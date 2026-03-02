@@ -48,17 +48,13 @@ class My3DAnalyzer(QWidget):
         main_layout.setContentsMargins(30, 30, 30, 30)
         main_layout.setSpacing(30)
 
-        # --- 左侧：双展示区 ---
+        # --- 左侧：2d与3d双展示区 ---
         self.left_panel_container = QStackedWidget()
         self.left_panel_container.setStyleSheet("background-color: #1A1A2E; border-radius: 8px;")
 
         # --- 3D 渲染器配置 ---
         self.plotter = QtInteractor(self.left_panel_container)
         self.plotter.set_background("#1A1A2E")
-
-        # 屏蔽原有的鼠标回调
-        self.plotter.track_mouse_position()
-        self.plotter.add_on_render_callback(self.on_mouse_moved_in_3d)
 
         # 交互状态文字
         self.coord_label = SiLabel("交互模式: 拖拽盒子的面以同步坐标", self.plotter)
@@ -232,10 +228,6 @@ class My3DAnalyzer(QWidget):
         except:
             pass
 
-    def on_mouse_moved_in_3d(self, *args):
-        """ 彻底移除原来的辅助线逻辑 """
-        pass
-
     def on_toggle_axes(self, checked):
         """标尺开关逻辑修复"""
         self.show_axes_flag = checked
@@ -305,13 +297,13 @@ class My3DAnalyzer(QWidget):
     def render_3d(self, data, exposure):
         try:
             try:
-                saved_cam = self.plotter.camera_position
+                saved_cam = self.plotter.camera_position#记住画面更新前相机位置
             except:
                 saved_cam = None
             ratio = (exposure / 50.0)
-            opac = [0.0, 0.15 * ratio, 0.45 * ratio, 0.75 * ratio, 0.95 * ratio, 1.0, 1.0]
+            opac = [0.0,0.15 * ratio, 0.15 * ratio, 0.45 * ratio, 0.75 * ratio, 0.95 * ratio, 1.0, 1.0]
             vol = self.plotter.add_volume(data, cmap="magma", opacity=opac, show_scalar_bar=False, name="main_vol",
-                                          render=False)
+                                          render=False)#name用于标记此“volume”,必须设置，每次画面更新时会清除原先的name为main_vol的“volume”替换为新的，如果不设置，每次更新画面都会占用内存，导致内存浪费甚至爆满
 
             if self.clip_ranges:
                 import vtk
@@ -319,20 +311,17 @@ class My3DAnalyzer(QWidget):
                 planes = vtk.vtkPlaneCollection()
                 specs = [((r[0], 0, 0), (1, 0, 0)), ((r[1], 0, 0), (-1, 0, 0)), ((0, r[2], 0), (0, 1, 0)),
                          ((0, r[3], 0), (0, -1, 0)), ((0, 0, r[4]), (0, 0, 1)), ((0, 0, r[5]), (0, 0, -1))]
-                for o, n in specs:
+                for o, n in specs:#将每个元素（元组）中的第一个小元组赋值给o，第二个小元组赋值给n
                     p = vtk.vtkPlane();
                     p.SetOrigin(o);
                     p.SetNormal(n);
                     planes.AddItem(p)
-                vol.mapper.SetClippingPlanes(planes)
-
-                pick_box = pv.Box(bounds=r)
-                self.plotter.add_mesh(pick_box, name="pick_target", opacity=0.0, render=False)
+                vol.mapper.SetClippingPlanes(planes)#当self.clip_range内有值时，只保留self.clip_ranges规定范围内的部分，实现切片
             else:
                 self.plotter.remove_actor("pick_target")
 
             if self.show_axes_flag: self.render_axes()
-            if saved_cam: self.plotter.camera_position = saved_cam
+            if saved_cam: self.plotter.camera_position = saved_cam#保持相机位置不动，防止画面跳动
             self.plotter.render()
         except:
             pass
@@ -361,10 +350,10 @@ class My3DAnalyzer(QWidget):
 
     def on_cut(self):
         try:
-            texts = {k: v.text().strip() for k, v in self.edits.items()}
+            texts = {k: v.text().strip() for k, v in self.edits.items()}#字典推导式，self.edits.items()字典中的值是QLineEdit对象,通过v.text().strip()将字典变为纯文本字典
             axes_pairs = [("X轴下限", "X轴上限"), ("Y轴下限", "Y轴上限"), ("Z轴下限", "Z轴上限")]
             filled_axes = [i for i, (min_k, max_k) in enumerate(axes_pairs) if
-                           texts[min_k] != "" and texts[max_k] != ""]
+                           texts[min_k] != "" and texts[max_k] != ""]#列表推导式enumerate 会返回一个包含两个元素的元组，例如：(0, ("X轴下限", "X轴上限"))
 
             if len(filled_axes) == 1:
                 idx = filled_axes[0]
@@ -378,7 +367,7 @@ class My3DAnalyzer(QWidget):
             self.core.is_2d_mode = False
             self.clip_ranges = [float(texts["X轴下限"] or 0), float(texts["X轴上限"] or 200),
                                 float(texts["Y轴下限"] or 0), float(texts["Y轴上限"] or 200),
-                                float(texts["Z轴下限"] or 0), float(texts["Z轴上限"] or 200)]
+                                float(texts["Z轴下限"] or 0), float(texts["Z轴上限"] or 200)]#将输入框文本传入self.clip_ranges
             self.update_visual()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"输入内容无效: {str(e)}")
