@@ -10,8 +10,6 @@ from siui.components.widgets import SiLabel
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
 
-# 导入图标包
-import icons
 
 # 导入渲染引擎和核心算法
 from render_core import VisualEngine
@@ -26,10 +24,6 @@ from page_data_process import DataProcessPage
 from pyvistaqt import QtInteractor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-
-# 载入图标
-siui.core.globals.SiGlobal.siui.loadIcons(
-    icons.IconDictionary(color=SiGlobal.siui.colors.fromToken(SiColor.SVG_NORMAL)).icons)
 
 
 class My3DAnalyzer(QWidget):
