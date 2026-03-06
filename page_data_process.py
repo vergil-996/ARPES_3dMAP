@@ -11,6 +11,7 @@ from siui.core import SiColor
 class DataProcessPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.locked_half_width = 0
         self.init_ui()
 
     def _apply_style(self, grp):
@@ -172,35 +173,46 @@ class DataProcessPage(QWidget):
         # 如果上限低于下限，强迫下限跟着动
         if value < self.s_t_low.value():
             self.s_t_low.setValue(value)
+
     def _on_axe_low_changed(self, value):
-        # 如果下限超过上限，强迫上限跟着动
+        if self._is_updating: return
+        # 基础保护：下限不超上限
         if value > self.s_ax_up.value():
             self.s_ax_up.setValue(value)
 
+        # --- 核心：手动调节时，更新锁定的半宽度 ---
+        mid = self.s_ax_mid.value()
+        self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
+
     def _on_axe_up_changed(self, value):
-        # 如果上限低于下限，强迫下限跟着动
+        if self._is_updating: return
+        # 基础保护：上限不低下限
         if value < self.s_ax_low.value():
             self.s_ax_low.setValue(value)
+
+        # --- 核心：手动调节时，更新锁定的半宽度 ---
+        self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
 
     # 中心点驱动上下限平移
     def _on_axe_mid_changed(self, new_mid):
         if self._is_updating: return
 
-        # 计算当前设定的厚度的一半
-        half_width = (self.s_ax_up.value() - self.s_ax_low.value()) // 2
+        # 使用之前手动调节时“锁定”的半宽度
+        # 如果还没手动调节过，就实时计算一次作为初始值
+        if self.locked_half_width == 0:
+            self.locked_half_width = (self.s_ax_up.value() - self.s_ax_low.value()) // 2
 
-        new_low = new_mid - half_width
-        new_up = new_mid + half_width
+        # 计算理想的左右边界（基于锁定的间距）
+        target_low = new_mid - self.locked_half_width
+        target_up = new_mid + self.locked_half_width
 
-        # 边界检查防止溢出
-        if new_low < 0:
-            new_up -= new_low
-            new_low = 0
-        if new_up > self.s_ax_up.maximum():
-            new_low -= (new_up - self.s_ax_up.maximum())
-            new_up = self.s_ax_up.maximum()
+        # 边界截断：撞墙就停，但不改变 target 值对另一侧的影响
+        max_limit = self.s_ax_up.maximum()
+
+        actual_low = max(0, target_low)
+        actual_up = min(max_limit, target_up)
 
         self._is_updating = True
-        self.s_ax_low.setValue(max(0, new_low))
-        self.s_ax_up.setValue(new_up)
+        self.s_ax_low.setValue(actual_low)
+        self.s_ax_up.setValue(actual_up)
         self._is_updating = False

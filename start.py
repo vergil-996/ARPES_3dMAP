@@ -179,6 +179,7 @@ class My3DAnalyzer(QWidget):
 
         # Page 3: 积分逻辑
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
+
     # --- 核心刷新函数 ---
         self.page_data.s_ax_mid.valueChanged.connect(self.auto_refresh_integral)
 
@@ -247,22 +248,30 @@ class My3DAnalyzer(QWidget):
             self.clip_ranges = None
             self.core.is_2d_mode = False
 
-            # 2. 设置时间滑块
             t_max = info[3] - 1
-            self.page_image.slider_time.setRange(0, t_max)
-            self.page_image.slider_time.setToolTipConvertionFunc(
-                lambda v: f"Delay: {self.core.coords['delay'][int(v)]:.4f}")
 
-            # 3. 初始化 Page 3 (积分页) UI
+            # --- 定义一个统一的物理时间转换函数 (支持负数) ---
+            # 这样三个滑块显示的悬浮气泡就完全一致了
+            time_func = lambda v: f"Delay: {self.core.coords['delay'][int(v)]:.4f} ps"
+
+            # 2. 设置 Page 1 的单帧时间滑块
+            self.page_image.slider_time.setRange(0, t_max)
+            self.page_image.slider_time.setToolTipConvertionFunc(time_func)
+
+            # 3. 初始化 Page 3 (处理分析页) 的时间积分范围滑块
+            # 设置索引范围 (0 到 N-1)
             self.page_data.s_t_low.setRange(0, t_max)
             self.page_data.s_t_up.setRange(0, t_max)
+
+            # 设置悬浮气泡显示物理时间 (这里就会显示负数了)
+            self.page_data.s_t_low.setToolTipConvertionFunc(time_func)
+            self.page_data.s_t_up.setToolTipConvertionFunc(time_func)
+
+            # 默认将上限设为最大值
             self.page_data.s_t_up.setValue(t_max)
 
-            # 4. 重新绑定 Page 3 信号
+            # 4. 重新绑定 Page 3 信号并更新轴滑块
             self.page_data.combo_ax.currentIndexChanged.connect(self.update_ax_slider_range)
-            self.page_data.s_ax_low.valueChanged.connect(self.sync_ax_sliders_to_box)
-            self.page_data.s_ax_up.valueChanged.connect(self.sync_ax_sliders_to_box)
-            self.page_data.btn_ax_apply.clicked.connect(self.on_apply_axis_integral)
 
             # 初始化轴滑块范围
             self.update_ax_slider_range()
@@ -280,6 +289,7 @@ class My3DAnalyzer(QWidget):
         # 所有的滑块范围保持一致
         for s in [self.page_data.s_ax_low, self.page_data.s_ax_up, self.page_data.s_ax_mid]:
             s.setRange(0, max_val)
+
     def on_cut(self):
         """指挥核心处理坐标字符串并刷新"""
         texts = self.page_image.get_slice_values()
@@ -328,15 +338,6 @@ class My3DAnalyzer(QWidget):
         # 切换到 3D 视图刷新
         self.global_refresh()
 
-    def update_ax_slider_range(self):
-        """当下拉框切换轴时，动态改变滑块的 Max 值"""
-        if self.core.raw_data is None: return
-        axis_idx = self.page_data.combo_ax.currentIndex()  # 0:X, 1:Y, 2:Z
-        max_val = self.core.raw_data.shape[axis_idx] - 1
-
-        self.page_data.s_ax_low.setRange(0, max_val)
-        self.page_data.s_ax_up.setRange(0, max_val)
-        self.page_data.s_ax_up.setValue(max_val)
 
     def sync_ax_sliders_to_box(self):
         """滑块 -> Box 的单向联动"""
@@ -395,12 +396,37 @@ class My3DAnalyzer(QWidget):
         if self.core.raw_data is None: return
 
         text = self.page_data.combo_other.currentText()
-        self.core.is_2d_mode = True  # 借用 2D 视图容器（Matplotlib 窗口）
 
         if text == "切片态密度":
+            if self.clip_ranges is None:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("未进行切片设置")
+                msg.setText("请先在‘图像控制’页开启交互盒或手动设置切片范围！")
+                msg.setIcon(QMessageBox.Warning)
+
+                msg.setStyleSheet("""
+                                    QMessageBox {
+                                        background-color: #2A2A3A;
+                                    }
+                                    QLabel {
+                                        color: #FFFFFF;
+                                        font-family: "Segoe UI";
+                                        font-size: 14px;
+                                    }
+                                    QPushButton {
+                                        background-color: #E81123;
+                                        color: white;
+                                        border-radius: 4px;
+                                        padding: 5px 15px;
+                                    }
+                                """)
+                msg.exec_()
+                return
             self.mode_1d = "Slice-DOS"
         elif text == "能级态密度":
             self.mode_1d = "Energy-DOS"
+
+        self.core.is_2d_mode = True  # 借用 2D 视图容器（Matplotlib 窗口）
 
         self.global_refresh()
 
@@ -430,6 +456,7 @@ class My3DAnalyzer(QWidget):
         self.ax_2d.tick_params(colors='white')
         self.fig.tight_layout()
         self.canvas_2d.draw()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
