@@ -182,7 +182,8 @@ class My3DAnalyzer(QWidget):
 
     # --- 核心刷新函数 ---
         self.page_data.s_ax_mid.valueChanged.connect(self.auto_refresh_integral)
-
+        self.page_data.btn_ax_apply.clicked.connect(self.on_apply_axis_integral)
+        self.page_data.s_ax_mid.valueChanged.connect(self.auto_refresh_integral)
         self.page_data.btn_other_apply.clicked.connect(self.on_apply_other_integral)
 
     def global_refresh(self):
