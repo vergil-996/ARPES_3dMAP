@@ -13,14 +13,44 @@ class AnalyzerCore(QObject):
 
     def load_npz(self, path):
         try:
-            npz = np.load(path)
-            self.coords['X'] = npz["X"].flatten()
-            self.coords['Y'] = npz["Y"].flatten()
-            self.coords['E'] = npz["E"].flatten()
-            self.coords['delay'] = npz["delay"].flatten() if "delay" in npz else np.arange(npz["binned"].shape[3])
-            self.raw_data = npz["binned"]
-            return True, self.raw_data.shape
+            data = np.load(path)
+
+            # 1. 自动识别主数据键名
+            main_key = 'sample' if 'sample' in data else 'data'
+            # 获取原始数据 (T, E, Ky, Kx) -> (25, 200, 150, 150)
+            raw_data = data[main_key]
+
+            # 2. 【核心修复】维度重排：从 (T, E, Ky, Kx) 转为代码需要的 (Kx, Ky, E, T)
+            # 这样 Shape 就会变成 (150, 150, 200, 25)
+            self.raw_data = raw_data.transpose(3, 2, 1, 0)
+
+            # 3. 【核心修复】键名映射：将 kx/ky/time 统一映射为 X/Y/delay
+            # 使用 .flatten() 确保它们是一维数组，防止维度溢出
+            self.coords = {}
+
+            # 映射 X 轴
+            self.coords['X'] = data['kx'].flatten() if 'kx' in data else np.arange(self.raw_data.shape[0])
+
+            # 映射 Y 轴
+            self.coords['Y'] = data['ky'].flatten() if 'ky' in data else np.arange(self.raw_data.shape[1])
+
+            # 映射 E 轴 (新文件里没给，我们根据 Shape 伪造一个)
+            self.coords['E'] = np.linspace(0, 1, self.raw_data.shape[2])
+
+            # 映射时间轴 (delay)
+            if 'time' in data:
+                self.coords['delay'] = data['time'].flatten()
+            elif 'delay' in data:
+                self.coords['delay'] = data['delay'].flatten()
+            else:
+                self.coords['delay'] = np.arange(self.raw_data.shape[3])
+
+            # 4. 返回正确的新 Shape 给 UI 刷新滑块范围
+            info = self.raw_data.shape  # (150, 150, 200, 25)
+            return True, info
+
         except Exception as e:
+            print(f"AnalyzerCore 加载失败: {e}")
             return False, str(e)
 
     def get_integrated_dynamics(self, r):
