@@ -176,7 +176,7 @@ class My3DAnalyzer(QWidget):
 
         # Page 2: 渲染逻辑
         self.page_render.btn_apply_map.clicked.connect(self.global_refresh)
-        self.page_render.btn_apply_noise.clicked.connect(self.global_refresh)
+        self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
 
         # Page 3: 积分逻辑
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
@@ -190,6 +190,11 @@ class My3DAnalyzer(QWidget):
     def global_refresh(self):
         if self.core.raw_data is None: return
 
+        if self.mode_1d:
+            self.left_display_stack.setCurrentIndex(1)  # 切换到 Matplotlib 页面
+            self.render_1d_plots()
+            return
+
         # 1. 采集色阶参数
         black = self.page_render.s_low.value()
         gamma = self.page_render.s_gamma.value()
@@ -197,18 +202,17 @@ class My3DAnalyzer(QWidget):
         levels = (black, gamma, white)
         mapping_mode = self.page_render.combo_map.currentText()
 
-        #1d模式拦截
-        if self.mode_1d:
-            self.left_display_stack.setCurrentIndex(1)  # 切换到 Matplotlib 页面
-            self.render_1d_plots()
-            return
 
         # 2. 确定数据源
         if self.current_display_data is not None:
+            # 只有在“积分模式”下才走这里
             base_3d = self.current_display_data
         else:
+            # 正常模式：根据时间滑块读取（此时读到的是去噪后的 4D 里的某一帧）
             t_idx = self.page_image.slider_time.value()
             base_3d = self.core.get_data_for_t(t_idx)
+
+        print("去噪数据切换成功")
 
         # 3. 渲染逻辑
         if self.core.is_2d_mode:
@@ -229,7 +233,35 @@ class My3DAnalyzer(QWidget):
             self.left_display_stack.setCurrentIndex(0)
             VisualEngine.render_3d(self.plotter, base_3d, levels, opac_mode=mapping_mode, clip_ranges=self.clip_ranges,
                                    show_axes=self.page_image.switch_axes.isChecked(), core_coords=self.core.coords)
+            self.plotter.reset_camera()
+            self.plotter.render()
+            print("去噪数据图像显示成功")
     # --- 调度执行函数 ---
+    def on_apply_denoise(self):
+        if self.core.raw_data is None: return
+        from denoise_engines import DenoiseEngines
+        methods = self.page_render.get_denoise_settings()
+
+        print("正在进行全量 4D 数据去噪...")
+        # 1. 执行去噪
+        cleaned_4d = DenoiseEngines.apply_pipeline(self.core.raw_data, methods)
+
+        # 2. 【关键修复】如果单帧分辨率过高，强制进行 2x 降采样
+        # 假设单帧是 (400, 400, 200)，降采样后变为 (200, 200, 100)
+        # 这样面片数量会减少到原来的 1/8 甚至更低
+        if cleaned_4d.shape[1] > 200 or cleaned_4d.shape[2] > 200:
+            print(f"检测到高分辨率数据 {cleaned_4d.shape}，执行空间降采样以保护渲染引擎...")
+            cleaned_4d = cleaned_4d[:, ::2, ::2, ::2]
+
+            # 3. 挂载数据
+        self.core.raw_data = cleaned_4d
+        self.current_display_data = None
+
+        # 4. 刷新渲染前，先清理一遍显存
+        self.plotter.clear_actors()
+        QApplication.processEvents()
+
+        self.global_refresh()
 
     def on_load(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择.npz文件", "", "Data (*.npz)")
