@@ -137,6 +137,7 @@ class RenderControlPage(QWidget):
 
         self.btn_apply_noise = self._create_red_btn("应用所有去噪设置")
 
+
         v_noise.addWidget(self.combo_n1)
         v_noise.addWidget(self.combo_n2)
         v_noise.addWidget(self.combo_n3)
@@ -148,3 +149,11 @@ class RenderControlPage(QWidget):
         self.vbox.addStretch()
         self.scroll.setCenterWidget(self.container)
         layout.addWidget(self.scroll)
+
+    def get_denoise_settings(self):
+        """ 获取当前选中的三级去噪配置 """
+        return [
+            self.combo_n1.currentText(),
+            self.combo_n2.currentText(),
+            self.combo_n3.currentText()
+        ]
