@@ -11,46 +11,73 @@ class AnalyzerCore(QObject):
         self.coords = {'X': None, 'Y': None, 'E': None, 'delay': None}
         self.is_2d_mode = False
 
-    def load_npz(self, path):
+    def load_npz(self, path,is_flip):
         try:
             data = np.load(path)
 
-            # 1. 自动识别主数据键名
-            main_key = 'sample' if 'sample' in data else 'data'
-            # 获取原始数据 (T, E, Ky, Kx) -> (25, 200, 150, 150)
-            raw_data = data[main_key]
+            # 1. 【彻底解决变量名问题】
+            # 自动寻找文件里唯一的那个 4 维数组
+            main_key = None
+            for key in data.keys():
+                if hasattr(data[key], 'ndim') and data[key].ndim == 4:
+                    main_key = key
+                    break
 
-            # 2. 【核心修复】维度重排：从 (T, E, Ky, Kx) 转为代码需要的 (Kx, Ky, E, T)
-            # 这样 Shape 就会变成 (150, 150, 200, 25)
-            self.raw_data = raw_data.transpose(3, 2, 1, 0)
+            if main_key is None:
+                return False, "文件内未找到 4 维数据矩阵"
 
-            # 3. 【核心修复】键名映射：将 kx/ky/time 统一映射为 X/Y/delay
-            # 使用 .flatten() 确保它们是一维数组，防止维度溢出
+            raw = data[main_key]  # 拿到矩阵，不管它叫什么
+            original_shape = list(raw.shape)
+
+            # 2. 【识别维度逻辑】维度相同的是 kx, ky；剩下两个里大的为 E，小的为 Time
+            counts = {}
+            for i, s in enumerate(original_shape):
+                counts[s] = counts.get(s, []) + [i]
+
+            # 提取 kx, ky 索引 (出现两次的维度)
+            k_indices = []
+            other_indices = []
+            for s, idxs in counts.items():
+                if len(idxs) == 2:
+                    k_indices = idxs
+                else:
+                    other_indices += idxs
+
+            if len(k_indices) < 2:
+                # 如果没有维度完全相同的，说明 kx 和 ky 像素数不等
+                # 这种情况下通常最后两位是 kx, ky
+                idx_kx, idx_ky = 3, 2
+                idx_E, idx_T = 1, 0
+            else:
+                idx_kx, idx_ky = k_indices[1], k_indices[0]
+                val1, val2 = original_shape[other_indices[0]], original_shape[other_indices[1]]
+                if val1 > val2:
+                    idx_E, idx_T = other_indices[0], other_indices[1]
+                else:
+                    idx_E, idx_T = other_indices[1], other_indices[0]
+
+            # 3. 【重排与纠偏】统一转为 [Kx, Ky, E, T] 并翻转上下
+            self.raw_data = raw.transpose(idx_kx, idx_ky, idx_E, idx_T)
+            if is_flip==True:
+                self.raw_data = np.flip(self.raw_data, axis=2)  # 解决上下颠倒
+
+            # 4. 【坐标映射】
             self.coords = {}
-
-            # 映射 X 轴
+            # 尝试匹配文件中可能的坐标轴键名
             self.coords['X'] = data['kx'].flatten() if 'kx' in data else np.arange(self.raw_data.shape[0])
+            self.coords['Y'] = np.flip(data['ky'].flatten()) if 'ky' in data else np.arange(self.raw_data.shape[1])
+            self.coords['E'] = data['E'].flatten() if 'E' in data else np.linspace(0, 1, self.raw_data.shape[2])
 
-            # 映射 Y 轴
-            self.coords['Y'] = data['ky'].flatten() if 'ky' in data else np.arange(self.raw_data.shape[1])
-
-            # 映射 E 轴 (新文件里没给，我们根据 Shape 伪造一个)
-            self.coords['E'] = np.linspace(0, 1, self.raw_data.shape[2])
-
-            # 映射时间轴 (delay)
-            if 'time' in data:
-                self.coords['delay'] = data['time'].flatten()
-            elif 'delay' in data:
-                self.coords['delay'] = data['delay'].flatten()
+            time_key = 'time' if 'time' in data else ('delay' if 'delay' in data else None)
+            if time_key:
+                self.coords['delay'] = data[time_key].flatten()
             else:
                 self.coords['delay'] = np.arange(self.raw_data.shape[3])
 
-            # 4. 返回正确的新 Shape 给 UI 刷新滑块范围
-            info = self.raw_data.shape  # (150, 150, 200, 25)
-            return True, info
+            return True, self.raw_data.shape
 
         except Exception as e:
-            print(f"AnalyzerCore 加载失败: {e}")
+            print(f"智能加载失败: {e}")
             return False, str(e)
 
     def get_integrated_dynamics(self, r):

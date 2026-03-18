@@ -234,8 +234,9 @@ class My3DAnalyzer(QWidget):
     def on_load(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择.npz文件", "", "Data (*.npz)")
         if not path: return
+        is_flip = self.page_image.switch_flip.isChecked()
 
-        success, info = self.core.load_npz(path)
+        success, info = self.core.load_npz(path,is_flip=is_flip)
         if success:
             # --- 关键：先断开信号连接，防止初始化时的信号风暴 ---
             try:
@@ -318,6 +319,11 @@ class My3DAnalyzer(QWidget):
             self.back_click_count = 1
         elif self.back_click_count == 1:
             self.clip_ranges = None
+            self.core.is_2d_mode = False
+            self.mode_1d = None
+            self.current_display_data = None
+            self.left_display_stack.setCurrentIndex(0)
+            self.left_display_stack.setCurrentIndex(0)
             self.back_click_count = 1  # 保持在1
 
         # 2. 彻底清场 (包括数据和盒子句柄)
@@ -454,6 +460,7 @@ class My3DAnalyzer(QWidget):
                                 """)
                 msg.exec_()
                 return
+            self.back_click_count = 0
             self.mode_1d = "Slice-DOS"
         elif text == "能级态密度":
             self.mode_1d = "Energy-DOS"

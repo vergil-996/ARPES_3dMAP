@@ -85,14 +85,18 @@ class ImageControlPage(QWidget):
         self.switch_coord = SiSwitchRefactor(self)
         lbl_coord = SiLabel("切片交互")
         lbl_coord.setStyleSheet("color: white; font-weight: bold;")
+        self.switch_flip = SiSwitchRefactor(self)
+        lbl_flip = SiLabel("E轴反转")
+        lbl_flip.setStyleSheet("color: white; font-weight: bold;")
 
         h_sw.addStretch()
         h_sw.addWidget(lbl_axes)
         h_sw.addWidget(self.switch_axes)
-        h_sw.addSpacing(30)
         h_sw.addWidget(lbl_coord)
         h_sw.addWidget(self.switch_coord)
         h_sw.addStretch()
+        h_sw.addWidget(lbl_flip)
+        h_sw.addWidget(self.switch_flip)
         self.vbox.addLayout(h_sw)
 
         # --- 4. 按钮组 ---
