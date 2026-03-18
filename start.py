@@ -37,6 +37,7 @@ class My3DAnalyzer(QWidget):
         self.is_dynamics_mode = False
         self.current_display_data = None
         self.mode_1d = None
+        self.back_click_count = 1  # 记录返回按钮点击次数
 
         # 2. 注册全局气泡窗口（SiliconUI 规范）
         if "TOOL_TIP" not in SiGlobal.siui.windows:
@@ -251,8 +252,6 @@ class My3DAnalyzer(QWidget):
 
             t_max = info[3] - 1
 
-            # --- 定义一个统一的物理时间转换函数 (支持负数) ---
-            # 这样三个滑块显示的悬浮气泡就完全一致了
             time_func = lambda v: f"Delay: {self.core.coords['delay'][int(v)]:.4f} ps"
 
             # 2. 设置 Page 1 的单帧时间滑块
@@ -310,14 +309,42 @@ class My3DAnalyzer(QWidget):
         self.plotter.render()
 
     def on_back(self):
-        self.current_display_data = None  # 清除积分数据，回到单帧模式
-        self.clip_ranges = None
-        self.mode_1d = None
-        self.core.is_2d_mode = False
+        # 1. 状态回退逻辑
+        if self.back_click_count == 0:
+            self.core.is_2d_mode = False
+            self.mode_1d = None
+            self.current_display_data = None
+            self.left_display_stack.setCurrentIndex(0)
+            self.back_click_count = 1
+        elif self.back_click_count == 1:
+            self.clip_ranges = None
+            self.back_click_count = 1  # 保持在1
+
+        # 2. 彻底清场 (包括数据和盒子句柄)
         self.plotter.clear_actors()
         self.plotter.clear_box_widgets()
+
+        # 3. 重新加载 3D 数据本体
         self.global_refresh()
-        self.plotter.reset_camera()
+
+        # 4. 【关键】如果开关开着，手动“重启”交互盒
+        if self.page_image.switch_coord.isChecked():
+            # 强制系统处理完前面的“清除”指令，防止句柄冲突
+            QApplication.processEvents()
+
+            # 重新根据最新的 clip_ranges (或 None 时的全尺寸) 画盒子
+            shape = self.core.raw_data.shape
+            r = self.clip_ranges if self.clip_ranges else [0, shape[0], 0, shape[1], 0, shape[2]]
+
+            self.plotter.add_box_widget(
+                callback=lambda poly: self.page_image.set_slice_values(poly.bounds),
+                bounds=r, color="#FF69B4", rotation_enabled=False
+            )
+
+        # 5. 视角和渲染
+        if self.clip_ranges is None:
+            self.plotter.reset_camera()
+        self.plotter.render()
 
     def on_screenshot(self):
         path, _ = QFileDialog.getSaveFileName(self, "保存截图", "capture.png", "PNG (*.png)")
@@ -329,6 +356,7 @@ class My3DAnalyzer(QWidget):
 
     def on_apply_time_integral(self):
         if self.core.raw_data is None: return
+        self.back_click_count = 0  # 重置计数器状态
 
         low = self.page_data.s_t_low.value()
         up = self.page_data.s_t_up.value()
@@ -343,34 +371,37 @@ class My3DAnalyzer(QWidget):
     def sync_ax_sliders_to_box(self):
         """滑块 -> Box 的单向联动"""
         if self.page_image.switch_coord.isChecked() and self.core.raw_data is not None:
-            # 1. 采集当前滑块定义的区间
-            ax_name = self.page_data.combo_ax.currentText()
+            # 1. 直接获取当前选的是第几个轴 (0, 1, 2)
+            axis_idx = self.page_data.combo_ax.currentIndex()
             low = self.page_data.s_ax_low.value()
             up = self.page_data.s_ax_up.value()
 
-            # 2. 获取基础范围 (如果已经有点切，就在切片基础上改；否则用原始形状)
+            # 2. 获取基础范围
             shape = self.core.raw_data.shape
+            # 注意：这里的 r 长度必须是 6
             r = list(self.clip_ranges) if self.clip_ranges else [0, shape[0], 0, shape[1], 0, shape[2]]
 
-            # 3. 覆盖对应轴的范围
-            if ax_name == "X轴":
+            # 3. 根据索引精准覆盖 (基于 Kx, Ky, E, T 的重排顺序)
+            if axis_idx == 0:     # X轴 (Kx)
                 r[0], r[1] = low, up
-            elif ax_name == "Y轴":
+            elif axis_idx == 1:   # Y轴 (Ky)
                 r[2], r[3] = low, up
-            else:
+            elif axis_idx == 2:   # 能量轴 (E)
                 r[4], r[5] = low, up
 
-            # 清除所有现有的 Box 挂件，防止叠加
+            # 4. 重新绘制
             self.plotter.clear_box_widgets()
-
-            # 4. 重新添加唯一的交互盒
-            self.plotter.add_box_widget(bounds=r, color="#FF69B4", rotation_enabled=False,
-                callback=lambda poly: self.page_image.set_slice_values(
-                    poly.bounds))  # ----------------------------------------------
+            self.plotter.add_box_widget(
+                bounds=r,
+                color="#FF69B4",
+                rotation_enabled=False,
+                callback=lambda poly: self.page_image.set_slice_values(poly.bounds)
+            )
 
     def on_apply_axis_integral(self):
         """点击应用：执行坐标轴积分并显示 2D 投影图"""
         if self.core.raw_data is None: return
+        self.back_click_count = 0  # 重置计数器状态
 
         # 标记当前进入 2D 投影模式
         self.core.is_2d_mode = True
@@ -383,15 +414,15 @@ class My3DAnalyzer(QWidget):
         self.global_refresh()
 
     def auto_refresh_integral(self):
-        # 只有中点变动时，才去同步 slice_info 并刷新图像
+        # --- 逻辑 A：同步 3D 交互盒 (只要开启了开关，不受 is_2d_mode 限制) ---
+        if self.page_image.switch_coord.isChecked():
+            self.sync_ax_sliders_to_box()
+
+        # --- 逻辑 B：刷新 2D 投影图像 (只有在点击了应用按钮后才执行) ---
         if self.core.is_2d_mode and hasattr(self.core, "slice_info"):
             if self.core.slice_info.get("mode") == "integral":
                 self.core.slice_info["range"] = (self.page_data.s_ax_low.value(), self.page_data.s_ax_up.value())
                 self.global_refresh()
-
-                # 同时更新 3D 交互盒（如果开启了交互框）
-                if self.page_image.switch_coord.isChecked():
-                    self.sync_ax_sliders_to_box()
 
     def on_apply_other_integral(self):
         if self.core.raw_data is None: return
