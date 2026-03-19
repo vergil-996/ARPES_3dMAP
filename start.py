@@ -38,6 +38,7 @@ class My3DAnalyzer(QWidget):
         self.current_display_data = None
         self.mode_1d = None
         self.back_click_count = 1  # 记录返回按钮点击次数
+        self.is_denoised_mode = False
 
         # 2. 注册全局气泡窗口（SiliconUI 规范）
         if "TOOL_TIP" not in SiGlobal.siui.windows:
@@ -61,10 +62,6 @@ class My3DAnalyzer(QWidget):
             self._initialized_layout = True
 
     def run_brute_force_layout(self):
-        """
-        瞒天过海逻辑：
-        在后台执行 放大 -> Page2 -> 缩小 -> Page3 -> 放大 -> Page1
-        """
         # --- 步骤 1：窗口放大 ---
         self.showMaximized()
 
@@ -212,7 +209,6 @@ class My3DAnalyzer(QWidget):
             t_idx = self.page_image.slider_time.value()
             base_3d = self.core.get_data_for_t(t_idx)
 
-        print("去噪数据切换成功")
 
         # 3. 渲染逻辑
         if self.core.is_2d_mode:
@@ -235,32 +231,40 @@ class My3DAnalyzer(QWidget):
                                    show_axes=self.page_image.switch_axes.isChecked(), core_coords=self.core.coords)
             self.plotter.reset_camera()
             self.plotter.render()
-            print("去噪数据图像显示成功")
+
     # --- 调度执行函数 ---
     def on_apply_denoise(self):
-        if self.core.raw_data is None: return
+        if not hasattr(self, 'original_raw_data'): return
         from denoise_engines import DenoiseEngines
         methods = self.page_render.get_denoise_settings()
 
-        print("正在进行全量 4D 数据去噪...")
-        # 1. 执行去噪
-        cleaned_4d = DenoiseEngines.apply_pipeline(self.core.raw_data, methods)
+        # 1. 始终基于原始底片去噪
 
-        # 2. 【关键修复】如果单帧分辨率过高，强制进行 2x 降采样
-        # 假设单帧是 (400, 400, 200)，降采样后变为 (200, 200, 100)
-        # 这样面片数量会减少到原来的 1/8 甚至更低
-        if cleaned_4d.shape[1] > 200 or cleaned_4d.shape[2] > 200:
-            print(f"检测到高分辨率数据 {cleaned_4d.shape}，执行空间降采样以保护渲染引擎...")
-            cleaned_4d = cleaned_4d[:, ::2, ::2, ::2]
+        temp_data = DenoiseEngines.apply_pipeline(self.original_raw_data, methods)
 
-            # 3. 挂载数据
-        self.core.raw_data = cleaned_4d
+        # 2. 【物理降采样】直接把数据变小
+        # 只要有一维超过 200，就执行 2x 采样
+        if max(temp_data.shape[1:]) > 200:
+
+            self.core.raw_data = temp_data[:, ::2, ::2, ::2]
+
+            # --- 重要：同步更新坐标轴 (Kx, Ky, E) ---
+            keys = list(self.core.coords.keys())
+            for k in keys[:3]:  # 假设前三个是空间坐标
+                self.core.coords[k] = self.core.coords[k][::2]
+        else:
+            self.core.raw_data = temp_data
+
+        # 3. 更新 UI 滑块范围，防止越界触发 0xC0000409
+        self.update_ax_slider_range()
+
         self.current_display_data = None
+        self.back_click_count = 2  # 标记已改动
+        self.is_denoised_mode = True
 
-        # 4. 刷新渲染前，先清理一遍显存
+        # 4. 强制清理并刷新
         self.plotter.clear_actors()
         QApplication.processEvents()
-
         self.global_refresh()
 
     def on_load(self):
@@ -270,7 +274,9 @@ class My3DAnalyzer(QWidget):
 
         success, info = self.core.load_npz(path,is_flip=is_flip)
         if success:
-            # --- 关键：先断开信号连接，防止初始化时的信号风暴 ---
+
+            self.original_raw_data = self.core.raw_data.copy()
+            #先断开信号连接
             try:
                 self.page_data.combo_ax.currentIndexChanged.disconnect()
                 self.page_data.s_ax_low.valueChanged.disconnect()
@@ -296,7 +302,7 @@ class My3DAnalyzer(QWidget):
             self.page_data.s_t_low.setRange(0, t_max)
             self.page_data.s_t_up.setRange(0, t_max)
 
-            # 设置悬浮气泡显示物理时间 (这里就会显示负数了)
+            # 设置悬浮气泡显示物理时间
             self.page_data.s_t_low.setToolTipConvertionFunc(time_func)
             self.page_data.s_t_up.setToolTipConvertionFunc(time_func)
 
@@ -357,20 +363,35 @@ class My3DAnalyzer(QWidget):
             self.left_display_stack.setCurrentIndex(0)
             self.left_display_stack.setCurrentIndex(0)
             self.back_click_count = 1  # 保持在1
+        elif self.back_click_count == 2:
+            if hasattr(self, 'original_raw_data'):
+                self.core.raw_data = self.original_raw_data.copy()
+            self.core.is_2d_mode = False
+            self.mode_1d = None
+            self.current_display_data = None
+            self.left_display_stack.setCurrentIndex(0)
+            self.back_click_count = 1
+        elif self.back_click_count == 3:
+            self.core.is_2d_mode = False
+            self.mode_1d = None
+            self.current_display_data = None
+            self.left_display_stack.setCurrentIndex(0)
+            self.back_click_count = 2
 
-        # 2. 彻底清场 (包括数据和盒子句柄)
+
+        # 2. 彻底清场
         self.plotter.clear_actors()
         self.plotter.clear_box_widgets()
 
         # 3. 重新加载 3D 数据本体
         self.global_refresh()
 
-        # 4. 【关键】如果开关开着，手动“重启”交互盒
+        # 4. 如果开关开着，手动“重启”交互盒
         if self.page_image.switch_coord.isChecked():
             # 强制系统处理完前面的“清除”指令，防止句柄冲突
             QApplication.processEvents()
 
-            # 重新根据最新的 clip_ranges (或 None 时的全尺寸) 画盒子
+            # 重新根据最新的 clip_ranges  画盒子
             shape = self.core.raw_data.shape
             r = self.clip_ranges if self.clip_ranges else [0, shape[0], 0, shape[1], 0, shape[2]]
 
@@ -394,7 +415,10 @@ class My3DAnalyzer(QWidget):
 
     def on_apply_time_integral(self):
         if self.core.raw_data is None: return
-        self.back_click_count = 0  # 重置计数器状态
+        if self.is_denoised_mode:
+            self.back_click_count = 3  # 重置计数器状态
+        else:
+            self.back_click_count = 0
 
         low = self.page_data.s_t_low.value()
         up = self.page_data.s_t_up.value()
