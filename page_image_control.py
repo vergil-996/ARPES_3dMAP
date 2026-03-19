@@ -86,7 +86,7 @@ class ImageControlPage(QWidget):
         lbl_coord = SiLabel("切片交互")
         lbl_coord.setStyleSheet("color: white; font-weight: bold;")
         self.switch_flip = SiSwitchRefactor(self)
-        lbl_flip = SiLabel("E轴反转")
+        lbl_flip = SiLabel("坐标反转")
         lbl_flip.setStyleSheet("color: white; font-weight: bold;")
 
         h_sw.addStretch()

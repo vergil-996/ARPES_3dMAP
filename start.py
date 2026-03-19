@@ -54,7 +54,7 @@ class My3DAnalyzer(QWidget):
         self.bind_all_events()
     def showEvent(self, event):
         super().showEvent(event)
-        # 只执行一次初始化“体操”
+        # 只执行一次初始化
         if not hasattr(self, "_initialized_layout"):
             from PyQt5.QtCore import QTimer
             # 给系统一瞬间的响应时间开始执行动作
@@ -62,10 +62,10 @@ class My3DAnalyzer(QWidget):
             self._initialized_layout = True
 
     def run_brute_force_layout(self):
-        # --- 步骤 1：窗口放大 ---
+        # 窗口放大
         self.showMaximized()
 
-        # --- 步骤 2：轮转页面强制刷新 ---
+        # 轮转页面强制刷新
         # 切换到第二页并轻微改变大小触发重绘
         self.page_container.setCurrentIndex(1)
         self.showNormal()  # 缩小
@@ -74,7 +74,7 @@ class My3DAnalyzer(QWidget):
         self.page_container.setCurrentIndex(2)
         self.showMaximized()  # 放大
 
-        # --- 步骤 3：回归第一页并展示 ---
+        # 回归第一页并展示
         self.page_container.setCurrentIndex(0)
         self.btn_page1.setChecked(True)  # 别忘了更新导航按钮状态
 
@@ -92,7 +92,6 @@ class My3DAnalyzer(QWidget):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(20)
 
-        # --- 左侧：展示区 (使用 QStackedWidget 切换 3D/2D) ---
         self.left_display_stack = QStackedWidget()
         self.left_display_stack.setStyleSheet("background-color: #1A1A2E; border-radius: 12px;")
 
@@ -242,13 +241,11 @@ class My3DAnalyzer(QWidget):
 
         temp_data = DenoiseEngines.apply_pipeline(self.original_raw_data, methods)
 
-        # 2. 【物理降采样】直接把数据变小
         # 只要有一维超过 200，就执行 2x 采样
         if max(temp_data.shape[1:]) > 200:
 
             self.core.raw_data = temp_data[:, ::2, ::2, ::2]
 
-            # --- 重要：同步更新坐标轴 (Kx, Ky, E) ---
             keys = list(self.core.coords.keys())
             for k in keys[:3]:  # 假设前三个是空间坐标
                 self.core.coords[k] = self.core.coords[k][::2]

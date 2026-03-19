@@ -59,7 +59,8 @@ class AnalyzerCore(QObject):
             # 3. 【重排与纠偏】统一转为 [Kx, Ky, E, T] 并翻转上下
             self.raw_data = raw.transpose(idx_kx, idx_ky, idx_E, idx_T)
             if is_flip==True:
-                self.raw_data = np.flip(self.raw_data, axis=2)  # 解决上下颠倒
+                for i in [0,1,2]:
+                    self.raw_data = np.flip(self.raw_data, axis=i)  # 翻转坐标轴
 
             # 4. 【坐标映射】
             self.coords = {}
@@ -73,7 +74,6 @@ class AnalyzerCore(QObject):
                 self.coords['delay'] = data[time_key].flatten()
             else:
                 self.coords['delay'] = np.arange(self.raw_data.shape[3])
-
             return True, self.raw_data.shape
 
         except Exception as e:
