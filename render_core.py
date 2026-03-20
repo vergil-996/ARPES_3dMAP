@@ -37,36 +37,53 @@ class VisualEngine:
         try:
             b, g, w = levels_params
 
-            # 1. 记录相机... (略)
+            # 1. 记录相机位置
             try:
                 saved_cam = plotter.camera_position
             except:
                 saved_cam = None
 
-            # 2. 应用色阶 (这里已经处理了黑场、白场和 Gamma)
+            # 2. 应用色阶
             processed_data = VisualEngine.apply_levels(data, b, g, w)
 
-            # 3. 设置透明度... (略)
+            # 3. 设置透明度
             opac_dict = {"线性": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 "对数": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
                 "幂函数": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
                 "sigmoid": [0.006, 0.018, 0.049, 0.118, 0.268, 0.500, 0.732, 0.882, 0.951, 0.982, 0.994]}
             selected_opac = opac_dict.get(opac_mode, opac_dict["线性"])
 
-            # 4. 【关键修改】：调整 Colormap 的映射区间
-            # 我们将映射区间固定在 [0, 1]，因为 apply_levels 已经把数据规范化了。
-            # 这样，Colormap 的最深色永远对应你设定的“黑场”，最亮色对应“白场”。
-            vol = plotter.add_volume(processed_data, cmap="magma", opacity=selected_opac, clim=[0, 1],  # <--- 强制颜色映射在 0 到 1 之间
-                show_scalar_bar=False, name="main_vol", render=False)
+            # --- 【核心修改】：重新定义数据的空间几何 ---
+            sh = data.shape
+            target_size = 200.0
 
-            # ... 后续 Clipping 和 Axes 逻辑 (略) ...
-            # 5. 处理切片限制 (Clipping Planes) - 完整保留逻辑
+            # 计算步长，强制全轴填满 200 单位
+            dx = target_size / (sh[0] - 1) if sh[0] > 1 else 1.0
+            dy = target_size / (sh[1] - 1) if sh[1] > 1 else 1.0
+            dz = target_size / (sh[2] - 1) if sh[2] > 1 else 1.0
+
+            # 创建网格并强制赋予 0-200 的坐标系
+            if hasattr(pv, 'ImageData'):
+                grid = pv.ImageData()
+            else:
+                grid = pv.UniformGrid()
+
+            grid.dimensions = np.array(sh)
+            grid.origin = (0, 0, 0)
+            grid.spacing = (dx, dy, dz)
+            grid.point_data["values"] = processed_data.flatten(order="F")
+
+            # 4. 添加体渲染
+            vol = plotter.add_volume(grid, cmap="magma", opacity=selected_opac, clim=[0, 1], show_scalar_bar=False,
+                name="main_vol", render=False)
+
+            # 5. 处理切片限制 (Clipping Planes)
+            # 注意：此处的 clip_ranges 输入必须已经是 0-200 的值
             if clip_ranges:
                 r = clip_ranges
                 planes = vtk.vtkPlaneCollection()
-                # 定义 6 个面的法线和原点
                 specs = [((r[0], 0, 0), (1, 0, 0)), ((r[1], 0, 0), (-1, 0, 0)), ((0, r[2], 0), (0, 1, 0)),
-                    ((0, r[3], 0), (0, -1, 0)), ((0, 0, r[4]), (0, 0, 1)), ((0, 0, r[5]), (0, 0, -1))]
+                         ((0, r[3], 0), (0, -1, 0)), ((0, 0, r[4]), (0, 0, 1)), ((0, 0, r[5]), (0, 0, -1))]
                 for o, n in specs:
                     p = vtk.vtkPlane()
                     p.SetOrigin(o)
@@ -74,11 +91,11 @@ class VisualEngine:
                     planes.AddItem(p)
                 vol.mapper.SetClippingPlanes(planes)
             else:
-                plotter.remove_actor("pick_target")
+                vol.mapper.RemoveAllClippingPlanes()
 
-            # 6. 处理标尺
+            # 6. 处理标尺 (强制 0-200 逻辑)
             if show_axes and core_coords:
-                VisualEngine.render_axes(plotter, data.shape, core_coords)
+                VisualEngine.render_axes(plotter, grid.dimensions, core_coords)
             else:
                 plotter.remove_bounds_axes()
 
@@ -92,20 +109,25 @@ class VisualEngine:
 
     @staticmethod
     def render_axes(plotter, data_shape, coords):
-        """标尺渲染逻辑"""
         try:
-            sx, sy, se = data_shape[0:3]
+            # 获取物理范围用于 Title 显示
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
             plotter.remove_bounds_axes()
 
             # 根据背景色自动调整标尺颜色
             bg = plotter.background_color
-            ax_color = 'black' if (bg[0] > 0.9 and bg[1] > 0.9 and bg[2] > 0.9) else 'white'
+            # 优化颜色：如果是深色背景，使用淡紫色/灰色避免纯白太刺眼
+            if (bg[0] > 0.9 and bg[1] > 0.9 and bg[2] > 0.9):
+                ax_color = 'black'
+            else:
+                ax_color = '#A0A0B0'  # 浅淡紫灰，匹配深色主题
 
-            plotter.show_bounds(bounds=[0, sx, 0, sy, 0, se], grid='back', location='outer', ticks='both', font_size=10,
-                color=ax_color, xtitle=f"Kx ({xp[0]:.2f}~{xp[-1]:.2f})", ytitle=f"Ky ({yp[0]:.2f}~{yp[-1]:.2f})",
-                ztitle=f"E ({zp[0]:.2f}~{zp[-1]:.2f} eV)", render=False)
+            # --- 【核心修改】：强制 Bounds 为 0-200 ---
+            plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
+                font_size=10, color=ax_color, # 标题依然显示物理范围，但刻度数字会是 0, 50, 100, 150, 200
+                xtitle=f"Kx Index ({xp[0]:.2f}~{xp[-1]:.2f})", ytitle=f"Ky Index ({yp[0]:.2f}~{yp[-1]:.2f})",
+                ztitle=f"E Index ({zp[0]:.2f}~{zp[-1]:.2f} eV)", render=False)
         except Exception as e:
             print(f"Axes Error: {e}")
 

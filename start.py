@@ -314,6 +314,7 @@ class My3DAnalyzer(QWidget):
 
             # 5. 执行首次渲染
             self.plotter.set_background("white")
+            print("加载成功")
             self.global_refresh()
             self.plotter.reset_camera()
 
@@ -337,7 +338,7 @@ class My3DAnalyzer(QWidget):
     def on_toggle_interactive_box(self, checked):
         if checked and self.core.raw_data is not None:
             shape = self.core.raw_data.shape
-            init_b = self.clip_ranges if self.clip_ranges else [0, shape[0], 0, shape[1], 0, shape[2]]
+            init_b = self.clip_ranges if self.clip_ranges else [0, 200, 0, 200, 0, 200]
             self.plotter.add_box_widget(callback=lambda poly: self.page_image.set_slice_values(poly.bounds),
                 bounds=init_b, color="#FF69B4", rotation_enabled=False)
         else:

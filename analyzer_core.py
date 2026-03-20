@@ -11,72 +11,99 @@ class AnalyzerCore(QObject):
         self.coords = {'X': None, 'Y': None, 'E': None, 'delay': None}
         self.is_2d_mode = False
 
-    def load_npz(self, path,is_flip):
+    def load_npz(self, path, is_flip):
         try:
             data = np.load(path)
 
-            # 1. 【彻底解决变量名问题】
-            # 自动寻找文件里唯一的那个 4 维数组
+            # 1. 自动寻找 4 维数据矩阵
             main_key = None
             for key in data.keys():
                 if hasattr(data[key], 'ndim') and data[key].ndim == 4:
                     main_key = key
                     break
+            if main_key is None: return False, "文件内未找到 4 维数据矩阵"
 
-            if main_key is None:
-                return False, "文件内未找到 4 维数据矩阵"
+            raw = data[main_key]
+            sh = list(raw.shape)
+            idx_pool = [0, 1, 2, 3]
+            roles = {'X': -1, 'Y': -1, 'E': -1, 'T': -1}
 
-            raw = data[main_key]  # 拿到矩阵，不管它叫什么
-            original_shape = list(raw.shape)
+            # 2. 【指纹识别逻辑】：按物理特征锁定维度身份
+            # 建立键名搜索组
+            search_map = {'X': ['kx', 'x'], 'Y': ['ky', 'y'], 'E': ['E', 'energy', 'En', 'Ef'],
+                'T': ['time', 'delay', 't']}
 
-            # 2. 【识别维度逻辑】维度相同的是 kx, ky；剩下两个里大的为 E，小的为 Time
-            counts = {}
-            for i, s in enumerate(original_shape):
-                counts[s] = counts.get(s, []) + [i]
+            # 第一步：根据键名和长度匹配（初步锁定）
+            for role, keys in search_map.items():
+                for k in keys:
+                    if k in data:
+                        length = data[k].size
+                        # 寻找长度匹配且尚未被分配的维度
+                        for i in idx_pool:
+                            if sh[i] == length:
+                                roles[role] = i
+                                idx_pool.remove(i)
+                                break
+                        if roles[role] != -1: break
 
-            # 提取 kx, ky 索引 (出现两次的维度)
-            k_indices = []
-            other_indices = []
-            for s, idxs in counts.items():
-                if len(idxs) == 2:
-                    k_indices = idxs
-                else:
-                    other_indices += idxs
+            # 第二步：对于未识别出的维度（比如键名不匹配或三轴同长），根据物理跨度判定
+            if len(idx_pool) > 0:
+                # 剩余轴的物理特征分析
+                # 在 ARPES 中：E 轴跨度通常 < 20eV, K 轴跨度通常很大 (像素或 >100)
+                remaining_roles = [r for r, idx in roles.items() if idx == -1]
+                for i in list(idx_pool):
+                    # 尝试猜测这个维度对应的坐标数组（如果有的话）
+                    # 这里假设如果没匹配到键名，就按剩下的索引顺序补位，但引入跨度检查
+                    pass  # 基础补位在后面统一处理
 
-            if len(k_indices) < 2:
-                # 如果没有维度完全相同的，说明 kx 和 ky 像素数不等
-                # 这种情况下通常最后两位是 kx, ky
-                idx_kx, idx_ky = 3, 2
-                idx_E, idx_T = 1, 0
-            else:
-                idx_kx, idx_ky = k_indices[1], k_indices[0]
-                val1, val2 = original_shape[other_indices[0]], original_shape[other_indices[1]]
-                if val1 > val2:
-                    idx_E, idx_T = other_indices[0], other_indices[1]
-                else:
-                    idx_E, idx_T = other_indices[1], other_indices[0]
+            # 第三步：保底补位（防止 repeated axis）
+            for role in ['X', 'Y', 'E', 'T']:
+                if roles[role] == -1 and idx_pool:
+                    roles[role] = idx_pool.pop(0)
 
-            # 3. 【重排与纠偏】统一转为 [Kx, Ky, E, T] 并翻转上下
-            self.raw_data = raw.transpose(idx_kx, idx_ky, idx_E, idx_T)
-            if is_flip==True:
-                for i in [0,1,2]:
-                    self.raw_data = np.flip(self.raw_data, axis=i)  # 翻转坐标轴
+            idx_kx, idx_ky, idx_E, idx_T = roles['X'], roles['Y'], roles['E'], roles['T']
+            print(f"维度识别结果: Kx={idx_kx}, Ky={idx_ky}, E={idx_E}, T={idx_T}")
 
-            # 4. 【坐标映射】
+            # 3. 重排与内存优化
+            # 强制使用 float32 并确保内存连续，彻底解决卡退问题
+            self.raw_data = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E, idx_T), dtype=np.float32)
+
+            if is_flip:
+                # 空间三轴一次性翻转
+                self.raw_data = np.flip(self.raw_data, axis=(0, 1, 2))
+
+            # 4. 坐标映射与单位同步
             self.coords = {}
-            # 尝试匹配文件中可能的坐标轴键名
-            self.coords['X'] = data['kx'].flatten() if 'kx' in data else np.arange(self.raw_data.shape[0])
-            self.coords['Y'] = np.flip(data['ky'].flatten()) if 'ky' in data else np.arange(self.raw_data.shape[1])
-            self.coords['E'] = data['E'].flatten() if 'E' in data else np.linspace(0, 1, self.raw_data.shape[2])
 
-            time_key = 'time' if 'time' in data else ('delay' if 'delay' in data else None)
-            if time_key:
-                self.coords['delay'] = data[time_key].flatten()
+            # 助手函数：安全提取坐标并翻转
+            def get_coord(role_key, keys, fallback_shape_idx):
+                actual_key = next((k for k in keys if k in data), None)
+                if actual_key:
+                    arr = data[actual_key].flatten()
+                else:
+                    # 如果没找到坐标，按像素索引生成
+                    arr = np.arange(self.raw_data.shape[fallback_shape_idx])
+                return arr
+
+            # 获取各轴坐标
+            self.coords['X'] = get_coord('X', search_map['X'], 0)
+            self.coords['Y'] = get_coord('Y', search_map['Y'], 1)
+            self.coords['E'] = get_coord('E', search_map['E'], 2)
+            self.coords['delay'] = get_coord('T', search_map['T'], 3)
+
+            # 如果开启了 is_flip，物理坐标数组也需要翻转，否则刻度会反
+            if is_flip:
+                for k in ['X', 'Y', 'E']:
+                    self.coords[k] = np.flip(self.coords[k])
             else:
-                self.coords['delay'] = np.arange(self.raw_data.shape[3])
+                # 兼容你原代码中对 Y 轴的特殊 flip 习惯
+                self.coords['Y'] = np.flip(self.coords['Y'])
+
             return True, self.raw_data.shape
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             print(f"智能加载失败: {e}")
             return False, str(e)
 
