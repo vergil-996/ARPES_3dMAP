@@ -62,7 +62,6 @@ class AnalyzerCore(QObject):
                     roles[role] = idx_pool.pop(0)
 
             idx_kx, idx_ky, idx_E, idx_T = roles['X'], roles['Y'], roles['E'], roles['T']
-            print(f"维度识别结果: Kx={idx_kx}, Ky={idx_ky}, E={idx_E}, T={idx_T}")
 
             # 3. 重排与内存优化
             # 强制使用 float32 并确保内存连续，彻底解决卡退问题
