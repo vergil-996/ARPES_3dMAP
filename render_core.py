@@ -137,30 +137,47 @@ class VisualEngine:
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
-            # 判断是普通切片还是积分投影
+            # --- 统一坐标轴排序逻辑：确保从小到大 ---
+            # 无论 load_npz 里怎么翻转，渲染时强制左小右大，下小上大
+            x_min, x_max = np.min(xp), np.max(xp)
+            y_min, y_max = np.min(yp), np.max(yp)
+            e_min, e_max = np.min(zp), np.max(zp)
+
             if slice_info.get("mode") == "integral":
-                # 这里的 data 已经是 AnalyzerCore 积分完传进来的 2D 矩阵了
                 idx = slice_info["axis"]
                 low, up = slice_info["range"]
 
-                if idx == 0:  # X轴积分，剩下 Y-E 面
-                    img, ext, title = data.T, [yp[0], yp[-1], zp[0], zp[-1]], f"X-Integral ({low}~{up})"
-                elif idx == 1:  # Y轴积分，剩下 X-E 面
-                    img, ext, title = data.T, [xp[0], xp[-1], zp[0], zp[-1]], f"Y-Integral ({low}~{up})"
-                else:  # Z轴积分，剩下 X-Y 面
-                    img, ext, title = data.T, [xp[0], xp[-1], yp[0], yp[-1]], f"E-Integral ({low}~{up})"
+                if idx == 0:  # X轴积分，横轴 Y (y_min~y_max)，纵轴 E (e_min~e_max)
+                    img = data.T
+                    ext = [y_min, y_max, e_min, e_max]
+                    title = f"X-Integral ({low}~{up})"
+                elif idx == 1:  # Y轴积分，横轴 X (x_min~x_max)，纵轴 E (e_min~e_max)
+                    img = data.T
+                    ext = [x_min, x_max, e_min, e_max]
+                    title = f"Y-Integral ({low}~{up})"
+                else:  # E轴积分，横轴 X (x_min~x_max)，纵轴 Y (y_min~y_max)
+                    img = data.T
+                    ext = [x_min, x_max, y_min, y_max]
+                    title = f"E-Integral ({low}~{up})"
             else:
-                # 原有的普通切片逻辑... (略)
+                # 普通切片逻辑同理处理 ext
                 pass
 
+            # 应用色阶处理
             processed_slice = VisualEngine.apply_levels(img, b, g, w)
+
             ax.clear()
+            # origin='lower' 配合 [min, max, min, max]
+            # 会实现完美的：左->右(从小到大)，下->上(从小到大)
             ax.imshow(processed_slice, cmap="magma", aspect='auto', origin='lower', extent=ext,
                       interpolation='spline16')
 
-            text_color = 'white'  # 强制白色适配暗色主题
-            ax.set_title(title, color=text_color)
+            ax.set_title(title, color='white')
+
+            # 额外加固：强制坐标轴刻度显示
+            ax.tick_params(colors='white')
             canvas.draw()
+
         except Exception as e:
             print(f"2D Render Error: {e}")
 

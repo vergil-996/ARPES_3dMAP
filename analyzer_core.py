@@ -30,8 +30,8 @@ class AnalyzerCore(QObject):
 
             # 2. 【指纹识别逻辑】：按物理特征锁定维度身份
             # 建立键名搜索组
-            search_map = {'X': ['kx', 'x'], 'Y': ['ky', 'y'], 'E': ['E', 'energy', 'En', 'Ef'],
-                'T': ['time', 'delay', 't']}
+            search_map = {'X': ['kx', 'x', 'X'], 'Y': ['ky', 'y', 'Y'], 'E': ['E', 'energy', 'En', 'Ef', 'E'],
+                'T': ['time', 'delay', 't','T']}
 
             # 第一步：根据键名和长度匹配（初步锁定）
             for role, keys in search_map.items():
@@ -69,7 +69,7 @@ class AnalyzerCore(QObject):
 
             if is_flip:
                 # 空间三轴一次性翻转
-                self.raw_data = np.flip(self.raw_data, axis=(0, 1, 2))
+                self.raw_data = np.flip(self.raw_data, axis=2)
 
             # 4. 坐标映射与单位同步
             self.coords = {}
