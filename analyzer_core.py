@@ -28,7 +28,6 @@ class AnalyzerCore(QObject):
             idx_pool = [0, 1, 2, 3]
             roles = {'X': -1, 'Y': -1, 'E': -1, 'T': -1}
 
-            # 2. 【指纹识别逻辑】：按物理特征锁定维度身份
             # 建立键名搜索组
             search_map = {'X': ['kx', 'x', 'X'], 'Y': ['ky', 'y', 'Y'], 'E': ['E', 'energy', 'En', 'Ef', 'E'],
                 'T': ['time', 'delay', 't','T']}
@@ -81,7 +80,7 @@ class AnalyzerCore(QObject):
                     arr = data[actual_key].flatten()
                 else:
                     # 如果没找到坐标，按像素索引生成
-                    arr = np.arange(self.raw_data.shape[fallback_shape_idx])
+                    arr = np.arange(self.raw_data.shape[fallback_shape_idx])#根据此轴长度生成相应的等差数列（默认步长为1）
                 return arr
 
             # 获取各轴坐标

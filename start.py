@@ -288,7 +288,7 @@ class My3DAnalyzer(QWidget):
 
             t_max = info[3] - 1
 
-            time_func = lambda v: f"Delay: {self.core.coords['delay'][int(v)]:.4f} ps"
+            time_func = lambda v: f"Delay: {self.core.coords['delay'][int(v)]:.4f} fs"
 
             # 2. 设置 Page 1 的单帧时间滑块
             self.page_image.slider_time.setRange(0, t_max)
@@ -314,7 +314,6 @@ class My3DAnalyzer(QWidget):
 
             # 5. 执行首次渲染
             self.plotter.set_background("white")
-            print("加载成功")
             self.global_refresh()
             self.plotter.reset_camera()
 
