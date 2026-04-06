@@ -4,39 +4,77 @@ from PyQt5.QtCore import QObject, pyqtSignal
 class AnalyzerCore(QObject):
     progress_changed = pyqtSignal(int)
     data_loaded = pyqtSignal(tuple)
+    DISPLAY_LABEL_MAP = {
+        "X轴下限": ("X", 0),
+        "X轴上限": ("X", 1),
+        "Y轴下限": ("Y", 2),
+        "Y轴上限": ("Y", 3),
+        "Z轴下限": ("E", 4),
+        "Z轴上限": ("E", 5),
+    }
+    AXIS_INDEX_MAP = {0: "X", 1: "Y", 2: "E"}
 
     def __init__(self):
         super().__init__()
         self.raw_data = None
         self.coords = {'X': None, 'Y': None, 'E': None, 'delay': None}
         self.is_2d_mode = False
+        self.has_time_axis = True
 
-    def load_npz(self, path, is_flip):
+    def load_npz(self, path, is_flip=False):
         try:
             data = np.load(path)
 
-            # 1. 自动寻找 4 维数据矩阵
+            def safe_get_array(key):
+                try:
+                    return data[key]
+                except ValueError:
+                    return None
+
+            # 1. 自动寻找 4 维或 3 维数据矩阵
             main_key = None
+            main_ndim = None
             for key in data.keys():
-                if hasattr(data[key], 'ndim') and data[key].ndim == 4:
+                arr = safe_get_array(key)
+                if hasattr(arr, 'ndim') and arr.ndim == 4:
                     main_key = key
+                    main_ndim = 4
                     break
-            if main_key is None: return False, "文件内未找到 4 维数据矩阵"
+            if main_key is None:
+                for key in data.keys():
+                    arr = safe_get_array(key)
+                    if hasattr(arr, 'ndim') and arr.ndim == 3:
+                        main_key = key
+                        main_ndim = 3
+                        break
+            if main_key is None:
+                return False, "文件内未找到 3 维或 4 维数据矩阵"
 
             raw = data[main_key]
             sh = list(raw.shape)
-            idx_pool = [0, 1, 2, 3]
-            roles = {'X': -1, 'Y': -1, 'E': -1, 'T': -1}
+            self.has_time_axis = (main_ndim == 4)
+            if self.has_time_axis:
+                idx_pool = [0, 1, 2, 3]
+                roles = {'X': -1, 'Y': -1, 'E': -1, 'T': -1}
+                role_order = ['X', 'Y', 'E', 'T']
+            else:
+                idx_pool = [0, 1, 2]
+                roles = {'X': -1, 'Y': -1, 'E': -1}
+                role_order = ['X', 'Y', 'E']
 
             # 建立键名搜索组
             search_map = {'X': ['kx', 'x', 'X'], 'Y': ['ky', 'y', 'Y'], 'E': ['E', 'energy', 'En', 'Ef', 'E'],
                 'T': ['time', 'delay', 't','T']}
 
             # 第一步：根据键名和长度匹配（初步锁定）
-            for role, keys in search_map.items():
+            for role in role_order:
+                keys = search_map[role]
                 for k in keys:
                     if k in data:
-                        length = data[k].size
+                        coord_arr = safe_get_array(k)
+                        if coord_arr is None:
+                            continue
+                        length = coord_arr.size
                         # 寻找长度匹配且尚未被分配的维度
                         for i in idx_pool:
                             if sh[i] == length:
@@ -56,19 +94,18 @@ class AnalyzerCore(QObject):
                     pass  # 基础补位在后面统一处理
 
             # 第三步：保底补位（防止 repeated axis）
-            for role in ['X', 'Y', 'E', 'T']:
+            for role in role_order:
                 if roles[role] == -1 and idx_pool:
                     roles[role] = idx_pool.pop(0)
 
-            idx_kx, idx_ky, idx_E, idx_T = roles['X'], roles['Y'], roles['E'], roles['T']
-
             # 3. 重排与内存优化
-            # 强制使用 float32 并确保内存连续，彻底解决卡退问题
-            self.raw_data = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E, idx_T), dtype=np.float32)
-
-            if is_flip:
-                # 空间三轴一次性翻转
-                self.raw_data = np.flip(self.raw_data, axis=2)
+            if self.has_time_axis:
+                idx_kx, idx_ky, idx_E, idx_T = roles['X'], roles['Y'], roles['E'], roles['T']
+                self.raw_data = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E, idx_T), dtype=np.float32)
+            else:
+                idx_kx, idx_ky, idx_E = roles['X'], roles['Y'], roles['E']
+                raw_3d = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E), dtype=np.float32)
+                self.raw_data = raw_3d[..., np.newaxis]
 
             # 4. 坐标映射与单位同步
             self.coords = {}
@@ -77,7 +114,11 @@ class AnalyzerCore(QObject):
             def get_coord(role_key, keys, fallback_shape_idx):
                 actual_key = next((k for k in keys if k in data), None)
                 if actual_key:
-                    arr = data[actual_key].flatten()
+                    loaded_arr = safe_get_array(actual_key)
+                    if loaded_arr is not None:
+                        arr = loaded_arr.flatten()
+                    else:
+                        arr = np.arange(self.raw_data.shape[fallback_shape_idx])
                 else:
                     # 如果没找到坐标，按像素索引生成
                     arr = np.arange(self.raw_data.shape[fallback_shape_idx])#根据此轴长度生成相应的等差数列（默认步长为1）
@@ -87,15 +128,13 @@ class AnalyzerCore(QObject):
             self.coords['X'] = get_coord('X', search_map['X'], 0)
             self.coords['Y'] = get_coord('Y', search_map['Y'], 1)
             self.coords['E'] = get_coord('E', search_map['E'], 2)
-            self.coords['delay'] = get_coord('T', search_map['T'], 3)
-
-            # 如果开启了 is_flip，物理坐标数组也需要翻转，否则刻度会反
-            if is_flip:
-                for k in ['X', 'Y', 'E']:
-                    self.coords[k] = np.flip(self.coords[k])
+            if self.has_time_axis:
+                self.coords['delay'] = get_coord('T', search_map['T'], 3)
             else:
-                # 兼容你原代码中对 Y 轴的特殊 flip 习惯
-                self.coords['Y'] = np.flip(self.coords['Y'])
+                self.coords['delay'] = np.array([0.0], dtype=np.float32)
+
+            # 兼容原有显示习惯：Y 轴物理坐标默认保持反向
+            self.coords['Y'] = np.flip(self.coords['Y'])
 
             return True, self.raw_data.shape
 
@@ -104,6 +143,126 @@ class AnalyzerCore(QObject):
             traceback.print_exc()
             print(f"智能加载失败: {e}")
             return False, str(e)
+
+    def _resolve_axis_key(self, axis_ref):
+        if isinstance(axis_ref, int):
+            return self.AXIS_INDEX_MAP.get(axis_ref, "X")
+
+        if axis_ref in self.coords:
+            return axis_ref
+
+        if axis_ref in self.DISPLAY_LABEL_MAP:
+            return self.DISPLAY_LABEL_MAP[axis_ref][0]
+
+        return "X"
+
+    def _get_axis_coords(self, axis_ref):
+        axis_key = self._resolve_axis_key(axis_ref)
+        coords = self.coords.get(axis_key)
+
+        if coords is None:
+            return np.array([], dtype=np.float32)
+
+        return np.asarray(coords, dtype=np.float64).flatten()
+
+    def logical_to_physical(self, axis_ref, logical_value):
+        coords = self._get_axis_coords(axis_ref)
+        if coords.size == 0:
+            return float(logical_value)
+
+        if coords.size == 1:
+            return float(coords[0])
+
+        logical_value = float(np.clip(logical_value, 0, coords.size - 1))
+        logical_axis = np.arange(coords.size, dtype=np.float64)
+        return float(np.interp(logical_value, logical_axis, coords))
+
+    def physical_to_logical(self, axis_ref, physical_value):
+        coords = self._get_axis_coords(axis_ref)
+        if coords.size <= 1:
+            return 0.0
+
+        physical_value = float(physical_value)
+        logical_axis = np.arange(coords.size, dtype=np.float64)
+
+        diffs = np.diff(coords)
+        if np.all(diffs >= 0):
+            x_axis = coords
+            y_axis = logical_axis
+        elif np.all(diffs <= 0):
+            x_axis = coords[::-1]
+            y_axis = logical_axis[::-1]
+        else:
+            nearest_idx = int(np.argmin(np.abs(coords - physical_value)))
+            return float(nearest_idx)
+
+        clipped_value = float(np.clip(physical_value, np.min(x_axis), np.max(x_axis)))
+        return float(np.interp(clipped_value, x_axis, y_axis))
+
+    def logical_bounds_to_physical_bounds(self, bounds):
+        if bounds is None:
+            return None
+
+        physical_bounds = list(bounds)
+        for label, (_, idx) in self.DISPLAY_LABEL_MAP.items():
+            physical_bounds[idx] = self.logical_to_physical(label, bounds[idx])
+        return physical_bounds
+
+    def physical_texts_to_logical_texts(self, texts):
+        logical_texts = dict(texts)
+
+        for label, (_, _) in self.DISPLAY_LABEL_MAP.items():
+            raw_text = texts.get(label, "").strip()
+            if not raw_text:
+                logical_texts[label] = ""
+                continue
+
+            try:
+                logical_texts[label] = str(self.physical_to_logical(label, float(raw_text)))
+            except ValueError:
+                logical_texts[label] = raw_text
+
+        return logical_texts
+
+    @staticmethod
+    def logical_to_render_bounds(bounds, shape, target_size=200.0):
+        if bounds is None:
+            return None
+
+        render_bounds = []
+        for axis_idx in range(3):
+            axis_size = shape[axis_idx]
+            axis_max = max(axis_size - 1, 0)
+            scale = target_size / axis_max if axis_max > 0 else 0.0
+
+            low = float(np.clip(bounds[axis_idx * 2], 0, axis_max))
+            up = float(np.clip(bounds[axis_idx * 2 + 1], 0, axis_max))
+
+            render_bounds.extend([low * scale, up * scale])
+
+        return render_bounds
+
+    @staticmethod
+    def render_to_logical_bounds(bounds, shape, target_size=200.0):
+        logical_bounds = []
+        for axis_idx in range(3):
+            axis_size = shape[axis_idx]
+            axis_max = max(axis_size - 1, 0)
+            scale = target_size / axis_max if axis_max > 0 else 0.0
+
+            low = float(bounds[axis_idx * 2])
+            up = float(bounds[axis_idx * 2 + 1])
+
+            if scale == 0:
+                logical_bounds.extend([0.0, 0.0])
+                continue
+
+            logical_bounds.extend([
+                float(np.clip(low / scale, 0, axis_max)),
+                float(np.clip(up / scale, 0, axis_max)),
+            ])
+
+        return logical_bounds
 
     def get_integrated_dynamics(self, r):
         """ 计算给定索引范围内的强度积分 """
@@ -115,7 +274,10 @@ class AnalyzerCore(QObject):
         return np.sum(roi, axis=(0, 1, 2))
 
     def get_data_for_t(self, t_idx):
-        return self.raw_data[:, :, :, int(t_idx)]
+        if self.raw_data is None:
+            return None
+        t_idx = int(np.clip(t_idx, 0, self.raw_data.shape[3] - 1))
+        return self.raw_data[:, :, :, t_idx]
 
     def process_cut_logic(self, texts):
         """
@@ -145,23 +307,27 @@ class AnalyzerCore(QObject):
             if x_min == x_max:
                 self.is_2d_mode = True
                 self.slice_info = {"axis": 0, "index": int(x_min)}
-                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None}
+                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None,
+                    "logical_bounds": [x_min, x_max, y_min, y_max, z_min, z_max]}
 
             if y_min == y_max:
                 self.is_2d_mode = True
                 self.slice_info = {"axis": 1, "index": int(y_min)}
-                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None}
+                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None,
+                    "logical_bounds": [x_min, x_max, y_min, y_max, z_min, z_max]}
 
             if z_min == z_max:
                 self.is_2d_mode = True
                 self.slice_info = {"axis": 2, "index": int(z_min)}
-                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None}
+                return {"is_2d_mode": True, "slice_info": self.slice_info, "clip_ranges": None,
+                    "logical_bounds": [x_min, x_max, y_min, y_max, z_min, z_max]}
 
             # 3. 否则判定为 3D 裁剪模式
             self.is_2d_mode = False
             self.slice_info = None
             clip_ranges = [x_min, x_max, y_min, y_max, z_min, z_max]
-            return {"is_2d_mode": False, "slice_info": None, "clip_ranges": clip_ranges}
+            return {"is_2d_mode": False, "slice_info": None, "clip_ranges": clip_ranges,
+                "logical_bounds": clip_ranges}
 
         except Exception as e:
             print(f"数据解析失败: {e}")

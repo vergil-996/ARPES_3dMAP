@@ -1,6 +1,5 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
 from PyQt5.QtGui import QColor
-from PyQt5.QtCore import Qt
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
 from siui.components.slider_ import SiSlider
@@ -12,36 +11,33 @@ class DataProcessPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.locked_half_width = 0
+        self._is_updating = False
         self.init_ui()
 
     def _apply_style(self, grp):
         for child in grp.findChildren(SiLabel):
             try:
-                # 统一文字颜色为白色
                 child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
                 child.reloadStyleSheet()
-            except:
+            except Exception:
                 pass
 
     def _create_red_btn(self, text):
-        """统一小尺寸红色按钮"""
         btn = SiPushButton(self)
         btn.setFixedHeight(28)
         btn.attachment().setText(text)
-        # 设置红色主题
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
         btn.reloadStyleSheet()
         return btn
 
     def _create_pink_slider(self):
-        """统一粉色滑块样式"""
-        s = SiSlider(self)
-        s.setFixedHeight(24)
-        s.style_data.main_color = QColor("#FF69B4")
-        s.style_data.background_color = QColor(255, 105, 180, 64)
-        s.style_data.handle_color = QColor("#FFFFFF")
-        return s
+        slider = SiSlider(self)
+        slider.setFixedHeight(24)
+        slider.style_data.main_color = QColor("#FF69B4")
+        slider.style_data.background_color = QColor(255, 105, 180, 64)
+        slider.style_data.handle_color = QColor("#FFFFFF")
+        return slider
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -53,7 +49,6 @@ class DataProcessPage(QWidget):
         self.vbox.setContentsMargins(15, 15, 15, 15)
         self.vbox.setSpacing(20)
 
-        #  对时间轴积分
         grp_t = SiTitledWidgetGroup(self)
         grp_t.addTitle("对时间轴积分")
         v_t = QVBoxLayout(grp_t)
@@ -80,14 +75,12 @@ class DataProcessPage(QWidget):
         self.s_t_up.valueChanged.connect(self._on_t_up_changed)
 
         self.btn_t_apply = self._create_red_btn("应用")
-
         v_t.addLayout(h_t1)
         v_t.addLayout(h_t2)
         v_t.addWidget(self.btn_t_apply)
         self._apply_style(grp_t)
         self.vbox.addWidget(grp_t)
 
-        #  对坐标轴积分
         grp_ax = SiTitledWidgetGroup(self)
         grp_ax.addTitle("对坐标轴积分")
         v_ax = QVBoxLayout(grp_ax)
@@ -121,7 +114,7 @@ class DataProcessPage(QWidget):
         lbl5.setStyleSheet("color: white; font-weight: bold;")
         lbl5.setFixedWidth(60)
         h_ax3.addWidget(lbl5)
-        self.s_ax_mid = self._create_pink_slider()  # 新增中点滑块
+        self.s_ax_mid = self._create_pink_slider()
         h_ax3.addWidget(self.s_ax_mid)
 
         self.s_ax_low.valueChanged.connect(self._on_axe_low_changed)
@@ -138,24 +131,25 @@ class DataProcessPage(QWidget):
         self._apply_style(grp_ax)
         self.vbox.addWidget(grp_ax)
 
-        self._is_updating = False
-
-        #  其它积分
         grp_other = SiTitledWidgetGroup(self)
-        grp_other.addTitle("其它积分")
+        grp_other.addTitle("其他积分")
         v_other = QVBoxLayout(grp_other)
         v_other.setContentsMargins(15, 50, 15, 15)
 
         self.combo_other = SiCapsuleComboBox(self)
         self.combo_other.setTitle("积分类型")
         self.combo_other.setFixedHeight(30)
-        self.combo_other.setEditable(False)  # 核心修改：设置为只读
-        self.combo_other.addItems(["切片态密度", "能级态密度"]) # 补充示例项
+        self.combo_other.setEditable(False)
+        self.combo_other.addItems(["切片态密度", "能级态密度"])
 
+        h_other_btns = QHBoxLayout()
         self.btn_other_apply = self._create_red_btn("应用")
+        self.btn_other_save = self._create_red_btn("保存")
+        h_other_btns.addWidget(self.btn_other_apply)
+        h_other_btns.addWidget(self.btn_other_save)
 
         v_other.addWidget(self.combo_other)
-        v_other.addWidget(self.btn_other_apply)
+        v_other.addLayout(h_other_btns)
 
         self._apply_style(grp_other)
         self.vbox.addWidget(grp_other)
@@ -165,48 +159,36 @@ class DataProcessPage(QWidget):
         layout.addWidget(self.scroll)
 
     def _on_t_low_changed(self, value):
-        # 如果下限超过上限，强迫上限跟着动
         if value > self.s_t_up.value():
             self.s_t_up.setValue(value)
 
     def _on_t_up_changed(self, value):
-        # 如果上限低于下限，强迫下限跟着动
         if value < self.s_t_low.value():
             self.s_t_low.setValue(value)
 
     def _on_axe_low_changed(self, value):
-        if self._is_updating: return
-        # 基础保护：下限不超上限
+        if self._is_updating:
+            return
         if value > self.s_ax_up.value():
             self.s_ax_up.setValue(value)
-
-        # --- 核心：手动调节时，更新锁定的半宽度 ---
-        mid = self.s_ax_mid.value()
         self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
 
     def _on_axe_up_changed(self, value):
-        if self._is_updating: return
-        # 基础保护：上限不低下限
+        if self._is_updating:
+            return
         if value < self.s_ax_low.value():
             self.s_ax_low.setValue(value)
-
-        # --- 核心：手动调节时，更新锁定的半宽度 ---
         self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
 
-    # 中心点驱动上下限平移
     def _on_axe_mid_changed(self, new_mid):
-        if self._is_updating: return
+        if self._is_updating:
+            return
 
-        # 使用之前手动调节时“锁定”的半宽度
-        # 如果还没手动调节过，就实时计算一次作为初始值
         if self.locked_half_width == 0:
             self.locked_half_width = (self.s_ax_up.value() - self.s_ax_low.value()) // 2
 
-        # 计算理想的左右边界（基于锁定的间距）
         target_low = new_mid - self.locked_half_width
         target_up = new_mid + self.locked_half_width
-
-        # 边界截断：撞墙就停，但不改变 target 值对另一侧的影响
         max_limit = self.s_ax_up.maximum()
 
         actual_low = max(0, target_low)

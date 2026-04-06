@@ -50,81 +50,87 @@ def find_key(keys, candidates):
 # ===== 核心转换 =====
 def convert(src, dst):
     mode, data = load_mat_auto(src)
-
-    if mode == "h5py":
-        keys = list(data.keys())
-    else:
-        keys = [k for k in data.keys() if not k.startswith('__')]
-
-    print("变量列表:", keys)
-
-    # 自动匹配
-    kx_key = find_key(keys, ['kx', 'X'])
-    ky_key = find_key(keys, ['ky', 'Y'])
-    e_key  = find_key(keys, ['E', 'energy'])
-    t_key  = find_key(keys, ['time', 't'])
-    s_key  = find_key(keys, ['sample', 'binned', 'data'])
-
-    if s_key is None:
-        raise ValueError("❌ 未找到 sample/binned/data")
-
-    # ===== 读取数据 =====
-    def read_array(obj, key):
-        if key is None:
-            return None
-        return np.array(obj[key]).squeeze()
-
-    kx = read_array(data, kx_key)
-    ky = read_array(data, ky_key)
-    energy = read_array(data, e_key)
-
-    if mode == "h5py":
-        sample = np.array(data[s_key])
-    else:
-        sample = data[s_key]
-
-    print("原始 sample shape:", sample.shape)
-
-    # ===== 处理 time =====
-    if t_key and t_key in keys:
-        time = read_array(data, t_key)
-        print("✅ 使用原始 time")
-    else:
-        print("⚠️ 未检测到 time，自动生成 5 帧")
-        num_t = 5
-        time = np.linspace(0, num_t - 1, num_t)
-
-        if sample.ndim == 3:
-            sample = sample[:, :, :, np.newaxis]
-            sample = np.tile(sample, (1, 1, 1, num_t))
-        elif sample.ndim == 2:
-            sample = sample[:, :, np.newaxis, np.newaxis]
-            sample = np.tile(sample, (1, 1, 1, num_t))
+    try:
+        if mode == "h5py":
+            keys = list(data.keys())
         else:
-            raise ValueError(f"❌ 不支持维度: {sample.ndim}")
+            keys = [k for k in data.keys() if not k.startswith('__')]
 
-    # ===== 类型优化 =====
-    sample = sample.astype(np.float32)
+        print("变量列表:", keys)
 
-    # ===== 保存 =====
-    np.savez(dst,
-             kx=kx,
-             ky=ky,
-             E=energy,
-             time=time,
-             sample=sample)
+        # 自动匹配
+        kx_key = find_key(keys, ['kx', 'X'])
+        ky_key = find_key(keys, ['ky', 'Y'])
+        e_key  = find_key(keys, ['E', 'energy'])
+        t_key  = find_key(keys, ['time', 't'])
+        s_key  = find_key(keys, ['sample', 'binned', 'data'])
 
-    # ===== 输出信息 =====
-    print("\n--- 转换完成 ---")
-    if kx is not None:
-        print("kx:", kx.shape)
-    if ky is not None:
-        print("ky:", ky.shape)
-    if energy is not None:
-        print("E :", energy.shape)
-    print("time:", time.shape)
-    print("sample:", sample.shape)
-    print("✅ 保存路径:", dst)
+        if s_key is None:
+            raise ValueError("❌ 未找到 sample/binned/data")
+
+        # ===== 读取数据 =====
+        def read_array(obj, key):
+            if key is None:
+                return None
+            return np.array(obj[key]).squeeze()
+
+        kx = read_array(data, kx_key)
+        ky = read_array(data, ky_key)
+        energy = read_array(data, e_key)
+
+        if mode == "h5py":
+            sample = np.array(data[s_key])
+        else:
+            sample = data[s_key]
+
+        print("原始 sample shape:", sample.shape)
+
+        # ===== 处理 time / 静谱 =====
+        if t_key and t_key in keys:
+            time = read_array(data, t_key)
+            print("✅ 使用原始 time")
+        else:
+            print("⚠️ 未检测到 time，按静谱处理")
+            time = np.array([0.0], dtype=np.float32)
+
+            if sample.ndim == 3:
+                pass
+            elif sample.ndim == 2:
+                sample = sample[:, :, np.newaxis]
+            else:
+                raise ValueError(f"❌ 不支持维度: {sample.ndim}")
+
+        # ===== 类型优化 =====
+        sample = sample.astype(np.float32)
+
+        # ===== 保存 =====
+        save_dict = {
+            "sample": sample,
+            "time": time,
+        }
+        if kx is not None:
+            save_dict["kx"] = kx
+        if ky is not None:
+            save_dict["ky"] = ky
+        if energy is not None:
+            save_dict["E"] = energy
+
+        np.savez(dst, **save_dict)
+
+        # ===== 输出信息 =====
+        print("\n--- 转换完成 ---")
+        if kx is not None:
+            print("kx:", kx.shape)
+        if ky is not None:
+            print("ky:", ky.shape)
+        if energy is not None:
+            print("E :", energy.shape)
+        print("time:", time.shape)
+        print("sample:", sample.shape)
+        print("✅ 保存路径:", dst)
+    finally:
+        if mode == "h5py":
+            data.close()
 
 
 # ===== 主程序 =====

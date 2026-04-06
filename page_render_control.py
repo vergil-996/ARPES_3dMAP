@@ -9,6 +9,15 @@ from siui.core import SiColor
 
 
 class RenderControlPage(QWidget):
+    CMAP_OPTIONS = [
+        "magma", "inferno", "plasma", "viridis", "cividis", "turbo",
+        "afmhot", "hot", "gist_heat", "coolwarm", "RdBu_r", "seismic",
+        "Spectral", "jet", "rainbow", "nipy_spectral", "cubehelix",
+        "twilight", "twilight_shifted", "Greys", "gray", "bone", "pink",
+        "spring", "summer", "autumn", "winter", "cool", "hsv", "terrain",
+        "ocean", "gnuplot", "gnuplot2",
+    ]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
@@ -48,6 +57,29 @@ class RenderControlPage(QWidget):
         self.vbox = QVBoxLayout(self.container)
         self.vbox.setContentsMargins(15, 15, 15, 15)
         self.vbox.setSpacing(15)
+
+        # 色带选择
+        grp_cmap = SiTitledWidgetGroup(self)
+        grp_cmap.addTitle("色带选择")
+        v_cmap = QVBoxLayout(grp_cmap)
+        v_cmap.setContentsMargins(15, 50, 15, 15)
+        v_cmap.setSpacing(8)
+
+        h_cmap = QHBoxLayout()
+        self.combo_cmap = SiCapsuleComboBox(self)
+        self.combo_cmap.setTitle("渲染色带")
+        self.combo_cmap.setFixedHeight(30)
+        self.combo_cmap.setEditable(False)
+        self.combo_cmap.addItems(self.CMAP_OPTIONS)
+        self.btn_apply_cmap = self._create_red_btn("确定")
+        self.btn_apply_cmap.setFixedWidth(90)
+
+        h_cmap.addWidget(self.combo_cmap, stretch=1)
+        h_cmap.addWidget(self.btn_apply_cmap)
+        v_cmap.addLayout(h_cmap)
+
+        self._apply_style(grp_cmap)
+        self.vbox.addWidget(grp_cmap)
 
         #  色阶调整
         grp_exp = SiTitledWidgetGroup(self)
@@ -149,6 +181,9 @@ class RenderControlPage(QWidget):
         self.vbox.addStretch()
         self.scroll.setCenterWidget(self.container)
         layout.addWidget(self.scroll)
+
+    def get_selected_cmap(self):
+        return self.combo_cmap.currentText()
 
     def get_denoise_settings(self):
         """ 获取当前选中的三级去噪配置 """

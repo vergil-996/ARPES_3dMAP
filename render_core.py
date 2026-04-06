@@ -2,6 +2,7 @@ import numpy as np
 import vtk
 from PyQt5.QtGui import QColor
 import pyvista as pv
+from pyvista.plotting.cube_axes_actor import make_axis_labels
 
 
 class VisualEngine:
@@ -33,7 +34,8 @@ class VisualEngine:
         return img
 
     @staticmethod
-    def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None):
+    def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None,
+                  cmap="magma"):
         try:
             b, g, w = levels_params
 
@@ -74,7 +76,7 @@ class VisualEngine:
             grid.point_data["values"] = processed_data.flatten(order="F")
 
             # 4. 添加体渲染
-            vol = plotter.add_volume(grid, cmap="magma", opacity=selected_opac, clim=[0, 1], show_scalar_bar=False,
+            vol = plotter.add_volume(grid, cmap=cmap, opacity=selected_opac, clim=[0, 1], show_scalar_bar=False,
                 name="main_vol", render=False)
 
             # 5. 处理切片限制 (Clipping Planes)
@@ -123,41 +125,42 @@ class VisualEngine:
             else:
                 ax_color = '#A0A0B0'  # 浅淡紫灰，匹配深色主题
 
-            # --- 【核心修改】：强制 Bounds 为 0-200 ---
-            plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
-                font_size=10, color=ax_color, # 标题依然显示物理范围，但刻度数字会是 0, 50, 100, 150, 200
-                xtitle=f"Kx Index ({xp[0]:.2f}~{xp[-1]:.2f})", ytitle=f"Ky Index ({yp[0]:.2f}~{yp[-1]:.2f})",
-                ztitle=f"E Index ({zp[0]:.2f}~{zp[-1]:.2f} eV)", render=False)
+            actor = plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
+                axes_ranges=[float(np.min(xp)), float(np.max(xp)), float(np.min(yp)), float(np.max(yp)),
+                    float(np.min(zp)), float(np.max(zp))], font_size=10, color=ax_color, fmt="%.2f", xtitle="Kx",
+                ytitle="Ky", ztitle="E (eV)", render=False)
+
+            actor.SetAxisLabels(0, make_axis_labels(vmin=float(xp[0]), vmax=float(xp[-1]), n=actor.n_xlabels, fmt="%.2f"))
+            actor.SetAxisLabels(1, make_axis_labels(vmin=float(yp[0]), vmax=float(yp[-1]), n=actor.n_ylabels, fmt="%.2f"))
+            actor.SetAxisLabels(2, make_axis_labels(vmin=float(zp[0]), vmax=float(zp[-1]), n=actor.n_zlabels, fmt="%.2f"))
         except Exception as e:
             print(f"Axes Error: {e}")
 
     @staticmethod
-    def render_2d_slice(ax, canvas, data, slice_info, levels_params, coords):
+    def render_2d_slice(ax, canvas, data, slice_info, levels_params, coords, cmap="magma"):
         try:
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
-            # --- 统一坐标轴排序逻辑：确保从小到大 ---
-            # 无论 load_npz 里怎么翻转，渲染时强制左小右大，下小上大
-            x_min, x_max = np.min(xp), np.max(xp)
-            y_min, y_max = np.min(yp), np.max(yp)
-            e_min, e_max = np.min(zp), np.max(zp)
+            x_start, x_end = float(xp[0]), float(xp[-1])
+            y_start, y_end = float(yp[0]), float(yp[-1])
+            e_start, e_end = float(zp[0]), float(zp[-1])
 
             if slice_info.get("mode") == "integral":
                 idx = slice_info["axis"]
                 low, up = slice_info["range"]
 
-                if idx == 0:  # X轴积分，横轴 Y (y_min~y_max)，纵轴 E (e_min~e_max)
+                if idx == 0:  # X轴积分，横轴 Y，纵轴 E
                     img = data.T
-                    ext = [y_min, y_max, e_min, e_max]
+                    ext = [y_start, y_end, e_start, e_end]
                     title = f"X-Integral ({low}~{up})"
-                elif idx == 1:  # Y轴积分，横轴 X (x_min~x_max)，纵轴 E (e_min~e_max)
+                elif idx == 1:  # Y轴积分，横轴 X，纵轴 E
                     img = data.T
-                    ext = [x_min, x_max, e_min, e_max]
+                    ext = [x_start, x_end, e_start, e_end]
                     title = f"Y-Integral ({low}~{up})"
-                else:  # E轴积分，横轴 X (x_min~x_max)，纵轴 Y (y_min~y_max)
+                else:  # E轴积分，横轴 X，纵轴 Y
                     img = data.T
-                    ext = [x_min, x_max, y_min, y_max]
+                    ext = [x_start, x_end, y_start, y_end]
                     title = f"E-Integral ({low}~{up})"
             else:
                 # 普通切片逻辑同理处理 ext
@@ -167,9 +170,7 @@ class VisualEngine:
             processed_slice = VisualEngine.apply_levels(img, b, g, w)
 
             ax.clear()
-            # origin='lower' 配合 [min, max, min, max]
-            # 会实现完美的：左->右(从小到大)，下->上(从小到大)
-            ax.imshow(processed_slice, cmap="magma", aspect='auto', origin='lower', extent=ext,
+            ax.imshow(processed_slice, cmap=cmap, aspect='auto', origin='lower', extent=ext,
                       interpolation='spline16')
 
             ax.set_title(title, color='white')
