@@ -4,6 +4,7 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget, QFrame, QButtonGroup, \
     QFileDialog, QMessageBox
 from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QIcon
 # 导入 SIUI 核心组件
 import siui
 from siui.core import SiGlobal, SiColor
@@ -27,6 +28,11 @@ from pyvistaqt import QtInteractor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from scipy.io import savemat
+
+
+def resource_path(relative_path):
+    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return os.path.join(base_path, relative_path)
 
 
 class My3DAnalyzer(QWidget):
@@ -840,7 +846,7 @@ class My3DAnalyzer(QWidget):
                 msg = QMessageBox(self)
                 msg.setWindowTitle("静谱数据")
                 msg.setIcon(QMessageBox.Information)
-                msg.setText("当前数据不包含时间轴，无法计算切片态密度动力学。")
+                msg.setText("当前数据不包含时间轴，无法计算切片态密度")
                 msg.exec_()
                 return
             if self.clip_ranges is None:
@@ -912,6 +918,11 @@ class My3DAnalyzer(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    icon_path = resource_path("app.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     window = My3DAnalyzer()
+    if os.path.exists(icon_path):
+        window.setWindowIcon(QIcon(icon_path))
     window.showMaximized()
     sys.exit(app.exec_())
