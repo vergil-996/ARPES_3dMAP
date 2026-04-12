@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
@@ -9,6 +9,12 @@ from siui.core import SiColor
 
 
 class ImageControlPage(QWidget):
+    PAGE_MARGIN = 13
+    SECTION_MARGIN = 15
+    SECTION_SPACING = 20
+    GROUP_MARGINS = (15, 55, 15, 20)
+    GROUP_SPACING = 12
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.edits = {}
@@ -23,6 +29,7 @@ class ImageControlPage(QWidget):
     def _create_slider(self):
         slider = SiSlider(self)
         slider.setFixedHeight(32)
+        slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         slider.style_data.main_color = QColor("#FF69B4")
         slider.style_data.background_color = QColor(255, 105, 180, 64)
         slider.style_data.handle_color = QColor("#FFFFFF")
@@ -39,26 +46,36 @@ class ImageControlPage(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN)
+        layout.setSpacing(0)
         self.scroll = SiScrollArea(self)
         self.container = QWidget()
         self.vbox = QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(15, 15, 15, 15)
-        self.vbox.setSpacing(20)
+        self.vbox.setContentsMargins(
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+        )
+        self.vbox.setSpacing(self.SECTION_SPACING)
 
         grp_time = SiTitledWidgetGroup(self)
+        grp_time.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grp_time.addTitle("时间轴控制")
         self.slider_time = self._create_slider()
         v_time = QVBoxLayout(grp_time)
-        v_time.setContentsMargins(15, 55, 15, 20)
+        v_time.setContentsMargins(*self.GROUP_MARGINS)
+        v_time.setSpacing(self.GROUP_SPACING)
         v_time.addWidget(self.slider_time)
         self._apply_group_style(grp_time)
         self.vbox.addWidget(grp_time)
 
         grp_slice = SiTitledWidgetGroup(self)
+        grp_slice.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grp_slice.addTitle("切片立方体设置")
         v_slice = QVBoxLayout(grp_slice)
-        v_slice.setContentsMargins(15, 55, 15, 20)
-        v_slice.setSpacing(12)
+        v_slice.setContentsMargins(*self.GROUP_MARGINS)
+        v_slice.setSpacing(self.GROUP_SPACING)
 
         axes_cfg = [("X轴下限", "X轴上限"), ("Y轴下限", "Y轴上限"), ("Z轴下限", "Z轴上限")]
         for min_label, max_label in axes_cfg:

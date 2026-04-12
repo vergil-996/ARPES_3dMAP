@@ -62,7 +62,7 @@ def convert(src, dst):
         kx_key = find_key(keys, ['kx', 'X'])
         ky_key = find_key(keys, ['ky', 'Y'])
         e_key  = find_key(keys, ['E', 'energy'])
-        t_key  = find_key(keys, ['time', 't'])
+        t_key  = find_key(keys, ['time', 'delay', 't', 'T'])
         s_key  = find_key(keys, ['sample', 'binned', 'data'])
 
         if s_key is None:
@@ -91,9 +91,14 @@ def convert(src, dst):
             print("✅ 使用原始 time")
         else:
             print("⚠️ 未检测到 time，按静谱处理")
-            time = np.array([0.0], dtype=np.float32)
+            if sample.ndim == 4:
+                time = np.arange(sample.shape[-1], dtype=np.float32)
+            else:
+                time = np.array([0.0], dtype=np.float32)
 
-            if sample.ndim == 3:
+            if sample.ndim == 4:
+                pass
+            elif sample.ndim == 3:
                 pass
             elif sample.ndim == 2:
                 sample = sample[:, :, np.newaxis]

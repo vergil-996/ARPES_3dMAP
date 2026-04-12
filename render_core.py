@@ -163,8 +163,21 @@ class VisualEngine:
                     ext = [x_start, x_end, y_start, y_end]
                     title = f"E-Integral ({low}~{up})"
             else:
-                # 普通切片逻辑同理处理 ext
-                pass
+                idx = slice_info["axis"]
+                index = slice_info["index"]
+
+                if idx == 0:  # X切片，横轴 Y，纵轴 E
+                    img = data.T
+                    ext = [y_start, y_end, e_start, e_end]
+                    title = f"X-Slice ({index})"
+                elif idx == 1:  # Y切片，横轴 X，纵轴 E
+                    img = data.T
+                    ext = [x_start, x_end, e_start, e_end]
+                    title = f"Y-Slice ({index})"
+                else:  # E切片，横轴 X，纵轴 Y
+                    img = data.T
+                    ext = [x_start, x_end, y_start, y_end]
+                    title = f"E-Slice ({index})"
 
             # 应用色阶处理
             processed_slice = VisualEngine.apply_levels(img, b, g, w)

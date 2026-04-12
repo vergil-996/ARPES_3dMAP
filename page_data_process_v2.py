@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
@@ -8,6 +8,16 @@ from siui.core import SiColor
 
 
 class DataProcessPage(QWidget):
+    PAGE_MARGIN = 13
+    SECTION_MARGIN = 15
+    SECTION_SPACING = 20
+    GROUP_MARGINS = (15, 55, 15, 20)
+    GROUP_SPACING = 12
+    SLIDER_BLOCK_WIDTH = 400
+    SLIDER_GROUP_WIDTH = 450
+    CONTROL_ROW_WIDTH = 340
+    COMBO_WIDTH = 210
+    BUTTON_WIDTH = 100
     def __init__(self, parent=None):
         super().__init__(parent)
         self.locked_half_width = 0
@@ -25,6 +35,7 @@ class DataProcessPage(QWidget):
     def _create_red_btn(self, text):
         btn = SiPushButton(self)
         btn.setFixedHeight(28)
+        btn.setFixedWidth(self.BUTTON_WIDTH)
         btn.attachment().setText(text)
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
@@ -33,27 +44,61 @@ class DataProcessPage(QWidget):
 
     def _create_pink_slider(self):
         slider = SiSlider(self)
-        slider.setFixedHeight(24)
+        slider.setFixedHeight(32)
+        slider.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        slider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         slider.style_data.main_color = QColor("#FF69B4")
         slider.style_data.background_color = QColor(255, 105, 180, 64)
         slider.style_data.handle_color = QColor("#FFFFFF")
         return slider
 
+    def _center_widget(self, widget, max_width=None):
+        if max_width is not None:
+            widget.setMaximumWidth(max_width)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(widget)
+        row.addStretch()
+        return row
+
+    def _create_labeled_slider_block(self, text, slider):
+        container = QWidget(self)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        container.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        block = QVBoxLayout(container)
+        block.setContentsMargins(0, 0, 0, 0)
+        block.setSpacing(6)
+        label = SiLabel(text)
+        label.setStyleSheet("color: white; font-weight: bold;")
+        block.addWidget(label)
+        block.addWidget(slider)
+        return container
+
+    def _add_centered_slider_block(self, layout, text, slider):
+        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider)))
+
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN)
+        layout.setSpacing(0)
 
         self.scroll = SiScrollArea(self)
         self.container = QWidget()
         self.vbox = QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(15, 15, 15, 15)
-        self.vbox.setSpacing(20)
+        self.vbox.setContentsMargins(
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+        )
+        self.vbox.setSpacing(self.SECTION_SPACING)
 
         grp_t = SiTitledWidgetGroup(self)
+        grp_t.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_t.addTitle("对时间轴积分")
         v_t = QVBoxLayout(grp_t)
-        v_t.setContentsMargins(15, 50, 15, 15)
-        v_t.setSpacing(8)
+        v_t.setContentsMargins(*self.GROUP_MARGINS)
+        v_t.setSpacing(self.GROUP_SPACING)
 
         h_t1 = QHBoxLayout()
         lbl1 = SiLabel("积分上限")
@@ -77,19 +122,43 @@ class DataProcessPage(QWidget):
         self.btn_t_apply = self._create_red_btn("应用")
         v_t.addLayout(h_t1)
         v_t.addLayout(h_t2)
-        v_t.addWidget(self.btn_t_apply)
+        for _ in range(2):
+            item = v_t.takeAt(v_t.count() - 1)
+            row = item.layout() if item is not None else None
+            if row is None:
+                continue
+            while row.count():
+                child = row.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+        for _ in range(2):
+            item = v_t.takeAt(v_t.count() - 1)
+            row = item.layout() if item is not None else None
+            if row is None:
+                continue
+            while row.count():
+                child = row.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+        self._add_centered_slider_block(v_t, lbl1.text(), self.s_t_up)
+        self._add_centered_slider_block(v_t, lbl2.text(), self.s_t_low)
+        v_t.addLayout(self._center_widget(self.btn_t_apply, self.BUTTON_WIDTH))
         self._apply_style(grp_t)
-        self.vbox.addWidget(grp_t)
+        self.vbox.addLayout(self._center_widget(grp_t, self.SLIDER_GROUP_WIDTH))
 
         grp_ax = SiTitledWidgetGroup(self)
+        grp_ax.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_ax.addTitle("对坐标轴积分")
         v_ax = QVBoxLayout(grp_ax)
-        v_ax.setContentsMargins(15, 50, 15, 15)
-        v_ax.setSpacing(8)
+        v_ax.setContentsMargins(*self.GROUP_MARGINS)
+        v_ax.setSpacing(self.GROUP_SPACING)
 
         self.combo_ax = SiCapsuleComboBox(self)
         self.combo_ax.setTitle("选择轴向")
         self.combo_ax.setFixedHeight(30)
+        self.combo_ax.setFixedWidth(self.COMBO_WIDTH)
         self.combo_ax.setEditable(False)
         self.combo_ax.addItems(["X轴", "Y轴", "Z轴"])
 
@@ -123,36 +192,60 @@ class DataProcessPage(QWidget):
 
         self.btn_ax_apply = self._create_red_btn("应用")
 
-        v_ax.addWidget(self.combo_ax)
+        v_ax.addLayout(self._center_widget(self.combo_ax, self.COMBO_WIDTH))
         v_ax.addLayout(h_ax1)
         v_ax.addLayout(h_ax2)
         v_ax.addLayout(h_ax3)
-        v_ax.addWidget(self.btn_ax_apply)
+        for _ in range(3):
+            item = v_ax.takeAt(v_ax.count() - 1)
+            row = item.layout() if item is not None else None
+            if row is None:
+                continue
+            while row.count():
+                child = row.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+        for _ in range(3):
+            item = v_ax.takeAt(v_ax.count() - 1)
+            row = item.layout() if item is not None else None
+            if row is None:
+                continue
+            while row.count():
+                child = row.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+        self._add_centered_slider_block(v_ax, lbl3.text(), self.s_ax_up)
+        self._add_centered_slider_block(v_ax, lbl4.text(), self.s_ax_low)
+        self._add_centered_slider_block(v_ax, lbl5.text(), self.s_ax_mid)
+        v_ax.addLayout(self._center_widget(self.btn_ax_apply, self.BUTTON_WIDTH))
         self._apply_style(grp_ax)
-        self.vbox.addWidget(grp_ax)
+        self.vbox.addLayout(self._center_widget(grp_ax, self.SLIDER_GROUP_WIDTH))
 
         grp_other = SiTitledWidgetGroup(self)
+        grp_other.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_other.addTitle("其他积分")
         v_other = QVBoxLayout(grp_other)
-        v_other.setContentsMargins(15, 50, 15, 15)
+        v_other.setContentsMargins(*self.GROUP_MARGINS)
+        v_other.setSpacing(self.GROUP_SPACING)
 
         self.combo_other = SiCapsuleComboBox(self)
         self.combo_other.setTitle("积分类型")
         self.combo_other.setFixedHeight(30)
+        self.combo_other.setFixedWidth(self.COMBO_WIDTH)
         self.combo_other.setEditable(False)
         self.combo_other.addItems(["切片态密度", "能级态密度"])
 
-        h_other_btns = QHBoxLayout()
         self.btn_other_apply = self._create_red_btn("应用")
         self.btn_other_save = self._create_red_btn("保存")
-        h_other_btns.addWidget(self.btn_other_apply)
-        h_other_btns.addWidget(self.btn_other_save)
 
-        v_other.addWidget(self.combo_other)
-        v_other.addLayout(h_other_btns)
+        v_other.addLayout(self._center_widget(self.combo_other, self.COMBO_WIDTH))
+        v_other.addLayout(self._center_widget(self.btn_other_apply, self.BUTTON_WIDTH))
+        v_other.addLayout(self._center_widget(self.btn_other_save, self.BUTTON_WIDTH))
 
         self._apply_style(grp_other)
-        self.vbox.addWidget(grp_other)
+        self.vbox.addLayout(self._center_widget(grp_other, self.SLIDER_GROUP_WIDTH))
 
         self.vbox.addStretch()
         self.scroll.setCenterWidget(self.container)

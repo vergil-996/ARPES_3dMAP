@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from PyQt5.QtCore import Qt
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
@@ -9,6 +9,16 @@ from siui.core import SiColor
 
 
 class RenderControlPage(QWidget):
+    PAGE_MARGIN = 13
+    SECTION_MARGIN = 15
+    SECTION_SPACING = 20
+    GROUP_MARGINS = (15, 55, 15, 20)
+    GROUP_SPACING = 12
+    SLIDER_BLOCK_WIDTH = 400
+    SLIDER_GROUP_WIDTH = 450
+    CONTROL_ROW_WIDTH = 340
+    COMBO_WIDTH = 210
+    BUTTON_WIDTH = 100
     CMAP_OPTIONS = [
         "magma", "inferno", "plasma", "viridis", "cividis", "turbo",
         "afmhot", "hot", "gist_heat", "coolwarm", "RdBu_r", "seismic",
@@ -34,6 +44,7 @@ class RenderControlPage(QWidget):
         """统一小尺寸红色按钮"""
         btn = SiPushButton(self)
         btn.setFixedHeight(28)
+        btn.setFixedWidth(self.BUTTON_WIDTH)
         btn.attachment().setText(text)
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
@@ -42,51 +53,90 @@ class RenderControlPage(QWidget):
 
     def _create_pink_slider(self):
         s = SiSlider(self)
-        s.setFixedHeight(24)
+        s.setFixedHeight(32)
+        s.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        s.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         s.style_data.main_color = QColor("#FF69B4")
         s.style_data.background_color = QColor(255, 105, 180, 64)
         s.style_data.handle_color = QColor("#FFFFFF")
         return s
 
+    def _center_widget(self, widget, max_width=None):
+        if max_width is not None:
+            widget.setMaximumWidth(max_width)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(widget)
+        row.addStretch()
+        return row
+
+    def _create_labeled_slider_block(self, text, slider):
+        container = QWidget(self)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        container.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        block = QVBoxLayout(container)
+        block.setContentsMargins(0, 0, 0, 0)
+        block.setSpacing(6)
+        label = SiLabel(text)
+        label.setStyleSheet("color: white; font-weight: bold;")
+        block.addWidget(label)
+        block.addWidget(slider)
+        return container
+
+    def _add_centered_slider_block(self, layout, text, slider):
+        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider)))
+
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN)
+        layout.setSpacing(0)
 
         self.scroll = SiScrollArea(self)
         self.container = QWidget()
         self.vbox = QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(15, 15, 15, 15)
-        self.vbox.setSpacing(15)
+        self.vbox.setContentsMargins(
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+            self.SECTION_MARGIN,
+        )
+        self.vbox.setSpacing(self.SECTION_SPACING)
 
         # 色带选择
         grp_cmap = SiTitledWidgetGroup(self)
+        grp_cmap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_cmap.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_cmap.addTitle("色带选择")
         v_cmap = QVBoxLayout(grp_cmap)
-        v_cmap.setContentsMargins(15, 50, 15, 15)
-        v_cmap.setSpacing(8)
+        v_cmap.setContentsMargins(*self.GROUP_MARGINS)
+        v_cmap.setSpacing(self.GROUP_SPACING)
 
         h_cmap = QHBoxLayout()
         self.combo_cmap = SiCapsuleComboBox(self)
         self.combo_cmap.setTitle("渲染色带")
         self.combo_cmap.setFixedHeight(30)
+        self.combo_cmap.setFixedWidth(self.COMBO_WIDTH)
         self.combo_cmap.setEditable(False)
         self.combo_cmap.addItems(self.CMAP_OPTIONS)
         self.btn_apply_cmap = self._create_red_btn("确定")
-        self.btn_apply_cmap.setFixedWidth(90)
 
-        h_cmap.addWidget(self.combo_cmap, stretch=1)
+        h_cmap.addStretch()
+        h_cmap.addWidget(self.combo_cmap)
         h_cmap.addWidget(self.btn_apply_cmap)
+        h_cmap.addStretch()
         v_cmap.addLayout(h_cmap)
 
         self._apply_style(grp_cmap)
-        self.vbox.addWidget(grp_cmap)
+        self.vbox.addLayout(self._center_widget(grp_cmap, self.SLIDER_GROUP_WIDTH))
 
         #  色阶调整
         grp_exp = SiTitledWidgetGroup(self)
+        grp_exp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_exp.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_exp.addTitle("色阶调整")
         v_exp = QVBoxLayout(grp_exp)
-        v_exp.setContentsMargins(15, 50, 15, 15)
-        v_exp.setSpacing(10)
+        v_exp.setContentsMargins(*self.GROUP_MARGINS)
+        v_exp.setSpacing(self.GROUP_SPACING)
 
         # 上限色
         h_up = QHBoxLayout()
@@ -124,27 +174,43 @@ class RenderControlPage(QWidget):
         v_exp.addLayout(h_up)
         v_exp.addLayout(h_gamma)
         v_exp.addLayout(h_low)
+        for _ in range(3):
+            item = v_exp.takeAt(v_exp.count() - 1)
+            row = item.layout() if item is not None else None
+            if row is None:
+                continue
+            while row.count():
+                child = row.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+        self._add_centered_slider_block(v_exp, lbl_up.text(), self.s_up)
+        self._add_centered_slider_block(v_exp, lbl_gamma.text(), self.s_gamma)
+        self._add_centered_slider_block(v_exp, lbl_low.text(), self.s_low)
 
         self.combo_map = SiCapsuleComboBox(self)
         self.combo_map.setTitle("强度映射方式")
         self.combo_map.setFixedHeight(30)
+        self.combo_map.setFixedWidth(self.CONTROL_ROW_WIDTH)
         self.combo_map.setEditable(False)
         self.combo_map.addItems(["线性", "对数", "幂函数", "sigmoid"])
 
         self.btn_apply_map = self._create_red_btn("应用设置")
 
-        v_exp.addWidget(self.combo_map)
-        v_exp.addWidget(self.btn_apply_map)
+        v_exp.addLayout(self._center_widget(self.combo_map, self.CONTROL_ROW_WIDTH))
+        v_exp.addLayout(self._center_widget(self.btn_apply_map, self.BUTTON_WIDTH))
 
         self._apply_style(grp_exp)
-        self.vbox.addWidget(grp_exp)
+        self.vbox.addLayout(self._center_widget(grp_exp, self.SLIDER_GROUP_WIDTH))
 
         # 去噪处理
         grp_noise = SiTitledWidgetGroup(self)
+        grp_noise.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_noise.setFixedWidth(self.SLIDER_GROUP_WIDTH)
         grp_noise.addTitle("去噪处理")
         v_noise = QVBoxLayout(grp_noise)
-        v_noise.setContentsMargins(15, 50, 15, 15)
-        v_noise.setSpacing(8)
+        v_noise.setContentsMargins(*self.GROUP_MARGINS)
+        v_noise.setSpacing(self.GROUP_SPACING)
         lbl_noise = SiLabel("自上向下依次生效：")
         lbl_noise.setStyleSheet("color: white; font-weight: bold;")
         v_noise.addWidget(lbl_noise)
@@ -152,31 +218,34 @@ class RenderControlPage(QWidget):
         self.combo_n1 = SiCapsuleComboBox(self)
         self.combo_n1.setTitle("一级去噪")
         self.combo_n1.setFixedHeight(30)
+        self.combo_n1.setFixedWidth(self.CONTROL_ROW_WIDTH)
         self.combo_n1.setEditable(False)
         self.combo_n1.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
         self.combo_n2 = SiCapsuleComboBox(self)
         self.combo_n2.setTitle("二级去噪")
         self.combo_n2.setFixedHeight(30)
+        self.combo_n2.setFixedWidth(self.CONTROL_ROW_WIDTH)
         self.combo_n2.setEditable(False)
         self.combo_n2.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
         self.combo_n3 = SiCapsuleComboBox(self)
         self.combo_n3.setTitle("三级去噪")
         self.combo_n3.setFixedHeight(30)
+        self.combo_n3.setFixedWidth(self.CONTROL_ROW_WIDTH)
         self.combo_n3.setEditable(False)
         self.combo_n3.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
-        self.btn_apply_noise = self._create_red_btn("应用所有去噪设置")
+        self.btn_apply_noise = self._create_red_btn("应用设置")
 
 
-        v_noise.addWidget(self.combo_n1)
-        v_noise.addWidget(self.combo_n2)
-        v_noise.addWidget(self.combo_n3)
-        v_noise.addWidget(self.btn_apply_noise)
+        v_noise.addLayout(self._center_widget(self.combo_n1, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(self._center_widget(self.combo_n2, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(self._center_widget(self.combo_n3, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(self._center_widget(self.btn_apply_noise, self.BUTTON_WIDTH))
 
         self._apply_style(grp_noise)
-        self.vbox.addWidget(grp_noise)
+        self.vbox.addLayout(self._center_widget(grp_noise, self.SLIDER_GROUP_WIDTH))
 
         self.vbox.addStretch()
         self.scroll.setCenterWidget(self.container)

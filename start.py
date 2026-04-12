@@ -22,12 +22,40 @@ from data_trans import convert as convert_mat_to_npz
 from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from page_data_process_v2 import DataProcessPage
+from refactored_app import My3DAnalyzer as RefactoredMy3DAnalyzer
 
 # 渲染器相关（PyVista 和 Matplotlib）
 from pyvistaqt import QtInteractor
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from scipy.io import savemat
+
+
+APP_FEEDBACK_STYLE = """
+QMessageBox {
+    background-color: #2A2A3A;
+}
+QMessageBox QLabel {
+    color: #FFFFFF;
+    font-family: "Segoe UI";
+    font-size: 14px;
+}
+QMessageBox QPushButton {
+    background-color: #E81123;
+    color: #FFFFFF;
+    border-radius: 4px;
+    padding: 5px 15px;
+    min-width: 72px;
+}
+QMessageBox QPushButton:hover {
+    background-color: #F33A4A;
+}
+QToolTip {
+    color: #FFFFFF;
+    background-color: #2A2A3A;
+    border: 1px solid #FF69B4;
+}
+"""
 
 
 def resource_path(relative_path):
@@ -65,6 +93,7 @@ class My3DAnalyzer(QWidget):
             SiGlobal.siui.windows["TOOL_TIP"] = ToolTipWindow()
             SiGlobal.siui.windows["TOOL_TIP"].show()
             SiGlobal.siui.windows["TOOL_TIP"].setOpacity(0)
+        self._apply_feedback_styles()
 
         self.setWindowTitle("3D 能带分析工具")
         self.resize(1550, 950)
@@ -73,6 +102,16 @@ class My3DAnalyzer(QWidget):
         self.init_ui()
         self.bind_all_events()
         self._update_export_button_states()
+
+    def _apply_feedback_styles(self):
+        tooltip_window = SiGlobal.siui.windows.get("TOOL_TIP")
+        if tooltip_window is None:
+            return
+
+        tooltip_window.bg_label.setColor("#2A2A3A")
+        tooltip_window.text_label.setStyleSheet("color: #FFFFFF; padding: 8px;")
+        tooltip_window.highlight_mask.setFixedStyleSheet("border-radius: 6px")
+
     def showEvent(self, event):
         super().showEvent(event)
         # 只执行一次初始化
@@ -918,10 +957,11 @@ class My3DAnalyzer(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet(APP_FEEDBACK_STYLE)
     icon_path = resource_path("app.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
-    window = My3DAnalyzer()
+    window = RefactoredMy3DAnalyzer()
     if os.path.exists(icon_path):
         window.setWindowIcon(QIcon(icon_path))
     window.showMaximized()
