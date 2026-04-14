@@ -55,6 +55,7 @@ class ResultPageButton(PageButton):
 
 class ResultWorkspace(QWidget):
     page_activated = pyqtSignal(str)
+    page_closed = pyqtSignal(str)
 
     def __init__(self, display_widget: QWidget, parent=None):
         super().__init__(parent)
@@ -107,7 +108,7 @@ class ResultWorkspace(QWidget):
         header_layout.addStretch(1)
 
         self.close_button = QToolButton(self.header)
-        self.close_button.setText("x")
+        self.close_button.setText("X")
         self.close_button.setCursor(Qt.PointingHandCursor)
         self.close_button.setFixedSize(28, 28)
         self.close_button.clicked.connect(self.close_current_page)
@@ -263,6 +264,8 @@ class ResultWorkspace(QWidget):
             for index, current_button in enumerate(self.page_buttons.values()):
                 current_button.setIndex(index)
             self._refresh_navigation_layout()
+
+        self.page_closed.emit(page_id)
 
         if not was_current:
             return

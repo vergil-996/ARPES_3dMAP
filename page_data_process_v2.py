@@ -1,3 +1,4 @@
+from PyQt5.QtCore import QSignalBlocker
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
@@ -235,7 +236,7 @@ class DataProcessPage(QWidget):
         self.combo_other.setFixedHeight(30)
         self.combo_other.setFixedWidth(self.COMBO_WIDTH)
         self.combo_other.setEditable(False)
-        self.combo_other.addItems(["切片态密度", "能级态密度"])
+        self.combo_other.addItems(["切片内强度积分", "能级态密度"])
 
         self.btn_other_apply = self._create_red_btn("应用")
         self.btn_other_save = self._create_red_btn("保存")
@@ -291,3 +292,147 @@ class DataProcessPage(QWidget):
         self.s_ax_low.setValue(actual_low)
         self.s_ax_up.setValue(actual_up)
         self._is_updating = False
+
+    @staticmethod
+    def _combo_index_for_text(combo_box, text):
+        if text == "切片态密度":
+            text = "切片内强度积分"
+        for index in range(combo_box.count()):
+            if combo_box.itemText(index) == text:
+                return index
+        return -1
+
+    @staticmethod
+    def _sync_slider_visual(slider):
+        minimum = int(slider.minimum())
+        maximum = int(slider.maximum())
+        value = int(slider.value())
+        if maximum == minimum:
+            progress = 0.0
+        else:
+            progress = (value - minimum) / (maximum - minimum)
+
+        try:
+            slider.setProperty(slider.Property.TrackProgress, progress)
+        except Exception:
+            pass
+
+        progress_ani = getattr(slider, "progress_ani", None)
+        if progress_ani is not None:
+            try:
+                progress_ani.fromProperty()
+                progress_ani.setCurrentValue(progress)
+                progress_ani.setEndValue(progress)
+            except Exception:
+                pass
+
+        update_tooltip = getattr(slider, "_updateToolTip", None)
+        if callable(update_tooltip):
+            try:
+                update_tooltip(flash=False)
+            except Exception:
+                pass
+
+        slider.update()
+
+    def export_state(self):
+        return {
+            "s_t_low": {
+                "minimum": int(self.s_t_low.minimum()),
+                "maximum": int(self.s_t_low.maximum()),
+                "value": int(self.s_t_low.value()),
+            },
+            "s_t_up": {
+                "minimum": int(self.s_t_up.minimum()),
+                "maximum": int(self.s_t_up.maximum()),
+                "value": int(self.s_t_up.value()),
+            },
+            "combo_ax": {
+                "index": int(self.combo_ax.currentIndex()),
+                "text": self.combo_ax.currentText(),
+            },
+            "s_ax_low": {
+                "minimum": int(self.s_ax_low.minimum()),
+                "maximum": int(self.s_ax_low.maximum()),
+                "value": int(self.s_ax_low.value()),
+            },
+            "s_ax_up": {
+                "minimum": int(self.s_ax_up.minimum()),
+                "maximum": int(self.s_ax_up.maximum()),
+                "value": int(self.s_ax_up.value()),
+            },
+            "s_ax_mid": {
+                "minimum": int(self.s_ax_mid.minimum()),
+                "maximum": int(self.s_ax_mid.maximum()),
+                "value": int(self.s_ax_mid.value()),
+            },
+            "locked_half_width": int(self.locked_half_width),
+            "combo_other": {
+                "index": int(self.combo_other.currentIndex()),
+                "text": self.combo_other.currentText(),
+            },
+        }
+
+    def restore_state(self, state, *, block_signals=True):
+        state = state or {}
+        widgets = [
+            self.s_t_low,
+            self.s_t_up,
+            self.combo_ax,
+            self.s_ax_low,
+            self.s_ax_up,
+            self.s_ax_mid,
+            self.combo_other,
+        ]
+        blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
+        previous_updating = self._is_updating
+        self._is_updating = True
+
+        try:
+            for slider_name, slider in (("s_t_low", self.s_t_low), ("s_t_up", self.s_t_up)):
+                slider_state = state.get(slider_name) or {}
+                minimum = slider_state.get("minimum")
+                maximum = slider_state.get("maximum")
+                if minimum is not None and maximum is not None:
+                    slider.setRange(int(minimum), int(maximum))
+                if "value" in slider_state:
+                    value = int(slider_state["value"])
+                    value = max(int(slider.minimum()), min(int(slider.maximum()), value))
+                    slider.setValue(value)
+                self._sync_slider_visual(slider)
+
+            combo_ax_state = state.get("combo_ax") or {}
+            combo_ax_index = combo_ax_state.get("index")
+            if combo_ax_index is None and "text" in combo_ax_state:
+                combo_ax_index = self._combo_index_for_text(self.combo_ax, combo_ax_state["text"])
+            if combo_ax_index is not None and 0 <= int(combo_ax_index) < self.combo_ax.count():
+                self.combo_ax.setCurrentIndex(int(combo_ax_index))
+
+            for slider_name, slider in (("s_ax_low", self.s_ax_low), ("s_ax_up", self.s_ax_up), ("s_ax_mid", self.s_ax_mid)):
+                slider_state = state.get(slider_name) or {}
+                minimum = slider_state.get("minimum")
+                maximum = slider_state.get("maximum")
+                if minimum is not None and maximum is not None:
+                    slider.setRange(int(minimum), int(maximum))
+                if "value" in slider_state:
+                    value = int(slider_state["value"])
+                    value = max(int(slider.minimum()), min(int(slider.maximum()), value))
+                    slider.setValue(value)
+                self._sync_slider_visual(slider)
+
+            combo_other_state = state.get("combo_other") or {}
+            combo_other_index = combo_other_state.get("index")
+            if combo_other_index is None and "text" in combo_other_state:
+                combo_other_index = self._combo_index_for_text(self.combo_other, combo_other_state["text"])
+            if combo_other_index is not None and 0 <= int(combo_other_index) < self.combo_other.count():
+                self.combo_other.setCurrentIndex(int(combo_other_index))
+
+            self.locked_half_width = int(
+                state.get(
+                    "locked_half_width",
+                    abs(int(self.s_ax_up.value()) - int(self.s_ax_low.value())) // 2,
+                )
+            )
+        finally:
+            self._is_updating = previous_updating
+            del blockers

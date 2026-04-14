@@ -1,3 +1,4 @@
+from PyQt5.QtCore import QSignalBlocker
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
@@ -151,6 +152,90 @@ class ImageControlPage(QWidget):
             self.edits["Z轴上限"].setText(f"{float(bounds[5]):.2f}")
         except Exception:
             pass
+
+    @staticmethod
+    def _sync_slider_visual(slider):
+        minimum = int(slider.minimum())
+        maximum = int(slider.maximum())
+        value = int(slider.value())
+        if maximum == minimum:
+            progress = 0.0
+        else:
+            progress = (value - minimum) / (maximum - minimum)
+
+        try:
+            slider.setProperty(slider.Property.TrackProgress, progress)
+        except Exception:
+            pass
+
+        progress_ani = getattr(slider, "progress_ani", None)
+        if progress_ani is not None:
+            try:
+                progress_ani.fromProperty()
+                progress_ani.setCurrentValue(progress)
+                progress_ani.setEndValue(progress)
+            except Exception:
+                pass
+
+        update_tooltip = getattr(slider, "_updateToolTip", None)
+        if callable(update_tooltip):
+            try:
+                update_tooltip(flash=False)
+            except Exception:
+                pass
+
+        slider.update()
+
+    def export_state(self):
+        return {
+            "slider_time": {
+                "minimum": int(self.slider_time.minimum()),
+                "maximum": int(self.slider_time.maximum()),
+                "value": int(self.slider_time.value()),
+            },
+            "slice_values": self.get_slice_values(),
+            "switch_axes": bool(self.switch_axes.isChecked()),
+            "switch_coord": bool(self.switch_coord.isChecked()),
+            "switch_flip": bool(self.switch_flip.isChecked()),
+        }
+
+    def restore_state(self, state, *, block_signals=True):
+        state = state or {}
+        blockers = []
+        if block_signals:
+            blockers = [
+                QSignalBlocker(self.slider_time),
+                QSignalBlocker(self.switch_axes),
+                QSignalBlocker(self.switch_coord),
+                QSignalBlocker(self.switch_flip),
+            ]
+
+        try:
+            slider_state = state.get("slider_time") or {}
+            minimum = slider_state.get("minimum")
+            maximum = slider_state.get("maximum")
+            if minimum is not None and maximum is not None:
+                self.slider_time.setRange(int(minimum), int(maximum))
+            if "value" in slider_state:
+                value = int(slider_state["value"])
+                value = max(int(self.slider_time.minimum()), min(int(self.slider_time.maximum()), value))
+                self.slider_time.setValue(value)
+            self._sync_slider_visual(self.slider_time)
+
+            slice_values = state.get("slice_values") or {}
+            for key, value in slice_values.items():
+                widget = self.edits.get(key)
+                if widget is not None:
+                    widget.setText(str(value))
+
+            if "switch_axes" in state:
+                self.switch_axes.setChecked(bool(state["switch_axes"]))
+            if "switch_coord" in state:
+                self.switch_coord.setChecked(bool(state["switch_coord"]))
+            if "switch_flip" in state:
+                self.switch_flip.setChecked(bool(state["switch_flip"]))
+        finally:
+            del blockers
 
     def request_load(self):
         pass

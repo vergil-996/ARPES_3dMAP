@@ -878,14 +878,14 @@ class My3DAnalyzer(QWidget):
 
         self.applied_other_mode = None
         self._update_export_button_states()
-        text = self.page_data.combo_other.currentText()
+        current_index = int(self.page_data.combo_other.currentIndex())
 
-        if text == "切片态密度":
+        if current_index == 0:
             if not self.core.has_time_axis:
                 msg = QMessageBox(self)
                 msg.setWindowTitle("静谱数据")
                 msg.setIcon(QMessageBox.Information)
-                msg.setText("当前数据不包含时间轴，无法计算切片态密度")
+                msg.setText("当前数据不包含时间轴，无法计算切片内强度积分")
                 msg.exec_()
                 return
             if self.clip_ranges is None:
@@ -914,7 +914,7 @@ class My3DAnalyzer(QWidget):
                 return
             self.back_click_count = 0
             self.mode_1d = "Slice-DOS"
-        elif text == "能级态密度":
+        elif current_index == 1:
             self.mode_1d = "Energy-DOS"
 
         self.core.is_2d_mode = True  # 借用 2D 视图容器（Matplotlib 窗口）

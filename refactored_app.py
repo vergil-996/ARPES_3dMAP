@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import uuid
@@ -65,6 +66,8 @@ class My3DAnalyzer(QWidget):
         self.precise_logical_bounds = None
         self.last_synced_slice_texts = None
         self.active_page_spec = None
+        self.last_visual_page_id = None
+        self.page_denoise_cache = {}
         self._syncing_controls = False
         self.axis_source_mode = "frame"
         self.loaded_npz_stem = "data"
@@ -80,7 +83,7 @@ class My3DAnalyzer(QWidget):
             SiGlobal.siui.windows["TOOL_TIP"].setOpacity(0)
         self._apply_feedback_styles()
 
-        self.setWindowTitle("3D 能带分析工具")
+        self.setWindowTitle("能带分析工具")
         self.resize(1550, 950)
         self.setStyleSheet("background-color: #151525;")
 
@@ -88,6 +91,7 @@ class My3DAnalyzer(QWidget):
         self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
+        self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
 
     def _apply_feedback_styles(self):
@@ -250,6 +254,7 @@ class My3DAnalyzer(QWidget):
         self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
 
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
+        self.left_workspace.page_closed.connect(self.on_result_page_closed)
 
     def _initialize_result_workspace(self):
         home_spec = AnalysisPageSpec(
@@ -270,12 +275,16 @@ class My3DAnalyzer(QWidget):
             ),
             activate=False,
         )
-        self.left_workspace.update_page("control_panel", title="控件页")
+        self.left_workspace.update_page("control_panel", title="去噪参数设置")
         self.active_page_spec = home_spec
+        self.last_visual_page_id = home_spec.page_id
+        home_spec.params["control_state"] = self._capture_control_state()
 
     def _select_control_page(self, index):
         self.page_container.setCurrentIndex(index)
         [self.btn_page1, self.btn_page2, self.btn_page3][index].setChecked(True)
+        if not self._syncing_controls:
+            self._persist_page_ui_state()
 
     def _clone_coords(self, coords=None):
         source = coords if coords is not None else self.core.coords
@@ -283,6 +292,231 @@ class My3DAnalyzer(QWidget):
             key: None if value is None else np.array(value, copy=True)
             for key, value in source.items()
         }
+
+    def _persist_active_page_state(self):
+        self._persist_page_ui_state(self.active_page_spec)
+
+    @staticmethod
+    def _copy_state(value):
+        return copy.deepcopy(value)
+
+    def _current_visual_spec(self):
+        target_page_id = self.last_visual_page_id or self.left_workspace.home_page_id
+        target_spec = self.left_workspace.page_by_id(target_page_id)
+        return target_spec or self.left_workspace.home_spec()
+
+    def _control_state_owner(self, spec=None):
+        candidate = spec or self.active_page_spec or self.left_workspace.current_spec()
+        if candidate is not None and candidate.page_kind != "control_panel":
+            return candidate
+        return self._current_visual_spec()
+
+    def _capture_control_state(self):
+        return {
+            "active_control_tab": int(self.page_container.currentIndex()),
+            "axis_source_mode": self.axis_source_mode,
+            "image": self.page_image.export_state(),
+            "render": self.page_render.export_state(),
+            "denoise_detail": self.page_control_blank.export_state(),
+            "data_process": self.page_data.export_state(),
+        }
+
+    def _store_control_state(self, spec, control_state):
+        if spec is None:
+            return
+        spec.params["control_state"] = self._copy_state(control_state)
+
+    def _seed_control_state_for_spec(self, spec):
+        if spec is None:
+            return
+        control_state = self._capture_control_state()
+        control_state["axis_source_mode"] = self._page_axis_source_mode(spec)
+        self._store_control_state(spec, control_state)
+
+    def _page_axis_source_mode(self, spec):
+        if spec is None:
+            return "frame"
+        if spec.page_kind == "time_integral":
+            return "time_integral"
+        if spec.page_kind == "axis_integral":
+            return self._normalize_axis_source_mode(
+                spec.params.get(
+                    "source_mode",
+                    "time_integral" if spec.params.get("source_page_kind") == "time_integral" else "frame",
+                )
+            )
+        return "frame"
+
+    def _persist_home_page_state(self, spec):
+        if spec is None:
+            return
+        spec.params["clip_ranges"] = self._copy_state(self.clip_ranges)
+        spec.params["home_slice_info"] = self._copy_state(self.home_slice_info)
+        spec.params["precise_logical_bounds"] = self._copy_state(self.precise_logical_bounds)
+        spec.params["last_synced_slice_texts"] = self._copy_state(self.last_synced_slice_texts)
+
+    def _restore_home_page_state(self, spec):
+        params = spec.params if spec is not None else {}
+        self.clip_ranges = self._copy_state(params.get("clip_ranges"))
+        self.home_slice_info = self._copy_state(params.get("home_slice_info"))
+        self.precise_logical_bounds = self._copy_state(params.get("precise_logical_bounds"))
+        self.last_synced_slice_texts = self._copy_state(params.get("last_synced_slice_texts"))
+
+    def _persist_page_specific_state(self, spec):
+        if spec is None:
+            return
+        if spec.page_kind == "home":
+            self._persist_home_page_state(spec)
+        elif spec.page_kind == "time_integral":
+            self._persist_time_integral_page_state(spec)
+        elif spec.page_kind == "axis_integral":
+            self._persist_axis_integral_page_state(spec)
+        elif spec.page_kind == "energy_dos":
+            spec.params["t_index"] = int(self.page_image.slider_time.value())
+
+    def _persist_page_ui_state(self, spec=None):
+        owner_spec = self._control_state_owner(spec)
+        if owner_spec is None:
+            return
+        self._store_control_state(owner_spec, self._capture_control_state())
+        self._persist_page_specific_state(owner_spec)
+
+    def _restore_page_ui_state(self, spec):
+        owner_spec = self._control_state_owner(spec)
+        if owner_spec is None:
+            return
+
+        control_state = self._copy_state(owner_spec.params.get("control_state"))
+        if control_state is None:
+            control_state = self._capture_control_state()
+            control_state["axis_source_mode"] = self._page_axis_source_mode(owner_spec)
+            self._store_control_state(owner_spec, control_state)
+
+        if self.axis_refresh_timer.isActive():
+            self.axis_refresh_timer.stop()
+
+        self._syncing_controls = True
+        try:
+            if owner_spec.page_kind == "home":
+                self._restore_home_page_state(owner_spec)
+
+            self.axis_source_mode = control_state.get("axis_source_mode", self._page_axis_source_mode(owner_spec))
+            self.page_image.restore_state(control_state.get("image"), block_signals=True)
+            self.page_render.restore_state(control_state.get("render"), block_signals=True)
+            self.page_control_blank.restore_state(control_state.get("denoise_detail"), block_signals=True)
+            self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
+
+            if self.core.raw_data is not None:
+                self.update_ax_slider_range()
+                data_state = control_state.get("data_process") or {}
+                self.page_data.restore_state(
+                    {
+                        "combo_ax": data_state.get("combo_ax"),
+                        "s_ax_low": data_state.get("s_ax_low"),
+                        "s_ax_up": data_state.get("s_ax_up"),
+                        "s_ax_mid": data_state.get("s_ax_mid"),
+                        "locked_half_width": data_state.get("locked_half_width"),
+                    },
+                    block_signals=True,
+                )
+
+            tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
+            tab_index = max(0, min(self.page_container.count() - 1, tab_index))
+            self._select_control_page(tab_index)
+        finally:
+            self._syncing_controls = False
+
+    def _persist_axis_integral_page_state(self, spec=None):
+        target_spec = spec or self.left_workspace.current_spec()
+        if target_spec is None or target_spec.page_kind != "axis_integral":
+            return
+
+        axis_index = int(self.page_data.combo_ax.currentIndex())
+        axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
+        source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
+
+        target_spec.params["axis_index"] = axis_index
+        target_spec.params["axis_name"] = axis_name
+        target_spec.params["low"] = int(self.page_data.s_ax_low.value())
+        target_spec.params["up"] = int(self.page_data.s_ax_up.value())
+        target_spec.params["mid"] = int(self.page_data.s_ax_mid.value())
+        target_spec.params["source_mode"] = source_mode
+        target_spec.params["source_page_kind"] = "time_integral" if source_mode == "time_integral" else "home"
+        target_spec.params["source_t_index"] = int(self.page_image.slider_time.value())
+        target_spec.params["source_t_low"] = int(self.page_data.s_t_low.value())
+        target_spec.params["source_t_up"] = int(self.page_data.s_t_up.value())
+
+    @staticmethod
+    def _normalize_denoise_methods(methods):
+        return [method for method in methods if method not in (None, "None")]
+
+    def _get_spec_denoise_methods(self, spec):
+        if spec is None:
+            return []
+        return self._normalize_denoise_methods(spec.params.get("denoise_methods", []))
+
+    @staticmethod
+    def _denoise_signature(methods):
+        return repr(methods)
+
+    @staticmethod
+    def _get_data_for_t_from_raw(raw_data, t_idx):
+        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
+        return raw_data[:, :, :, t_idx]
+
+    @staticmethod
+    def _get_time_integrated_data_from_raw(raw_data, t_low, t_up):
+        t_low = max(0, int(t_low))
+        t_up = min(raw_data.shape[3] - 1, int(t_up))
+        if t_low > t_up:
+            t_low, t_up = t_up, t_low
+        return np.sum(raw_data[:, :, :, t_low:t_up + 1], axis=3)
+
+    @staticmethod
+    def _get_axis_integrated_data_from_raw(data_3d, axis_index, low_idx, up_idx):
+        axis_index = int(axis_index)
+        low = max(0, int(low_idx))
+        up = min(data_3d.shape[axis_index] - 1, int(up_idx))
+        if low > up:
+            low, up = up, low
+
+        if axis_index == 0:
+            return np.sum(data_3d[low:up + 1, :, :], axis=0)
+        if axis_index == 1:
+            return np.sum(data_3d[:, low:up + 1, :], axis=1)
+        return np.sum(data_3d[:, :, low:up + 1], axis=2)
+
+    def _apply_denoise_methods_to_raw(self, raw_data, methods):
+        if not methods:
+            return np.asarray(raw_data, dtype=np.float32)
+
+        from denoise_engines import DenoiseEngines
+
+        return DenoiseEngines.apply_pipeline(raw_data, methods)
+
+    def _get_display_state_for_spec(self, spec):
+        if self.original_raw_data is None or self.original_coords is None:
+            return None, None
+
+        methods = self._get_spec_denoise_methods(spec)
+        signature = self._denoise_signature(methods)
+        cache_entry = self.page_denoise_cache.get(spec.page_id)
+
+        if cache_entry is not None and cache_entry["signature"] == signature:
+            raw_data = np.array(cache_entry["raw_data"], copy=True)
+        else:
+            raw_data = self._apply_denoise_methods_to_raw(self.original_raw_data, methods)
+            self.page_denoise_cache[spec.page_id] = {
+                "signature": signature,
+                "raw_data": np.array(raw_data, copy=True),
+            }
+
+        coords = self._clone_coords(self.original_coords)
+        if self.page_image.switch_flip.isChecked():
+            raw_data = np.flip(raw_data, axis=2)
+            coords["E"] = np.flip(coords["E"])
+
+        return np.asarray(raw_data, dtype=np.float32), coords
 
     def _refresh_core_display_state(self):
         if self.base_raw_data is None or self.base_coords is None:
@@ -391,6 +625,28 @@ class My3DAnalyzer(QWidget):
     def _make_page_id(self):
         return uuid.uuid4().hex
 
+    @staticmethod
+    def _integral_length(low, up):
+        low = int(low)
+        up = int(up)
+        return abs(up - low) + 1
+
+    def _make_unique_page_title(self, base_title, exclude_page_id=None):
+        existing_titles = {
+            spec.title
+            for page_id, spec in self.left_workspace.page_specs.items()
+            if page_id != exclude_page_id
+        }
+        if base_title not in existing_titles:
+            return base_title
+
+        suffix = 2
+        while True:
+            candidate = f"{base_title}_{suffix}"
+            if candidate not in existing_titles:
+                return candidate
+            suffix += 1
+
     def _get_clip_slices(self, logical_bounds=None):
         if self.core.raw_data is None:
             return None
@@ -485,7 +741,7 @@ class My3DAnalyzer(QWidget):
 
     def _update_time_slider_state(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
-        active_spec = self.left_workspace.current_spec()
+        active_spec = self._control_state_owner(self.left_workspace.current_spec())
         self.page_image.slider_time.setEnabled(has_time_axis and not self._is_time_integral_axis_page(active_spec))
 
     def _configure_time_controls(self):
@@ -527,8 +783,8 @@ class My3DAnalyzer(QWidget):
         up_text = self._format_filename_number(self.core.logical_to_physical("delay", t_up))
         return self._sanitize_filename_component(f"{low_text}_{up_text}_t_{self._get_loaded_npz_stem()}")
 
-    def _get_axis_integral_export_context(self, spec):
-        if self.core.raw_data is None:
+    def _get_axis_integral_export_context(self, spec, raw_data, coords):
+        if raw_data is None:
             return None
 
         if self._is_current_page(spec):
@@ -547,34 +803,34 @@ class My3DAnalyzer(QWidget):
 
         axis_key = {0: "X", 1: "Y", 2: "E"}.get(axis_index, "X")
         axis_tag = {0: "x", 1: "y", 2: "z"}.get(axis_index, "x")
-        axis_max = self.core.raw_data.shape[axis_index] - 1
+        axis_max = raw_data.shape[axis_index] - 1
         low = int(np.clip(low, 0, axis_max))
         up = int(np.clip(up, 0, axis_max))
         mid = int(np.clip(mid, low, up))
 
         if axis_index == 0:
-            sample = np.sum(self.core.raw_data[low:up + 1, :, :, :], axis=0)
+            sample = np.sum(raw_data[low:up + 1, :, :, :], axis=0)
             export_data = {
                 "sample": np.asarray(sample, dtype=np.float32),
-                "ky": np.asarray(self.core.coords["Y"], dtype=np.float32),
-                "E": np.asarray(self.core.coords["E"], dtype=np.float32),
-                "time": np.asarray(self.core.coords["delay"], dtype=np.float32),
+                "ky": np.asarray(coords["Y"], dtype=np.float32),
+                "E": np.asarray(coords["E"], dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
             }
         elif axis_index == 1:
-            sample = np.sum(self.core.raw_data[:, low:up + 1, :, :], axis=1)
+            sample = np.sum(raw_data[:, low:up + 1, :, :], axis=1)
             export_data = {
                 "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(self.core.coords["X"], dtype=np.float32),
-                "E": np.asarray(self.core.coords["E"], dtype=np.float32),
-                "time": np.asarray(self.core.coords["delay"], dtype=np.float32),
+                "kx": np.asarray(coords["X"], dtype=np.float32),
+                "E": np.asarray(coords["E"], dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
             }
         else:
-            sample = np.sum(self.core.raw_data[:, :, low:up + 1, :], axis=2)
+            sample = np.sum(raw_data[:, :, low:up + 1, :], axis=2)
             export_data = {
                 "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(self.core.coords["X"], dtype=np.float32),
-                "ky": np.asarray(self.core.coords["Y"], dtype=np.float32),
-                "time": np.asarray(self.core.coords["delay"], dtype=np.float32),
+                "kx": np.asarray(coords["X"], dtype=np.float32),
+                "ky": np.asarray(coords["Y"], dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
             }
 
         low_text = self._format_filename_number(self.core.logical_to_physical(axis_key, low))
@@ -594,18 +850,18 @@ class My3DAnalyzer(QWidget):
             return data_3d[:, safe_index, :]
         return data_3d[:, :, safe_index]
 
-    def _get_home_render_context(self):
-        if self.core.raw_data is None:
+    def _get_home_render_context(self, spec, raw_data, coords):
+        if raw_data is None:
             return None
 
         t_idx = int(self.page_image.slider_time.value())
-        data_3d = self.core.get_data_for_t(t_idx)
+        data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
 
         if self.home_slice_info is not None:
             data_2d = self._extract_slice_data(data_3d, self.home_slice_info["axis"], self.home_slice_info["index"])
-            return {"view": "2d", "data": data_2d, "slice_info": self.home_slice_info}
+            return {"view": "2d", "data": data_2d, "slice_info": self.home_slice_info, "coords": coords}
 
-        return {"view": "3d", "data": data_3d, "clip_ranges": self.clip_ranges}
+        return {"view": "3d", "data": data_3d, "clip_ranges": self.clip_ranges, "coords": coords}
 
     def _is_current_page(self, spec):
         current_spec = self.left_workspace.current_spec()
@@ -643,10 +899,9 @@ class My3DAnalyzer(QWidget):
         }
 
     @staticmethod
-    def _axis_request_signature(title, params):
+    def _axis_request_signature(params):
         source_mode = params.get("source_mode", "frame")
         signature = [
-            title,
             int(params["axis_index"]),
             int(params["low"]),
             int(params["up"]),
@@ -661,9 +916,12 @@ class My3DAnalyzer(QWidget):
     def _is_same_axis_request(self, spec, candidate_spec):
         if spec is None or spec.page_kind != "axis_integral":
             return False
-        return self._axis_request_signature(spec.title, spec.params) == self._axis_request_signature(candidate_spec.title, candidate_spec.params)
+        return self._axis_request_signature(spec.params) == self._axis_request_signature(candidate_spec.params)
 
     def _overwrite_axis_page(self, current_spec, candidate_spec):
+        if "denoise_methods" in current_spec.params and "denoise_methods" not in candidate_spec.params:
+            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
+        candidate_spec.title = self._make_unique_page_title(candidate_spec.title, exclude_page_id=current_spec.page_id)
         self.left_workspace.update_page(
             current_spec.page_id,
             title=candidate_spec.title,
@@ -672,39 +930,41 @@ class My3DAnalyzer(QWidget):
         )
         self.on_result_page_activated(current_spec.page_id)
 
-    def _get_3d_source_context_for_axis(self, spec):
+    def _get_3d_source_context_for_axis(self, spec, raw_data):
         params = spec.params
         source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
         if source_mode == "time_integral":
             t_low = params.get("source_t_low")
             t_up = params.get("source_t_up")
             if t_low is not None and t_up is not None:
-                return {"view": "3d", "data": self.core.get_time_integrated_data(int(t_low), int(t_up))}
-
-        source_kind = params.get("source_page_kind", "home")
-        if source_kind == "time_integral":
-            source_spec = self.left_workspace.page_by_id(spec.source_page_id)
-            if source_spec is not None:
-                return self._get_time_integral_context(source_spec)
+                return {
+                    "view": "3d",
+                    "data": self._get_time_integrated_data_from_raw(raw_data, int(t_low), int(t_up)),
+                }
 
         t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-        return {"view": "3d", "data": self.core.get_data_for_t(t_index)}
+        return {"view": "3d", "data": self._get_data_for_t_from_raw(raw_data, t_index)}
 
-    def _get_time_integral_context(self, spec):
+    def _get_time_integral_context(self, spec, raw_data, coords):
         if self._is_current_page(spec):
             self._persist_time_integral_page_state(spec)
 
         t_low = int(spec.params["t_low"])
         t_up = int(spec.params["t_up"])
-        return {"view": "3d", "data": self.core.get_time_integrated_data(t_low, t_up)}
+        return {
+            "view": "3d",
+            "data": self._get_time_integrated_data_from_raw(raw_data, t_low, t_up),
+            "coords": coords,
+        }
 
-    def _get_axis_integral_context(self, spec):
+    def _get_axis_integral_context(self, spec, raw_data, coords):
         if self._is_current_page(spec):
             source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
             if source_mode == "time_integral":
                 source_context = {
                     "view": "3d",
-                    "data": self.core.get_time_integrated_data(
+                    "data": self._get_time_integrated_data_from_raw(
+                        raw_data,
                         int(self.page_data.s_t_low.value()),
                         int(self.page_data.s_t_up.value()),
                     ),
@@ -712,51 +972,52 @@ class My3DAnalyzer(QWidget):
             else:
                 source_context = {
                     "view": "3d",
-                    "data": self.core.get_data_for_t(int(self.page_image.slider_time.value())),
+                    "data": self._get_data_for_t_from_raw(raw_data, int(self.page_image.slider_time.value())),
                 }
             axis_index = int(self.page_data.combo_ax.currentIndex())
             low = int(self.page_data.s_ax_low.value())
             up = int(self.page_data.s_ax_up.value())
             axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
         else:
-            source_context = self._get_3d_source_context_for_axis(spec)
+            source_context = self._get_3d_source_context_for_axis(spec, raw_data)
             axis_index = int(spec.params["axis_index"])
             low = int(spec.params["low"])
             up = int(spec.params["up"])
-            axis_name = spec.params["axis_name"]
-        data_2d = self.core.get_axis_integrated_data(source_context["data"], axis_name, low, up)
+        data_2d = self._get_axis_integrated_data_from_raw(source_context["data"], axis_index, low, up)
         return {
             "view": "2d",
             "data": data_2d,
             "slice_info": {"axis": axis_index, "mode": "integral", "range": (low, up)},
+            "coords": coords,
         }
 
-    def _compute_slice_dos(self, logical_bounds):
+    def _compute_slice_dos(self, raw_data, logical_bounds):
         clip_info = self._get_clip_slices(logical_bounds)
         if clip_info is None:
             return None
 
         slices, _ = clip_info
-        return np.sum(self.core.raw_data[slices[0], slices[1], slices[2], :], axis=(0, 1, 2))
+        return np.sum(raw_data[slices[0], slices[1], slices[2], :], axis=(0, 1, 2))
 
-    def _get_slice_dos_context(self, spec):
+    def _get_slice_dos_context(self, spec, raw_data, coords):
         return {
             "view": "1d",
-            "x_data": self.core.coords["delay"],
-            "y_data": self._compute_slice_dos(spec.params["clip_ranges"]),
+            "x_data": coords["delay"],
+            "y_data": self._compute_slice_dos(raw_data, spec.params["clip_ranges"]),
             "title": "Slice Integrated Intensity vs Time",
             "xlabel": "Delay (ps)",
         }
 
-    def _get_energy_dos_context(self, spec):
+    def _get_energy_dos_context(self, spec, raw_data, coords):
         if self._is_current_page(spec):
             t_index = int(self.page_image.slider_time.value())
         else:
             t_index = int(spec.params["t_index"])
+        data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
         return {
             "view": "1d",
-            "x_data": self.core.coords["E"],
-            "y_data": self.core.get_energy_dos(t_index),
+            "x_data": coords["E"],
+            "y_data": np.sum(data_3d, axis=(0, 1)),
             "title": f"Energy DOS (T={self._current_delay_text(t_index)})",
             "xlabel": "Energy (eV)",
         }
@@ -765,20 +1026,21 @@ class My3DAnalyzer(QWidget):
         if spec.page_kind == "control_panel":
             return {"view": "config"}
 
-        if self.core.raw_data is None:
+        raw_data, coords = self._get_display_state_for_spec(spec)
+        if raw_data is None or coords is None:
             return None
 
         if spec.page_kind == "home":
-            return self._get_home_render_context()
+            return self._get_home_render_context(spec, raw_data, coords)
         if spec.page_kind == "time_integral":
-            return self._get_time_integral_context(spec)
+            return self._get_time_integral_context(spec, raw_data, coords)
         if spec.page_kind == "axis_integral":
-            return self._get_axis_integral_context(spec)
+            return self._get_axis_integral_context(spec, raw_data, coords)
         if spec.page_kind == "slice_dos":
-            return self._get_slice_dos_context(spec)
+            return self._get_slice_dos_context(spec, raw_data, coords)
         if spec.page_kind == "energy_dos":
-            return self._get_energy_dos_context(spec)
-        return self._get_home_render_context()
+            return self._get_energy_dos_context(spec, raw_data, coords)
+        return self._get_home_render_context(spec, raw_data, coords)
 
     def _render_1d_plot(self, context):
         self.ax_2d.clear()
@@ -832,7 +1094,7 @@ class My3DAnalyzer(QWidget):
                 opac_mode=mapping_mode,
                 clip_ranges=render_clip,
                 show_axes=self.page_image.switch_axes.isChecked(),
-                core_coords=self.core.coords,
+                core_coords=context.get("coords", self.core.coords),
                 cmap=current_cmap,
             )
         elif context["view"] == "2d":
@@ -844,7 +1106,7 @@ class My3DAnalyzer(QWidget):
                 context["data"],
                 context["slice_info"],
                 levels,
-                self.core.coords,
+                context.get("coords", self.core.coords),
                 cmap=current_cmap,
             )
         else:
@@ -864,67 +1126,31 @@ class My3DAnalyzer(QWidget):
         self._update_export_button_states()
 
     def on_result_page_activated(self, page_id):
+        self._persist_active_page_state()
         spec = self.left_workspace.page_by_id(page_id)
         if spec is None:
             return
 
         self.active_page_spec = spec
+        if spec.page_kind != "control_panel":
+            self.last_visual_page_id = spec.page_id
         self._sync_controls_from_page(spec)
         self._update_time_slider_state()
         self.global_refresh()
 
     def _sync_controls_from_page(self, spec):
-        self._syncing_controls = True
-        try:
-            if spec.page_kind == "home":
-                self.axis_source_mode = "frame"
-                return
+        self._restore_page_ui_state(spec)
 
-            if spec.page_kind == "control_panel":
-                self._select_control_page(1)
-                return
-
-            self._select_control_page(2)
-
-            if spec.page_kind == "time_integral":
-                self.page_data.s_t_low.setValue(spec.params["t_low"])
-                self.page_data.s_t_up.setValue(spec.params["t_up"])
-                self.axis_source_mode = "time_integral"
-                return
-
-            if spec.page_kind == "axis_integral":
-                self.page_data.combo_ax.setCurrentIndex(spec.params["axis_index"])
-                self.page_data.s_ax_low.setValue(spec.params["low"])
-                self.page_data.s_ax_up.setValue(spec.params["up"])
-                self.page_data.s_ax_mid.setValue(spec.params.get("mid", (spec.params["low"] + spec.params["up"]) // 2))
-                source_mode = self._normalize_axis_source_mode(
-                    spec.params.get(
-                        "source_mode",
-                        "time_integral" if spec.params.get("source_page_kind") == "time_integral" else "frame",
-                    )
-                )
-                self.axis_source_mode = source_mode
-                if source_mode == "frame":
-                    self.page_image.slider_time.setValue(spec.params.get("source_t_index", self.page_image.slider_time.value()))
-                else:
-                    self.page_data.s_t_low.setValue(spec.params.get("source_t_low", self.page_data.s_t_low.value()))
-                    self.page_data.s_t_up.setValue(spec.params.get("source_t_up", self.page_data.s_t_up.value()))
-                return
-
-            if spec.page_kind == "slice_dos":
-                self.axis_source_mode = "frame"
-                self.page_data.combo_other.setCurrentIndex(0)
-                self.clip_ranges = list(spec.params["clip_ranges"])
-                self.home_slice_info = None
-                self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
-                return
-
-            if spec.page_kind == "energy_dos":
-                self.axis_source_mode = "frame"
-                self.page_data.combo_other.setCurrentIndex(1)
-                self.page_image.slider_time.setValue(spec.params["t_index"])
-        finally:
-            self._syncing_controls = False
+    def on_result_page_closed(self, page_id):
+        self.page_denoise_cache.pop(page_id, None)
+        if self.last_visual_page_id == page_id:
+            fallback_spec = self.left_workspace.current_spec()
+            if fallback_spec is None or fallback_spec.page_kind == "control_panel":
+                fallback_spec = self.left_workspace.home_spec()
+            if fallback_spec is not None and fallback_spec.page_kind != "control_panel":
+                self.last_visual_page_id = fallback_spec.page_id
+            else:
+                self.last_visual_page_id = self.left_workspace.home_page_id
 
     def on_toggle_e_flip(self, checked):
         if self.base_raw_data is None:
@@ -939,10 +1165,14 @@ class My3DAnalyzer(QWidget):
         if self.original_raw_data is None:
             return
 
-        from denoise_engines import DenoiseEngines
         current_spec = self.left_workspace.current_spec()
-        keep_control_panel = current_spec is not None and current_spec.page_kind == "control_panel"
-        keep_page_id = current_spec.page_id if keep_control_panel else None
+        if current_spec is not None and current_spec.page_kind != "control_panel":
+            target_spec = current_spec
+        else:
+            target_page_id = self.last_visual_page_id or self.left_workspace.home_page_id
+            target_spec = self.left_workspace.page_by_id(target_page_id)
+        if target_spec is None:
+            return
 
         try:
             methods = self.page_control_blank.build_method_specs(
@@ -953,23 +1183,10 @@ class My3DAnalyzer(QWidget):
             self._show_message("Savitzky-Golay 参数无效", str(exc), QMessageBox.Warning)
             return
 
-        temp_data = DenoiseEngines.apply_pipeline(self.original_raw_data, methods)
-
-        if max(temp_data.shape[1:]) > 200:
-            self.base_raw_data = temp_data[:, ::2, ::2, ::2]
-            self.base_coords = self._clone_coords(self.original_coords)
-            for key in ["X", "Y", "E"]:
-                self.base_coords[key] = self.base_coords[key][::2]
-        else:
-            self.base_raw_data = temp_data
-            self.base_coords = self._clone_coords(self.original_coords)
-
-        self._refresh_core_display_state()
-        self.update_ax_slider_range()
-        self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
-        self.global_refresh()
-        if keep_page_id is not None:
-            self.left_workspace.activate_page(keep_page_id)
+        self._persist_page_ui_state(self.active_page_spec)
+        target_spec.params["denoise_methods"] = methods
+        self.page_denoise_cache.pop(target_spec.page_id, None)
+        self.left_workspace.activate_page(target_spec.page_id)
 
     def on_load(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1007,9 +1224,21 @@ class My3DAnalyzer(QWidget):
         self.original_coords = self._clone_coords()
         self.base_raw_data = np.array(self.original_raw_data, copy=True)
         self.base_coords = self._clone_coords(self.original_coords)
+        self.page_denoise_cache.clear()
         self.clip_ranges = None
         self.home_slice_info = None
         self.axis_source_mode = "frame"
+
+        self._syncing_controls = True
+        try:
+            self.page_image.restore_state(self.initial_control_state.get("image"), block_signals=True)
+            self.page_render.restore_state(self.initial_control_state.get("render"), block_signals=True)
+            self.page_control_blank.restore_state(self.initial_control_state.get("denoise_detail"), block_signals=True)
+            self.page_data.restore_state(self.initial_control_state.get("data_process"), block_signals=True)
+            self._select_control_page(int(self.initial_control_state.get("active_control_tab", 0)))
+        finally:
+            self._syncing_controls = False
+
         self._refresh_core_display_state()
 
         t_max = info[3] - 1
@@ -1030,6 +1259,11 @@ class My3DAnalyzer(QWidget):
         self.update_ax_slider_range()
         self._sync_slice_edits_from_logical_bounds()
         self._configure_time_controls()
+        home_spec = self.left_workspace.home_spec()
+        if home_spec is not None:
+            home_spec.params.clear()
+            home_spec.params["control_state"] = self._capture_control_state()
+            self._persist_home_page_state(home_spec)
         self.left_workspace.reset_to_home()
         self.plotter.set_background("white")
         self.global_refresh()
@@ -1103,13 +1337,16 @@ class My3DAnalyzer(QWidget):
     def _build_time_integral_spec(self):
         low = self.page_data.s_t_low.value()
         up = self.page_data.s_t_up.value()
-        return AnalysisPageSpec(
+        title = f"时间积分_{self._integral_length(low, up)}"
+        spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
-            title=f"时间积分 [{low}~{up}]",
+            title=title,
             page_kind="time_integral",
             source_module="data_process",
             params={"t_low": low, "t_up": up},
         )
+        self._seed_control_state_for_spec(spec)
+        return spec
 
     def _resolve_axis_source(self):
         active_spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
@@ -1119,15 +1356,17 @@ class My3DAnalyzer(QWidget):
 
     def _build_axis_integral_spec(self, source_mode=None):
         params = self._build_axis_request_params(source_mode=source_mode)
-        title = f"{params['axis_name']}积分 [{params['low']}~{params['up']}]"
+        title = f"{params['axis_name']}积分_{self._integral_length(params['low'], params['up'])}"
 
-        return AnalysisPageSpec(
+        spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=title,
             page_kind="axis_integral",
             source_module="data_process",
             params=params,
         )
+        self._seed_control_state_for_spec(spec)
+        return spec
 
     def _build_slice_dos_spec(self):
         clip_info = self._get_clip_slices(self.clip_ranges)
@@ -1136,45 +1375,39 @@ class My3DAnalyzer(QWidget):
 
         _, index_bounds = clip_info
         x1, x2, y1, y2, z1, z2 = index_bounds
-        return AnalysisPageSpec(
+        spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
-            title=f"Slice-DOS [{x1}:{x2}, {y1}:{y2}, {z1}:{z2}]",
+            title=f"切片内强度积分 [{x1}:{x2}, {y1}:{y2}, {z1}:{z2}]",
             page_kind="slice_dos",
             source_module="data_process",
             params={"clip_ranges": list(self.clip_ranges)},
         )
+        self._seed_control_state_for_spec(spec)
+        return spec
 
     def _build_energy_dos_spec(self):
         t_index = int(self.page_image.slider_time.value())
         delay_text = self._current_delay_text(t_index)
-        return AnalysisPageSpec(
+        spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=f"Energy-DOS [T={t_index}/{delay_text}]",
             page_kind="energy_dos",
             source_module="data_process",
             params={"t_index": t_index},
         )
+        self._seed_control_state_for_spec(spec)
+        return spec
 
     def on_apply_time_integral(self):
         if self.core.raw_data is None or not self.core.has_time_axis:
             return
 
+        candidate_spec = self._build_time_integral_spec()
         current_spec = self.left_workspace.current_spec()
-        if current_spec is None or current_spec.page_kind != "axis_integral":
-            self.left_workspace.ensure_page(self._build_time_integral_spec())
-            return
-
-        candidate_spec = self._build_axis_integral_spec(source_mode="time_integral")
-        if self._is_same_axis_request(current_spec, candidate_spec):
-            self.left_workspace.activate_page(current_spec.page_id)
-            self._update_time_slider_state()
-            return
-
-        if self._confirm_create_axis_page():
-            self.left_workspace.add_page(candidate_spec)
-            return
-
-        self._overwrite_axis_page(current_spec, candidate_spec)
+        if current_spec is not None and "denoise_methods" in current_spec.params:
+            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
+        candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
+        self.left_workspace.add_page(candidate_spec)
 
     def on_time_integral_controls_changed(self, _):
         if self.core.raw_data is None or self._syncing_controls:
@@ -1190,6 +1423,7 @@ class My3DAnalyzer(QWidget):
             self.global_refresh()
         elif self._is_time_integral_axis_page(current_spec):
             self.axis_source_mode = "time_integral"
+            self._persist_axis_integral_page_state(current_spec)
             self._update_time_slider_state()
             self.global_refresh()
 
@@ -1203,6 +1437,7 @@ class My3DAnalyzer(QWidget):
 
         self.axis_source_mode = "frame"
         if current_spec is not None and current_spec.page_kind == "axis_integral":
+            self._persist_axis_integral_page_state(current_spec)
             self.global_refresh()
 
     def sync_ax_sliders_to_box(self):
@@ -1231,6 +1466,7 @@ class My3DAnalyzer(QWidget):
     def schedule_axis_refresh(self):
         if self.core.raw_data is None:
             return
+        self._persist_axis_integral_page_state()
         self.axis_refresh_timer.start()
 
     def flush_axis_refresh(self):
@@ -1253,20 +1489,10 @@ class My3DAnalyzer(QWidget):
 
         candidate_spec = self._build_axis_integral_spec()
         current_spec = self.left_workspace.current_spec()
-
-        if current_spec is None or current_spec.page_kind != "axis_integral":
-            self.left_workspace.ensure_page(candidate_spec)
-            return
-
-        if self._is_same_axis_request(current_spec, candidate_spec):
-            self.left_workspace.activate_page(current_spec.page_id)
-            return
-
-        if self._confirm_create_axis_page():
-            self.left_workspace.add_page(candidate_spec)
-            return
-
-        self._overwrite_axis_page(current_spec, candidate_spec)
+        if current_spec is not None and "denoise_methods" in current_spec.params:
+            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
+        candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
+        self.left_workspace.add_page(candidate_spec)
 
     def auto_refresh_integral(self):
         if self.page_image.switch_coord.isChecked():
@@ -1274,16 +1500,17 @@ class My3DAnalyzer(QWidget):
 
         current_spec = self.left_workspace.current_spec()
         if current_spec is not None and current_spec.page_kind == "axis_integral":
+            self._persist_axis_integral_page_state(current_spec)
             self.global_refresh()
 
     def on_apply_other_integral(self):
         if self.core.raw_data is None:
             return
 
-        current_text = self.page_data.combo_other.currentText()
-        if current_text == "切片态密度":
+        current_index = int(self.page_data.combo_other.currentIndex())
+        if current_index == 0:
             if not self.core.has_time_axis:
-                self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片态密度。", QMessageBox.Information)
+                self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
                 return
             if self.clip_ranges is None:
                 self._show_message("未进行切片设置", "请先在“图像控制”页设置切片范围。", QMessageBox.Warning)
@@ -1293,7 +1520,11 @@ class My3DAnalyzer(QWidget):
             spec = self._build_energy_dos_spec()
 
         if spec is not None:
-            self.left_workspace.ensure_page(spec)
+            current_spec = self.left_workspace.current_spec()
+            if current_spec is not None and "denoise_methods" in current_spec.params:
+                spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
+            spec.title = self._make_unique_page_title(spec.title)
+            self.left_workspace.add_page(spec)
 
     def on_other_mode_selection_changed(self, _):
         if self._syncing_controls:
@@ -1307,6 +1538,10 @@ class My3DAnalyzer(QWidget):
         if spec.page_kind == "control_panel":
             return
 
+        raw_data, coords = self._get_display_state_for_spec(spec)
+        if raw_data is None or coords is None:
+            return
+
         if spec.page_kind == "home":
             clip_info = self._get_clip_slices()
             if clip_info is None:
@@ -1314,34 +1549,34 @@ class My3DAnalyzer(QWidget):
                 return
 
             slices, _ = clip_info
-            sample = self.core.raw_data[slices[0], slices[1], slices[2], :]
+            sample = raw_data[slices[0], slices[1], slices[2], :]
             if not self.core.has_time_axis:
                 sample = sample[..., 0]
 
             export_data = {
                 "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(self.core.coords["X"][slices[0]], dtype=np.float32),
-                "ky": np.asarray(self.core.coords["Y"][slices[1]], dtype=np.float32),
-                "E": np.asarray(self.core.coords["E"][slices[2]], dtype=np.float32),
-                "time": np.asarray(self.core.coords["delay"], dtype=np.float32),
+                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
+                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
+                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
             }
             title = "保存当前立方体数据"
             default_name = "slice_cube.mat"
         elif spec.page_kind == "time_integral":
             self._persist_time_integral_page_state(spec)
-            context = self._get_time_integral_context(spec)
+            context = self._get_time_integral_context(spec, raw_data, coords)
             t_low = int(spec.params["t_low"])
             t_up = int(spec.params["t_up"])
             export_data = {
                 "sample": np.asarray(context["data"], dtype=np.float32),
-                "kx": np.asarray(self.core.coords["X"], dtype=np.float32),
-                "ky": np.asarray(self.core.coords["Y"], dtype=np.float32),
-                "E": np.asarray(self.core.coords["E"], dtype=np.float32),
+                "kx": np.asarray(coords["X"], dtype=np.float32),
+                "ky": np.asarray(coords["Y"], dtype=np.float32),
+                "E": np.asarray(coords["E"], dtype=np.float32),
             }
             title = "保存时间积分结果"
             default_name = self._build_time_integral_default_name(t_low, t_up)
         elif spec.page_kind == "axis_integral":
-            axis_context = self._get_axis_integral_export_context(spec)
+            axis_context = self._get_axis_integral_export_context(spec, raw_data, coords)
             if axis_context is None:
                 return
             export_data = axis_context["export_data"]
@@ -1349,20 +1584,20 @@ class My3DAnalyzer(QWidget):
             default_name = axis_context["default_name"]
         elif spec.page_kind == "slice_dos":
             export_data = {
-                "time": np.asarray(self.core.coords["delay"], dtype=np.float32),
-                "intensity": np.asarray(self._compute_slice_dos(spec.params["clip_ranges"]), dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
+                "intensity": np.asarray(self._compute_slice_dos(raw_data, spec.params["clip_ranges"]), dtype=np.float32),
             }
-            title = "保存 Slice-DOS 结果"
+            title = "保存切片内强度积分结果"
             default_name = "slice_dos.mat"
         else:
-            context = self._get_energy_dos_context(spec)
+            context = self._get_energy_dos_context(spec, raw_data, coords)
             if self._is_current_page(spec):
                 t_index = int(self.page_image.slider_time.value())
             else:
                 t_index = int(spec.params["t_index"])
             export_data = {
-                "time": np.asarray([self.core.coords["delay"][t_index]], dtype=np.float32),
-                "E": np.asarray(self.core.coords["E"], dtype=np.float32),
+                "time": np.asarray([coords["delay"][t_index]], dtype=np.float32),
+                "E": np.asarray(coords["E"], dtype=np.float32),
                 "intensity": np.asarray(context["y_data"], dtype=np.float32),
             }
             title = "保存 Energy-DOS 结果"

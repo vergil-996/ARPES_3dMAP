@@ -1,3 +1,4 @@
+from PyQt5.QtCore import QSignalBlocker
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
 from PyQt5.QtCore import Qt
@@ -261,3 +262,108 @@ class RenderControlPage(QWidget):
             self.combo_n2.currentText(),
             self.combo_n3.currentText()
         ]
+    @staticmethod
+    def _combo_index_for_text(combo_box, text):
+        for index in range(combo_box.count()):
+            if combo_box.itemText(index) == text:
+                return index
+        return -1
+
+    @staticmethod
+    def _sync_slider_visual(slider):
+        minimum = int(slider.minimum())
+        maximum = int(slider.maximum())
+        value = int(slider.value())
+        if maximum == minimum:
+            progress = 0.0
+        else:
+            progress = (value - minimum) / (maximum - minimum)
+
+        try:
+            slider.setProperty(slider.Property.TrackProgress, progress)
+        except Exception:
+            pass
+
+        progress_ani = getattr(slider, "progress_ani", None)
+        if progress_ani is not None:
+            try:
+                progress_ani.fromProperty()
+                progress_ani.setCurrentValue(progress)
+                progress_ani.setEndValue(progress)
+            except Exception:
+                pass
+
+        update_tooltip = getattr(slider, "_updateToolTip", None)
+        if callable(update_tooltip):
+            try:
+                update_tooltip(flash=False)
+            except Exception:
+                pass
+
+        slider.update()
+
+    def export_state(self):
+        return {
+            "combo_cmap": self.combo_cmap.currentText(),
+            "s_low": {
+                "minimum": int(self.s_low.minimum()),
+                "maximum": int(self.s_low.maximum()),
+                "value": int(self.s_low.value()),
+            },
+            "s_gamma": {
+                "minimum": int(self.s_gamma.minimum()),
+                "maximum": int(self.s_gamma.maximum()),
+                "value": int(self.s_gamma.value()),
+            },
+            "s_up": {
+                "minimum": int(self.s_up.minimum()),
+                "maximum": int(self.s_up.maximum()),
+                "value": int(self.s_up.value()),
+            },
+            "combo_map": self.combo_map.currentText(),
+            "combo_n1": self.combo_n1.currentText(),
+            "combo_n2": self.combo_n2.currentText(),
+            "combo_n3": self.combo_n3.currentText(),
+        }
+
+    def restore_state(self, state, *, block_signals=True):
+        state = state or {}
+        widgets = [
+            self.combo_cmap,
+            self.s_low,
+            self.s_gamma,
+            self.s_up,
+            self.combo_map,
+            self.combo_n1,
+            self.combo_n2,
+            self.combo_n3,
+        ]
+        blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
+
+        try:
+            for slider_name, slider in (("s_low", self.s_low), ("s_gamma", self.s_gamma), ("s_up", self.s_up)):
+                slider_state = state.get(slider_name) or {}
+                minimum = slider_state.get("minimum")
+                maximum = slider_state.get("maximum")
+                if minimum is not None and maximum is not None:
+                    slider.setRange(int(minimum), int(maximum))
+                if "value" in slider_state:
+                    value = int(slider_state["value"])
+                    value = max(int(slider.minimum()), min(int(slider.maximum()), value))
+                    slider.setValue(value)
+                self._sync_slider_visual(slider)
+
+            for combo_name, combo in (
+                ("combo_cmap", self.combo_cmap),
+                ("combo_map", self.combo_map),
+                ("combo_n1", self.combo_n1),
+                ("combo_n2", self.combo_n2),
+                ("combo_n3", self.combo_n3),
+            ):
+                if combo_name not in state:
+                    continue
+                index = self._combo_index_for_text(combo, state[combo_name])
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+        finally:
+            del blockers
