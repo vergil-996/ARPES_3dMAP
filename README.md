@@ -157,4 +157,4 @@ time   : 时间 / delay 坐标，一维数组
 - 若有其他改进建议或需添加功能或者bug反馈欢迎联系作者
 - qq:1277514490
 - 邮箱:jiaxinyu25@mails.ucas.ac.cn
-- 打赏:![3D 体渲染](docs/images/money.png)
+- 打赏:![money](docs/images/money.png)
