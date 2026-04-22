@@ -181,6 +181,7 @@ class VisualEngine:
 
             # 应用色阶处理
             processed_slice = VisualEngine.apply_levels(img, b, g, w)
+            title = slice_info.get("title_override", title)
 
             ax.clear()
             ax.imshow(processed_slice, cmap=cmap, aspect='auto', origin='lower', extent=ext,

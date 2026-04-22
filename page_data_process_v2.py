@@ -232,12 +232,16 @@ class DataProcessPage(QWidget):
         v_other.setSpacing(self.GROUP_SPACING)
 
         self.combo_other = SiCapsuleComboBox(self)
-        self.combo_other.setTitle("积分类型")
+        self.combo_other.setTitle("\u79ef\u5206\u7c7b\u578b")
         self.combo_other.setFixedHeight(30)
         self.combo_other.setFixedWidth(self.COMBO_WIDTH)
         self.combo_other.setEditable(False)
-        self.combo_other.addItems(["切片内强度积分", "能级态密度"])
-
+        self.combo_other.addItems([
+            "\u5207\u7247\u5185\u5f3a\u5ea6\u79ef\u5206",
+            "\u80fd\u7ea7\u6001\u5bc6\u5ea6",
+            "EDC\u7011\u5e03\u56fe",
+            "\u4e8c\u9636\u5bfc",
+        ])
         self.btn_other_apply = self._create_red_btn("应用")
         self.btn_other_save = self._create_red_btn("保存")
 

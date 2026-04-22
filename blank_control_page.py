@@ -11,6 +11,7 @@ from siui.core import SiColor
 class BlankControlPage(QWidget):
     SG_METHOD_NAME = "Savitzky-Golay滤波"
     GROUP_WIDTH = 560
+    DEFAULT_WATERFALL_STEP = 0.01
     DEFAULT_SG_PARAMS = {
         "window_length": 5,
         "polyorder": 2,
@@ -37,6 +38,7 @@ class BlankControlPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._waterfall_step_custom = False
         self._build_ui()
 
     def _build_ui(self):
@@ -54,8 +56,10 @@ class BlankControlPage(QWidget):
 
         self.group_savgol = self._create_method_group(self.SG_METHOD_NAME)
         self.group_wavelet = self._create_wavelet_method_group()
+        self.group_waterfall = self._create_waterfall_group()
         self.content_layout.addWidget(self.group_savgol, 0, Qt.AlignTop | Qt.AlignLeft)
         self.content_layout.addWidget(self.group_wavelet, 0, Qt.AlignTop | Qt.AlignLeft)
+        self.content_layout.addWidget(self.group_waterfall, 0, Qt.AlignTop | Qt.AlignLeft)
         self.content_layout.addStretch(1)
         self.container.adjustSize()
 
@@ -170,6 +174,39 @@ class BlankControlPage(QWidget):
         group.addWidget(card)
         self._apply_group_style(group)
         self._sync_wavelet_constraints()
+        return group
+
+    def _create_waterfall_group(self):
+        group = SiTitledWidgetGroup(self.container)
+        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        group.setFixedWidth(self.GROUP_WIDTH)
+        group.addTitle("瀑布图参数")
+
+        card = SiTriSectionPanelCard(group)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        card.header().hide()
+        card.footer().hide()
+        card.body().layout().setSpacing(12)
+
+        self.waterfall_step_box = self._create_double_spin_box(
+            parent=card,
+            title="k步长 (1/Å)",
+            value=self.DEFAULT_WATERFALL_STEP,
+            minimum=0.0001,
+            maximum=10.0,
+            single_step=0.01,
+        )
+        self.waterfall_step_box.editingFinished.connect(self._on_waterfall_step_edited)
+        value_changed = getattr(self.waterfall_step_box, "valueChanged", None)
+        if value_changed is not None:
+            value_changed.connect(self._on_waterfall_step_value_changed)
+
+        card.body().addWidget(self.waterfall_step_box)
+        card.adjustSize()
+
+        group.addWidget(card)
+        self._apply_group_style(group)
+        self._sync_waterfall_constraints()
         return group
 
     def _create_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
@@ -305,6 +342,22 @@ class BlankControlPage(QWidget):
         strength = max(0.0, min(float(strength), 10.0))
         self.wavelet_strength_box.setValue(strength)
 
+    def _sync_waterfall_constraints(self):
+        step = self._commit_double_spinbox_value(
+            self.waterfall_step_box,
+            self.DEFAULT_WATERFALL_STEP,
+        )
+        step = max(0.0001, min(float(step), 10.0))
+        self.waterfall_step_box.setValue(step)
+        return float(step)
+
+    def _on_waterfall_step_edited(self):
+        self._sync_waterfall_constraints()
+        self._waterfall_step_custom = True
+
+    def _on_waterfall_step_value_changed(self, *_):
+        self._waterfall_step_custom = True
+
     def get_savgol_params(self, data_shape=None):
         self._sync_savgol_constraints()
 
@@ -341,6 +394,18 @@ class BlankControlPage(QWidget):
             "threshold_mode": self.wavelet_threshold_mode_combo.currentText(),
             "strength": float(self.wavelet_strength_box.value()),
         }
+
+    def get_waterfall_step(self):
+        return self._sync_waterfall_constraints()
+
+    def set_waterfall_step(self, value, *, custom=None):
+        self.waterfall_step_box.setValue(float(value))
+        self._sync_waterfall_constraints()
+        if custom is not None:
+            self._waterfall_step_custom = bool(custom)
+
+    def is_waterfall_step_custom(self):
+        return bool(self._waterfall_step_custom)
 
     def build_method_specs(self, selected_methods, data_shape=None):
         self._sync_savgol_constraints()
@@ -380,6 +445,10 @@ class BlankControlPage(QWidget):
                 "threshold_mode": self.wavelet_threshold_mode_combo.currentText(),
                 "strength": float(self.wavelet_strength_box.value()),
             },
+            "waterfall": {
+                "k_step": float(self.waterfall_step_box.value()),
+                "custom": bool(self._waterfall_step_custom),
+            },
         }
 
     def restore_state(self, state, *, block_signals=True):
@@ -393,6 +462,7 @@ class BlankControlPage(QWidget):
             self.wavelet_threshold_rule_combo,
             self.wavelet_threshold_mode_combo,
             self.wavelet_strength_box,
+            self.waterfall_step_box,
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
 
@@ -432,5 +502,11 @@ class BlankControlPage(QWidget):
             if "strength" in wavelet_state:
                 self.wavelet_strength_box.setValue(float(wavelet_state["strength"]))
             self._sync_wavelet_constraints()
+
+            waterfall_state = state.get("waterfall") or {}
+            if "k_step" in waterfall_state:
+                self.waterfall_step_box.setValue(float(waterfall_state["k_step"]))
+            self._sync_waterfall_constraints()
+            self._waterfall_step_custom = bool(waterfall_state.get("custom", False))
         finally:
             del blockers

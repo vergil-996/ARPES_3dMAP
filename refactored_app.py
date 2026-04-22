@@ -71,6 +71,8 @@ class My3DAnalyzer(QWidget):
         self._syncing_controls = False
         self.axis_source_mode = "frame"
         self.loaded_npz_stem = "data"
+        self.global_waterfall_step = BlankControlPage.DEFAULT_WATERFALL_STEP
+        self.global_waterfall_step_custom = False
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -91,6 +93,7 @@ class My3DAnalyzer(QWidget):
         self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
+        self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
 
@@ -312,6 +315,7 @@ class My3DAnalyzer(QWidget):
         return self._current_visual_spec()
 
     def _capture_control_state(self):
+        self._sync_global_waterfall_step_from_ui()
         return {
             "active_control_tab": int(self.page_container.currentIndex()),
             "axis_source_mode": self.axis_source_mode,
@@ -326,6 +330,16 @@ class My3DAnalyzer(QWidget):
             return
         spec.params["control_state"] = self._copy_state(control_state)
 
+    def _sync_global_waterfall_step_from_ui(self):
+        self.global_waterfall_step = float(self.page_control_blank.get_waterfall_step())
+        self.global_waterfall_step_custom = bool(self.page_control_blank.is_waterfall_step_custom())
+
+    def _apply_global_waterfall_step_to_ui(self):
+        self.page_control_blank.set_waterfall_step(
+            float(self.global_waterfall_step),
+            custom=self.global_waterfall_step_custom,
+        )
+
     def _seed_control_state_for_spec(self, spec):
         if spec is None:
             return
@@ -338,7 +352,7 @@ class My3DAnalyzer(QWidget):
             return "frame"
         if spec.page_kind == "time_integral":
             return "time_integral"
-        if spec.page_kind == "axis_integral":
+        if spec.page_kind in {"axis_integral", "waterfall_edc", "second_derivative"}:
             return self._normalize_axis_source_mode(
                 spec.params.get(
                     "source_mode",
@@ -423,6 +437,7 @@ class My3DAnalyzer(QWidget):
             tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
             tab_index = max(0, min(self.page_container.count() - 1, tab_index))
             self._select_control_page(tab_index)
+            self._apply_global_waterfall_step_to_ui()
         finally:
             self._syncing_controls = False
 
@@ -622,6 +637,49 @@ class My3DAnalyzer(QWidget):
         safe_index = min(max(int(t_index), 0), len(delays) - 1)
         return f"{float(delays[safe_index]):.3f}"
 
+    @staticmethod
+    def _compute_axis_spacing(axis_values, fallback=0.01):
+        values = np.asarray(axis_values, dtype=np.float64).flatten()
+        if values.size < 2:
+            return float(fallback)
+
+        diffs = np.abs(np.diff(values))
+        diffs = diffs[np.isfinite(diffs) & (diffs > 1e-12)]
+        if diffs.size == 0:
+            return float(fallback)
+
+        return float(max(np.median(diffs), 1e-4))
+
+    def _waterfall_step_reference_axis(self, spec):
+        if spec is None:
+            return None
+
+        if spec.page_kind in {"axis_integral", "waterfall_edc"}:
+            axis_index = int(spec.params.get("axis_index", -1))
+            if axis_index == 0:
+                return "Y"
+            if axis_index == 1:
+                return "X"
+        return None
+
+    def _suggest_waterfall_step(self, spec=None):
+        axis_key = self._waterfall_step_reference_axis(spec or self.left_workspace.current_spec())
+        if axis_key is None:
+            return BlankControlPage.DEFAULT_WATERFALL_STEP
+
+        if self.core.raw_data is not None:
+            coords = self.core.coords
+        else:
+            coords = self.original_coords or {}
+        return self._compute_axis_spacing(coords.get(axis_key), BlankControlPage.DEFAULT_WATERFALL_STEP)
+
+    def _refresh_waterfall_step_default(self, spec=None):
+        if self.global_waterfall_step_custom:
+            return
+        self.global_waterfall_step = float(self._suggest_waterfall_step(spec))
+        self.global_waterfall_step_custom = False
+        self._apply_global_waterfall_step_to_ui()
+
     def _make_page_id(self):
         return uuid.uuid4().hex
 
@@ -739,10 +797,20 @@ class My3DAnalyzer(QWidget):
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
         )
 
+    def _is_time_locked_page(self, spec):
+        if spec is None:
+            return False
+        if self._is_time_integral_axis_page(spec):
+            return True
+        return (
+            spec.page_kind in {"waterfall_edc", "second_derivative"}
+            and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
+        )
+
     def _update_time_slider_state(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
         active_spec = self._control_state_owner(self.left_workspace.current_spec())
-        self.page_image.slider_time.setEnabled(has_time_axis and not self._is_time_integral_axis_page(active_spec))
+        self.page_image.slider_time.setEnabled(has_time_axis and not self._is_time_locked_page(active_spec))
 
     def _configure_time_controls(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
@@ -841,6 +909,137 @@ class My3DAnalyzer(QWidget):
         )
 
         return {"export_data": export_data, "default_name": default_name}
+
+    @staticmethod
+    def _safe_curve_normalize(curve):
+        curve = np.asarray(curve, dtype=np.float64)
+        max_value = np.max(curve) if curve.size else 0.0
+        if not np.isfinite(max_value) or abs(max_value) < 1e-12:
+            return np.zeros_like(curve, dtype=np.float64)
+        return curve / max_value
+
+    @staticmethod
+    def _nearest_axis_indices(axis_values, step):
+        values = np.asarray(axis_values, dtype=np.float64).flatten()
+        if values.size == 0:
+            return np.array([], dtype=np.int32)
+        if values.size == 1:
+            return np.array([0], dtype=np.int32)
+
+        safe_step = max(float(step), 1e-4)
+        axis_min = float(np.min(values))
+        axis_max = float(np.max(values))
+        sampled_positions = list(np.arange(axis_min, axis_max + safe_step * 0.5, safe_step))
+        sampled_positions.extend([axis_min, axis_max])
+
+        indices = {
+            int(np.argmin(np.abs(values - position)))
+            for position in sampled_positions
+        }
+        sorted_indices = sorted(indices, key=lambda idx: float(values[idx]))
+        return np.asarray(sorted_indices, dtype=np.int32)
+
+    def _resolve_waterfall_axis_info(self, axis_index):
+        axis_index = int(axis_index)
+        if axis_index == 0:
+            return {
+                "k_axis_key": "Y",
+                "k_axis_label": "ky",
+                "integrated_axis_label": "X",
+            }
+        if axis_index == 1:
+            return {
+                "k_axis_key": "X",
+                "k_axis_label": "kx",
+                "integrated_axis_label": "Y",
+            }
+        return None
+
+    def _waterfall_title_summary(self, axis_label, integrated_axis_label, center_value, k_step, *, ascii_only=False):
+        center_text = self._format_filename_number(center_value)
+        step_text = f"{float(k_step):.3f}"
+        if ascii_only:
+            return f"EDC Waterfall [{axis_label}, {integrated_axis_label} center {center_text}, step {step_text}]"
+        return f"EDC瀑布图 [{axis_label}, {integrated_axis_label}中心 {center_text}, 步长 {step_text}]"
+
+    def _build_waterfall_context_from_axis_params(self, raw_data, coords, params):
+        if raw_data is None or coords is None:
+            return None
+
+        axis_index = int(params.get("axis_index", -1))
+        if axis_index not in (0, 1):
+            return None
+
+        source_context = self._get_3d_source_context_for_axis(
+            AnalysisPageSpec(
+                page_id="waterfall_source",
+                title="waterfall_source",
+                page_kind="axis_integral",
+                source_module="data_process",
+                params=dict(params),
+            ),
+            raw_data,
+        )
+        data_2d = self._get_axis_integrated_data_from_raw(
+            source_context["data"],
+            axis_index,
+            int(params["integral_low"]),
+            int(params["integral_up"]),
+        )
+
+        axis_info = self._resolve_waterfall_axis_info(axis_index)
+        if axis_info is None:
+            return None
+
+        k_coords = np.asarray(coords[axis_info["k_axis_key"]], dtype=np.float64)
+        energy_axis = np.asarray(coords["E"], dtype=np.float64)
+        k_step = max(float(params["k_step"]), 1e-4)
+        sampled_indices = self._nearest_axis_indices(k_coords, k_step)
+        if sampled_indices.size < 2:
+            raise ValueError("当前 k 步长过大，无法生成至少两条 EDC 曲线。")
+
+        valid_indices = sampled_indices[(sampled_indices >= 0) & (sampled_indices < data_2d.shape[0])]
+        valid_indices = np.unique(valid_indices)
+        if valid_indices.size < 2:
+            raise ValueError("当前 k 步长过大，无法生成至少两条 EDC 曲线。")
+
+        k_values = k_coords[valid_indices]
+        curves = np.asarray(data_2d[valid_indices, :], dtype=np.float64)
+        normalized = np.asarray([self._safe_curve_normalize(curve) for curve in curves], dtype=np.float64)
+
+        low_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_low"]))
+        up_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_up"]))
+        center_physical = self.core.logical_to_physical(
+            axis_info["integrated_axis_label"],
+            int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
+        )
+        title = self._waterfall_title_summary(
+            axis_info["k_axis_label"],
+            axis_info["integrated_axis_label"],
+            center_physical,
+            k_step,
+            ascii_only=True,
+        )
+
+        return {
+            "view": "waterfall",
+            "title": title,
+            "energy_axis": energy_axis,
+            "k_values": np.asarray(k_values, dtype=np.float64),
+            "curves": normalized,
+            "raw_curves": curves,
+            "offset_step": 1.2,
+            "xlabel": "Intensity (normalized, arb. u.)",
+            "ylabel": "Energy (eV)",
+            "k_axis_label": axis_info["k_axis_label"],
+            "integrated_axis_label": axis_info["integrated_axis_label"],
+            "integrated_range": (float(low_physical), float(up_physical)),
+            "integrated_center": float(center_physical),
+            "k_step": float(k_step),
+        }
+
+    def _get_waterfall_edc_context(self, spec, raw_data, coords):
+        return self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
 
     def _extract_slice_data(self, data_3d, axis_idx, index):
         safe_index = int(np.clip(index, 0, data_3d.shape[axis_idx] - 1))
@@ -1022,6 +1221,83 @@ class My3DAnalyzer(QWidget):
             "xlabel": "Energy (eV)",
         }
 
+    @staticmethod
+    def _compute_second_derivative_along_energy(data_2d, energy_axis):
+        energy_axis = np.asarray(energy_axis, dtype=np.float64).flatten()
+        source = np.asarray(data_2d, dtype=np.float64)
+        first = np.gradient(source, energy_axis, axis=1, edge_order=1)
+        return np.gradient(first, energy_axis, axis=1, edge_order=1)
+
+    def _second_derivative_source_label(self, params):
+        if params.get("source_page_kind") == "home":
+            axis_index = int(params.get("slice_axis", -1))
+            axis_name = {0: "X切片", 1: "Y切片"}.get(axis_index, "切片")
+            return f"{axis_name}"
+
+        axis_index = int(params.get("axis_index", -1))
+        axis_name = {0: "X轴积分", 1: "Y轴积分"}.get(axis_index, "坐标轴积分")
+        return axis_name
+
+    def _second_derivative_plot_label(self, params):
+        if params.get("source_page_kind") == "home":
+            axis_index = int(params.get("slice_axis", -1))
+            return {0: "X-slice", 1: "Y-slice"}.get(axis_index, "Slice")
+
+        axis_index = int(params.get("axis_index", -1))
+        return {0: "X-integral", 1: "Y-integral"}.get(axis_index, "Axis-integral")
+
+    def _build_second_derivative_context_from_params(self, raw_data, coords, params):
+        if raw_data is None or coords is None:
+            return None
+
+        source_kind = params.get("source_page_kind")
+        if source_kind == "home":
+            slice_axis = int(params.get("slice_axis", -1))
+            if slice_axis not in (0, 1):
+                return None
+            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+            data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
+            source_data = self._extract_slice_data(data_3d, slice_axis, int(params["slice_index"]))
+            source_slice_info = {"axis": slice_axis, "index": int(params["slice_index"])}
+        elif source_kind == "axis_integral":
+            temp_spec = AnalysisPageSpec(
+                page_id="second_derivative_source",
+                title="second_derivative_source",
+                page_kind="axis_integral",
+                source_module="data_process",
+                params={
+                    "axis_index": int(params["axis_index"]),
+                    "low": int(params["integral_low"]),
+                    "up": int(params["integral_up"]),
+                    "source_mode": params.get("source_mode", "frame"),
+                    "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
+                    "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
+                    "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+                },
+            )
+            base_context = self._get_axis_integral_context(temp_spec, raw_data, coords)
+            source_data = base_context["data"]
+            source_slice_info = dict(base_context["slice_info"])
+        else:
+            return None
+
+        slice_axis = int(source_slice_info.get("axis", -1))
+        if slice_axis not in (0, 1):
+            return None
+
+        derivative = self._compute_second_derivative_along_energy(source_data, coords["E"])
+        title = f"Second Derivative (d2/dE2) - {self._second_derivative_plot_label(params)}"
+        source_slice_info["title_override"] = title
+        return {
+            "view": "2d",
+            "data": derivative,
+            "slice_info": source_slice_info,
+            "coords": coords,
+        }
+
+    def _get_second_derivative_context(self, spec, raw_data, coords):
+        return self._build_second_derivative_context_from_params(raw_data, coords, spec.params)
+
     def _compute_render_context(self, spec):
         if spec.page_kind == "control_panel":
             return {"view": "config"}
@@ -1040,6 +1316,10 @@ class My3DAnalyzer(QWidget):
             return self._get_slice_dos_context(spec, raw_data, coords)
         if spec.page_kind == "energy_dos":
             return self._get_energy_dos_context(spec, raw_data, coords)
+        if spec.page_kind == "waterfall_edc":
+            return self._get_waterfall_edc_context(spec, raw_data, coords)
+        if spec.page_kind == "second_derivative":
+            return self._get_second_derivative_context(spec, raw_data, coords)
         return self._get_home_render_context(spec, raw_data, coords)
 
     def _render_1d_plot(self, context):
@@ -1050,6 +1330,38 @@ class My3DAnalyzer(QWidget):
         self.ax_2d.set_ylabel("Intensity (a.u.)", color="white")
         self.ax_2d.tick_params(colors="white")
         self.fig.tight_layout()
+        self.canvas_2d.draw()
+
+    def _render_waterfall_plot(self, context):
+        self.ax_2d.clear()
+
+        energy_axis = np.asarray(context["energy_axis"], dtype=np.float64)
+        curves = np.asarray(context["curves"], dtype=np.float64)
+        k_values = np.asarray(context["k_values"], dtype=np.float64)
+        offset_step = float(context.get("offset_step", 1.2))
+        xaxis_transform = self.ax_2d.get_xaxis_transform()
+
+        for idx, curve in enumerate(curves):
+            offset = idx * offset_step
+            self.ax_2d.plot(curve + offset, energy_axis, color="black", linewidth=1.5)
+            self.ax_2d.text(
+                offset + 0.5,
+                1.03,
+                f"{k_values[idx]:.2f}",
+                color="white",
+                fontsize=8,
+                ha="center",
+                va="bottom",
+                transform=xaxis_transform,
+                clip_on=False,
+            )
+
+        self.ax_2d.set_title(context["title"], color="white", pad=28)
+        self.ax_2d.set_xlabel(context["xlabel"], color="white")
+        self.ax_2d.set_ylabel(context["ylabel"], color="white")
+        self.ax_2d.tick_params(colors="white")
+        self.ax_2d.set_xlim(-0.1, max(1.25, (len(curves) - 1) * offset_step + 1.1))
+        self.fig.tight_layout(rect=[0, 0, 1, 0.95])
         self.canvas_2d.draw()
 
     def _render_active_page(self):
@@ -1072,7 +1384,11 @@ class My3DAnalyzer(QWidget):
             self.canvas_2d.draw()
             return
 
-        context = self._compute_render_context(spec)
+        try:
+            context = self._compute_render_context(spec)
+        except ValueError as exc:
+            self._show_message("EDC 瀑布图渲染失败", str(exc), QMessageBox.Warning)
+            return
         if context is None:
             return
 
@@ -1112,7 +1428,10 @@ class My3DAnalyzer(QWidget):
         else:
             self.left_display_stack.setCurrentIndex(1)
             self.plotter.clear_box_widgets()
-            self._render_1d_plot(context)
+            if context["view"] == "waterfall":
+                self._render_waterfall_plot(context)
+            else:
+                self._render_1d_plot(context)
 
         if self._can_show_interactive_box():
             self._rebuild_interactive_box()
@@ -1398,6 +1717,180 @@ class My3DAnalyzer(QWidget):
         self._seed_control_state_for_spec(spec)
         return spec
 
+    def _build_waterfall_edc_spec(self):
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is None or current_spec.page_kind != "axis_integral":
+            self._show_message(
+                "无法生成 EDC 瀑布图",
+                "仅支持在 X 轴积分或 Y 轴积分生成的 2D 图像下使用该功能。",
+                QMessageBox.Warning,
+            )
+            return None
+
+        if self._is_current_page(current_spec):
+            self._persist_axis_integral_page_state(current_spec)
+            axis_index = int(self.page_data.combo_ax.currentIndex())
+            low = int(self.page_data.s_ax_low.value())
+            up = int(self.page_data.s_ax_up.value())
+            mid = int(self.page_data.s_ax_mid.value())
+            source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
+            source_t_index = int(self.page_image.slider_time.value())
+            source_t_low = int(self.page_data.s_t_low.value())
+            source_t_up = int(self.page_data.s_t_up.value())
+        else:
+            axis_index = int(current_spec.params.get("axis_index", -1))
+            low = int(current_spec.params.get("low", 0))
+            up = int(current_spec.params.get("up", 0))
+            mid = int(current_spec.params.get("mid", round((low + up) / 2)))
+            source_mode = self._normalize_axis_source_mode(current_spec.params.get("source_mode"))
+            source_t_index = int(current_spec.params.get("source_t_index", int(self.page_image.slider_time.value())))
+            source_t_low = int(current_spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
+            source_t_up = int(current_spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
+
+        axis_info = self._resolve_waterfall_axis_info(axis_index)
+        if axis_info is None:
+            self._show_message(
+                "无法生成 EDC 瀑布图",
+                "仅支持在 X 轴积分或 Y 轴积分生成的 2D 图像下使用该功能。",
+                QMessageBox.Warning,
+            )
+            return None
+
+        k_step = self.page_control_blank.get_waterfall_step()
+        if k_step <= 0:
+            self._show_message("无法生成 EDC 瀑布图", "k 步长必须大于 0。", QMessageBox.Warning)
+            return None
+
+        low_idx, up_idx = sorted((int(low), int(up)))
+        mid_idx = int(np.clip(int(mid), low_idx, up_idx))
+        center_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], mid_idx)
+        title = self._waterfall_title_summary(
+            axis_info["k_axis_label"],
+            axis_info["integrated_axis_label"],
+            center_physical,
+            k_step,
+        )
+
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=title,
+            page_kind="waterfall_edc",
+            source_module="data_process",
+            source_page_id=current_spec.page_id,
+            params={
+                "source_page_id": current_spec.page_id,
+                "source_page_kind": "axis_integral",
+                "axis_index": int(axis_index),
+                "integral_low": int(low_idx),
+                "integral_up": int(up_idx),
+                "integral_mid": int(mid_idx),
+                "source_mode": source_mode,
+                "source_t_index": int(source_t_index),
+                "source_t_low": int(source_t_low),
+                "source_t_up": int(source_t_up),
+                "k_axis_label": axis_info["k_axis_label"],
+                "k_step": float(k_step),
+            },
+        )
+        raw_data, coords = self._get_display_state_for_spec(current_spec)
+        try:
+            self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
+        except ValueError as exc:
+            self._show_message("无法生成 EDC 瀑布图", str(exc), QMessageBox.Warning)
+            return None
+        self._seed_control_state_for_spec(spec)
+        return spec
+
+    def _build_second_derivative_spec(self):
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is None:
+            return None
+
+        if current_spec.page_kind == "home":
+            if self.home_slice_info is None:
+                self._show_message("无法生成二阶导", "仅支持在当前 2D 切片或 X/Y 轴积分页面下使用该功能。", QMessageBox.Warning)
+                return None
+            slice_axis = int(self.home_slice_info.get("axis", -1))
+            if slice_axis not in (0, 1):
+                self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
+                return None
+
+            source_t_index = int(self.page_image.slider_time.value())
+            source_label = self._second_derivative_source_label(
+                {"source_page_kind": "home", "slice_axis": slice_axis}
+            )
+            spec = AnalysisPageSpec(
+                page_id=self._make_page_id(),
+                title=f"二阶导 [{source_label}]",
+                page_kind="second_derivative",
+                source_module="data_process",
+                source_page_id=current_spec.page_id,
+                params={
+                    "source_page_id": current_spec.page_id,
+                    "source_page_kind": "home",
+                    "slice_axis": slice_axis,
+                    "slice_index": int(self.home_slice_info["index"]),
+                    "source_mode": "frame",
+                    "source_t_index": source_t_index,
+                },
+            )
+        elif current_spec.page_kind == "axis_integral":
+            if self._is_current_page(current_spec):
+                self._persist_axis_integral_page_state(current_spec)
+                axis_index = int(self.page_data.combo_ax.currentIndex())
+                low = int(self.page_data.s_ax_low.value())
+                up = int(self.page_data.s_ax_up.value())
+                source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
+                source_t_index = int(self.page_image.slider_time.value())
+                source_t_low = int(self.page_data.s_t_low.value())
+                source_t_up = int(self.page_data.s_t_up.value())
+            else:
+                axis_index = int(current_spec.params.get("axis_index", -1))
+                low = int(current_spec.params.get("low", 0))
+                up = int(current_spec.params.get("up", 0))
+                source_mode = self._normalize_axis_source_mode(current_spec.params.get("source_mode"))
+                source_t_index = int(current_spec.params.get("source_t_index", int(self.page_image.slider_time.value())))
+                source_t_low = int(current_spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
+                source_t_up = int(current_spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
+
+            if axis_index not in (0, 1):
+                self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
+                return None
+
+            source_label = self._second_derivative_source_label(
+                {"source_page_kind": "axis_integral", "axis_index": axis_index}
+            )
+            spec = AnalysisPageSpec(
+                page_id=self._make_page_id(),
+                title=f"二阶导 [{source_label}]",
+                page_kind="second_derivative",
+                source_module="data_process",
+                source_page_id=current_spec.page_id,
+                params={
+                    "source_page_id": current_spec.page_id,
+                    "source_page_kind": "axis_integral",
+                    "axis_index": int(axis_index),
+                    "integral_low": int(low),
+                    "integral_up": int(up),
+                    "source_mode": source_mode,
+                    "source_t_index": int(source_t_index),
+                    "source_t_low": int(source_t_low),
+                    "source_t_up": int(source_t_up),
+                },
+            )
+        else:
+            self._show_message("无法生成二阶导", "仅支持在当前 2D 切片或 X/Y 轴积分页面下使用该功能。", QMessageBox.Warning)
+            return None
+
+        raw_data, coords = self._get_display_state_for_spec(current_spec)
+        context = self._build_second_derivative_context_from_params(raw_data, coords, spec.params)
+        if context is None:
+            self._show_message("无法生成二阶导", "当前页面不符合沿能量轴做二阶导的条件。", QMessageBox.Warning)
+            return None
+
+        self._seed_control_state_for_spec(spec)
+        return spec
+
     def on_apply_time_integral(self):
         if self.core.raw_data is None or not self.core.has_time_axis:
             return
@@ -1516,8 +2009,12 @@ class My3DAnalyzer(QWidget):
                 self._show_message("未进行切片设置", "请先在“图像控制”页设置切片范围。", QMessageBox.Warning)
                 return
             spec = self._build_slice_dos_spec()
-        else:
+        elif current_index == 1:
             spec = self._build_energy_dos_spec()
+        elif current_index == 2:
+            spec = self._build_waterfall_edc_spec()
+        else:
+            spec = self._build_second_derivative_spec()
 
         if spec is not None:
             current_spec = self.left_workspace.current_spec()
@@ -1589,6 +2086,38 @@ class My3DAnalyzer(QWidget):
             }
             title = "保存切片内强度积分结果"
             default_name = "slice_dos.mat"
+        elif spec.page_kind == "waterfall_edc":
+            try:
+                context = self._get_waterfall_edc_context(spec, raw_data, coords)
+            except ValueError as exc:
+                self._show_message("保存 EDC 瀑布图失败", str(exc), QMessageBox.Warning)
+                return
+            if context is None:
+                return
+            export_data = {
+                "k": np.asarray(context["k_values"], dtype=np.float32),
+                "E": np.asarray(context["energy_axis"], dtype=np.float32),
+                "intensity": np.asarray(context["raw_curves"], dtype=np.float32),
+                "integrated_axis": np.asarray([context["integrated_axis_label"]]),
+                "integrated_range": np.asarray(context["integrated_range"], dtype=np.float32),
+            }
+            title = "保存 EDC 瀑布图结果"
+            default_name = "waterfall_edc.mat"
+        elif spec.page_kind == "second_derivative":
+            context = self._get_second_derivative_context(spec, raw_data, coords)
+            if context is None:
+                return
+            axis_index = int(context["slice_info"].get("axis", -1))
+            export_data = {
+                "sample": np.asarray(context["data"], dtype=np.float32),
+                "E": np.asarray(coords["E"], dtype=np.float32),
+            }
+            if axis_index == 0:
+                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
+            elif axis_index == 1:
+                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
+            title = "保存二阶导结果"
+            default_name = "second_derivative.mat"
         else:
             context = self._get_energy_dos_context(spec, raw_data, coords)
             if self._is_current_page(spec):
