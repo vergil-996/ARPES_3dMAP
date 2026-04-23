@@ -29,6 +29,7 @@ class ResultPageButton(PageButton):
         "control_panel": "ic_fluent_wrench_screwdriver_filled",
         "time_integral": "ic_fluent_history_filled",
         "axis_integral": "ic_fluent_data_trending_filled",
+        "axis_integral_crop": "ic_fluent_data_trending_filled",
         "slice_dos": "ic_fluent_table_stack_right_filled",
         "energy_dos": "ic_fluent_document_data_filled",
         "waterfall_edc": "ic_fluent_document_data_filled",

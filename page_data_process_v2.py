@@ -207,16 +207,7 @@ class DataProcessPage(QWidget):
                 widget = child.widget()
                 if widget is not None:
                     widget.setParent(None)
-        for _ in range(3):
-            item = v_ax.takeAt(v_ax.count() - 1)
-            row = item.layout() if item is not None else None
-            if row is None:
-                continue
-            while row.count():
-                child = row.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
+        # Keep the axis selector row in place; only rebuild the slider rows below it.
         self._add_centered_slider_block(v_ax, lbl3.text(), self.s_ax_up)
         self._add_centered_slider_block(v_ax, lbl4.text(), self.s_ax_low)
         self._add_centered_slider_block(v_ax, lbl5.text(), self.s_ax_mid)

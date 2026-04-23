@@ -18,6 +18,9 @@ from PyQt5.QtWidgets import (
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.backend_bases import MouseButton
+from matplotlib.patches import Rectangle
+from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
@@ -78,6 +81,11 @@ class My3DAnalyzer(QWidget):
         self.axis_refresh_timer.setSingleShot(True)
         self.axis_refresh_timer.setInterval(40)
         self.axis_refresh_timer.timeout.connect(self.auto_refresh_integral)
+        self.current_render_context = None
+        self.axis_crop_selector = None
+        self.axis_crop_overlay = None
+        self.axis_crop_candidates = {}
+        self.axis_crop_canvas_cid = None
 
         if "TOOL_TIP" not in SiGlobal.siui.windows:
             SiGlobal.siui.windows["TOOL_TIP"] = ToolTipWindow()
@@ -140,6 +148,7 @@ class My3DAnalyzer(QWidget):
         self.fig = Figure(figsize=(5, 4), dpi=100, facecolor="#1A1A2E")
         self.canvas_2d = FigureCanvas(self.fig)
         self.ax_2d = self.fig.add_subplot(111)
+        self.axis_crop_canvas_cid = self.canvas_2d.mpl_connect("button_press_event", self._on_axis_crop_canvas_click)
         self.left_display_stack.addWidget(self.canvas_2d)
 
         self.page_control_blank = BlankControlPage(self.left_display_stack)
@@ -278,7 +287,7 @@ class My3DAnalyzer(QWidget):
             ),
             activate=False,
         )
-        self.left_workspace.update_page("control_panel", title="去噪参数设置")
+        self.left_workspace.update_page("control_panel", title="参数设置")
         self.active_page_spec = home_spec
         self.last_visual_page_id = home_spec.page_id
         home_spec.params["control_state"] = self._capture_control_state()
@@ -352,7 +361,7 @@ class My3DAnalyzer(QWidget):
             return "frame"
         if spec.page_kind == "time_integral":
             return "time_integral"
-        if spec.page_kind in {"axis_integral", "waterfall_edc", "second_derivative"}:
+        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc", "second_derivative"}:
             return self._normalize_axis_source_mode(
                 spec.params.get(
                     "source_mode",
@@ -383,7 +392,7 @@ class My3DAnalyzer(QWidget):
             self._persist_home_page_state(spec)
         elif spec.page_kind == "time_integral":
             self._persist_time_integral_page_state(spec)
-        elif spec.page_kind == "axis_integral":
+        elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(spec)
         elif spec.page_kind == "energy_dos":
             spec.params["t_index"] = int(self.page_image.slider_time.value())
@@ -443,7 +452,7 @@ class My3DAnalyzer(QWidget):
 
     def _persist_axis_integral_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
-        if target_spec is None or target_spec.page_kind != "axis_integral":
+        if target_spec is None or target_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
             return
 
         axis_index = int(self.page_data.combo_ax.currentIndex())
@@ -793,7 +802,7 @@ class My3DAnalyzer(QWidget):
     def _is_time_integral_axis_page(self, spec):
         return (
             spec is not None
-            and spec.page_kind == "axis_integral"
+            and spec.page_kind in {"axis_integral", "axis_integral_crop"}
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
         )
 
@@ -851,20 +860,258 @@ class My3DAnalyzer(QWidget):
         up_text = self._format_filename_number(self.core.logical_to_physical("delay", t_up))
         return self._sanitize_filename_component(f"{low_text}_{up_text}_t_{self._get_loaded_npz_stem()}")
 
+    @staticmethod
+    def _axis_plot_info(axis_index):
+        axis_index = int(axis_index)
+        if axis_index == 0:
+            return {
+                "x_key": "Y",
+                "y_key": "E",
+                "x_label": "ky",
+                "y_label": "E",
+                "integrated_axis_key": "X",
+                "integrated_axis_label": "X",
+            }
+        if axis_index == 1:
+            return {
+                "x_key": "X",
+                "y_key": "E",
+                "x_label": "kx",
+                "y_label": "E",
+                "integrated_axis_key": "Y",
+                "integrated_axis_label": "Y",
+            }
+        return {
+            "x_key": "X",
+            "y_key": "Y",
+            "x_label": "kx",
+            "y_label": "ky",
+            "integrated_axis_key": "E",
+            "integrated_axis_label": "E",
+        }
+
+    @staticmethod
+    def _normalize_plot_rect(rect):
+        if rect is None:
+            return None
+        x_low = int(min(rect["x_low"], rect["x_up"]))
+        x_up = int(max(rect["x_low"], rect["x_up"]))
+        y_low = int(min(rect["y_low"], rect["y_up"]))
+        y_up = int(max(rect["y_low"], rect["y_up"]))
+        return {
+            "x_low": x_low,
+            "x_up": x_up,
+            "y_low": y_low,
+            "y_up": y_up,
+        }
+
+    @staticmethod
+    def _copy_plot_rect(rect):
+        if rect is None:
+            return None
+        return {
+            "x_low": int(rect["x_low"]),
+            "x_up": int(rect["x_up"]),
+            "y_low": int(rect["y_low"]),
+            "y_up": int(rect["y_up"]),
+        }
+
+    @staticmethod
+    def _plot_bounds_to_rect(plot_bounds):
+        if plot_bounds is None:
+            return None
+        return {
+            "x_low": int(plot_bounds["x_low"]),
+            "x_up": int(plot_bounds["x_up"]),
+            "y_low": int(plot_bounds["y_low"]),
+            "y_up": int(plot_bounds["y_up"]),
+        }
+
+    @staticmethod
+    def _rect_matches_plot_bounds(rect, plot_bounds):
+        if rect is None or plot_bounds is None:
+            return False
+        return (
+            int(rect["x_low"]) == int(plot_bounds["x_low"])
+            and int(rect["x_up"]) == int(plot_bounds["x_up"])
+            and int(rect["y_low"]) == int(plot_bounds["y_low"])
+            and int(rect["y_up"]) == int(plot_bounds["y_up"])
+        )
+
+    @staticmethod
+    def _intersect_plot_rects(rect_a, rect_b):
+        if rect_a is None:
+            return None if rect_b is None else dict(rect_b)
+        if rect_b is None:
+            return dict(rect_a)
+        x_low = max(int(rect_a["x_low"]), int(rect_b["x_low"]))
+        x_up = min(int(rect_a["x_up"]), int(rect_b["x_up"]))
+        y_low = max(int(rect_a["y_low"]), int(rect_b["y_low"]))
+        y_up = min(int(rect_a["y_up"]), int(rect_b["y_up"]))
+        if x_low > x_up or y_low > y_up:
+            return None
+        return {
+            "x_low": x_low,
+            "x_up": x_up,
+            "y_low": y_low,
+            "y_up": y_up,
+        }
+
+    def _axis_crop_rect_from_params(self, params):
+        required = ("crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up")
+        if any(key not in params for key in required):
+            return None
+        return self._normalize_plot_rect(
+            {
+                "x_low": int(params["crop_k_low"]),
+                "x_up": int(params["crop_k_up"]),
+                "y_low": int(params["crop_e_low"]),
+                "y_up": int(params["crop_e_up"]),
+            }
+        )
+
+    def _resolved_axis_integral_params(self, spec):
+        if spec is None:
+            return None
+
+        if self._is_current_page(spec) and spec.page_kind == "axis_integral":
+            self._persist_axis_integral_page_state(spec)
+
+        params = spec.params
+        axis_index = int(params.get("axis_index", 0))
+        low = int(params.get("low", 0))
+        up = int(params.get("up", low))
+        if low > up:
+            low, up = up, low
+        mid_default = round((low + up) / 2)
+        mid = int(np.clip(int(params.get("mid", mid_default)), low, up))
+        return {
+            "axis_index": axis_index,
+            "axis_name": params.get("axis_name"),
+            "low": low,
+            "up": up,
+            "mid": mid,
+            "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
+            "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
+            "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
+            "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+        }
+
+    def _build_axis_integral_base_context(self, spec, raw_data, coords):
+        params = self._resolved_axis_integral_params(spec)
+        if params is None:
+            return None
+
+        source_context = self._get_3d_source_context_for_axis(spec, raw_data)
+        axis_index = int(params["axis_index"])
+        data_2d = self._get_axis_integrated_data_from_raw(
+            source_context["data"],
+            axis_index,
+            int(params["low"]),
+            int(params["up"]),
+        )
+        axis_info = self._axis_plot_info(axis_index)
+        plot_bounds = {
+            "x_low": 0,
+            "x_up": max(int(data_2d.shape[0]) - 1, 0),
+            "y_low": 0,
+            "y_up": max(int(data_2d.shape[1]) - 1, 0),
+        }
+        crop_rect = None
+        if spec.page_kind == "axis_integral_crop":
+            crop_rect = self._axis_crop_rect_from_params(spec.params)
+        else:
+            crop_rect = self._copy_plot_rect(self.axis_crop_candidates.get(spec.page_id))
+
+        return {
+            "view": "2d",
+            "data": np.asarray(data_2d, dtype=np.float64),
+            "slice_info": {
+                "axis": axis_index,
+                "mode": "integral",
+                "range": (int(params["low"]), int(params["up"])),
+            },
+            "coords": coords,
+            "plot_axes": {
+                "x_key": axis_info["x_key"],
+                "y_key": axis_info["y_key"],
+                "x_label": axis_info["x_label"],
+                "y_label": axis_info["y_label"],
+            },
+            "plot_logical_bounds": plot_bounds,
+            "crop_rect": crop_rect,
+            "integral_params": params,
+        }
+
+    def _apply_axis_crop_to_context(self, context, crop_rect):
+        if context is None or crop_rect is None:
+            return context
+
+        plot_bounds = context.get("plot_logical_bounds")
+        cropped_rect = self._intersect_plot_rects(self._normalize_plot_rect(crop_rect), plot_bounds)
+        if cropped_rect is None:
+            return context
+
+        x_low = int(cropped_rect["x_low"])
+        x_up = int(cropped_rect["x_up"])
+        y_low = int(cropped_rect["y_low"])
+        y_up = int(cropped_rect["y_up"])
+
+        x_slice = slice(x_low, x_up + 1)
+        y_slice = slice(y_low, y_up + 1)
+        plot_axes = context["plot_axes"]
+        coords = context["coords"]
+        x_coords = np.asarray(coords[plot_axes["x_key"]], dtype=np.float64)[x_slice]
+        y_coords = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[y_slice]
+
+        slice_info = dict(context["slice_info"])
+        slice_info["extent_override"] = [
+            float(x_coords[0]),
+            float(x_coords[-1]),
+            float(y_coords[0]),
+            float(y_coords[-1]),
+        ]
+
+        updated = dict(context)
+        updated["data"] = np.asarray(context["data"][x_slice, y_slice], dtype=np.float64)
+        updated["slice_info"] = slice_info
+        updated["plot_logical_bounds"] = cropped_rect
+        updated["crop_rect"] = cropped_rect
+        return updated
+
+    def _axis_crop_title(self, params, crop_rect):
+        axis_index = int(params["axis_index"])
+        axis_info = self._axis_plot_info(axis_index)
+        crop_rect = self._normalize_plot_rect(crop_rect)
+        k_low = self._format_filename_number(
+            self.core.logical_to_physical(axis_info["x_key"], int(crop_rect["x_low"]))
+        )
+        k_up = self._format_filename_number(
+            self.core.logical_to_physical(axis_info["x_key"], int(crop_rect["x_up"]))
+        )
+        e_low = self._format_filename_number(
+            self.core.logical_to_physical(axis_info["y_key"], int(crop_rect["y_low"]))
+        )
+        e_up = self._format_filename_number(
+            self.core.logical_to_physical(axis_info["y_key"], int(crop_rect["y_up"]))
+        )
+        return (
+            f"{axis_info['integrated_axis_label']}-Integral Crop "
+            f"[{axis_info['x_label']} {k_low}~{k_up}, E {e_low}~{e_up}]"
+        )
+
     def _get_axis_integral_export_context(self, spec, raw_data, coords):
         if raw_data is None:
             return None
 
-        if self._is_current_page(spec):
-            axis_index = int(self.page_data.combo_ax.currentIndex())
-            low = int(self.page_data.s_ax_low.value())
-            up = int(self.page_data.s_ax_up.value())
-            mid = int(self.page_data.s_ax_mid.value())
-        else:
-            axis_index = int(spec.params["axis_index"])
-            low = int(spec.params["low"])
-            up = int(spec.params["up"])
-            mid = int(spec.params.get("mid", round((low + up) / 2)))
+        params = self._resolved_axis_integral_params(spec)
+        if params is None:
+            return None
+
+        axis_index = int(params["axis_index"])
+        low = int(params["low"])
+        up = int(params["up"])
+        mid = int(params["mid"])
 
         if low > up:
             low, up = up, low
@@ -908,6 +1155,47 @@ class My3DAnalyzer(QWidget):
             f"{low_text}_{up_text}_{mid_text}_{axis_tag}_{self._get_loaded_npz_stem()}"
         )
 
+        return {"export_data": export_data, "default_name": default_name}
+
+    def _get_axis_integral_crop_export_context(self, spec, raw_data, coords):
+        context = self._get_axis_integral_crop_context(spec, raw_data, coords)
+        if context is None:
+            return None
+
+        plot_axes = context["plot_axes"]
+        plot_bounds = context["plot_logical_bounds"]
+        x_low = int(plot_bounds["x_low"])
+        x_up = int(plot_bounds["x_up"])
+        y_low = int(plot_bounds["y_low"])
+        y_up = int(plot_bounds["y_up"])
+        params = self._resolved_axis_integral_params(spec)
+        axis_info = self._axis_plot_info(params["axis_index"])
+
+        export_data = {
+            "sample": np.asarray(context["data"], dtype=np.float32),
+            "k": np.asarray(coords[plot_axes["x_key"]][x_low:x_up + 1], dtype=np.float32),
+            "E": np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32),
+            "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
+            "integrated_range": np.asarray(
+                [
+                    self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["low"])),
+                    self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["up"])),
+                ],
+                dtype=np.float32,
+            ),
+            "crop_range": np.asarray(
+                [
+                    self.core.logical_to_physical(plot_axes["x_key"], x_low),
+                    self.core.logical_to_physical(plot_axes["x_key"], x_up),
+                    self.core.logical_to_physical(plot_axes["y_key"], y_low),
+                    self.core.logical_to_physical(plot_axes["y_key"], y_up),
+                ],
+                dtype=np.float32,
+            ),
+        }
+        default_name = self._sanitize_filename_component(
+            f"{axis_info['integrated_axis_label']}_integral_crop_{plot_axes['x_label']}_{x_low}_{x_up}_E_{y_low}_{y_up}_{self._get_loaded_npz_stem()}"
+        )
         return {"export_data": export_data, "default_name": default_name}
 
     @staticmethod
@@ -962,81 +1250,6 @@ class My3DAnalyzer(QWidget):
             return f"EDC Waterfall [{axis_label}, {integrated_axis_label} center {center_text}, step {step_text}]"
         return f"EDC瀑布图 [{axis_label}, {integrated_axis_label}中心 {center_text}, 步长 {step_text}]"
 
-    def _build_waterfall_context_from_axis_params(self, raw_data, coords, params):
-        if raw_data is None or coords is None:
-            return None
-
-        axis_index = int(params.get("axis_index", -1))
-        if axis_index not in (0, 1):
-            return None
-
-        source_context = self._get_3d_source_context_for_axis(
-            AnalysisPageSpec(
-                page_id="waterfall_source",
-                title="waterfall_source",
-                page_kind="axis_integral",
-                source_module="data_process",
-                params=dict(params),
-            ),
-            raw_data,
-        )
-        data_2d = self._get_axis_integrated_data_from_raw(
-            source_context["data"],
-            axis_index,
-            int(params["integral_low"]),
-            int(params["integral_up"]),
-        )
-
-        axis_info = self._resolve_waterfall_axis_info(axis_index)
-        if axis_info is None:
-            return None
-
-        k_coords = np.asarray(coords[axis_info["k_axis_key"]], dtype=np.float64)
-        energy_axis = np.asarray(coords["E"], dtype=np.float64)
-        k_step = max(float(params["k_step"]), 1e-4)
-        sampled_indices = self._nearest_axis_indices(k_coords, k_step)
-        if sampled_indices.size < 2:
-            raise ValueError("当前 k 步长过大，无法生成至少两条 EDC 曲线。")
-
-        valid_indices = sampled_indices[(sampled_indices >= 0) & (sampled_indices < data_2d.shape[0])]
-        valid_indices = np.unique(valid_indices)
-        if valid_indices.size < 2:
-            raise ValueError("当前 k 步长过大，无法生成至少两条 EDC 曲线。")
-
-        k_values = k_coords[valid_indices]
-        curves = np.asarray(data_2d[valid_indices, :], dtype=np.float64)
-        normalized = np.asarray([self._safe_curve_normalize(curve) for curve in curves], dtype=np.float64)
-
-        low_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_low"]))
-        up_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_up"]))
-        center_physical = self.core.logical_to_physical(
-            axis_info["integrated_axis_label"],
-            int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
-        )
-        title = self._waterfall_title_summary(
-            axis_info["k_axis_label"],
-            axis_info["integrated_axis_label"],
-            center_physical,
-            k_step,
-            ascii_only=True,
-        )
-
-        return {
-            "view": "waterfall",
-            "title": title,
-            "energy_axis": energy_axis,
-            "k_values": np.asarray(k_values, dtype=np.float64),
-            "curves": normalized,
-            "raw_curves": curves,
-            "offset_step": 1.2,
-            "xlabel": "Intensity (normalized, arb. u.)",
-            "ylabel": "Energy (eV)",
-            "k_axis_label": axis_info["k_axis_label"],
-            "integrated_axis_label": axis_info["integrated_axis_label"],
-            "integrated_range": (float(low_physical), float(up_physical)),
-            "integrated_center": float(center_physical),
-            "k_step": float(k_step),
-        }
 
     def _get_waterfall_edc_context(self, spec, raw_data, coords):
         return self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
@@ -1156,39 +1369,6 @@ class My3DAnalyzer(QWidget):
             "coords": coords,
         }
 
-    def _get_axis_integral_context(self, spec, raw_data, coords):
-        if self._is_current_page(spec):
-            source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
-            if source_mode == "time_integral":
-                source_context = {
-                    "view": "3d",
-                    "data": self._get_time_integrated_data_from_raw(
-                        raw_data,
-                        int(self.page_data.s_t_low.value()),
-                        int(self.page_data.s_t_up.value()),
-                    ),
-                }
-            else:
-                source_context = {
-                    "view": "3d",
-                    "data": self._get_data_for_t_from_raw(raw_data, int(self.page_image.slider_time.value())),
-                }
-            axis_index = int(self.page_data.combo_ax.currentIndex())
-            low = int(self.page_data.s_ax_low.value())
-            up = int(self.page_data.s_ax_up.value())
-            axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
-        else:
-            source_context = self._get_3d_source_context_for_axis(spec, raw_data)
-            axis_index = int(spec.params["axis_index"])
-            low = int(spec.params["low"])
-            up = int(spec.params["up"])
-        data_2d = self._get_axis_integrated_data_from_raw(source_context["data"], axis_index, low, up)
-        return {
-            "view": "2d",
-            "data": data_2d,
-            "slice_info": {"axis": axis_index, "mode": "integral", "range": (low, up)},
-            "coords": coords,
-        }
 
     def _compute_slice_dos(self, raw_data, logical_bounds):
         clip_info = self._get_clip_slices(logical_bounds)
@@ -1207,17 +1387,99 @@ class My3DAnalyzer(QWidget):
             "xlabel": "Delay (ps)",
         }
 
+    def _build_axis_source_spec_from_params(self, params, *, page_id="axis_source", title="axis_source"):
+        axis_index = int(params.get("axis_index", -1))
+        if axis_index not in (0, 1, 2):
+            return None
+
+        low = int(params.get("integral_low", params.get("low", 0)))
+        up = int(params.get("integral_up", params.get("up", low)))
+        if low > up:
+            low, up = up, low
+        mid_default = round((low + up) / 2)
+        spec_params = {
+            "axis_index": axis_index,
+            "low": int(low),
+            "up": int(up),
+            "mid": int(params.get("integral_mid", params.get("mid", mid_default))),
+            "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
+            "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
+            "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
+            "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+        }
+
+        crop_rect = self._axis_crop_rect_from_params(params)
+        page_kind = "axis_integral_crop" if crop_rect is not None else "axis_integral"
+        if crop_rect is not None:
+            spec_params.update(
+                {
+                    "crop_k_low": int(crop_rect["x_low"]),
+                    "crop_k_up": int(crop_rect["x_up"]),
+                    "crop_e_low": int(crop_rect["y_low"]),
+                    "crop_e_up": int(crop_rect["y_up"]),
+                }
+            )
+
+        return AnalysisPageSpec(
+            page_id=page_id,
+            title=title,
+            page_kind=page_kind,
+            source_module="data_process",
+            params=spec_params,
+        )
+
+    def _build_axis_like_context_from_params(self, raw_data, coords, params):
+        source_spec = self._build_axis_source_spec_from_params(params)
+        if source_spec is None:
+            return None
+        if source_spec.page_kind == "axis_integral_crop":
+            return self._get_axis_integral_crop_context(source_spec, raw_data, coords)
+        return self._get_axis_integral_context(source_spec, raw_data, coords)
+
     def _get_energy_dos_context(self, spec, raw_data, coords):
+        source_kind = spec.params.get("source_page_kind", "home")
+        if source_kind == "axis_integral":
+            source_context = self._build_axis_like_context_from_params(raw_data, coords, spec.params)
+            if source_context is None:
+                return None
+
+            plot_axes = source_context["plot_axes"]
+            plot_bounds = source_context["plot_logical_bounds"]
+            y_low = int(plot_bounds["y_low"])
+            y_up = int(plot_bounds["y_up"])
+            energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[y_low:y_up + 1]
+            axis_label = {0: "X-integral", 1: "Y-integral"}.get(int(spec.params.get("axis_index", -1)), "Axis-integral")
+            crop_suffix = self._waterfall_crop_suffix(spec.params, ascii_only=True)
+            return {
+                "view": "1d",
+                "x_data": energy_axis,
+                "y_data": np.sum(source_context["data"], axis=0),
+                "title": f"Energy DOS ({axis_label}{crop_suffix})",
+                "xlabel": "Energy (eV)",
+                "plot_axes": plot_axes,
+                "plot_logical_bounds": plot_bounds,
+            }
+
         if self._is_current_page(spec):
             t_index = int(self.page_image.slider_time.value())
         else:
             t_index = int(spec.params["t_index"])
         data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
+        energy_axis = np.asarray(coords["E"], dtype=np.float64)
+        clipped = False
+        clip_ranges = spec.params.get("clip_ranges")
+        if clip_ranges is not None:
+            clip_info = self._get_clip_slices(clip_ranges)
+            if clip_info is not None:
+                slices, _ = clip_info
+                data_3d = data_3d[slices[0], slices[1], slices[2]]
+                energy_axis = energy_axis[slices[2]]
+                clipped = True
         return {
             "view": "1d",
-            "x_data": coords["E"],
+            "x_data": energy_axis,
             "y_data": np.sum(data_3d, axis=(0, 1)),
-            "title": f"Energy DOS (T={self._current_delay_text(t_index)})",
+            "title": f"Energy DOS ({'Clipped, ' if clipped else ''}T={self._current_delay_text(t_index)})",
             "xlabel": "Energy (eV)",
         }
 
@@ -1259,25 +1521,21 @@ class My3DAnalyzer(QWidget):
             data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
             source_data = self._extract_slice_data(data_3d, slice_axis, int(params["slice_index"]))
             source_slice_info = {"axis": slice_axis, "index": int(params["slice_index"])}
+            plot_axes = self._axis_plot_info(slice_axis)
+            plot_bounds = {
+                "x_low": 0,
+                "x_up": max(int(source_data.shape[0]) - 1, 0),
+                "y_low": 0,
+                "y_up": max(int(source_data.shape[1]) - 1, 0),
+            }
         elif source_kind == "axis_integral":
-            temp_spec = AnalysisPageSpec(
-                page_id="second_derivative_source",
-                title="second_derivative_source",
-                page_kind="axis_integral",
-                source_module="data_process",
-                params={
-                    "axis_index": int(params["axis_index"]),
-                    "low": int(params["integral_low"]),
-                    "up": int(params["integral_up"]),
-                    "source_mode": params.get("source_mode", "frame"),
-                    "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
-                    "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
-                    "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
-                },
-            )
-            base_context = self._get_axis_integral_context(temp_spec, raw_data, coords)
+            base_context = self._build_axis_like_context_from_params(raw_data, coords, params)
+            if base_context is None:
+                return None
             source_data = base_context["data"]
             source_slice_info = dict(base_context["slice_info"])
+            plot_axes = dict(base_context["plot_axes"])
+            plot_bounds = dict(base_context["plot_logical_bounds"])
         else:
             return None
 
@@ -1285,7 +1543,10 @@ class My3DAnalyzer(QWidget):
         if slice_axis not in (0, 1):
             return None
 
-        derivative = self._compute_second_derivative_along_energy(source_data, coords["E"])
+        energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[
+            int(plot_bounds["y_low"]):int(plot_bounds["y_up"]) + 1
+        ]
+        derivative = self._compute_second_derivative_along_energy(source_data, energy_axis)
         title = f"Second Derivative (d2/dE2) - {self._second_derivative_plot_label(params)}"
         source_slice_info["title_override"] = title
         return {
@@ -1293,10 +1554,134 @@ class My3DAnalyzer(QWidget):
             "data": derivative,
             "slice_info": source_slice_info,
             "coords": coords,
+            "plot_axes": plot_axes,
+            "plot_logical_bounds": plot_bounds,
         }
 
     def _get_second_derivative_context(self, spec, raw_data, coords):
         return self._build_second_derivative_context_from_params(raw_data, coords, spec.params)
+
+    def _get_axis_integral_context(self, spec, raw_data, coords):
+        return self._build_axis_integral_base_context(spec, raw_data, coords)
+
+    def _get_axis_integral_crop_context(self, spec, raw_data, coords):
+        context = self._build_axis_integral_base_context(spec, raw_data, coords)
+        if context is None:
+            return None
+        return self._apply_axis_crop_to_context(context, self._axis_crop_rect_from_params(spec.params))
+
+    def _waterfall_crop_suffix(self, params, *, ascii_only=False):
+        crop_rect = self._axis_crop_rect_from_params(params)
+        if crop_rect is None:
+            return ""
+
+        axis_index = int(params.get("axis_index", -1))
+        axis_info = self._resolve_waterfall_axis_info(axis_index)
+        if axis_info is None:
+            return ""
+
+        k_low = self._format_filename_number(self.core.logical_to_physical(axis_info["k_axis_key"], crop_rect["x_low"]))
+        k_up = self._format_filename_number(self.core.logical_to_physical(axis_info["k_axis_key"], crop_rect["x_up"]))
+        e_low = self._format_filename_number(self.core.logical_to_physical("E", crop_rect["y_low"]))
+        e_up = self._format_filename_number(self.core.logical_to_physical("E", crop_rect["y_up"]))
+        if ascii_only:
+            return f", {axis_info['k_axis_label']} {k_low}~{k_up}, E {e_low}~{e_up}"
+        return f", {axis_info['k_axis_label']} {k_low}~{k_up}, E {e_low}~{e_up}"
+
+    def _build_waterfall_context_from_axis_params(self, raw_data, coords, params):
+        if raw_data is None or coords is None:
+            return None
+
+        axis_index = int(params.get("axis_index", -1))
+        if axis_index not in (0, 1):
+            return None
+
+        source_spec = AnalysisPageSpec(
+            page_id="waterfall_source",
+            title="waterfall_source",
+            page_kind="axis_integral",
+            source_module="data_process",
+            params={
+                "axis_index": int(params["axis_index"]),
+                "low": int(params["integral_low"]),
+                "up": int(params["integral_up"]),
+                "mid": int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
+                "source_mode": params.get("source_mode", "frame"),
+                "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
+                "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
+                "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+            },
+        )
+        context = self._build_axis_integral_base_context(source_spec, raw_data, coords)
+        crop_rect = self._axis_crop_rect_from_params(params)
+        if crop_rect is not None:
+            context = self._apply_axis_crop_to_context(context, crop_rect)
+        if context is None:
+            return None
+
+        axis_info = self._resolve_waterfall_axis_info(axis_index)
+        if axis_info is None:
+            return None
+
+        plot_bounds = context["plot_logical_bounds"]
+        x_low = int(plot_bounds["x_low"])
+        x_up = int(plot_bounds["x_up"])
+        y_low = int(plot_bounds["y_low"])
+        y_up = int(plot_bounds["y_up"])
+
+        data_2d = np.asarray(context["data"], dtype=np.float64)
+        k_coords = np.asarray(coords[axis_info["k_axis_key"]], dtype=np.float64)[x_low:x_up + 1]
+        energy_axis = np.asarray(coords["E"], dtype=np.float64)[y_low:y_up + 1]
+
+        k_step = max(float(params["k_step"]), 1e-4)
+        sampled_indices = self._nearest_axis_indices(k_coords, k_step)
+        if sampled_indices.size < 2:
+            raise ValueError("Current k step is too large to generate at least two EDC curves.")
+
+        valid_indices = sampled_indices[(sampled_indices >= 0) & (sampled_indices < data_2d.shape[0])]
+        valid_indices = np.unique(valid_indices)
+        if valid_indices.size < 2:
+            raise ValueError("Current k step is too large to generate at least two EDC curves.")
+
+        k_values = k_coords[valid_indices]
+        curves = np.asarray(data_2d[valid_indices, :], dtype=np.float64)
+        normalized = np.asarray([self._safe_curve_normalize(curve) for curve in curves], dtype=np.float64)
+
+        low_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_low"]))
+        up_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_up"]))
+        center_physical = self.core.logical_to_physical(
+            axis_info["integrated_axis_label"],
+            int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
+        )
+        title = self._waterfall_title_summary(
+            axis_info["k_axis_label"],
+            axis_info["integrated_axis_label"],
+            center_physical,
+            k_step,
+            ascii_only=True,
+        ) + self._waterfall_crop_suffix(params, ascii_only=True)
+
+        return {
+            "view": "waterfall",
+            "title": title,
+            "energy_axis": energy_axis,
+            "k_values": np.asarray(k_values, dtype=np.float64),
+            "curves": normalized,
+            "raw_curves": curves,
+            "offset_step": 1.2,
+            "xlabel": "Intensity (normalized, arb. u.)",
+            "ylabel": "Energy (eV)",
+            "k_axis_label": axis_info["k_axis_label"],
+            "integrated_axis_label": axis_info["integrated_axis_label"],
+            "integrated_range": (float(low_physical), float(up_physical)),
+            "integrated_center": float(center_physical),
+            "k_step": float(k_step),
+            "crop_rect": self._copy_plot_rect(crop_rect),
+            "energy_range": (
+                float(energy_axis[0]),
+                float(energy_axis[-1]),
+            ),
+        }
 
     def _compute_render_context(self, spec):
         if spec.page_kind == "control_panel":
@@ -1312,6 +1697,8 @@ class My3DAnalyzer(QWidget):
             return self._get_time_integral_context(spec, raw_data, coords)
         if spec.page_kind == "axis_integral":
             return self._get_axis_integral_context(spec, raw_data, coords)
+        if spec.page_kind == "axis_integral_crop":
+            return self._get_axis_integral_crop_context(spec, raw_data, coords)
         if spec.page_kind == "slice_dos":
             return self._get_slice_dos_context(spec, raw_data, coords)
         if spec.page_kind == "energy_dos":
@@ -1364,82 +1751,6 @@ class My3DAnalyzer(QWidget):
         self.fig.tight_layout(rect=[0, 0, 1, 0.95])
         self.canvas_2d.draw()
 
-    def _render_active_page(self):
-        spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
-        if spec is None:
-            return
-
-        if spec.page_kind == "control_panel":
-            self.left_display_stack.setCurrentIndex(2)
-            self.plotter.clear_box_widgets()
-            self.plotter.render()
-            return
-
-        if self.core.raw_data is None:
-            self.left_display_stack.setCurrentIndex(0)
-            self.plotter.clear_actors()
-            self.plotter.clear_box_widgets()
-            self.plotter.render()
-            self.ax_2d.clear()
-            self.canvas_2d.draw()
-            return
-
-        try:
-            context = self._compute_render_context(spec)
-        except ValueError as exc:
-            self._show_message("EDC 瀑布图渲染失败", str(exc), QMessageBox.Warning)
-            return
-        if context is None:
-            return
-
-        levels = self._get_display_levels()
-        mapping_mode = self.page_render.combo_map.currentText()
-        current_cmap = self.page_render.get_selected_cmap()
-
-        if context["view"] == "3d":
-            self.left_display_stack.setCurrentIndex(0)
-            clip_ranges = context.get("clip_ranges")
-            render_clip = None
-            if clip_ranges is not None:
-                render_clip = self.core.logical_to_render_bounds(clip_ranges, context["data"].shape)
-
-            VisualEngine.render_3d(
-                self.plotter,
-                context["data"],
-                levels,
-                opac_mode=mapping_mode,
-                clip_ranges=render_clip,
-                show_axes=self.page_image.switch_axes.isChecked(),
-                core_coords=context.get("coords", self.core.coords),
-                cmap=current_cmap,
-            )
-        elif context["view"] == "2d":
-            self.left_display_stack.setCurrentIndex(1)
-            self.plotter.clear_box_widgets()
-            VisualEngine.render_2d_slice(
-                self.ax_2d,
-                self.canvas_2d,
-                context["data"],
-                context["slice_info"],
-                levels,
-                context.get("coords", self.core.coords),
-                cmap=current_cmap,
-            )
-        else:
-            self.left_display_stack.setCurrentIndex(1)
-            self.plotter.clear_box_widgets()
-            if context["view"] == "waterfall":
-                self._render_waterfall_plot(context)
-            else:
-                self._render_1d_plot(context)
-
-        if self._can_show_interactive_box():
-            self._rebuild_interactive_box()
-            self.plotter.render()
-        else:
-            self.plotter.clear_box_widgets()
-            self.plotter.render()
-
     def global_refresh(self):
         self._render_active_page()
         self._update_export_button_states()
@@ -1459,17 +1770,6 @@ class My3DAnalyzer(QWidget):
 
     def _sync_controls_from_page(self, spec):
         self._restore_page_ui_state(spec)
-
-    def on_result_page_closed(self, page_id):
-        self.page_denoise_cache.pop(page_id, None)
-        if self.last_visual_page_id == page_id:
-            fallback_spec = self.left_workspace.current_spec()
-            if fallback_spec is None or fallback_spec.page_kind == "control_panel":
-                fallback_spec = self.left_workspace.home_spec()
-            if fallback_spec is not None and fallback_spec.page_kind != "control_panel":
-                self.last_visual_page_id = fallback_spec.page_id
-            else:
-                self.last_visual_page_id = self.left_workspace.home_page_id
 
     def on_toggle_e_flip(self, checked):
         if self.base_raw_data is None:
@@ -1601,21 +1901,6 @@ class My3DAnalyzer(QWidget):
             slider.setRange(0, max_val)
             slider.setToolTipConvertionFunc(tooltip_func)
 
-    def on_cut(self):
-        texts = self.page_image.get_slice_values()
-        if self.precise_logical_bounds is not None and texts == self.last_synced_slice_texts:
-            logical_texts = self._logical_bounds_to_texts(self.precise_logical_bounds)
-        else:
-            logical_texts = self.core.physical_texts_to_logical_texts(texts)
-
-        result = self.core.process_cut_logic(logical_texts)
-        if not result:
-            return
-
-        self.clip_ranges = result.get("clip_ranges")
-        self.home_slice_info = result.get("slice_info")
-        self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
-        self.global_refresh()
 
     def on_back(self):
         if self.left_workspace.home_page_id is not None:
@@ -1631,13 +1916,6 @@ class My3DAnalyzer(QWidget):
         self.plotter.reset_camera()
         self.plotter.render()
 
-    def on_toggle_interactive_box(self, checked):
-        if checked and self._can_show_interactive_box():
-            self._rebuild_interactive_box()
-            self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
-        else:
-            self.plotter.clear_box_widgets()
-        self.plotter.render()
 
     def on_screenshot(self):
         path, _ = QFileDialog.getSaveFileName(self, "保存截图", "capture.png", "PNG (*.png)")
@@ -1687,6 +1965,58 @@ class My3DAnalyzer(QWidget):
         self._seed_control_state_for_spec(spec)
         return spec
 
+    def _supports_axis_crop_spec(self, spec):
+        if spec is None or spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
+            return False
+
+        params = self._resolved_axis_integral_params(spec)
+        if params is None:
+            return False
+        return int(params["axis_index"]) in (0, 1)
+
+    def _build_axis_integral_crop_spec(self, current_spec, crop_rect):
+        if current_spec is None or current_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
+            return None
+
+        params = self._resolved_axis_integral_params(current_spec)
+        if params is None or int(params["axis_index"]) not in (0, 1):
+            return None
+
+        current_context = self.current_render_context if self._is_current_page(current_spec) else None
+        plot_bounds = None if current_context is None else current_context.get("plot_logical_bounds")
+        normalized_rect = self._intersect_plot_rects(self._normalize_plot_rect(crop_rect), plot_bounds)
+        if normalized_rect is None:
+            return None
+
+        spec_params = {
+            "axis_index": int(params["axis_index"]),
+            "axis_name": params.get("axis_name"),
+            "low": int(params["low"]),
+            "up": int(params["up"]),
+            "mid": int(params["mid"]),
+            "source_mode": params.get("source_mode", "frame"),
+            "source_t_index": int(params["source_t_index"]),
+            "source_t_low": int(params["source_t_low"]),
+            "source_t_up": int(params["source_t_up"]),
+            "source_page_id": current_spec.page_id,
+            "source_page_kind": "axis_integral",
+            "crop_k_low": int(normalized_rect["x_low"]),
+            "crop_k_up": int(normalized_rect["x_up"]),
+            "crop_e_low": int(normalized_rect["y_low"]),
+            "crop_e_up": int(normalized_rect["y_up"]),
+        }
+
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._axis_crop_title(spec_params, normalized_rect),
+            page_kind="axis_integral_crop",
+            source_module="data_process",
+            source_page_id=current_spec.page_id,
+            params=spec_params,
+        )
+        self._seed_control_state_for_spec(spec)
+        return spec
+
     def _build_slice_dos_spec(self):
         clip_info = self._get_clip_slices(self.clip_ranges)
         if clip_info is None:
@@ -1705,71 +2035,134 @@ class My3DAnalyzer(QWidget):
         return spec
 
     def _build_energy_dos_spec(self):
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is None or current_spec.page_kind == "control_panel":
+            current_spec = self._current_visual_spec()
+        if current_spec is None:
+            return None
+
         t_index = int(self.page_image.slider_time.value())
         delay_text = self._current_delay_text(t_index)
+        spec_params = {
+            "t_index": t_index,
+            "source_page_kind": "home",
+        }
+        title = f"Energy-DOS [T={t_index}/{delay_text}]"
+
+        if current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            params = self._resolved_axis_integral_params(current_spec)
+            if params is None or int(params["axis_index"]) not in (0, 1):
+                self._show_message(
+                    "Cannot create Energy DOS",
+                    "Energy DOS from axis-integral pages is only available when the 2D plot contains E.",
+                    QMessageBox.Warning,
+                )
+                return None
+
+            spec_params = {
+                "source_page_id": current_spec.page_id,
+                "source_page_kind": "axis_integral",
+                "axis_index": int(params["axis_index"]),
+                "integral_low": int(params["low"]),
+                "integral_up": int(params["up"]),
+                "integral_mid": int(params["mid"]),
+                "source_mode": params.get("source_mode", "frame"),
+                "source_t_index": int(params["source_t_index"]),
+                "source_t_low": int(params["source_t_low"]),
+                "source_t_up": int(params["source_t_up"]),
+            }
+            crop_rect = self._axis_crop_rect_from_params(current_spec.params)
+            if crop_rect is not None:
+                spec_params.update(
+                    {
+                        "crop_k_low": int(crop_rect["x_low"]),
+                        "crop_k_up": int(crop_rect["x_up"]),
+                        "crop_e_low": int(crop_rect["y_low"]),
+                        "crop_e_up": int(crop_rect["y_up"]),
+                    }
+                )
+            title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._waterfall_crop_suffix(spec_params)}]"
+        elif current_spec.page_kind == "home" and self.clip_ranges is not None:
+            spec_params["clip_ranges"] = list(self.clip_ranges)
+            title = f"Energy-DOS [Clipped T={t_index}/{delay_text}]"
+
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
-            title=f"Energy-DOS [T={t_index}/{delay_text}]",
+            title=title,
             page_kind="energy_dos",
             source_module="data_process",
-            params={"t_index": t_index},
+            source_page_id=current_spec.page_id,
+            params=spec_params,
         )
         self._seed_control_state_for_spec(spec)
         return spec
 
     def _build_waterfall_edc_spec(self):
         current_spec = self.left_workspace.current_spec()
-        if current_spec is None or current_spec.page_kind != "axis_integral":
+        if current_spec is None or current_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
             self._show_message(
-                "无法生成 EDC 瀑布图",
-                "仅支持在 X 轴积分或 Y 轴积分生成的 2D 图像下使用该功能。",
+                "Cannot create waterfall",
+                "EDC waterfall is only available from X-Integral / Y-Integral result pages.",
                 QMessageBox.Warning,
             )
             return None
 
-        if self._is_current_page(current_spec):
+        if self._is_current_page(current_spec) and current_spec.page_kind == "axis_integral":
             self._persist_axis_integral_page_state(current_spec)
-            axis_index = int(self.page_data.combo_ax.currentIndex())
-            low = int(self.page_data.s_ax_low.value())
-            up = int(self.page_data.s_ax_up.value())
-            mid = int(self.page_data.s_ax_mid.value())
-            source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
-            source_t_index = int(self.page_image.slider_time.value())
-            source_t_low = int(self.page_data.s_t_low.value())
-            source_t_up = int(self.page_data.s_t_up.value())
-        else:
-            axis_index = int(current_spec.params.get("axis_index", -1))
-            low = int(current_spec.params.get("low", 0))
-            up = int(current_spec.params.get("up", 0))
-            mid = int(current_spec.params.get("mid", round((low + up) / 2)))
-            source_mode = self._normalize_axis_source_mode(current_spec.params.get("source_mode"))
-            source_t_index = int(current_spec.params.get("source_t_index", int(self.page_image.slider_time.value())))
-            source_t_low = int(current_spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
-            source_t_up = int(current_spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
 
+        params = self._resolved_axis_integral_params(current_spec)
+        if params is None:
+            return None
+
+        axis_index = int(params["axis_index"])
         axis_info = self._resolve_waterfall_axis_info(axis_index)
         if axis_info is None:
             self._show_message(
-                "无法生成 EDC 瀑布图",
-                "仅支持在 X 轴积分或 Y 轴积分生成的 2D 图像下使用该功能。",
+                "Cannot create waterfall",
+                "EDC waterfall is only available from X-Integral / Y-Integral result pages.",
                 QMessageBox.Warning,
             )
             return None
 
         k_step = self.page_control_blank.get_waterfall_step()
         if k_step <= 0:
-            self._show_message("无法生成 EDC 瀑布图", "k 步长必须大于 0。", QMessageBox.Warning)
+            self._show_message("Cannot create waterfall", "k step must be greater than 0.", QMessageBox.Warning)
             return None
 
-        low_idx, up_idx = sorted((int(low), int(up)))
-        mid_idx = int(np.clip(int(mid), low_idx, up_idx))
+        low_idx, up_idx = sorted((int(params["low"]), int(params["up"])))
+        mid_idx = int(np.clip(int(params["mid"]), low_idx, up_idx))
         center_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], mid_idx)
         title = self._waterfall_title_summary(
             axis_info["k_axis_label"],
             axis_info["integrated_axis_label"],
             center_physical,
             k_step,
-        )
+        ) + self._waterfall_crop_suffix(current_spec.params)
+
+        spec_params = {
+            "source_page_id": current_spec.page_id,
+            "source_page_kind": "axis_integral",
+            "axis_index": int(axis_index),
+            "integral_low": int(low_idx),
+            "integral_up": int(up_idx),
+            "integral_mid": int(mid_idx),
+            "source_mode": params.get("source_mode", "frame"),
+            "source_t_index": int(params["source_t_index"]),
+            "source_t_low": int(params["source_t_low"]),
+            "source_t_up": int(params["source_t_up"]),
+            "k_axis_label": axis_info["k_axis_label"],
+            "k_step": float(k_step),
+        }
+        crop_rect = self._axis_crop_rect_from_params(current_spec.params)
+        if crop_rect is not None:
+            spec_params.update(
+                {
+                    "crop_k_low": int(crop_rect["x_low"]),
+                    "crop_k_up": int(crop_rect["x_up"]),
+                    "crop_e_low": int(crop_rect["y_low"]),
+                    "crop_e_up": int(crop_rect["y_up"]),
+                }
+            )
 
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
@@ -1777,26 +2170,13 @@ class My3DAnalyzer(QWidget):
             page_kind="waterfall_edc",
             source_module="data_process",
             source_page_id=current_spec.page_id,
-            params={
-                "source_page_id": current_spec.page_id,
-                "source_page_kind": "axis_integral",
-                "axis_index": int(axis_index),
-                "integral_low": int(low_idx),
-                "integral_up": int(up_idx),
-                "integral_mid": int(mid_idx),
-                "source_mode": source_mode,
-                "source_t_index": int(source_t_index),
-                "source_t_low": int(source_t_low),
-                "source_t_up": int(source_t_up),
-                "k_axis_label": axis_info["k_axis_label"],
-                "k_step": float(k_step),
-            },
+            params=spec_params,
         )
         raw_data, coords = self._get_display_state_for_spec(current_spec)
         try:
             self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
         except ValueError as exc:
-            self._show_message("无法生成 EDC 瀑布图", str(exc), QMessageBox.Warning)
+            self._show_message("Cannot create waterfall", str(exc), QMessageBox.Warning)
             return None
         self._seed_control_state_for_spec(spec)
         return spec
@@ -1834,24 +2214,11 @@ class My3DAnalyzer(QWidget):
                     "source_t_index": source_t_index,
                 },
             )
-        elif current_spec.page_kind == "axis_integral":
-            if self._is_current_page(current_spec):
-                self._persist_axis_integral_page_state(current_spec)
-                axis_index = int(self.page_data.combo_ax.currentIndex())
-                low = int(self.page_data.s_ax_low.value())
-                up = int(self.page_data.s_ax_up.value())
-                source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
-                source_t_index = int(self.page_image.slider_time.value())
-                source_t_low = int(self.page_data.s_t_low.value())
-                source_t_up = int(self.page_data.s_t_up.value())
-            else:
-                axis_index = int(current_spec.params.get("axis_index", -1))
-                low = int(current_spec.params.get("low", 0))
-                up = int(current_spec.params.get("up", 0))
-                source_mode = self._normalize_axis_source_mode(current_spec.params.get("source_mode"))
-                source_t_index = int(current_spec.params.get("source_t_index", int(self.page_image.slider_time.value())))
-                source_t_low = int(current_spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
-                source_t_up = int(current_spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
+        elif current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            params = self._resolved_axis_integral_params(current_spec)
+            if params is None:
+                return None
+            axis_index = int(params["axis_index"])
 
             if axis_index not in (0, 1):
                 self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
@@ -1870,14 +2237,25 @@ class My3DAnalyzer(QWidget):
                     "source_page_id": current_spec.page_id,
                     "source_page_kind": "axis_integral",
                     "axis_index": int(axis_index),
-                    "integral_low": int(low),
-                    "integral_up": int(up),
-                    "source_mode": source_mode,
-                    "source_t_index": int(source_t_index),
-                    "source_t_low": int(source_t_low),
-                    "source_t_up": int(source_t_up),
+                    "integral_low": int(params["low"]),
+                    "integral_up": int(params["up"]),
+                    "integral_mid": int(params["mid"]),
+                    "source_mode": params.get("source_mode", "frame"),
+                    "source_t_index": int(params["source_t_index"]),
+                    "source_t_low": int(params["source_t_low"]),
+                    "source_t_up": int(params["source_t_up"]),
                 },
             )
+            crop_rect = self._axis_crop_rect_from_params(current_spec.params)
+            if crop_rect is not None:
+                spec.params.update(
+                    {
+                        "crop_k_low": int(crop_rect["x_low"]),
+                        "crop_k_up": int(crop_rect["x_up"]),
+                        "crop_e_low": int(crop_rect["y_low"]),
+                        "crop_e_up": int(crop_rect["y_up"]),
+                    }
+                )
         else:
             self._show_message("无法生成二阶导", "仅支持在当前 2D 切片或 X/Y 轴积分页面下使用该功能。", QMessageBox.Warning)
             return None
@@ -2028,6 +2406,330 @@ class My3DAnalyzer(QWidget):
             return
         self._update_export_button_states()
 
+
+    def _waterfall_step_reference_axis(self, spec):
+        if spec is None:
+            return None
+
+        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc"}:
+            axis_index = int(spec.params.get("axis_index", -1))
+            if axis_index == 0:
+                return "Y"
+            if axis_index == 1:
+                return "X"
+        return None
+
+    def _clear_axis_crop_selector(self):
+        if self.axis_crop_selector is None:
+            return
+        try:
+            self.axis_crop_selector.set_active(False)
+            self.axis_crop_selector.set_visible(False)
+        except Exception:
+            pass
+        self.axis_crop_selector = None
+
+    def _clear_axis_crop_overlay(self, redraw=False):
+        if self.axis_crop_overlay is not None:
+            try:
+                self.axis_crop_overlay.remove()
+            except Exception:
+                pass
+            self.axis_crop_overlay = None
+        if redraw and self.left_display_stack.currentIndex() == 1:
+            self.canvas_2d.draw_idle()
+
+    def _clear_axis_crop_interaction(self, redraw=False):
+        self._clear_axis_crop_selector()
+        self._clear_axis_crop_overlay(redraw=redraw)
+
+    def _on_axis_crop_canvas_click(self, event):
+        if event is None or event.button != MouseButton.RIGHT:
+            return
+        if self.left_display_stack.currentIndex() != 1:
+            return
+
+        spec = self.left_workspace.current_spec()
+        context = self.current_render_context
+        if not self._supports_axis_crop_context(spec, context):
+            return
+
+        removed = self.axis_crop_candidates.pop(spec.page_id, None)
+        if removed is None:
+            return
+        self._refresh_axis_crop_interaction(spec, context)
+
+    def _supports_axis_crop_context(self, spec, context=None):
+        if spec is None or spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
+            return False
+        if context is None:
+            context = self.current_render_context
+        if context is None or context.get("view") != "2d":
+            return False
+        return int(context.get("slice_info", {}).get("axis", -1)) in (0, 1)
+
+    def _current_axis_crop_rect(self, spec, context):
+        if spec is None or context is None:
+            return None
+
+        candidate = self.axis_crop_candidates.get(spec.page_id)
+        if candidate is not None:
+            return self._copy_plot_rect(candidate)
+
+        crop_rect = context.get("crop_rect")
+        if crop_rect is None:
+            return None
+        if self._rect_matches_plot_bounds(crop_rect, context.get("plot_logical_bounds")):
+            return None
+        return self._copy_plot_rect(crop_rect)
+
+    def _plot_rect_extents(self, context, rect):
+        plot_axes = context["plot_axes"]
+        coords = context["coords"]
+        x_values = np.asarray(coords[plot_axes["x_key"]], dtype=np.float64)
+        y_values = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)
+        x0 = float(x_values[int(rect["x_low"])])
+        x1 = float(x_values[int(rect["x_up"])])
+        y0 = float(y_values[int(rect["y_low"])])
+        y1 = float(y_values[int(rect["y_up"])])
+        return min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
+
+    def _draw_axis_crop_overlay(self, spec, context):
+        self._clear_axis_crop_overlay(redraw=False)
+        rect = self._current_axis_crop_rect(spec, context)
+        if rect is None:
+            return
+
+        x0, x1, y0, y1 = self._plot_rect_extents(context, rect)
+        self.axis_crop_overlay = Rectangle(
+            (x0, y0),
+            max(x1 - x0, 1e-12),
+            max(y1 - y0, 1e-12),
+            fill=False,
+            edgecolor="#FF69B4",
+            linewidth=1.4,
+            linestyle="--",
+            alpha=0.9,
+        )
+        self.ax_2d.add_patch(self.axis_crop_overlay)
+
+    def _refresh_axis_crop_interaction(self, spec, context):
+        self._clear_axis_crop_selector()
+        self._clear_axis_crop_overlay(redraw=False)
+
+        if not self.page_image.switch_coord.isChecked():
+            if self.left_display_stack.currentIndex() == 1:
+                self.canvas_2d.draw_idle()
+            return
+
+        if not self._supports_axis_crop_context(spec, context):
+            return
+
+        self._draw_axis_crop_overlay(spec, context)
+        self.axis_crop_selector = RectangleSelector(
+            self.ax_2d,
+            self._on_axis_crop_selected,
+            useblit=False,
+            button=[1],
+            minspanx=1e-12,
+            minspany=1e-12,
+            spancoords="data",
+            interactive=False,
+            props={
+                "facecolor": "#FF69B4",
+                "edgecolor": "#FF69B4",
+                "alpha": 0.12,
+                "fill": True,
+            },
+        )
+        self.canvas_2d.draw_idle()
+
+    def _on_axis_crop_selected(self, eclick, erelease):
+        spec = self.left_workspace.current_spec()
+        context = self.current_render_context
+        if not self._supports_axis_crop_context(spec, context):
+            return
+        if eclick.xdata is None or eclick.ydata is None or erelease.xdata is None or erelease.ydata is None:
+            return
+
+        plot_axes = context["plot_axes"]
+        plot_bounds = context["plot_logical_bounds"]
+        x0 = self.core.physical_to_logical(plot_axes["x_key"], float(eclick.xdata))
+        x1 = self.core.physical_to_logical(plot_axes["x_key"], float(erelease.xdata))
+        y0 = self.core.physical_to_logical(plot_axes["y_key"], float(eclick.ydata))
+        y1 = self.core.physical_to_logical(plot_axes["y_key"], float(erelease.ydata))
+        rect = self._intersect_plot_rects(
+            {
+                "x_low": int(np.floor(min(x0, x1))),
+                "x_up": int(np.ceil(max(x0, x1))),
+                "y_low": int(np.floor(min(y0, y1))),
+                "y_up": int(np.ceil(max(y0, y1))),
+            },
+            plot_bounds,
+        )
+        if rect is None:
+            return
+
+        self.axis_crop_candidates[spec.page_id] = rect
+        self._refresh_axis_crop_interaction(spec, context)
+
+    def _render_active_page(self):
+        spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
+        if spec is None:
+            return
+
+        self.current_render_context = None
+        self._clear_axis_crop_interaction(redraw=False)
+
+        if spec.page_kind == "control_panel":
+            self.left_display_stack.setCurrentIndex(2)
+            self.plotter.clear_box_widgets()
+            self.plotter.render()
+            return
+
+        if self.core.raw_data is None:
+            self.left_display_stack.setCurrentIndex(0)
+            self.plotter.clear_actors()
+            self.plotter.clear_box_widgets()
+            self.plotter.render()
+            self.ax_2d.clear()
+            self.canvas_2d.draw()
+            return
+
+        try:
+            context = self._compute_render_context(spec)
+        except ValueError as exc:
+            self._show_message("Render failed", str(exc), QMessageBox.Warning)
+            return
+        if context is None:
+            return
+
+        self.current_render_context = context
+        levels = self._get_display_levels()
+        mapping_mode = self.page_render.combo_map.currentText()
+        current_cmap = self.page_render.get_selected_cmap()
+
+        if context["view"] == "3d":
+            self.left_display_stack.setCurrentIndex(0)
+            clip_ranges = context.get("clip_ranges")
+            render_clip = None
+            if clip_ranges is not None:
+                render_clip = self.core.logical_to_render_bounds(clip_ranges, context["data"].shape)
+
+            VisualEngine.render_3d(
+                self.plotter,
+                context["data"],
+                levels,
+                opac_mode=mapping_mode,
+                clip_ranges=render_clip,
+                show_axes=self.page_image.switch_axes.isChecked(),
+                core_coords=context.get("coords", self.core.coords),
+                cmap=current_cmap,
+            )
+        elif context["view"] == "2d":
+            self.left_display_stack.setCurrentIndex(1)
+            self.plotter.clear_box_widgets()
+            VisualEngine.render_2d_slice(
+                self.ax_2d,
+                self.canvas_2d,
+                context["data"],
+                context["slice_info"],
+                levels,
+                context.get("coords", self.core.coords),
+                cmap=current_cmap,
+            )
+        else:
+            self.left_display_stack.setCurrentIndex(1)
+            self.plotter.clear_box_widgets()
+            if context["view"] == "waterfall":
+                self._render_waterfall_plot(context)
+            else:
+                self._render_1d_plot(context)
+
+        if self._can_show_interactive_box():
+            self._rebuild_interactive_box()
+            self.plotter.render()
+        else:
+            self.plotter.clear_box_widgets()
+            self.plotter.render()
+
+        self._refresh_axis_crop_interaction(spec, context)
+
+    def on_result_page_closed(self, page_id):
+        self.page_denoise_cache.pop(page_id, None)
+        self.axis_crop_candidates.pop(page_id, None)
+        if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
+            self.current_render_context = None
+            self._clear_axis_crop_interaction(redraw=False)
+
+        if self.last_visual_page_id == page_id:
+            fallback_spec = self.left_workspace.current_spec()
+            if fallback_spec is None or fallback_spec.page_kind == "control_panel":
+                fallback_spec = self.left_workspace.home_spec()
+            if fallback_spec is not None and fallback_spec.page_kind != "control_panel":
+                self.last_visual_page_id = fallback_spec.page_id
+            else:
+                self.last_visual_page_id = self.left_workspace.home_page_id
+
+    def on_toggle_interactive_box(self, checked):
+        if checked and self._can_show_interactive_box():
+            self._rebuild_interactive_box()
+            self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
+        else:
+            self.plotter.clear_box_widgets()
+
+        if checked:
+            self._refresh_axis_crop_interaction(self.left_workspace.current_spec(), self.current_render_context)
+        else:
+            self._clear_axis_crop_interaction(redraw=self.left_display_stack.currentIndex() == 1)
+        self.plotter.render()
+
+    def on_cut(self):
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            if not self._supports_axis_crop_spec(current_spec):
+                self._show_message(
+                    "2D crop unavailable",
+                    "Rectangular 2D crop is only supported for X-Integral / Y-Integral pages because the plot must contain E.",
+                    QMessageBox.Warning,
+                )
+                return
+
+            crop_rect = self.axis_crop_candidates.get(current_spec.page_id)
+            if crop_rect is None:
+                self._show_message(
+                    "No crop selected",
+                    "Enable crop interaction and drag a rectangle on the 2D axis-integral plot first.",
+                    QMessageBox.Information,
+                )
+                return
+
+            spec = self._build_axis_integral_crop_spec(current_spec, crop_rect)
+            if spec is None:
+                self._show_message("Crop failed", "Unable to build a cropped axis-integral page from the current selection.", QMessageBox.Warning)
+                return
+
+            if "denoise_methods" in current_spec.params:
+                spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
+            spec.title = self._make_unique_page_title(spec.title)
+            self.left_workspace.add_page(spec)
+            return
+
+        texts = self.page_image.get_slice_values()
+        if self.precise_logical_bounds is not None and texts == self.last_synced_slice_texts:
+            logical_texts = self._logical_bounds_to_texts(self.precise_logical_bounds)
+        else:
+            logical_texts = self.core.physical_texts_to_logical_texts(texts)
+
+        result = self.core.process_cut_logic(logical_texts)
+        if not result:
+            return
+
+        self.clip_ranges = result.get("clip_ranges")
+        self.home_slice_info = result.get("slice_info")
+        self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
+        self.global_refresh()
+
     def export_current_result(self):
         spec = self.left_workspace.current_spec()
         if spec is None or self.core.raw_data is None:
@@ -2042,7 +2744,7 @@ class My3DAnalyzer(QWidget):
         if spec.page_kind == "home":
             clip_info = self._get_clip_slices()
             if clip_info is None:
-                self._show_message("未进行切片设置", "请先进行切片设置。", QMessageBox.Warning)
+                self._show_message("No slice configured", "Please configure a slice or cut range first.", QMessageBox.Warning)
                 return
 
             slices, _ = clip_info
@@ -2057,7 +2759,7 @@ class My3DAnalyzer(QWidget):
                 "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
                 "time": np.asarray(coords["delay"], dtype=np.float32),
             }
-            title = "保存当前立方体数据"
+            title = "Save current slice cube"
             default_name = "slice_cube.mat"
         elif spec.page_kind == "time_integral":
             self._persist_time_integral_page_state(spec)
@@ -2070,27 +2772,34 @@ class My3DAnalyzer(QWidget):
                 "ky": np.asarray(coords["Y"], dtype=np.float32),
                 "E": np.asarray(coords["E"], dtype=np.float32),
             }
-            title = "保存时间积分结果"
+            title = "Save time-integral result"
             default_name = self._build_time_integral_default_name(t_low, t_up)
         elif spec.page_kind == "axis_integral":
             axis_context = self._get_axis_integral_export_context(spec, raw_data, coords)
             if axis_context is None:
                 return
             export_data = axis_context["export_data"]
-            title = "保存坐标轴积分结果"
+            title = "Save axis-integral result"
+            default_name = axis_context["default_name"]
+        elif spec.page_kind == "axis_integral_crop":
+            axis_context = self._get_axis_integral_crop_export_context(spec, raw_data, coords)
+            if axis_context is None:
+                return
+            export_data = axis_context["export_data"]
+            title = "Save cropped axis-integral result"
             default_name = axis_context["default_name"]
         elif spec.page_kind == "slice_dos":
             export_data = {
                 "time": np.asarray(coords["delay"], dtype=np.float32),
                 "intensity": np.asarray(self._compute_slice_dos(raw_data, spec.params["clip_ranges"]), dtype=np.float32),
             }
-            title = "保存切片内强度积分结果"
+            title = "Save slice-integrated intensity"
             default_name = "slice_dos.mat"
         elif spec.page_kind == "waterfall_edc":
             try:
                 context = self._get_waterfall_edc_context(spec, raw_data, coords)
             except ValueError as exc:
-                self._show_message("保存 EDC 瀑布图失败", str(exc), QMessageBox.Warning)
+                self._show_message("Save failed", str(exc), QMessageBox.Warning)
                 return
             if context is None:
                 return
@@ -2101,35 +2810,82 @@ class My3DAnalyzer(QWidget):
                 "integrated_axis": np.asarray([context["integrated_axis_label"]]),
                 "integrated_range": np.asarray(context["integrated_range"], dtype=np.float32),
             }
-            title = "保存 EDC 瀑布图结果"
+            if context.get("crop_rect") is not None:
+                export_data["crop_rect"] = np.asarray(
+                    [
+                        int(context["crop_rect"]["x_low"]),
+                        int(context["crop_rect"]["x_up"]),
+                        int(context["crop_rect"]["y_low"]),
+                        int(context["crop_rect"]["y_up"]),
+                    ],
+                    dtype=np.int32,
+                )
+            title = "Save EDC waterfall result"
             default_name = "waterfall_edc.mat"
         elif spec.page_kind == "second_derivative":
             context = self._get_second_derivative_context(spec, raw_data, coords)
             if context is None:
                 return
             axis_index = int(context["slice_info"].get("axis", -1))
+            plot_axes = context.get("plot_axes")
+            plot_bounds = context.get("plot_logical_bounds")
+            energy_axis = np.asarray(coords["E"], dtype=np.float32)
             export_data = {
                 "sample": np.asarray(context["data"], dtype=np.float32),
-                "E": np.asarray(coords["E"], dtype=np.float32),
+                "E": energy_axis,
             }
-            if axis_index == 0:
+            if plot_axes is not None and plot_bounds is not None:
+                y_low = int(plot_bounds["y_low"])
+                y_up = int(plot_bounds["y_up"])
+                export_data["E"] = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
+                if axis_index == 0:
+                    export_data["ky"] = np.asarray(
+                        coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
+                        dtype=np.float32,
+                    )
+                elif axis_index == 1:
+                    export_data["kx"] = np.asarray(
+                        coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
+                        dtype=np.float32,
+                    )
+            elif axis_index == 0:
                 export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
             elif axis_index == 1:
                 export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
-            title = "保存二阶导结果"
+            title = "Save second-derivative result"
             default_name = "second_derivative.mat"
         else:
             context = self._get_energy_dos_context(spec, raw_data, coords)
-            if self._is_current_page(spec):
-                t_index = int(self.page_image.slider_time.value())
-            else:
-                t_index = int(spec.params["t_index"])
+            if context is None:
+                return
             export_data = {
-                "time": np.asarray([coords["delay"][t_index]], dtype=np.float32),
-                "E": np.asarray(coords["E"], dtype=np.float32),
+                "E": np.asarray(context["x_data"], dtype=np.float32),
                 "intensity": np.asarray(context["y_data"], dtype=np.float32),
             }
-            title = "保存 Energy-DOS 结果"
+            source_kind = spec.params.get("source_page_kind", "home")
+            if source_kind == "axis_integral":
+                if spec.params.get("source_mode") == "time_integral":
+                    export_data["time_range"] = np.asarray(
+                        [
+                            coords["delay"][int(spec.params["source_t_low"])],
+                            coords["delay"][int(spec.params["source_t_up"])],
+                        ],
+                        dtype=np.float32,
+                    )
+                else:
+                    export_data["time"] = np.asarray(
+                        [coords["delay"][int(spec.params.get("source_t_index", int(self.page_image.slider_time.value())))]] ,
+                        dtype=np.float32,
+                    )
+            else:
+                if self._is_current_page(spec):
+                    t_index = int(self.page_image.slider_time.value())
+                else:
+                    t_index = int(spec.params.get("t_index", int(self.page_image.slider_time.value())))
+                export_data["time"] = np.asarray([coords["delay"][t_index]], dtype=np.float32)
+            if "clip_ranges" in spec.params:
+                export_data["clip_ranges"] = np.asarray(spec.params["clip_ranges"], dtype=np.float32)
+            title = "Save Energy-DOS result"
             default_name = "energy_dos.mat"
 
         path = self._choose_export_path(title, default_name)
