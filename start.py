@@ -1,5 +1,9 @@
 import sys
 import os
+from qt_bootstrap import configure_qt_plugin_path
+
+configure_qt_plugin_path()
+
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget, QFrame, QButtonGroup, \
     QFileDialog, QMessageBox

@@ -14,5 +14,6 @@ pyvista>=0.43
 pyvistaqt>=0.11
 vtk>=9.2
 
-# SiliconUI is not published on PyPI yet
-git+https://github.com/ChinaIceF/PyQt-SiliconUI.git@main
+# SiliconUI is not published on PyPI yet.
+# Install from the source archive so users do not need a local git client/proxy.
+https://github.com/ChinaIceF/PyQt-SiliconUI/archive/refs/heads/main.zip

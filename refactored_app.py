@@ -4,6 +4,10 @@ import re
 import uuid
 from pathlib import Path
 
+from qt_bootstrap import configure_qt_plugin_path
+
+configure_qt_plugin_path()
+
 import numpy as np
 from PyQt5.QtCore import QEvent, QTimer, Qt
 from PyQt5.QtWidgets import (
