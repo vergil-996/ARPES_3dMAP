@@ -231,6 +231,7 @@ class DataProcessPage(QWidget):
             "\u5207\u7247\u5185\u5f3a\u5ea6\u79ef\u5206",
             "\u80fd\u7ea7\u6001\u5bc6\u5ea6",
             "EDC\u7011\u5e03\u56fe",
+            "\u5355\u6761 EDC \u66f2\u7ebf",
             "\u4e8c\u9636\u5bfc",
         ])
         self.btn_other_apply = self._create_red_btn("应用")

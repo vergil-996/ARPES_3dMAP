@@ -10,7 +10,9 @@ configure_qt_plugin_path()
 
 import numpy as np
 from PyQt5.QtCore import QEvent, QTimer, Qt
+from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFileDialog,
     QFrame,
@@ -80,6 +82,8 @@ class My3DAnalyzer(QWidget):
         self.loaded_npz_stem = "data"
         self.global_waterfall_step = BlankControlPage.DEFAULT_WATERFALL_STEP
         self.global_waterfall_step_custom = False
+        self._modifier_page_shortcut_candidate = None
+        self._modifier_page_shortcut_cancelled = False
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -105,6 +109,7 @@ class My3DAnalyzer(QWidget):
         self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
+        self._install_page_keyboard_shortcuts()
         self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
@@ -136,6 +141,107 @@ class My3DAnalyzer(QWidget):
         self.setWindowOpacity(1)
         self.activateWindow()
         self.raise_()
+
+    def _install_page_keyboard_shortcuts(self):
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.KeyPress:
+            if not self._page_keyboard_shortcuts_enabled():
+                self._reset_page_keyboard_shortcut()
+                return super().eventFilter(watched, event)
+            return self._handle_page_shortcut_key_press(event)
+        if event.type() == QEvent.KeyRelease:
+            if not self._page_keyboard_shortcuts_enabled():
+                self._reset_page_keyboard_shortcut()
+                return super().eventFilter(watched, event)
+            return self._handle_page_shortcut_key_release(event)
+        return super().eventFilter(watched, event)
+
+    def _page_keyboard_shortcuts_enabled(self):
+        return (
+            self.isVisible()
+            and QApplication.activeWindow() is self
+            and QApplication.activeModalWidget() is None
+        )
+
+    def _reset_page_keyboard_shortcut(self):
+        self._modifier_page_shortcut_candidate = None
+        self._modifier_page_shortcut_cancelled = False
+
+    def _handle_page_shortcut_key_press(self, event):
+        if event.isAutoRepeat():
+            return False
+
+        key = event.key()
+        if key in (Qt.Key_Shift, Qt.Key_Control):
+            if self._modifier_page_shortcut_candidate is None:
+                self._modifier_page_shortcut_candidate = key
+                self._modifier_page_shortcut_cancelled = False
+            elif self._modifier_page_shortcut_candidate != key:
+                self._modifier_page_shortcut_cancelled = True
+            return False
+
+        if self._modifier_page_shortcut_candidate is not None:
+            self._modifier_page_shortcut_cancelled = True
+        return False
+
+    def _handle_page_shortcut_key_release(self, event):
+        if event.isAutoRepeat():
+            return False
+
+        key = event.key()
+        if key != self._modifier_page_shortcut_candidate:
+            return False
+
+        if not self._modifier_page_shortcut_cancelled:
+            if key == Qt.Key_Shift:
+                self._step_page_under_cursor(1)
+            elif key == Qt.Key_Control:
+                self._step_page_under_cursor(-1)
+
+        self._modifier_page_shortcut_candidate = None
+        self._modifier_page_shortcut_cancelled = False
+        return False
+
+    @staticmethod
+    def _cursor_inside_widget(widget, global_pos):
+        return widget is not None and widget.isVisible() and widget.rect().contains(widget.mapFromGlobal(global_pos))
+
+    def _step_page_under_cursor(self, step):
+        cursor_pos = QCursor.pos()
+        if self._cursor_inside_widget(self.right_panel, cursor_pos):
+            self._step_control_page(step)
+        elif self._cursor_inside_widget(self.left_workspace, cursor_pos):
+            self._step_left_workspace_page(step)
+
+    def _step_control_page(self, step):
+        page_count = int(self.page_container.count())
+        if page_count <= 0:
+            return
+        current_index = int(self.page_container.currentIndex())
+        target_index = (current_index + int(step)) % page_count
+        self._select_control_page(target_index)
+
+    def _step_left_workspace_page(self, step):
+        page_ids = [
+            page_id
+            for page_id in self.left_workspace.page_buttons.keys()
+            if page_id in self.left_workspace.page_specs
+        ]
+        if not page_ids:
+            return
+
+        current_page_id = self.left_workspace.current_page_id
+        try:
+            current_index = page_ids.index(current_page_id)
+        except ValueError:
+            current_index = 0
+
+        target_index = (current_index + int(step)) % len(page_ids)
+        self.left_workspace.activate_page(page_ids[target_index])
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -365,7 +471,7 @@ class My3DAnalyzer(QWidget):
             return "frame"
         if spec.page_kind == "time_integral":
             return "time_integral"
-        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc", "second_derivative"}:
+        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc", "edc_curve", "second_derivative"}:
             return self._normalize_axis_source_mode(
                 spec.params.get(
                     "source_mode",
@@ -816,7 +922,7 @@ class My3DAnalyzer(QWidget):
         if self._is_time_integral_axis_page(spec):
             return True
         return (
-            spec.page_kind in {"waterfall_edc", "second_derivative"}
+            spec.page_kind in {"waterfall_edc", "edc_curve", "second_derivative"}
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
         )
 
@@ -1101,7 +1207,7 @@ class My3DAnalyzer(QWidget):
         )
         return (
             f"{axis_info['integrated_axis_label']}-Integral Crop "
-            f"[{axis_info['x_label']} {k_low}~{k_up}, E {e_low}~{e_up}]"
+            f"[{axis_info['x_label']} {k_low}~{k_up}, {axis_info['y_label']} {e_low}~{e_up}]"
         )
 
     def _get_axis_integral_export_context(self, spec, raw_data, coords):
@@ -1174,11 +1280,11 @@ class My3DAnalyzer(QWidget):
         y_up = int(plot_bounds["y_up"])
         params = self._resolved_axis_integral_params(spec)
         axis_info = self._axis_plot_info(params["axis_index"])
+        x_values = np.asarray(coords[plot_axes["x_key"]][x_low:x_up + 1], dtype=np.float32)
+        y_values = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
 
         export_data = {
             "sample": np.asarray(context["data"], dtype=np.float32),
-            "k": np.asarray(coords[plot_axes["x_key"]][x_low:x_up + 1], dtype=np.float32),
-            "E": np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32),
             "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
             "integrated_range": np.asarray(
                 [
@@ -1197,8 +1303,14 @@ class My3DAnalyzer(QWidget):
                 dtype=np.float32,
             ),
         }
+        if plot_axes["y_key"] == "E":
+            export_data["k"] = x_values
+            export_data["E"] = y_values
+        else:
+            export_data[plot_axes["x_label"]] = x_values
+            export_data[plot_axes["y_label"]] = y_values
         default_name = self._sanitize_filename_component(
-            f"{axis_info['integrated_axis_label']}_integral_crop_{plot_axes['x_label']}_{x_low}_{x_up}_E_{y_low}_{y_up}_{self._get_loaded_npz_stem()}"
+            f"{axis_info['integrated_axis_label']}_integral_crop_{plot_axes['x_label']}_{x_low}_{x_up}_{plot_axes['y_label']}_{y_low}_{y_up}_{self._get_loaded_npz_stem()}"
         )
         return {"export_data": export_data, "default_name": default_name}
 
@@ -1487,6 +1599,86 @@ class My3DAnalyzer(QWidget):
             "xlabel": "Energy (eV)",
         }
 
+    def _edc_curve_title(self, params):
+        crop_rect = self._axis_crop_rect_from_params(params)
+        if crop_rect is None:
+            return "EDC Curve"
+
+        kx_low = self._format_filename_number(self.core.logical_to_physical("X", int(crop_rect["x_low"])))
+        kx_up = self._format_filename_number(self.core.logical_to_physical("X", int(crop_rect["x_up"])))
+        ky_low = self._format_filename_number(self.core.logical_to_physical("Y", int(crop_rect["y_low"])))
+        ky_up = self._format_filename_number(self.core.logical_to_physical("Y", int(crop_rect["y_up"])))
+        return f"EDC Curve [kx {kx_low}~{kx_up}, ky {ky_low}~{ky_up}]"
+
+    def _build_edc_curve_context_from_params(self, raw_data, coords, params):
+        if raw_data is None or coords is None:
+            return None
+        if int(params.get("axis_index", -1)) != 2:
+            return None
+
+        crop_rect = self._axis_crop_rect_from_params(params)
+        if crop_rect is None:
+            return None
+
+        source_spec = self._build_axis_source_spec_from_params(params)
+        if source_spec is None:
+            return None
+        source_context = self._get_3d_source_context_for_axis(source_spec, raw_data)
+        source_data = np.asarray(source_context["data"], dtype=np.float64)
+
+        x_low = int(np.clip(crop_rect["x_low"], 0, source_data.shape[0] - 1))
+        x_up = int(np.clip(crop_rect["x_up"], 0, source_data.shape[0] - 1))
+        y_low = int(np.clip(crop_rect["y_low"], 0, source_data.shape[1] - 1))
+        y_up = int(np.clip(crop_rect["y_up"], 0, source_data.shape[1] - 1))
+        if x_low > x_up:
+            x_low, x_up = x_up, x_low
+        if y_low > y_up:
+            y_low, y_up = y_up, y_low
+
+        selected_cube = source_data[x_low:x_up + 1, y_low:y_up + 1, :]
+        intensity = np.sum(selected_cube, axis=(0, 1))
+        energy_axis = np.asarray(coords["E"], dtype=np.float64)
+
+        source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
+        context = {
+            "view": "1d",
+            "x_data": energy_axis,
+            "y_data": intensity,
+            "title": self._edc_curve_title(params),
+            "xlabel": "Energy (eV)",
+            "crop_rect": {
+                "x_low": x_low,
+                "x_up": x_up,
+                "y_low": y_low,
+                "y_up": y_up,
+            },
+            "kx_range": (
+                float(self.core.logical_to_physical("X", x_low)),
+                float(self.core.logical_to_physical("X", x_up)),
+            ),
+            "ky_range": (
+                float(self.core.logical_to_physical("Y", y_low)),
+                float(self.core.logical_to_physical("Y", y_up)),
+            ),
+            "source_mode": source_mode,
+        }
+        if source_mode == "time_integral":
+            t_low = int(params.get("source_t_low", int(self.page_data.s_t_low.value())))
+            t_up = int(params.get("source_t_up", int(self.page_data.s_t_up.value())))
+            context["source_t_range"] = (
+                float(coords["delay"][t_low]),
+                float(coords["delay"][t_up]),
+            )
+            context["source_t_indices"] = (t_low, t_up)
+        else:
+            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+            context["source_t_index"] = t_index
+            context["source_t_value"] = float(coords["delay"][t_index])
+        return context
+
+    def _get_edc_curve_context(self, spec, raw_data, coords):
+        return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
+
     @staticmethod
     def _compute_second_derivative_along_energy(data_2d, energy_axis):
         energy_axis = np.asarray(energy_axis, dtype=np.float64).flatten()
@@ -1709,6 +1901,8 @@ class My3DAnalyzer(QWidget):
             return self._get_energy_dos_context(spec, raw_data, coords)
         if spec.page_kind == "waterfall_edc":
             return self._get_waterfall_edc_context(spec, raw_data, coords)
+        if spec.page_kind == "edc_curve":
+            return self._get_edc_curve_context(spec, raw_data, coords)
         if spec.page_kind == "second_derivative":
             return self._get_second_derivative_context(spec, raw_data, coords)
         return self._get_home_render_context(spec, raw_data, coords)
@@ -1976,14 +2170,14 @@ class My3DAnalyzer(QWidget):
         params = self._resolved_axis_integral_params(spec)
         if params is None:
             return False
-        return int(params["axis_index"]) in (0, 1)
+        return int(params["axis_index"]) in (0, 1, 2)
 
     def _build_axis_integral_crop_spec(self, current_spec, crop_rect):
         if current_spec is None or current_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
             return None
 
         params = self._resolved_axis_integral_params(current_spec)
-        if params is None or int(params["axis_index"]) not in (0, 1):
+        if params is None or int(params["axis_index"]) not in (0, 1, 2):
             return None
 
         current_context = self.current_render_context if self._is_current_page(current_spec) else None
@@ -2098,6 +2292,61 @@ class My3DAnalyzer(QWidget):
             source_page_id=current_spec.page_id,
             params=spec_params,
         )
+        self._seed_control_state_for_spec(spec)
+        return spec
+
+    def _show_edc_curve_source_error(self):
+        self._show_message(
+            "Cannot create EDC curve",
+            "Please first crop a rectangular region from a Z-axis integral result page, then create the single EDC curve.",
+            QMessageBox.Warning,
+        )
+
+    def _build_edc_curve_spec(self):
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is None or current_spec.page_kind != "axis_integral_crop":
+            self._show_edc_curve_source_error()
+            return None
+
+        params = self._resolved_axis_integral_params(current_spec)
+        if params is None or int(params["axis_index"]) != 2:
+            self._show_edc_curve_source_error()
+            return None
+
+        crop_rect = self._axis_crop_rect_from_params(current_spec.params)
+        if crop_rect is None:
+            self._show_edc_curve_source_error()
+            return None
+
+        spec_params = {
+            "source_page_id": current_spec.page_id,
+            "source_page_kind": "axis_integral_crop",
+            "axis_index": 2,
+            "integral_low": int(params["low"]),
+            "integral_up": int(params["up"]),
+            "integral_mid": int(params["mid"]),
+            "source_mode": params.get("source_mode", "frame"),
+            "source_t_index": int(params["source_t_index"]),
+            "source_t_low": int(params["source_t_low"]),
+            "source_t_up": int(params["source_t_up"]),
+            "crop_k_low": int(crop_rect["x_low"]),
+            "crop_k_up": int(crop_rect["x_up"]),
+            "crop_e_low": int(crop_rect["y_low"]),
+            "crop_e_up": int(crop_rect["y_up"]),
+        }
+
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._edc_curve_title(spec_params),
+            page_kind="edc_curve",
+            source_module="data_process",
+            source_page_id=current_spec.page_id,
+            params=spec_params,
+        )
+        raw_data, coords = self._get_display_state_for_spec(current_spec)
+        if self._build_edc_curve_context_from_params(raw_data, coords, spec.params) is None:
+            self._show_edc_curve_source_error()
+            return None
         self._seed_control_state_for_spec(spec)
         return spec
 
@@ -2395,6 +2644,8 @@ class My3DAnalyzer(QWidget):
             spec = self._build_energy_dos_spec()
         elif current_index == 2:
             spec = self._build_waterfall_edc_spec()
+        elif current_index == 3:
+            spec = self._build_edc_curve_spec()
         else:
             spec = self._build_second_derivative_spec()
 
@@ -2470,7 +2721,7 @@ class My3DAnalyzer(QWidget):
             context = self.current_render_context
         if context is None or context.get("view") != "2d":
             return False
-        return int(context.get("slice_info", {}).get("axis", -1)) in (0, 1)
+        return int(context.get("slice_info", {}).get("axis", -1)) in (0, 1, 2)
 
     def _current_axis_crop_rect(self, spec, context):
         if spec is None or context is None:
@@ -2694,7 +2945,7 @@ class My3DAnalyzer(QWidget):
             if not self._supports_axis_crop_spec(current_spec):
                 self._show_message(
                     "2D crop unavailable",
-                    "Rectangular 2D crop is only supported for X-Integral / Y-Integral pages because the plot must contain E.",
+                    "Rectangular 2D crop is only supported for axis-integral result pages.",
                     QMessageBox.Warning,
                 )
                 return
@@ -2799,6 +3050,34 @@ class My3DAnalyzer(QWidget):
             }
             title = "Save slice-integrated intensity"
             default_name = "slice_dos.mat"
+        elif spec.page_kind == "edc_curve":
+            context = self._get_edc_curve_context(spec, raw_data, coords)
+            if context is None:
+                return
+            export_data = {
+                "E": np.asarray(context["x_data"], dtype=np.float32),
+                "intensity": np.asarray(context["y_data"], dtype=np.float32),
+                "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
+                "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
+                "source_mode": np.asarray([context["source_mode"]]),
+                "crop_rect": np.asarray(
+                    [
+                        int(context["crop_rect"]["x_low"]),
+                        int(context["crop_rect"]["x_up"]),
+                        int(context["crop_rect"]["y_low"]),
+                        int(context["crop_rect"]["y_up"]),
+                    ],
+                    dtype=np.int32,
+                ),
+            }
+            if context["source_mode"] == "time_integral":
+                export_data["source_t_range"] = np.asarray(context["source_t_range"], dtype=np.float32)
+                export_data["source_t_indices"] = np.asarray(context["source_t_indices"], dtype=np.int32)
+            else:
+                export_data["source_t_index"] = np.asarray([context["source_t_index"]], dtype=np.int32)
+                export_data["source_t_value"] = np.asarray([context["source_t_value"]], dtype=np.float32)
+            title = "Save EDC curve result"
+            default_name = "edc_curve.mat"
         elif spec.page_kind == "waterfall_edc":
             try:
                 context = self._get_waterfall_edc_context(spec, raw_data, coords)

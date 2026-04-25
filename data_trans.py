@@ -47,6 +47,13 @@ def find_key(keys, candidates):
     return None
 
 
+def normalize_hdf5_sample(sample):
+    """MATLAB v7.3 stores HDF5 arrays in reversed dimension order."""
+    if sample.ndim in (3, 4):
+        return sample.transpose(tuple(reversed(range(sample.ndim))))
+    return sample
+
+
 # ===== 核心转换 =====
 def convert(src, dst):
     mode, data = load_mat_auto(src)
@@ -72,7 +79,7 @@ def convert(src, dst):
         def read_array(obj, key):
             if key is None:
                 return None
-            return np.array(obj[key]).squeeze()
+            return np.array(obj[key]).squeeze().reshape(-1)
 
         kx = read_array(data, kx_key)
         ky = read_array(data, ky_key)
@@ -80,6 +87,9 @@ def convert(src, dst):
 
         if mode == "h5py":
             sample = np.array(data[s_key])
+            print("HDF5 sample shape:", sample.shape)
+            sample = normalize_hdf5_sample(sample)
+            print("规范化 sample shape:", sample.shape)
         else:
             sample = data[s_key]
 
@@ -105,6 +115,11 @@ def convert(src, dst):
             else:
                 raise ValueError(f"❌ 不支持维度: {sample.ndim}")
 
+        if sample.ndim not in (3, 4):
+            raise ValueError(f"❌ 不支持维度: {sample.ndim}")
+
+        axis_order = ["X", "Y", "E", "T"] if sample.ndim == 4 else ["X", "Y", "E"]
+
         # ===== 类型优化 =====
         sample = sample.astype(np.float32)
 
@@ -112,6 +127,7 @@ def convert(src, dst):
         save_dict = {
             "sample": sample,
             "time": time,
+            "axis_order": np.array(axis_order),
         }
         if kx is not None:
             save_dict["kx"] = kx

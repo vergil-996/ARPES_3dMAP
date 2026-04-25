@@ -28,8 +28,123 @@ class AnalyzerCore(QObject):
             def safe_get_array(key):
                 try:
                     return data[key]
-                except ValueError:
+                except (KeyError, ValueError):
                     return None
+
+            search_map = {
+                'X': ['kx', 'x', 'X'],
+                'Y': ['ky', 'y', 'Y'],
+                'E': ['E', 'energy', 'En', 'Ef'],
+                'T': ['time', 'delay', 't', 'T'],
+            }
+
+            def find_coord_key(role):
+                return next((k for k in search_map[role] if k in data), None)
+
+            def coord_length(role):
+                key = find_coord_key(role)
+                if key is None:
+                    return None
+                arr = safe_get_array(key)
+                if arr is None:
+                    return None
+                return int(arr.size)
+
+            def normalize_role_name(value):
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="ignore")
+                value = str(value).strip()
+                aliases = {
+                    "kx": "X",
+                    "x": "X",
+                    "X": "X",
+                    "ky": "Y",
+                    "y": "Y",
+                    "Y": "Y",
+                    "E": "E",
+                    "energy": "E",
+                    "En": "E",
+                    "Ef": "E",
+                    "time": "T",
+                    "delay": "T",
+                    "t": "T",
+                    "T": "T",
+                }
+                return aliases.get(value, value)
+
+            def roles_from_axis_order(role_order):
+                axis_order_arr = safe_get_array("axis_order")
+                if axis_order_arr is None:
+                    return None
+
+                axis_order = [
+                    normalize_role_name(item)
+                    for item in np.asarray(axis_order_arr).reshape(-1).tolist()
+                ]
+                if len(axis_order) != len(role_order):
+                    return None
+                if set(axis_order) != set(role_order):
+                    return None
+                return {role: axis_order.index(role) for role in role_order}
+
+            def roles_from_legacy_hdf5_shape(shape, role_order):
+                x_len = coord_length('X')
+                y_len = coord_length('Y')
+                e_len = coord_length('E')
+                t_len = coord_length('T')
+
+                if len(shape) == 3 and {'X', 'Y', 'E'} == set(role_order):
+                    # Legacy converter saved MATLAB v7.3 HDF5 data as (E, Y, X).
+                    if (
+                        x_len is not None and y_len is not None and e_len is not None
+                        and shape[0] == e_len and shape[1] == y_len and shape[2] == x_len
+                        and not (shape[0] == x_len and shape[1] == y_len and shape[2] == e_len)
+                    ):
+                        return {'X': 2, 'Y': 1, 'E': 0}
+
+                if len(shape) == 4 and {'X', 'Y', 'E', 'T'} == set(role_order):
+                    # Legacy converter saved MATLAB v7.3 HDF5 data as (T, E, Y, X).
+                    if (
+                        x_len is not None and y_len is not None and t_len is not None
+                        and shape[0] == t_len and shape[2] == y_len and shape[3] == x_len
+                        and (e_len is None or shape[1] == e_len)
+                        and not (shape[0] == x_len and shape[1] == y_len and (e_len is None or shape[2] == e_len) and shape[3] == t_len)
+                    ):
+                        return {'X': 3, 'Y': 2, 'E': 1, 'T': 0}
+
+                return None
+
+            def roles_from_coord_lengths(shape, role_order):
+                roles = {role: -1 for role in role_order}
+                idx_pool = list(range(len(shape)))
+                preferred = {role: idx for idx, role in enumerate(role_order)}
+
+                # Prefer the canonical order first, so equal-length X/Y axes
+                # keep the documented (X, Y, E, T) interpretation.
+                for role in role_order:
+                    length = coord_length(role)
+                    preferred_idx = preferred[role]
+                    if length is not None and preferred_idx in idx_pool and shape[preferred_idx] == length:
+                        roles[role] = preferred_idx
+                        idx_pool.remove(preferred_idx)
+
+                for role in role_order:
+                    if roles[role] != -1:
+                        continue
+                    length = coord_length(role)
+                    if length is None:
+                        continue
+                    for idx in list(idx_pool):
+                        if shape[idx] == length:
+                            roles[role] = idx
+                            idx_pool.remove(idx)
+                            break
+
+                for role in role_order:
+                    if roles[role] == -1 and idx_pool:
+                        roles[role] = idx_pool.pop(0)
+
+                return roles
 
             # 1. 自动寻找 4 维或 3 维数据矩阵
             main_key = None
@@ -54,49 +169,15 @@ class AnalyzerCore(QObject):
             sh = list(raw.shape)
             self.has_time_axis = (main_ndim == 4)
             if self.has_time_axis:
-                idx_pool = [0, 1, 2, 3]
-                roles = {'X': -1, 'Y': -1, 'E': -1, 'T': -1}
                 role_order = ['X', 'Y', 'E', 'T']
             else:
-                idx_pool = [0, 1, 2]
-                roles = {'X': -1, 'Y': -1, 'E': -1}
                 role_order = ['X', 'Y', 'E']
 
-            # 建立键名搜索组
-            search_map = {'X': ['kx', 'x', 'X'], 'Y': ['ky', 'y', 'Y'], 'E': ['E', 'energy', 'En', 'Ef', 'E'],
-                'T': ['time', 'delay', 't','T']}
-
-            # 第一步：根据键名和长度匹配（初步锁定）
-            for role in role_order:
-                keys = search_map[role]
-                for k in keys:
-                    if k in data:
-                        coord_arr = safe_get_array(k)
-                        if coord_arr is None:
-                            continue
-                        length = coord_arr.size
-                        # 寻找长度匹配且尚未被分配的维度
-                        for i in idx_pool:
-                            if sh[i] == length:
-                                roles[role] = i
-                                idx_pool.remove(i)
-                                break
-                        if roles[role] != -1: break
-
-            # 第二步：对于未识别出的维度（比如键名不匹配或三轴同长），根据物理跨度判定
-            if len(idx_pool) > 0:
-                # 剩余轴的物理特征分析
-                # 在 ARPES 中：E 轴跨度通常 < 20eV, K 轴跨度通常很大 (像素或 >100)
-                remaining_roles = [r for r, idx in roles.items() if idx == -1]
-                for i in list(idx_pool):
-                    # 尝试猜测这个维度对应的坐标数组（如果有的话）
-                    # 这里假设如果没匹配到键名，就按剩下的索引顺序补位，但引入跨度检查
-                    pass  # 基础补位在后面统一处理
-
-            # 第三步：保底补位（防止 repeated axis）
-            for role in role_order:
-                if roles[role] == -1 and idx_pool:
-                    roles[role] = idx_pool.pop(0)
+            roles = (
+                roles_from_axis_order(role_order)
+                or roles_from_legacy_hdf5_shape(sh, role_order)
+                or roles_from_coord_lengths(sh, role_order)
+            )
 
             # 3. 重排与内存优化
             if self.has_time_axis:
@@ -110,7 +191,7 @@ class AnalyzerCore(QObject):
             # 4. 坐标映射与单位同步
             self.coords = {}
 
-            # 助手函数：安全提取坐标并翻转
+            # 助手函数：安全提取坐标
             def get_coord(role_key, keys, fallback_shape_idx):
                 actual_key = next((k for k in keys if k in data), None)
                 if actual_key:
@@ -132,9 +213,6 @@ class AnalyzerCore(QObject):
                 self.coords['delay'] = get_coord('T', search_map['T'], 3)
             else:
                 self.coords['delay'] = np.array([0.0], dtype=np.float32)
-
-            # 兼容原有显示习惯：Y 轴物理坐标默认保持反向
-            self.coords['Y'] = np.flip(self.coords['Y'])
 
             return True, self.raw_data.shape
 

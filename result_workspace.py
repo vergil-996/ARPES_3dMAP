@@ -33,6 +33,7 @@ class ResultPageButton(PageButton):
         "slice_dos": "ic_fluent_table_stack_right_filled",
         "energy_dos": "ic_fluent_document_data_filled",
         "waterfall_edc": "ic_fluent_document_data_filled",
+        "edc_curve": "ic_fluent_document_data_filled",
         "second_derivative": "ic_fluent_document_data_filled",
     }
 
