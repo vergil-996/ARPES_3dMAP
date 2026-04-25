@@ -152,6 +152,8 @@ class My3DAnalyzer(QWidget):
             if not self._page_keyboard_shortcuts_enabled():
                 self._reset_page_keyboard_shortcut()
                 return super().eventFilter(watched, event)
+            if self._handle_number_page_shortcut(event):
+                return True
             return self._handle_page_shortcut_key_press(event)
         if event.type() == QEvent.KeyRelease:
             if not self._page_keyboard_shortcuts_enabled():
@@ -170,6 +172,40 @@ class My3DAnalyzer(QWidget):
     def _reset_page_keyboard_shortcut(self):
         self._modifier_page_shortcut_candidate = None
         self._modifier_page_shortcut_cancelled = False
+
+    @staticmethod
+    def _number_shortcut_index(event):
+        key_to_index = {
+            Qt.Key_1: 0,
+            Qt.Key_2: 1,
+            Qt.Key_3: 2,
+            Qt.Key_4: 3,
+        }
+        return key_to_index.get(event.key())
+
+    def _focus_accepts_number_input(self):
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None:
+            return False
+
+        class_names = []
+        current_class = focus_widget.__class__
+        while current_class is not object:
+            class_names.append(current_class.__name__)
+            current_class = current_class.__base__
+
+        editable_markers = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
+        return any(marker in class_name for class_name in class_names for marker in editable_markers)
+
+    def _handle_number_page_shortcut(self, event):
+        if event.isAutoRepeat() or event.modifiers() not in (Qt.NoModifier, Qt.KeypadModifier):
+            return False
+
+        index = self._number_shortcut_index(event)
+        if index is None or self._focus_accepts_number_input():
+            return False
+
+        return self._select_page_under_cursor(index)
 
     def _handle_page_shortcut_key_press(self, event):
         if event.isAutoRepeat():
@@ -217,6 +253,22 @@ class My3DAnalyzer(QWidget):
         elif self._cursor_inside_widget(self.left_workspace, cursor_pos):
             self._step_left_workspace_page(step)
 
+    def _select_page_under_cursor(self, index):
+        cursor_pos = QCursor.pos()
+        if self._cursor_inside_widget(self.right_panel, cursor_pos):
+            self._select_control_page_by_index(index)
+            return True
+        if self._cursor_inside_widget(self.left_workspace, cursor_pos):
+            self._select_left_workspace_page_by_index(index)
+            return True
+        return False
+
+    def _select_control_page_by_index(self, index):
+        if 0 <= index < self.page_container.count():
+            self._select_control_page(index)
+            return True
+        return False
+
     def _step_control_page(self, step):
         page_count = int(self.page_container.count())
         if page_count <= 0:
@@ -225,12 +277,22 @@ class My3DAnalyzer(QWidget):
         target_index = (current_index + int(step)) % page_count
         self._select_control_page(target_index)
 
-    def _step_left_workspace_page(self, step):
-        page_ids = [
+    def _ordered_left_workspace_page_ids(self):
+        return [
             page_id
             for page_id in self.left_workspace.page_buttons.keys()
             if page_id in self.left_workspace.page_specs
         ]
+
+    def _select_left_workspace_page_by_index(self, index):
+        page_ids = self._ordered_left_workspace_page_ids()
+        if 0 <= index < len(page_ids):
+            self.left_workspace.activate_page(page_ids[index])
+            return True
+        return False
+
+    def _step_left_workspace_page(self, step):
+        page_ids = self._ordered_left_workspace_page_ids()
         if not page_ids:
             return
 
@@ -646,10 +708,6 @@ class My3DAnalyzer(QWidget):
             }
 
         coords = self._clone_coords(self.original_coords)
-        if self.page_image.switch_flip.isChecked():
-            raw_data = np.flip(raw_data, axis=2)
-            coords["E"] = np.flip(coords["E"])
-
         return np.asarray(raw_data, dtype=np.float32), coords
 
     def _refresh_core_display_state(self):
@@ -658,10 +716,6 @@ class My3DAnalyzer(QWidget):
 
         display_raw = np.array(self.base_raw_data, copy=True)
         display_coords = self._clone_coords(self.base_coords)
-
-        if self.page_image.switch_flip.isChecked():
-            display_raw = np.flip(display_raw, axis=2)
-            display_coords["E"] = np.flip(display_coords["E"])
 
         self.core.raw_data = display_raw
         self.core.coords = display_coords
@@ -748,6 +802,51 @@ class My3DAnalyzer(QWidget):
             self.page_render.s_gamma.value(),
             self.page_render.s_up.value(),
         )
+
+    def _mirror_logical_bounds_for_display(self, bounds, shape):
+        if bounds is None:
+            return None
+
+        mirrored = list(bounds)
+        for axis_idx in range(3):
+            axis_max = max(int(shape[axis_idx]) - 1, 0)
+            low = float(bounds[axis_idx * 2])
+            up = float(bounds[axis_idx * 2 + 1])
+            mirrored[axis_idx * 2] = axis_max - up
+            mirrored[axis_idx * 2 + 1] = axis_max - low
+        return mirrored
+
+    def _render_context_for_visual_flip(self, context):
+        if not self.page_image.switch_flip.isChecked() or context is None:
+            return context
+
+        view = context.get("view")
+        if view == "2d":
+            render_context = dict(context)
+            slice_info = dict(render_context["slice_info"])
+            slice_info["display_flip"] = True
+            render_context["slice_info"] = slice_info
+            return render_context
+
+        if view != "3d":
+            return context
+
+        render_context = dict(context)
+        data = np.asarray(render_context["data"])
+        render_context["data"] = np.flip(data, axis=tuple(range(min(3, data.ndim))))
+
+        coords = self._clone_coords(render_context.get("coords", self.core.coords))
+        for axis_key in ("X", "Y", "E"):
+            if coords.get(axis_key) is not None:
+                coords[axis_key] = np.flip(coords[axis_key])
+        render_context["coords"] = coords
+
+        if render_context.get("clip_ranges") is not None:
+            render_context["clip_ranges"] = self._mirror_logical_bounds_for_display(
+                render_context["clip_ranges"],
+                data.shape,
+            )
+        return render_context
 
     def _current_delay_text(self, t_index):
         delays = self.core.coords.get("delay")
@@ -2860,46 +2959,47 @@ class My3DAnalyzer(QWidget):
             return
 
         self.current_render_context = context
+        render_context = self._render_context_for_visual_flip(context)
         levels = self._get_display_levels()
         mapping_mode = self.page_render.combo_map.currentText()
         current_cmap = self.page_render.get_selected_cmap()
 
-        if context["view"] == "3d":
+        if render_context["view"] == "3d":
             self.left_display_stack.setCurrentIndex(0)
-            clip_ranges = context.get("clip_ranges")
+            clip_ranges = render_context.get("clip_ranges")
             render_clip = None
             if clip_ranges is not None:
-                render_clip = self.core.logical_to_render_bounds(clip_ranges, context["data"].shape)
+                render_clip = self.core.logical_to_render_bounds(clip_ranges, render_context["data"].shape)
 
             VisualEngine.render_3d(
                 self.plotter,
-                context["data"],
+                render_context["data"],
                 levels,
                 opac_mode=mapping_mode,
                 clip_ranges=render_clip,
                 show_axes=self.page_image.switch_axes.isChecked(),
-                core_coords=context.get("coords", self.core.coords),
+                core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
             )
-        elif context["view"] == "2d":
+        elif render_context["view"] == "2d":
             self.left_display_stack.setCurrentIndex(1)
             self.plotter.clear_box_widgets()
             VisualEngine.render_2d_slice(
                 self.ax_2d,
                 self.canvas_2d,
-                context["data"],
-                context["slice_info"],
+                render_context["data"],
+                render_context["slice_info"],
                 levels,
-                context.get("coords", self.core.coords),
+                render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
             )
         else:
             self.left_display_stack.setCurrentIndex(1)
             self.plotter.clear_box_widgets()
-            if context["view"] == "waterfall":
-                self._render_waterfall_plot(context)
+            if render_context["view"] == "waterfall":
+                self._render_waterfall_plot(render_context)
             else:
-                self._render_1d_plot(context)
+                self._render_1d_plot(render_context)
 
         if self._can_show_interactive_box():
             self._rebuild_interactive_box()

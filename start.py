@@ -270,16 +270,38 @@ class My3DAnalyzer(QWidget):
             for key, value in source.items()
         }
 
+    @staticmethod
+    def _mirror_logical_bounds_for_display(bounds, shape):
+        if bounds is None:
+            return None
+
+        mirrored = list(bounds)
+        for axis_idx in range(3):
+            axis_max = max(int(shape[axis_idx]) - 1, 0)
+            low = float(bounds[axis_idx * 2])
+            up = float(bounds[axis_idx * 2 + 1])
+            mirrored[axis_idx * 2] = axis_max - up
+            mirrored[axis_idx * 2 + 1] = axis_max - low
+        return mirrored
+
+    def _visual_flip_3d_for_render(self, data_3d, coords, clip_ranges):
+        if not self.page_image.switch_flip.isChecked():
+            return data_3d, coords, clip_ranges
+
+        render_data = np.flip(data_3d, axis=(0, 1, 2))
+        render_coords = self._clone_coords(coords)
+        for axis_key in ("X", "Y", "E"):
+            if render_coords.get(axis_key) is not None:
+                render_coords[axis_key] = np.flip(render_coords[axis_key])
+        render_clip_ranges = self._mirror_logical_bounds_for_display(clip_ranges, data_3d.shape)
+        return render_data, render_coords, render_clip_ranges
+
     def _apply_display_state(self):
         if self.base_raw_data is None or self.base_coords is None:
             return
 
         display_raw = np.array(self.base_raw_data, copy=True)
         display_coords = self._clone_coords(self.base_coords)
-
-        if self.page_image.switch_flip.isChecked():
-            display_raw = np.flip(display_raw, axis=2)
-            display_coords["E"] = np.flip(display_coords["E"])
 
         self.core.raw_data = display_raw
         self.core.coords = display_coords
@@ -288,8 +310,6 @@ class My3DAnalyzer(QWidget):
             self.current_display_data = None
         else:
             display_3d = np.array(self.base_current_display_data, copy=True)
-            if self.page_image.switch_flip.isChecked():
-                display_3d = np.flip(display_3d, axis=2)
             self.current_display_data = display_3d
 
     def _get_full_logical_bounds(self):
@@ -558,13 +578,22 @@ class My3DAnalyzer(QWidget):
                 # 普通切片模式
                 display_2d = base_3d
 
-            VisualEngine.render_2d_slice(self.ax_2d, self.canvas_2d, display_2d, self.core.slice_info, levels,
+            slice_info = dict(self.core.slice_info)
+            if self.page_image.switch_flip.isChecked():
+                slice_info["display_flip"] = True
+
+            VisualEngine.render_2d_slice(self.ax_2d, self.canvas_2d, display_2d, slice_info, levels,
                                          self.core.coords, cmap=current_cmap)
         else:
             self.left_display_stack.setCurrentIndex(0)
-            render_clip_ranges = self.core.logical_to_render_bounds(self.clip_ranges, base_3d.shape) if self.clip_ranges else None
-            VisualEngine.render_3d(self.plotter, base_3d, levels, opac_mode=mapping_mode, clip_ranges=render_clip_ranges,
-                                   show_axes=self.page_image.switch_axes.isChecked(), core_coords=self.core.coords,
+            render_3d, render_coords, render_bounds = self._visual_flip_3d_for_render(
+                base_3d,
+                self.core.coords,
+                self.clip_ranges,
+            )
+            render_clip_ranges = self.core.logical_to_render_bounds(render_bounds, render_3d.shape) if render_bounds else None
+            VisualEngine.render_3d(self.plotter, render_3d, levels, opac_mode=mapping_mode, clip_ranges=render_clip_ranges,
+                                   show_axes=self.page_image.switch_axes.isChecked(), core_coords=render_coords,
                                    cmap=current_cmap)
             self.plotter.reset_camera()
             self.plotter.render()

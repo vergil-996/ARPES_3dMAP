@@ -37,6 +37,7 @@ class AnalyzerCore(QObject):
                 'E': ['E', 'energy', 'En', 'Ef'],
                 'T': ['time', 'delay', 't', 'T'],
             }
+            expected_axis_mapping_version = "mat_keyed_v2"
 
             def find_coord_key(role):
                 return next((k for k in search_map[role] if k in data), None)
@@ -72,7 +73,22 @@ class AnalyzerCore(QObject):
                 }
                 return aliases.get(value, value)
 
+            def get_string_metadata(key):
+                arr = safe_get_array(key)
+                if arr is None:
+                    return ""
+                values = np.asarray(arr).reshape(-1)
+                if values.size == 0:
+                    return ""
+                value = values[0]
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="ignore")
+                return str(value)
+
             def roles_from_axis_order(role_order):
+                if get_string_metadata("axis_mapping_version") != expected_axis_mapping_version:
+                    return None
+
                 axis_order_arr = safe_get_array("axis_order")
                 if axis_order_arr is None:
                     return None
@@ -94,57 +110,81 @@ class AnalyzerCore(QObject):
                 t_len = coord_length('T')
 
                 if len(shape) == 3 and {'X', 'Y', 'E'} == set(role_order):
-                    # Legacy converter saved MATLAB v7.3 HDF5 data as (E, Y, X).
+                    # Legacy converter saved MATLAB v7.3 HDF5 data as (E, X, Y).
                     if (
                         x_len is not None and y_len is not None and e_len is not None
-                        and shape[0] == e_len and shape[1] == y_len and shape[2] == x_len
+                        and shape[0] == e_len and shape[1] == x_len and shape[2] == y_len
                         and not (shape[0] == x_len and shape[1] == y_len and shape[2] == e_len)
                     ):
-                        return {'X': 2, 'Y': 1, 'E': 0}
+                        return {'X': 1, 'Y': 2, 'E': 0}
 
                 if len(shape) == 4 and {'X', 'Y', 'E', 'T'} == set(role_order):
-                    # Legacy converter saved MATLAB v7.3 HDF5 data as (T, E, Y, X).
+                    # Legacy converter saved MATLAB v7.3 HDF5 data as (T, E, X, Y).
                     if (
                         x_len is not None and y_len is not None and t_len is not None
-                        and shape[0] == t_len and shape[2] == y_len and shape[3] == x_len
+                        and shape[0] == t_len and shape[2] == x_len and shape[3] == y_len
                         and (e_len is None or shape[1] == e_len)
                         and not (shape[0] == x_len and shape[1] == y_len and (e_len is None or shape[2] == e_len) and shape[3] == t_len)
                     ):
-                        return {'X': 3, 'Y': 2, 'E': 1, 'T': 0}
+                        return {'X': 2, 'Y': 3, 'E': 1, 'T': 0}
 
                 return None
 
             def roles_from_coord_lengths(shape, role_order):
-                roles = {role: -1 for role in role_order}
-                idx_pool = list(range(len(shape)))
-                preferred = {role: idx for idx, role in enumerate(role_order)}
+                roles = {}
+                remaining = list(range(len(shape)))
 
-                # Prefer the canonical order first, so equal-length X/Y axes
-                # keep the documented (X, Y, E, T) interpretation.
-                for role in role_order:
-                    length = coord_length(role)
-                    preferred_idx = preferred[role]
-                    if length is not None and preferred_idx in idx_pool and shape[preferred_idx] == length:
-                        roles[role] = preferred_idx
-                        idx_pool.remove(preferred_idx)
-
-                for role in role_order:
-                    if roles[role] != -1:
-                        continue
+                def assign_unique(role):
                     length = coord_length(role)
                     if length is None:
-                        continue
-                    for idx in list(idx_pool):
-                        if shape[idx] == length:
-                            roles[role] = idx
-                            idx_pool.remove(idx)
-                            break
+                        return
+                    matches = [idx for idx in remaining if shape[idx] == length]
+                    if len(matches) == 1:
+                        roles[role] = matches[0]
+                        remaining.remove(matches[0])
 
-                for role in role_order:
-                    if roles[role] == -1 and idx_pool:
-                        roles[role] = idx_pool.pop(0)
+                def assign_first(role):
+                    length = coord_length(role)
+                    if length is None:
+                        return
+                    matches = [idx for idx in remaining if shape[idx] == length]
+                    if matches:
+                        roles[role] = matches[0]
+                        remaining.remove(matches[0])
+
+                for role in ('T', 'E'):
+                    if role in role_order:
+                        assign_unique(role)
+
+                for role in ('X', 'Y'):
+                    if role in role_order:
+                        assign_first(role)
+
+                fallback_roles = []
+                if ('X' in roles or 'Y' in roles) and 'E' in role_order and 'E' not in roles:
+                    fallback_roles.append('E')
+                fallback_roles.extend(role for role in role_order if role not in roles and role not in fallback_roles)
+
+                for role in fallback_roles:
+                    if not remaining:
+                        break
+                    roles[role] = remaining.pop(0)
 
                 return roles
+
+            def canonicalize_raw(raw, roles, role_order):
+                present_roles = [role for role in role_order if role in roles]
+                present_axes = [roles[role] for role in present_roles]
+                if len(set(present_axes)) != len(present_axes):
+                    raise ValueError(f"轴映射重复: {roles}")
+                if set(present_axes) != set(range(raw.ndim)):
+                    raise ValueError(f"轴映射不完整: shape={raw.shape}, roles={roles}")
+
+                canonical = raw.transpose(*present_axes) if present_axes else raw
+                for axis_idx, role in enumerate(role_order):
+                    if role not in roles:
+                        canonical = np.expand_dims(canonical, axis=axis_idx)
+                return canonical
 
             # 1. 自动寻找 4 维或 3 维数据矩阵
             main_key = None
@@ -167,8 +207,8 @@ class AnalyzerCore(QObject):
 
             raw = data[main_key]
             sh = list(raw.shape)
-            self.has_time_axis = (main_ndim == 4)
-            if self.has_time_axis:
+            has_time_coord_axis = coord_length('T') in sh
+            if main_ndim == 4 or has_time_coord_axis:
                 role_order = ['X', 'Y', 'E', 'T']
             else:
                 role_order = ['X', 'Y', 'E']
@@ -178,14 +218,14 @@ class AnalyzerCore(QObject):
                 or roles_from_legacy_hdf5_shape(sh, role_order)
                 or roles_from_coord_lengths(sh, role_order)
             )
+            self.has_time_axis = 'T' in role_order
 
             # 3. 重排与内存优化
             if self.has_time_axis:
-                idx_kx, idx_ky, idx_E, idx_T = roles['X'], roles['Y'], roles['E'], roles['T']
-                self.raw_data = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E, idx_T), dtype=np.float32)
+                raw_4d = canonicalize_raw(raw, roles, role_order)
+                self.raw_data = np.ascontiguousarray(raw_4d, dtype=np.float32)
             else:
-                idx_kx, idx_ky, idx_E = roles['X'], roles['Y'], roles['E']
-                raw_3d = np.ascontiguousarray(raw.transpose(idx_kx, idx_ky, idx_E), dtype=np.float32)
+                raw_3d = np.ascontiguousarray(canonicalize_raw(raw, roles, role_order), dtype=np.float32)
                 self.raw_data = raw_3d[..., np.newaxis]
 
             # 4. 坐标映射与单位同步

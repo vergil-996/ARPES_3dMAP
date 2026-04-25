@@ -47,11 +47,83 @@ def find_key(keys, candidates):
     return None
 
 
-def normalize_hdf5_sample(sample):
-    """MATLAB v7.3 stores HDF5 arrays in reversed dimension order."""
-    if sample.ndim in (3, 4):
-        return sample.transpose(tuple(reversed(range(sample.ndim))))
-    return sample
+AXIS_MAPPING_VERSION = "mat_keyed_v2"
+COORD_CANDIDATES = {
+    "X": ["kx", "X", "x"],
+    "Y": ["ky", "Y", "y"],
+    "E": ["E", "energy", "En", "Ef"],
+    "T": ["time", "delay", "t", "T"],
+}
+
+
+def infer_axis_roles(shape, coord_lengths, has_time_coord):
+    """Infer source array dimensions from coordinate key names and lengths."""
+    roles = {}
+    remaining = list(range(len(shape)))
+
+    def assign_unique(role):
+        length = coord_lengths.get(role)
+        if length is None:
+            return
+        matches = [idx for idx in remaining if shape[idx] == length]
+        if len(matches) == 1:
+            roles[role] = matches[0]
+            remaining.remove(matches[0])
+
+    def assign_first(role):
+        length = coord_lengths.get(role)
+        if length is None:
+            return
+        matches = [idx for idx in remaining if shape[idx] == length]
+        if matches:
+            roles[role] = matches[0]
+            remaining.remove(matches[0])
+
+    # T/E are anchors when their lengths uniquely identify a dimension.
+    for role in ("T", "E"):
+        assign_unique(role)
+
+    # Equal-length momentum axes are assigned by coordinate key identity.
+    for role in ("X", "Y"):
+        assign_first(role)
+
+    output_roles = ["X", "Y", "E"]
+    if has_time_coord or len(shape) == 4:
+        output_roles.append("T")
+
+    fallback_roles = []
+    if ("X" in roles or "Y" in roles) and "E" not in roles:
+        fallback_roles.append("E")
+    fallback_roles.extend(role for role in output_roles if role not in roles and role not in fallback_roles)
+
+    for role in fallback_roles:
+        if not remaining:
+            break
+        roles[role] = remaining.pop(0)
+
+    if remaining:
+        raise ValueError(f"❌ 无法识别多余维度: shape={shape}, remaining={remaining}, roles={roles}")
+
+    return roles
+
+
+def canonicalize_sample(sample, roles, has_time_coord):
+    has_time_axis = "T" in roles or (has_time_coord and sample.ndim == 4)
+    output_roles = ["X", "Y", "E"] + (["T"] if has_time_axis else [])
+    present_roles = [role for role in output_roles if role in roles]
+    present_axes = [roles[role] for role in present_roles]
+
+    if len(set(present_axes)) != len(present_axes):
+        raise ValueError(f"❌ 轴映射重复: {roles}")
+    if set(present_axes) != set(range(sample.ndim)):
+        raise ValueError(f"❌ 轴映射不完整: shape={sample.shape}, roles={roles}")
+
+    canonical = sample.transpose(present_axes) if present_axes else sample
+    for axis, role in enumerate(output_roles):
+        if role not in roles:
+            canonical = np.expand_dims(canonical, axis=axis)
+
+    return canonical, output_roles
 
 
 # ===== 核心转换 =====
@@ -66,10 +138,10 @@ def convert(src, dst):
         print("变量列表:", keys)
 
         # 自动匹配
-        kx_key = find_key(keys, ['kx', 'X'])
-        ky_key = find_key(keys, ['ky', 'Y'])
-        e_key  = find_key(keys, ['E', 'energy'])
-        t_key  = find_key(keys, ['time', 'delay', 't', 'T'])
+        kx_key = find_key(keys, COORD_CANDIDATES["X"])
+        ky_key = find_key(keys, COORD_CANDIDATES["Y"])
+        e_key = find_key(keys, COORD_CANDIDATES["E"])
+        t_key = find_key(keys, COORD_CANDIDATES["T"])
         s_key  = find_key(keys, ['sample', 'binned', 'data'])
 
         if s_key is None:
@@ -85,40 +157,38 @@ def convert(src, dst):
         ky = read_array(data, ky_key)
         energy = read_array(data, e_key)
 
-        if mode == "h5py":
-            sample = np.array(data[s_key])
-            print("HDF5 sample shape:", sample.shape)
-            sample = normalize_hdf5_sample(sample)
-            print("规范化 sample shape:", sample.shape)
-        else:
-            sample = data[s_key]
-
+        sample = np.array(data[s_key]) if mode == "h5py" else np.array(data[s_key])
         print("原始 sample shape:", sample.shape)
 
-        # ===== 处理 time / 静谱 =====
+        coord_lengths = {}
+        for role, arr in (("X", kx), ("Y", ky), ("E", energy)):
+            if arr is not None:
+                coord_lengths[role] = int(arr.size)
         if t_key and t_key in keys:
-            time = read_array(data, t_key)
-            print("✅ 使用原始 time")
+            raw_time = read_array(data, t_key)
+            coord_lengths["T"] = int(raw_time.size)
         else:
-            print("⚠️ 未检测到 time，按静谱处理")
-            if sample.ndim == 4:
-                time = np.arange(sample.shape[-1], dtype=np.float32)
-            else:
-                time = np.array([0.0], dtype=np.float32)
+            raw_time = None
 
-            if sample.ndim == 4:
-                pass
-            elif sample.ndim == 3:
-                pass
-            elif sample.ndim == 2:
-                sample = sample[:, :, np.newaxis]
-            else:
-                raise ValueError(f"❌ 不支持维度: {sample.ndim}")
-
-        if sample.ndim not in (3, 4):
+        if sample.ndim not in (2, 3, 4):
             raise ValueError(f"❌ 不支持维度: {sample.ndim}")
 
-        axis_order = ["X", "Y", "E", "T"] if sample.ndim == 4 else ["X", "Y", "E"]
+        roles = infer_axis_roles(sample.shape, coord_lengths, raw_time is not None)
+        sample, axis_order = canonicalize_sample(sample, roles, raw_time is not None)
+        print("轴映射:", roles)
+        print("规范化 sample shape:", sample.shape)
+
+        if "T" in axis_order:
+            if raw_time is not None and raw_time.size == sample.shape[3]:
+                time = raw_time
+                print("✅ 使用原始 time")
+            else:
+                time = np.arange(sample.shape[3], dtype=np.float32)
+                print("⚠️ time 与数据维度不匹配，按索引生成")
+        else:
+            time = np.array([0.0], dtype=np.float32)
+            if raw_time is None:
+                print("⚠️ 未检测到 time，按静谱处理")
 
         # ===== 类型优化 =====
         sample = sample.astype(np.float32)
@@ -128,6 +198,7 @@ def convert(src, dst):
             "sample": sample,
             "time": time,
             "axis_order": np.array(axis_order),
+            "axis_mapping_version": np.array([AXIS_MAPPING_VERSION]),
         }
         if kx is not None:
             save_dict["kx"] = kx

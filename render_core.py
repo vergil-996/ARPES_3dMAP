@@ -180,9 +180,15 @@ class VisualEngine:
                     title = f"E-Slice ({index})"
 
             # 应用色阶处理
+            if slice_info.get("display_flip"):
+                img = np.flip(img, axis=(0, 1))
+                ext = [ext[1], ext[0], ext[3], ext[2]]
+
             processed_slice = VisualEngine.apply_levels(img, b, g, w)
             title = slice_info.get("title_override", title)
             ext = slice_info.get("extent_override", ext)
+            if slice_info.get("display_flip") and slice_info.get("extent_override") is not None:
+                ext = [ext[1], ext[0], ext[3], ext[2]]
 
             ax.clear()
             ax.imshow(processed_slice, cmap=cmap, aspect='auto', origin='lower', extent=ext,
