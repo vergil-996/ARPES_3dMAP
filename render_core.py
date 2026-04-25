@@ -1,6 +1,5 @@
 import numpy as np
 import vtk
-from PyQt5.QtGui import QColor
 import pyvista as pv
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 

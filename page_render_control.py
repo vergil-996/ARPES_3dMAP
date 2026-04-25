@@ -1,12 +1,13 @@
 from PyQt5.QtCore import QSignalBlocker
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PyQt5.QtGui import QColor
-from PyQt5.QtCore import Qt
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
 from siui.components.slider_ import SiSlider
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiColor
+
+from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
 
 
 class RenderControlPage(QWidget):
@@ -20,6 +21,18 @@ class RenderControlPage(QWidget):
     CONTROL_ROW_WIDTH = 290
     COMBO_WIDTH = 190
     BUTTON_WIDTH = 92
+    MIN_GROUP_WIDTH = 340
+    MAX_GROUP_WIDTH = 470
+    MIN_CONTENT_WIDTH = MIN_GROUP_WIDTH + SECTION_MARGIN * 2
+    MAX_CONTENT_WIDTH = MAX_GROUP_WIDTH + SECTION_MARGIN * 2
+    MIN_SLIDER_BLOCK_WIDTH = 290
+    MAX_SLIDER_BLOCK_WIDTH = 420
+    MIN_CONTROL_ROW_WIDTH = 260
+    MAX_CONTROL_ROW_WIDTH = 360
+    MIN_COMBO_WIDTH = 180
+    MAX_COMBO_WIDTH = 230
+    MIN_BUTTON_WIDTH = 92
+    MAX_BUTTON_WIDTH = 112
     CMAP_OPTIONS = [
         "magma", "inferno", "plasma", "viridis", "cividis", "turbo",
         "afmhot", "hot", "gist_heat", "coolwarm", "RdBu_r", "seismic",
@@ -31,6 +44,12 @@ class RenderControlPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._adaptive_groups = []
+        self._adaptive_sliders = []
+        self._adaptive_slider_blocks = []
+        self._adaptive_row_controls = []
+        self._adaptive_combo_controls = []
+        self._adaptive_buttons = []
         self.init_ui()
 
     def _apply_style(self, grp):
@@ -46,6 +65,7 @@ class RenderControlPage(QWidget):
         btn = SiPushButton(self)
         btn.setFixedHeight(28)
         btn.setFixedWidth(self.BUTTON_WIDTH)
+        self._adaptive_buttons.append(btn)
         btn.attachment().setText(text)
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
@@ -56,6 +76,7 @@ class RenderControlPage(QWidget):
         s = SiSlider(self)
         s.setFixedHeight(32)
         s.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        self._adaptive_sliders.append(s)
         s.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         s.style_data.main_color = QColor("#FF69B4")
         s.style_data.background_color = QColor(255, 105, 180, 64)
@@ -75,6 +96,7 @@ class RenderControlPage(QWidget):
         container = QWidget(self)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         container.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        self._adaptive_slider_blocks.append(container)
         block = QVBoxLayout(container)
         block.setContentsMargins(0, 0, 0, 0)
         block.setSpacing(6)
@@ -107,6 +129,7 @@ class RenderControlPage(QWidget):
         grp_cmap = SiTitledWidgetGroup(self)
         grp_cmap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grp_cmap.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_cmap)
         grp_cmap.addTitle("色带选择")
         v_cmap = QVBoxLayout(grp_cmap)
         v_cmap.setContentsMargins(*self.GROUP_MARGINS)
@@ -117,6 +140,7 @@ class RenderControlPage(QWidget):
         self.combo_cmap.setTitle("渲染色带")
         self.combo_cmap.setFixedHeight(30)
         self.combo_cmap.setFixedWidth(self.COMBO_WIDTH)
+        self._adaptive_combo_controls.append(self.combo_cmap)
         self.combo_cmap.setEditable(False)
         self.combo_cmap.addItems(self.CMAP_OPTIONS)
         self.btn_apply_cmap = self._create_red_btn("确定")
@@ -134,6 +158,7 @@ class RenderControlPage(QWidget):
         grp_exp = SiTitledWidgetGroup(self)
         grp_exp.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grp_exp.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_exp)
         grp_exp.addTitle("色阶调整")
         v_exp = QVBoxLayout(grp_exp)
         v_exp.setContentsMargins(*self.GROUP_MARGINS)
@@ -193,6 +218,7 @@ class RenderControlPage(QWidget):
         self.combo_map.setTitle("强度映射方式")
         self.combo_map.setFixedHeight(30)
         self.combo_map.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        self._adaptive_row_controls.append(self.combo_map)
         self.combo_map.setEditable(False)
         self.combo_map.addItems(["线性", "对数", "幂函数", "sigmoid"])
 
@@ -208,6 +234,7 @@ class RenderControlPage(QWidget):
         grp_noise = SiTitledWidgetGroup(self)
         grp_noise.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         grp_noise.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_noise)
         grp_noise.addTitle("去噪处理")
         v_noise = QVBoxLayout(grp_noise)
         v_noise.setContentsMargins(*self.GROUP_MARGINS)
@@ -220,6 +247,7 @@ class RenderControlPage(QWidget):
         self.combo_n1.setTitle("一级去噪")
         self.combo_n1.setFixedHeight(30)
         self.combo_n1.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        self._adaptive_row_controls.append(self.combo_n1)
         self.combo_n1.setEditable(False)
         self.combo_n1.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
@@ -227,6 +255,7 @@ class RenderControlPage(QWidget):
         self.combo_n2.setTitle("二级去噪")
         self.combo_n2.setFixedHeight(30)
         self.combo_n2.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        self._adaptive_row_controls.append(self.combo_n2)
         self.combo_n2.setEditable(False)
         self.combo_n2.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
@@ -234,6 +263,7 @@ class RenderControlPage(QWidget):
         self.combo_n3.setTitle("三级去噪")
         self.combo_n3.setFixedHeight(30)
         self.combo_n3.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        self._adaptive_row_controls.append(self.combo_n3)
         self.combo_n3.setEditable(False)
         self.combo_n3.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
 
@@ -252,6 +282,59 @@ class RenderControlPage(QWidget):
         self.container.adjustSize()
         self.scroll.setAttachment(self.container)
         layout.addWidget(self.scroll)
+        self._apply_adaptive_layout()
+
+    def _apply_adaptive_layout(self):
+        if not hasattr(self, "scroll"):
+            return
+
+        content_width = scroll_content_width(
+            self.scroll,
+            self.MIN_CONTENT_WIDTH,
+            self.MAX_CONTENT_WIDTH,
+        )
+        group_width = max(self.MIN_GROUP_WIDTH, content_width - self.SECTION_MARGIN * 2)
+        slider_width = bounded_width(
+            group_width - 50,
+            self.MIN_SLIDER_BLOCK_WIDTH,
+            self.MAX_SLIDER_BLOCK_WIDTH,
+        )
+        row_width = bounded_width(
+            group_width - 70,
+            self.MIN_CONTROL_ROW_WIDTH,
+            self.MAX_CONTROL_ROW_WIDTH,
+        )
+        combo_width = bounded_width(
+            row_width - self.BUTTON_WIDTH - 12,
+            self.MIN_COMBO_WIDTH,
+            self.MAX_COMBO_WIDTH,
+        )
+        button_width = bounded_width(
+            group_width * 0.25,
+            self.MIN_BUTTON_WIDTH,
+            self.MAX_BUTTON_WIDTH,
+        )
+
+        self.container.setFixedWidth(content_width)
+        for group in self._adaptive_groups:
+            group.setFixedWidth(group_width)
+        for slider in self._adaptive_sliders:
+            slider.setFixedWidth(slider_width)
+        for block in self._adaptive_slider_blocks:
+            block.setFixedWidth(slider_width)
+        for control in self._adaptive_row_controls:
+            control.setFixedWidth(row_width)
+        for control in self._adaptive_combo_controls:
+            control.setFixedWidth(combo_width)
+        for button in self._adaptive_buttons:
+            button.setFixedWidth(button_width)
+
+        self.container.adjustSize()
+        align_scroll_content(self.scroll, self.container)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_adaptive_layout()
 
     def get_selected_cmap(self):
         return self.combo_cmap.currentText()

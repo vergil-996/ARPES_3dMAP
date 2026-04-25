@@ -84,6 +84,7 @@ class My3DAnalyzer(QWidget):
         self.global_waterfall_step_custom = False
         self._modifier_page_shortcut_candidate = None
         self._modifier_page_shortcut_cancelled = False
+        self._preserve_control_tab_on_next_page_sync = False
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -244,7 +245,22 @@ class My3DAnalyzer(QWidget):
 
     @staticmethod
     def _cursor_inside_widget(widget, global_pos):
-        return widget is not None and widget.isVisible() and widget.rect().contains(widget.mapFromGlobal(global_pos))
+        if widget is None or not widget.isVisible():
+            return False
+
+        if not widget.rect().contains(widget.mapFromGlobal(global_pos)):
+            return False
+
+        hovered = QApplication.widgetAt(global_pos)
+        if hovered is None:
+            return True
+
+        current = hovered
+        while current is not None:
+            if current is widget:
+                return True
+            current = current.parentWidget()
+        return False
 
     def _step_page_under_cursor(self, step):
         cursor_pos = QCursor.pos()
@@ -287,9 +303,16 @@ class My3DAnalyzer(QWidget):
     def _select_left_workspace_page_by_index(self, index):
         page_ids = self._ordered_left_workspace_page_ids()
         if 0 <= index < len(page_ids):
-            self.left_workspace.activate_page(page_ids[index])
+            self._activate_left_workspace_page_from_shortcut(page_ids[index])
             return True
         return False
+
+    def _activate_left_workspace_page_from_shortcut(self, page_id):
+        self._preserve_control_tab_on_next_page_sync = True
+        try:
+            self.left_workspace.activate_page(page_id)
+        finally:
+            self._preserve_control_tab_on_next_page_sync = False
 
     def _step_left_workspace_page(self, step):
         page_ids = self._ordered_left_workspace_page_ids()
@@ -303,7 +326,7 @@ class My3DAnalyzer(QWidget):
             current_index = 0
 
         target_index = (current_index + int(step)) % len(page_ids)
-        self.left_workspace.activate_page(page_ids[target_index])
+        self._activate_left_workspace_page_from_shortcut(page_ids[target_index])
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -330,7 +353,7 @@ class My3DAnalyzer(QWidget):
         main_layout.addWidget(self.left_workspace, stretch=7)
 
         self.right_panel = QFrame()
-        self.right_panel.setMinimumWidth(450)
+        self.right_panel.setMinimumWidth(430)
         self.right_panel.setStyleSheet("background-color: #2A2A3A; border-radius: 12px;")
         right_vbox = QVBoxLayout(self.right_panel)
         right_vbox.setContentsMargins(15, 10, 15, 15)
@@ -630,7 +653,10 @@ class My3DAnalyzer(QWidget):
                     block_signals=True,
                 )
 
-            tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
+            if self._preserve_control_tab_on_next_page_sync:
+                tab_index = int(self.page_container.currentIndex())
+            else:
+                tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
             tab_index = max(0, min(self.page_container.count() - 1, tab_index))
             self._select_control_page(tab_index)
             self._apply_waterfall_step_for_spec_to_ui(owner_spec)
@@ -935,18 +961,6 @@ class My3DAnalyzer(QWidget):
 
         return float(max(np.median(diffs), 1e-4))
 
-    def _waterfall_step_reference_axis(self, spec):
-        if spec is None:
-            return None
-
-        if spec.page_kind in {"axis_integral", "waterfall_edc"}:
-            axis_index = int(spec.params.get("axis_index", -1))
-            if axis_index == 0:
-                return "Y"
-            if axis_index == 1:
-                return "X"
-        return None
-
     def _suggest_waterfall_step(self, spec=None):
         axis_key = self._waterfall_step_reference_axis(spec or self.left_workspace.current_spec())
         if axis_key is None:
@@ -1028,17 +1042,6 @@ class My3DAnalyzer(QWidget):
     def _show_message(self, title, text, icon=QMessageBox.Information):
         msg = self._create_message_box(title, text, icon, buttons=QMessageBox.Ok, default_button=QMessageBox.Ok, escape_button=QMessageBox.Ok)
         msg.exec_()
-
-    def _confirm_create_axis_page(self):
-        msg = self._create_message_box(
-            "是否新增页面？",
-            "当前坐标轴积分页面参数已经变化。是否新增一个结果页面？",
-            QMessageBox.Question,
-            buttons=QMessageBox.Yes | QMessageBox.No,
-            default_button=QMessageBox.No,
-            escape_button=QMessageBox.No,
-        )
-        return msg.exec_() == QMessageBox.Yes
 
     @staticmethod
     def _sanitize_save_path(path, selected_filter=""):
@@ -1190,17 +1193,6 @@ class My3DAnalyzer(QWidget):
             "x_up": int(rect["x_up"]),
             "y_low": int(rect["y_low"]),
             "y_up": int(rect["y_up"]),
-        }
-
-    @staticmethod
-    def _plot_bounds_to_rect(plot_bounds):
-        if plot_bounds is None:
-            return None
-        return {
-            "x_low": int(plot_bounds["x_low"]),
-            "x_up": int(plot_bounds["x_up"]),
-            "y_low": int(plot_bounds["y_low"]),
-            "y_up": int(plot_bounds["y_up"]),
         }
 
     @staticmethod
@@ -1591,38 +1583,6 @@ class My3DAnalyzer(QWidget):
             "source_t_low": int(self.page_data.s_t_low.value()),
             "source_t_up": int(self.page_data.s_t_up.value()),
         }
-
-    @staticmethod
-    def _axis_request_signature(params):
-        source_mode = params.get("source_mode", "frame")
-        signature = [
-            int(params["axis_index"]),
-            int(params["low"]),
-            int(params["up"]),
-            source_mode,
-        ]
-        if source_mode == "time_integral":
-            signature.extend([int(params["source_t_low"]), int(params["source_t_up"])])
-        else:
-            signature.append(int(params["source_t_index"]))
-        return tuple(signature)
-
-    def _is_same_axis_request(self, spec, candidate_spec):
-        if spec is None or spec.page_kind != "axis_integral":
-            return False
-        return self._axis_request_signature(spec.params) == self._axis_request_signature(candidate_spec.params)
-
-    def _overwrite_axis_page(self, current_spec, candidate_spec):
-        if "denoise_methods" in current_spec.params and "denoise_methods" not in candidate_spec.params:
-            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
-        candidate_spec.title = self._make_unique_page_title(candidate_spec.title, exclude_page_id=current_spec.page_id)
-        self.left_workspace.update_page(
-            current_spec.page_id,
-            title=candidate_spec.title,
-            params=candidate_spec.params,
-            source_page_id=candidate_spec.source_page_id,
-        )
-        self.on_result_page_activated(current_spec.page_id)
 
     def _get_3d_source_context_for_axis(self, spec, raw_data):
         params = spec.params
@@ -2308,12 +2268,6 @@ class My3DAnalyzer(QWidget):
         )
         self._seed_control_state_for_spec(spec)
         return spec
-
-    def _resolve_axis_source(self):
-        active_spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
-        while active_spec is not None and active_spec.page_kind not in {"home", "time_integral"}:
-            active_spec = self.left_workspace.page_by_id(active_spec.source_page_id)
-        return active_spec or self.left_workspace.home_spec()
 
     def _build_axis_integral_spec(self, source_mode=None):
         params = self._build_axis_request_params(source_mode=source_mode)

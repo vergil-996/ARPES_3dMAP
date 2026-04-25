@@ -7,6 +7,8 @@ from siui.components.slider_ import SiSlider
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiColor
 
+from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
+
 
 class DataProcessPage(QWidget):
     PAGE_MARGIN = 13
@@ -19,10 +21,28 @@ class DataProcessPage(QWidget):
     CONTROL_ROW_WIDTH = 290
     COMBO_WIDTH = 190
     BUTTON_WIDTH = 92
+    MIN_GROUP_WIDTH = 340
+    MAX_GROUP_WIDTH = 470
+    MIN_CONTENT_WIDTH = MIN_GROUP_WIDTH + SECTION_MARGIN * 2
+    MAX_CONTENT_WIDTH = MAX_GROUP_WIDTH + SECTION_MARGIN * 2
+    MIN_SLIDER_BLOCK_WIDTH = 290
+    MAX_SLIDER_BLOCK_WIDTH = 420
+    MIN_CONTROL_ROW_WIDTH = 260
+    MAX_CONTROL_ROW_WIDTH = 360
+    MIN_COMBO_WIDTH = 180
+    MAX_COMBO_WIDTH = 230
+    MIN_BUTTON_WIDTH = 92
+    MAX_BUTTON_WIDTH = 112
     def __init__(self, parent=None):
         super().__init__(parent)
         self.locked_half_width = 0
         self._is_updating = False
+        self._adaptive_groups = []
+        self._adaptive_sliders = []
+        self._adaptive_slider_blocks = []
+        self._adaptive_row_controls = []
+        self._adaptive_combo_controls = []
+        self._adaptive_buttons = []
         self.init_ui()
 
     def _apply_style(self, grp):
@@ -37,6 +57,7 @@ class DataProcessPage(QWidget):
         btn = SiPushButton(self)
         btn.setFixedHeight(28)
         btn.setFixedWidth(self.BUTTON_WIDTH)
+        self._adaptive_buttons.append(btn)
         btn.attachment().setText(text)
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
@@ -47,6 +68,7 @@ class DataProcessPage(QWidget):
         slider = SiSlider(self)
         slider.setFixedHeight(32)
         slider.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        self._adaptive_sliders.append(slider)
         slider.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         slider.style_data.main_color = QColor("#FF69B4")
         slider.style_data.background_color = QColor(255, 105, 180, 64)
@@ -66,6 +88,7 @@ class DataProcessPage(QWidget):
         container = QWidget(self)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         container.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
+        self._adaptive_slider_blocks.append(container)
         block = QVBoxLayout(container)
         block.setContentsMargins(0, 0, 0, 0)
         block.setSpacing(6)
@@ -96,6 +119,7 @@ class DataProcessPage(QWidget):
 
         grp_t = SiTitledWidgetGroup(self)
         grp_t.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_t)
         grp_t.addTitle("对时间轴积分")
         v_t = QVBoxLayout(grp_t)
         v_t.setContentsMargins(*self.GROUP_MARGINS)
@@ -151,6 +175,7 @@ class DataProcessPage(QWidget):
 
         grp_ax = SiTitledWidgetGroup(self)
         grp_ax.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_ax)
         grp_ax.addTitle("对坐标轴积分")
         v_ax = QVBoxLayout(grp_ax)
         v_ax.setContentsMargins(*self.GROUP_MARGINS)
@@ -160,6 +185,7 @@ class DataProcessPage(QWidget):
         self.combo_ax.setTitle("选择轴向")
         self.combo_ax.setFixedHeight(30)
         self.combo_ax.setFixedWidth(self.COMBO_WIDTH)
+        self._adaptive_combo_controls.append(self.combo_ax)
         self.combo_ax.setEditable(False)
         self.combo_ax.addItems(["X轴", "Y轴", "Z轴"])
 
@@ -217,6 +243,7 @@ class DataProcessPage(QWidget):
 
         grp_other = SiTitledWidgetGroup(self)
         grp_other.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_other)
         grp_other.addTitle("其他积分")
         v_other = QVBoxLayout(grp_other)
         v_other.setContentsMargins(*self.GROUP_MARGINS)
@@ -226,6 +253,7 @@ class DataProcessPage(QWidget):
         self.combo_other.setTitle("\u79ef\u5206\u7c7b\u578b")
         self.combo_other.setFixedHeight(30)
         self.combo_other.setFixedWidth(self.COMBO_WIDTH)
+        self._adaptive_row_controls.append(self.combo_other)
         self.combo_other.setEditable(False)
         self.combo_other.addItems([
             "\u5207\u7247\u5185\u5f3a\u5ea6\u79ef\u5206",
@@ -248,6 +276,59 @@ class DataProcessPage(QWidget):
         self.container.adjustSize()
         self.scroll.setAttachment(self.container)
         layout.addWidget(self.scroll)
+        self._apply_adaptive_layout()
+
+    def _apply_adaptive_layout(self):
+        if not hasattr(self, "scroll"):
+            return
+
+        content_width = scroll_content_width(
+            self.scroll,
+            self.MIN_CONTENT_WIDTH,
+            self.MAX_CONTENT_WIDTH,
+        )
+        group_width = max(self.MIN_GROUP_WIDTH, content_width - self.SECTION_MARGIN * 2)
+        slider_width = bounded_width(
+            group_width - 50,
+            self.MIN_SLIDER_BLOCK_WIDTH,
+            self.MAX_SLIDER_BLOCK_WIDTH,
+        )
+        row_width = bounded_width(
+            group_width - 70,
+            self.MIN_CONTROL_ROW_WIDTH,
+            self.MAX_CONTROL_ROW_WIDTH,
+        )
+        combo_width = bounded_width(
+            row_width - self.BUTTON_WIDTH - 12,
+            self.MIN_COMBO_WIDTH,
+            self.MAX_COMBO_WIDTH,
+        )
+        button_width = bounded_width(
+            group_width * 0.25,
+            self.MIN_BUTTON_WIDTH,
+            self.MAX_BUTTON_WIDTH,
+        )
+
+        self.container.setFixedWidth(content_width)
+        for group in self._adaptive_groups:
+            group.setFixedWidth(group_width)
+        for slider in self._adaptive_sliders:
+            slider.setFixedWidth(slider_width)
+        for block in self._adaptive_slider_blocks:
+            block.setFixedWidth(slider_width)
+        for control in self._adaptive_row_controls:
+            control.setFixedWidth(row_width)
+        for control in self._adaptive_combo_controls:
+            control.setFixedWidth(combo_width)
+        for button in self._adaptive_buttons:
+            button.setFixedWidth(button_width)
+
+        self.container.adjustSize()
+        align_scroll_content(self.scroll, self.container)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_adaptive_layout()
 
     def _on_t_low_changed(self, value):
         if value > self.s_t_up.value():

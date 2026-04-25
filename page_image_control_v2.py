@@ -8,6 +8,8 @@ from siui.components.editbox import SiLabeledLineEdit
 from siui.components.button import SiSwitchRefactor
 from siui.core import SiColor
 
+from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
+
 
 class ImageControlPage(QWidget):
     PAGE_MARGIN = 13
@@ -18,10 +20,16 @@ class ImageControlPage(QWidget):
     GROUP_WIDTH = 360
     SLICE_EDIT_WIDTH = 155
     BUTTON_WIDTH = 64
+    MIN_GROUP_WIDTH = 344
+    MAX_GROUP_WIDTH = 470
+    MIN_CONTENT_WIDTH = MIN_GROUP_WIDTH + SECTION_MARGIN * 2
+    MAX_CONTENT_WIDTH = MAX_GROUP_WIDTH + SECTION_MARGIN * 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.edits = {}
+        self._adaptive_groups = []
+        self._slice_edits = []
         self.init_ui()
         self.bind_events()
 
@@ -68,6 +76,7 @@ class ImageControlPage(QWidget):
         grp_time = SiTitledWidgetGroup(self)
         grp_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         grp_time.setFixedWidth(self.GROUP_WIDTH)
+        self._adaptive_groups.append(grp_time)
         grp_time.addTitle("时间轴控制")
         self.slider_time = self._create_slider()
         v_time = QVBoxLayout(grp_time)
@@ -80,6 +89,7 @@ class ImageControlPage(QWidget):
         grp_slice = SiTitledWidgetGroup(self)
         grp_slice.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         grp_slice.setFixedWidth(self.GROUP_WIDTH)
+        self._adaptive_groups.append(grp_slice)
         grp_slice.addTitle("切片立方体设置")
         v_slice = QVBoxLayout(grp_slice)
         v_slice.setContentsMargins(*self.GROUP_MARGINS)
@@ -96,6 +106,7 @@ class ImageControlPage(QWidget):
             e_max.setTitle(max_label)
             e_max.setFixedHeight(45)
             e_max.setFixedWidth(self.SLICE_EDIT_WIDTH)
+            self._slice_edits.extend([e_min, e_max])
             h_row.addWidget(e_min)
             h_row.addWidget(e_max)
             v_slice.addLayout(h_row)
@@ -143,6 +154,32 @@ class ImageControlPage(QWidget):
         self.container.adjustSize()
         self.scroll.setAttachment(self.container)
         layout.addWidget(self.scroll)
+        self._apply_adaptive_layout()
+
+    def _apply_adaptive_layout(self):
+        if not hasattr(self, "scroll"):
+            return
+
+        content_width = scroll_content_width(
+            self.scroll,
+            self.MIN_CONTENT_WIDTH,
+            self.MAX_CONTENT_WIDTH,
+        )
+        group_width = max(self.MIN_GROUP_WIDTH, content_width - self.SECTION_MARGIN * 2)
+        edit_width = bounded_width((group_width - 10) // 2, self.SLICE_EDIT_WIDTH, 220)
+
+        self.container.setFixedWidth(content_width)
+        for group in self._adaptive_groups:
+            group.setFixedWidth(group_width)
+        for edit in self._slice_edits:
+            edit.setFixedWidth(edit_width)
+
+        self.container.adjustSize()
+        align_scroll_content(self.scroll, self.container)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_adaptive_layout()
 
     def bind_events(self):
         self.btn_load.clicked.connect(self.request_load)

@@ -1,7 +1,7 @@
 from PyQt5.QtCore import QSignalBlocker, Qt
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
-from siui.components.container import SiDenseContainer, SiTriSectionPanelCard
+from siui.components.container import SiTriSectionPanelCard
 from siui.components.editbox import SiDoubleSpinBox, SiSpinBox
 from siui.components.titled_widget_group import SiTitledWidgetGroup
 from siui.components.widgets import SiLabel, SiScrollArea
