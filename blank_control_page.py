@@ -200,6 +200,9 @@ class BlankControlPage(QWidget):
         value_changed = getattr(self.waterfall_step_box, "valueChanged", None)
         if value_changed is not None:
             value_changed.connect(self._on_waterfall_step_value_changed)
+        text_changed = getattr(self.waterfall_step_box, "textChanged", None)
+        if text_changed is not None:
+            text_changed.connect(self._on_waterfall_step_value_changed)
 
         card.body().addWidget(self.waterfall_step_box)
         card.adjustSize()

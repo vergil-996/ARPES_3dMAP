@@ -330,6 +330,7 @@ class My3DAnalyzer(QWidget):
         main_layout.addWidget(self.left_workspace, stretch=7)
 
         self.right_panel = QFrame()
+        self.right_panel.setMinimumWidth(450)
         self.right_panel.setStyleSheet("background-color: #2A2A3A; border-radius: 12px;")
         right_vbox = QVBoxLayout(self.right_panel)
         right_vbox.setContentsMargins(15, 10, 15, 15)
@@ -420,6 +421,12 @@ class My3DAnalyzer(QWidget):
         self.page_render.btn_apply_cmap.clicked.connect(self.global_refresh)
         self.page_render.btn_apply_map.clicked.connect(self.global_refresh)
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
+
+        self.page_control_blank.waterfall_step_box.editingFinished.connect(self.on_waterfall_step_changed)
+        for button_name in ("button_increase", "button_decrease"):
+            button = getattr(self.page_control_blank.waterfall_step_box, button_name, None)
+            if button is not None:
+                button.clicked.connect(self.on_waterfall_step_changed)
 
         self.page_data.combo_ax.currentIndexChanged.connect(self.update_ax_slider_range)
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
@@ -521,6 +528,12 @@ class My3DAnalyzer(QWidget):
             custom=self.global_waterfall_step_custom,
         )
 
+    def _apply_waterfall_step_for_spec_to_ui(self, spec):
+        if spec is not None and spec.page_kind == "waterfall_edc" and "k_step" in spec.params:
+            self.page_control_blank.set_waterfall_step(float(spec.params["k_step"]), custom=True)
+            return
+        self._apply_global_waterfall_step_to_ui()
+
     def _seed_control_state_for_spec(self, spec):
         if spec is None:
             return
@@ -566,6 +579,8 @@ class My3DAnalyzer(QWidget):
             self._persist_time_integral_page_state(spec)
         elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(spec)
+        elif spec.page_kind == "waterfall_edc":
+            self._persist_waterfall_page_state(spec)
         elif spec.page_kind == "energy_dos":
             spec.params["t_index"] = int(self.page_image.slider_time.value())
 
@@ -618,7 +633,7 @@ class My3DAnalyzer(QWidget):
             tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
             tab_index = max(0, min(self.page_container.count() - 1, tab_index))
             self._select_control_page(tab_index)
-            self._apply_global_waterfall_step_to_ui()
+            self._apply_waterfall_step_for_spec_to_ui(owner_spec)
         finally:
             self._syncing_controls = False
 
@@ -641,6 +656,58 @@ class My3DAnalyzer(QWidget):
         target_spec.params["source_t_index"] = int(self.page_image.slider_time.value())
         target_spec.params["source_t_low"] = int(self.page_data.s_t_low.value())
         target_spec.params["source_t_up"] = int(self.page_data.s_t_up.value())
+
+    def _waterfall_title_from_params(self, params, k_step=None, *, ascii_only=False):
+        axis_info = self._resolve_waterfall_axis_info(int(params.get("axis_index", -1)))
+        if axis_info is None:
+            return None
+
+        low_idx = int(params.get("integral_low", params.get("low", 0)))
+        up_idx = int(params.get("integral_up", params.get("up", low_idx)))
+        mid_idx = int(params.get("integral_mid", round((low_idx + up_idx) / 2)))
+        center_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], mid_idx)
+        step_value = float(k_step if k_step is not None else params.get("k_step", BlankControlPage.DEFAULT_WATERFALL_STEP))
+        return self._waterfall_title_summary(
+            axis_info["k_axis_label"],
+            axis_info["integrated_axis_label"],
+            center_physical,
+            step_value,
+            ascii_only=ascii_only,
+        ) + self._waterfall_crop_suffix(params, ascii_only=ascii_only)
+
+    def _persist_waterfall_page_state(self, spec=None):
+        target_spec = spec or self.left_workspace.current_spec()
+        if target_spec is None or target_spec.page_kind != "waterfall_edc":
+            return
+
+        k_step = float(self.page_control_blank.get_waterfall_step())
+        target_spec.params["k_step"] = k_step
+
+        title = self._waterfall_title_from_params(target_spec.params, k_step)
+        if title is None:
+            return
+
+        title = self._make_unique_page_title(title, exclude_page_id=target_spec.page_id)
+        self.left_workspace.update_page(
+            target_spec.page_id,
+            title=title,
+            params=target_spec.params,
+            source_page_id=target_spec.source_page_id,
+        )
+
+    def on_waterfall_step_changed(self):
+        if self._syncing_controls:
+            return
+
+        k_step = float(self.page_control_blank.get_waterfall_step())
+        self.page_control_blank.set_waterfall_step(k_step, custom=True)
+        self.global_waterfall_step = k_step
+        self.global_waterfall_step_custom = True
+
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is not None and current_spec.page_kind == "waterfall_edc":
+            self._persist_waterfall_page_state(current_spec)
+            self.global_refresh()
 
     @staticmethod
     def _normalize_denoise_methods(methods):

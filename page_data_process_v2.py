@@ -10,15 +10,15 @@ from siui.core import SiColor
 
 class DataProcessPage(QWidget):
     PAGE_MARGIN = 13
-    SECTION_MARGIN = 15
-    SECTION_SPACING = 20
-    GROUP_MARGINS = (15, 55, 15, 20)
-    GROUP_SPACING = 12
-    SLIDER_BLOCK_WIDTH = 400
-    SLIDER_GROUP_WIDTH = 450
-    CONTROL_ROW_WIDTH = 340
-    COMBO_WIDTH = 210
-    BUTTON_WIDTH = 100
+    SECTION_MARGIN = 10
+    SECTION_SPACING = 14
+    GROUP_MARGINS = (12, 45, 12, 16)
+    GROUP_SPACING = 10
+    SLIDER_BLOCK_WIDTH = 310
+    SLIDER_GROUP_WIDTH = 360
+    CONTROL_ROW_WIDTH = 290
+    COMBO_WIDTH = 190
+    BUTTON_WIDTH = 92
     def __init__(self, parent=None):
         super().__init__(parent)
         self.locked_half_width = 0
@@ -245,7 +245,8 @@ class DataProcessPage(QWidget):
         self.vbox.addLayout(self._center_widget(grp_other, self.SLIDER_GROUP_WIDTH))
 
         self.vbox.addStretch()
-        self.scroll.setCenterWidget(self.container)
+        self.container.adjustSize()
+        self.scroll.setAttachment(self.container)
         layout.addWidget(self.scroll)
 
     def _on_t_low_changed(self, value):

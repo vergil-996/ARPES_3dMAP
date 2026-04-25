@@ -15,6 +15,9 @@ class ImageControlPage(QWidget):
     SECTION_SPACING = 20
     GROUP_MARGINS = (15, 55, 15, 20)
     GROUP_SPACING = 12
+    GROUP_WIDTH = 360
+    SLICE_EDIT_WIDTH = 155
+    BUTTON_WIDTH = 64
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -39,6 +42,7 @@ class ImageControlPage(QWidget):
     def _create_red_btn(self, text):
         btn = SiPushButton(self)
         btn.setFixedHeight(32)
+        btn.setFixedWidth(self.BUTTON_WIDTH)
         btn.attachment().setText(text)
         btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
         btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
@@ -51,6 +55,7 @@ class ImageControlPage(QWidget):
         layout.setSpacing(0)
         self.scroll = SiScrollArea(self)
         self.container = QWidget()
+        self.container.setFixedWidth(self.GROUP_WIDTH + self.SECTION_MARGIN * 2)
         self.vbox = QVBoxLayout(self.container)
         self.vbox.setContentsMargins(
             self.SECTION_MARGIN,
@@ -61,7 +66,8 @@ class ImageControlPage(QWidget):
         self.vbox.setSpacing(self.SECTION_SPACING)
 
         grp_time = SiTitledWidgetGroup(self)
-        grp_time.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        grp_time.setFixedWidth(self.GROUP_WIDTH)
         grp_time.addTitle("时间轴控制")
         self.slider_time = self._create_slider()
         v_time = QVBoxLayout(grp_time)
@@ -72,7 +78,8 @@ class ImageControlPage(QWidget):
         self.vbox.addWidget(grp_time)
 
         grp_slice = SiTitledWidgetGroup(self)
-        grp_slice.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_slice.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        grp_slice.setFixedWidth(self.GROUP_WIDTH)
         grp_slice.addTitle("切片立方体设置")
         v_slice = QVBoxLayout(grp_slice)
         v_slice.setContentsMargins(*self.GROUP_MARGINS)
@@ -84,9 +91,11 @@ class ImageControlPage(QWidget):
             e_min = SiLabeledLineEdit(self)
             e_min.setTitle(min_label)
             e_min.setFixedHeight(45)
+            e_min.setFixedWidth(self.SLICE_EDIT_WIDTH)
             e_max = SiLabeledLineEdit(self)
             e_max.setTitle(max_label)
             e_max.setFixedHeight(45)
+            e_max.setFixedWidth(self.SLICE_EDIT_WIDTH)
             h_row.addWidget(e_min)
             h_row.addWidget(e_max)
             v_slice.addLayout(h_row)
@@ -105,6 +114,10 @@ class ImageControlPage(QWidget):
         lbl_flip = SiLabel("图像翻转")
         lbl_flip.setStyleSheet("color: white; font-weight: bold;")
 
+        h_sw.setSpacing(4)
+        for switch in (self.switch_axes, self.switch_coord, self.switch_flip):
+            switch.setFixedSize(40, 20)
+
         h_sw.addStretch()
         h_sw.addWidget(lbl_axes)
         h_sw.addWidget(self.switch_axes)
@@ -116,6 +129,7 @@ class ImageControlPage(QWidget):
         self.vbox.addLayout(h_sw)
 
         h_btns = QHBoxLayout()
+        h_btns.setSpacing(6)
         self.btn_load = self._create_red_btn("加载")
         self.btn_cut = self._create_red_btn("截取")
         self.btn_export = self._create_red_btn("保存")
@@ -126,7 +140,8 @@ class ImageControlPage(QWidget):
         self.vbox.addLayout(h_btns)
 
         self.vbox.addStretch()
-        self.scroll.setCenterWidget(self.container)
+        self.container.adjustSize()
+        self.scroll.setAttachment(self.container)
         layout.addWidget(self.scroll)
 
     def bind_events(self):
