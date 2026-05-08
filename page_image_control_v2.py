@@ -129,9 +129,9 @@ class ImageControlPage(QWidget):
         for switch in (self.switch_axes, self.switch_coord, self.switch_flip):
             switch.setFixedSize(40, 20)
 
-        h_sw.addStretch()
         h_sw.addWidget(lbl_axes)
         h_sw.addWidget(self.switch_axes)
+        h_sw.addStretch()
         h_sw.addWidget(lbl_coord)
         h_sw.addWidget(self.switch_coord)
         h_sw.addStretch()

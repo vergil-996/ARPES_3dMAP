@@ -849,7 +849,9 @@ class My3DAnalyzer(QWidget):
         if self.core.raw_data is None:
             return
 
-        logical_bounds = self.core.render_to_logical_bounds(render_bounds, self.core.raw_data.shape[:3])
+        shape = self.core.raw_data.shape[:3]
+        logical_bounds = self.core.render_to_logical_bounds(render_bounds, shape)
+        logical_bounds = self._map_visual_flip_logical_bounds(logical_bounds, shape)
         self._sync_slice_edits_from_logical_bounds(logical_bounds)
 
     def _get_render_bounds_for_box(self, logical_bounds=None):
@@ -860,7 +862,9 @@ class My3DAnalyzer(QWidget):
         if bounds is None:
             bounds = self._get_full_logical_bounds()
 
-        return self.core.logical_to_render_bounds(bounds, self.core.raw_data.shape[:3])
+        shape = self.core.raw_data.shape[:3]
+        bounds = self._map_visual_flip_logical_bounds(bounds, shape)
+        return self.core.logical_to_render_bounds(bounds, shape)
 
     def _can_show_interactive_box(self):
         active_spec = self.left_workspace.current_spec()
@@ -908,6 +912,11 @@ class My3DAnalyzer(QWidget):
             mirrored[axis_idx * 2] = axis_max - up
             mirrored[axis_idx * 2 + 1] = axis_max - low
         return mirrored
+
+    def _map_visual_flip_logical_bounds(self, bounds, shape):
+        if not self.page_image.switch_flip.isChecked():
+            return bounds
+        return self._mirror_logical_bounds_for_display(bounds, shape)
 
     def _render_context_for_visual_flip(self, context):
         if not self.page_image.switch_flip.isChecked() or context is None:
