@@ -1,5 +1,5 @@
-from PyQt5.QtCore import QSignalBlocker
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
+from PyQt5.QtCore import Qt, QSignalBlocker
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QDoubleSpinBox
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
@@ -18,6 +18,8 @@ class DataProcessPage(QWidget):
     GROUP_SPACING = 10
     SLIDER_BLOCK_WIDTH = 310
     SLIDER_GROUP_WIDTH = 360
+    AXIS_VALUE_BOX_WIDTH = 86
+    AXIS_VALUE_BOX_SPACING = 8
     CONTROL_ROW_WIDTH = 290
     COMBO_WIDTH = 190
     BUTTON_WIDTH = 92
@@ -39,7 +41,9 @@ class DataProcessPage(QWidget):
         self._is_updating = False
         self._adaptive_groups = []
         self._adaptive_sliders = []
+        self._adaptive_axis_sliders = []
         self._adaptive_slider_blocks = []
+        self._adaptive_axis_value_boxes = []
         self._adaptive_row_controls = []
         self._adaptive_combo_controls = []
         self._adaptive_buttons = []
@@ -75,6 +79,32 @@ class DataProcessPage(QWidget):
         slider.style_data.handle_color = QColor("#FFFFFF")
         return slider
 
+    def _create_axis_value_box(self):
+        spin_box = QDoubleSpinBox(self)
+        spin_box.setFixedSize(self.AXIS_VALUE_BOX_WIDTH, 30)
+        spin_box.setDecimals(2)
+        spin_box.setKeyboardTracking(False)
+        spin_box.setRange(0.0, 0.0)
+        spin_box.setSingleStep(0.01)
+        spin_box.setAlignment(Qt.AlignCenter)
+        spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        spin_box.setStyleSheet(
+            "QDoubleSpinBox {"
+            "background-color: rgba(255, 255, 255, 24);"
+            "color: white;"
+            "border: 1px solid rgba(255, 255, 255, 54);"
+            "border-radius: 6px;"
+            "padding-left: 4px;"
+            "padding-right: 4px;"
+            "}"
+            "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
+            "width: 0px;"
+            "border: none;"
+            "}"
+        )
+        self._adaptive_axis_value_boxes.append(spin_box)
+        return spin_box
+
     def _center_widget(self, widget, max_width=None):
         if max_width is not None:
             widget.setMaximumWidth(max_width)
@@ -84,7 +114,7 @@ class DataProcessPage(QWidget):
         row.addStretch()
         return row
 
-    def _create_labeled_slider_block(self, text, slider):
+    def _create_labeled_slider_block(self, text, slider, value_box=None):
         container = QWidget(self)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         container.setFixedWidth(self.SLIDER_BLOCK_WIDTH)
@@ -95,11 +125,19 @@ class DataProcessPage(QWidget):
         label = SiLabel(text)
         label.setStyleSheet("color: white; font-weight: bold;")
         block.addWidget(label)
-        block.addWidget(slider)
+        if value_box is None:
+            block.addWidget(slider)
+        else:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(self.AXIS_VALUE_BOX_SPACING)
+            row.addWidget(slider)
+            row.addWidget(value_box)
+            block.addLayout(row)
         return container
 
-    def _add_centered_slider_block(self, layout, text, slider):
-        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider)))
+    def _add_centered_slider_block(self, layout, text, slider, value_box=None):
+        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider, value_box)))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -195,6 +233,8 @@ class DataProcessPage(QWidget):
         lbl3.setFixedWidth(60)
         h_ax1.addWidget(lbl3)
         self.s_ax_up = self._create_pink_slider()
+        self._adaptive_axis_sliders.append(self.s_ax_up)
+        self.input_ax_up = self._create_axis_value_box()
         h_ax1.addWidget(self.s_ax_up)
 
         h_ax2 = QHBoxLayout()
@@ -203,6 +243,8 @@ class DataProcessPage(QWidget):
         lbl4.setFixedWidth(60)
         h_ax2.addWidget(lbl4)
         self.s_ax_low = self._create_pink_slider()
+        self._adaptive_axis_sliders.append(self.s_ax_low)
+        self.input_ax_low = self._create_axis_value_box()
         h_ax2.addWidget(self.s_ax_low)
 
         h_ax3 = QHBoxLayout()
@@ -211,6 +253,8 @@ class DataProcessPage(QWidget):
         lbl5.setFixedWidth(60)
         h_ax3.addWidget(lbl5)
         self.s_ax_mid = self._create_pink_slider()
+        self._adaptive_axis_sliders.append(self.s_ax_mid)
+        self.input_ax_mid = self._create_axis_value_box()
         h_ax3.addWidget(self.s_ax_mid)
 
         self.s_ax_low.valueChanged.connect(self._on_axe_low_changed)
@@ -234,9 +278,9 @@ class DataProcessPage(QWidget):
                 if widget is not None:
                     widget.setParent(None)
         # Keep the axis selector row in place; only rebuild the slider rows below it.
-        self._add_centered_slider_block(v_ax, lbl3.text(), self.s_ax_up)
-        self._add_centered_slider_block(v_ax, lbl4.text(), self.s_ax_low)
-        self._add_centered_slider_block(v_ax, lbl5.text(), self.s_ax_mid)
+        self._add_centered_slider_block(v_ax, lbl3.text(), self.s_ax_up, self.input_ax_up)
+        self._add_centered_slider_block(v_ax, lbl4.text(), self.s_ax_low, self.input_ax_low)
+        self._add_centered_slider_block(v_ax, lbl5.text(), self.s_ax_mid, self.input_ax_mid)
         v_ax.addLayout(self._center_widget(self.btn_ax_apply, self.BUTTON_WIDTH))
         self._apply_style(grp_ax)
         self.vbox.addLayout(self._center_widget(grp_ax, self.SLIDER_GROUP_WIDTH))
@@ -293,6 +337,10 @@ class DataProcessPage(QWidget):
             self.MIN_SLIDER_BLOCK_WIDTH,
             self.MAX_SLIDER_BLOCK_WIDTH,
         )
+        axis_slider_width = max(
+            180,
+            slider_width - self.AXIS_VALUE_BOX_WIDTH - self.AXIS_VALUE_BOX_SPACING,
+        )
         row_width = bounded_width(
             group_width - 70,
             self.MIN_CONTROL_ROW_WIDTH,
@@ -312,10 +360,16 @@ class DataProcessPage(QWidget):
         self.container.setFixedWidth(content_width)
         for group in self._adaptive_groups:
             group.setFixedWidth(group_width)
+        axis_sliders = set(self._adaptive_axis_sliders)
         for slider in self._adaptive_sliders:
-            slider.setFixedWidth(slider_width)
+            if slider not in axis_sliders:
+                slider.setFixedWidth(slider_width)
+        for slider in self._adaptive_axis_sliders:
+            slider.setFixedWidth(axis_slider_width)
         for block in self._adaptive_slider_blocks:
             block.setFixedWidth(slider_width)
+        for value_box in self._adaptive_axis_value_boxes:
+            value_box.setFixedWidth(self.AXIS_VALUE_BOX_WIDTH)
         for control in self._adaptive_row_controls:
             control.setFixedWidth(row_width)
         for control in self._adaptive_combo_controls:
@@ -434,15 +488,30 @@ class DataProcessPage(QWidget):
                 "maximum": int(self.s_ax_low.maximum()),
                 "value": int(self.s_ax_low.value()),
             },
+            "input_ax_low": {
+                "minimum": float(self.input_ax_low.minimum()),
+                "maximum": float(self.input_ax_low.maximum()),
+                "value": float(self.input_ax_low.value()),
+            },
             "s_ax_up": {
                 "minimum": int(self.s_ax_up.minimum()),
                 "maximum": int(self.s_ax_up.maximum()),
                 "value": int(self.s_ax_up.value()),
             },
+            "input_ax_up": {
+                "minimum": float(self.input_ax_up.minimum()),
+                "maximum": float(self.input_ax_up.maximum()),
+                "value": float(self.input_ax_up.value()),
+            },
             "s_ax_mid": {
                 "minimum": int(self.s_ax_mid.minimum()),
                 "maximum": int(self.s_ax_mid.maximum()),
                 "value": int(self.s_ax_mid.value()),
+            },
+            "input_ax_mid": {
+                "minimum": float(self.input_ax_mid.minimum()),
+                "maximum": float(self.input_ax_mid.maximum()),
+                "value": float(self.input_ax_mid.value()),
             },
             "locked_half_width": int(self.locked_half_width),
             "combo_other": {
@@ -460,6 +529,9 @@ class DataProcessPage(QWidget):
             self.s_ax_low,
             self.s_ax_up,
             self.s_ax_mid,
+            self.input_ax_low,
+            self.input_ax_up,
+            self.input_ax_mid,
             self.combo_other,
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
@@ -486,16 +558,37 @@ class DataProcessPage(QWidget):
             if combo_ax_index is not None and 0 <= int(combo_ax_index) < self.combo_ax.count():
                 self.combo_ax.setCurrentIndex(int(combo_ax_index))
 
-            for slider_name, slider in (("s_ax_low", self.s_ax_low), ("s_ax_up", self.s_ax_up), ("s_ax_mid", self.s_ax_mid)):
+            axis_controls = (
+                ("s_ax_low", "input_ax_low", self.s_ax_low, self.input_ax_low),
+                ("s_ax_up", "input_ax_up", self.s_ax_up, self.input_ax_up),
+                ("s_ax_mid", "input_ax_mid", self.s_ax_mid, self.input_ax_mid),
+            )
+            for slider_name, input_name, slider, value_box in axis_controls:
                 slider_state = state.get(slider_name) or {}
-                minimum = slider_state.get("minimum")
-                maximum = slider_state.get("maximum")
-                if minimum is not None and maximum is not None:
-                    slider.setRange(int(minimum), int(maximum))
+                input_state = state.get(input_name) or {}
+                slider_minimum = slider_state.get("minimum")
+                slider_maximum = slider_state.get("maximum")
+                if slider_minimum is not None and slider_maximum is not None:
+                    slider.setRange(int(slider_minimum), int(slider_maximum))
+
+                box_minimum = input_state.get("minimum")
+                box_maximum = input_state.get("maximum")
+                if box_minimum is not None and box_maximum is not None:
+                    value_box.setRange(float(box_minimum), float(box_maximum))
+                elif slider_minimum is not None and slider_maximum is not None:
+                    value_box.setRange(float(slider_minimum), float(slider_maximum))
+
                 if "value" in slider_state:
                     value = int(slider_state["value"])
                     value = max(int(slider.minimum()), min(int(slider.maximum()), value))
                     slider.setValue(value)
+
+                if "value" in input_state:
+                    box_value = float(input_state["value"])
+                    box_value = max(float(value_box.minimum()), min(float(value_box.maximum()), box_value))
+                    value_box.setValue(box_value)
+                elif "value" in slider_state:
+                    value_box.setValue(float(slider.value()))
                 self._sync_slider_visual(slider)
 
             combo_other_state = state.get("combo_other") or {}

@@ -9,7 +9,7 @@ from qt_bootstrap import configure_qt_plugin_path
 configure_qt_plugin_path()
 
 import numpy as np
-from PyQt5.QtCore import QEvent, QTimer, Qt
+from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -17,7 +17,9 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QMenu,
     QMessageBox,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -28,6 +30,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
+from scipy.ndimage import gaussian_filter, laplace
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
@@ -61,6 +64,9 @@ class QuickCloseMessageBox(QMessageBox):
 
 
 class My3DAnalyzer(QWidget):
+    COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
+    COMPARISON_PAGE_KIND = "curve_comparison_1d"
+
     def __init__(self):
         super().__init__()
         self.setWindowOpacity(0)
@@ -78,6 +84,7 @@ class My3DAnalyzer(QWidget):
         self.last_visual_page_id = None
         self.page_denoise_cache = {}
         self._syncing_controls = False
+        self._syncing_axis_value_boxes = False
         self.axis_source_mode = "frame"
         self.loaded_npz_stem = "data"
         self.global_waterfall_step = BlankControlPage.DEFAULT_WATERFALL_STEP
@@ -85,11 +92,13 @@ class My3DAnalyzer(QWidget):
         self._modifier_page_shortcut_candidate = None
         self._modifier_page_shortcut_cancelled = False
         self._preserve_control_tab_on_next_page_sync = False
+        self.curve_clipboard = None
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
         self.axis_refresh_timer.setInterval(40)
         self.axis_refresh_timer.timeout.connect(self.auto_refresh_integral)
+
         self.current_render_context = None
         self.axis_crop_selector = None
         self.axis_crop_overlay = None
@@ -153,6 +162,8 @@ class My3DAnalyzer(QWidget):
             if not self._page_keyboard_shortcuts_enabled():
                 self._reset_page_keyboard_shortcut()
                 return super().eventFilter(watched, event)
+            if self._handle_curve_clipboard_shortcut(event):
+                return True
             if self._handle_number_page_shortcut(event):
                 return True
             return self._handle_page_shortcut_key_press(event)
@@ -197,6 +208,43 @@ class My3DAnalyzer(QWidget):
 
         editable_markers = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
         return any(marker in class_name for class_name in class_names for marker in editable_markers)
+
+    @staticmethod
+    def _widget_is_descendant(widget, ancestor):
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = current.parentWidget()
+        return False
+
+    def _curve_clipboard_shortcuts_target_left_workspace(self):
+        if self._focus_accepts_number_input():
+            return False
+
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is not None:
+            if self._widget_is_descendant(focus_widget, self.left_workspace):
+                return True
+            if self._widget_is_descendant(focus_widget, self.left_display_stack):
+                return True
+
+        return self._cursor_inside_widget(self.left_workspace, QCursor.pos())
+
+    def _handle_curve_clipboard_shortcut(self, event):
+        if event.isAutoRepeat() or event.modifiers() != Qt.ControlModifier:
+            return False
+        if event.key() not in (Qt.Key_C, Qt.Key_V):
+            return False
+        if not self._curve_clipboard_shortcuts_target_left_workspace():
+            return False
+
+        self._reset_page_keyboard_shortcut()
+        if event.key() == Qt.Key_C:
+            self._copy_current_curve_to_clipboard(show_message=True)
+        else:
+            self._paste_curve_to_comparison_page(show_message=True)
+        return True
 
     def _handle_number_page_shortcut(self, event):
         if event.isAutoRepeat() or event.modifiers() not in (Qt.NoModifier, Qt.KeypadModifier):
@@ -342,6 +390,10 @@ class My3DAnalyzer(QWidget):
 
         self.fig = Figure(figsize=(5, 4), dpi=100, facecolor="#1A1A2E")
         self.canvas_2d = FigureCanvas(self.fig)
+        self.canvas_2d.setMinimumSize(0, 0)
+        self.canvas_2d.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.canvas_2d.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.canvas_2d.customContextMenuRequested.connect(self._show_curve_context_menu)
         self.ax_2d = self.fig.add_subplot(111)
         self.axis_crop_canvas_cid = self.canvas_2d.mpl_connect("button_press_event", self._on_axis_crop_canvas_click)
         self.left_display_stack.addWidget(self.canvas_2d)
@@ -442,6 +494,9 @@ class My3DAnalyzer(QWidget):
         self.page_image.switch_flip.toggled.connect(self.on_toggle_e_flip)
 
         self.page_render.btn_apply_cmap.clicked.connect(self.global_refresh)
+        self.page_render.s_low.sliderReleased.connect(self.flush_render_levels_refresh)
+        self.page_render.s_gamma.sliderReleased.connect(self.flush_render_levels_refresh)
+        self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.btn_apply_map.clicked.connect(self.global_refresh)
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
 
@@ -455,6 +510,24 @@ class My3DAnalyzer(QWidget):
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
         self.page_data.s_t_low.valueChanged.connect(self.on_time_integral_controls_changed)
         self.page_data.s_t_up.valueChanged.connect(self.on_time_integral_controls_changed)
+        self.page_data.s_ax_low.valueChanged.connect(
+            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_low, value)
+        )
+        self.page_data.s_ax_up.valueChanged.connect(
+            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_up, value)
+        )
+        self.page_data.s_ax_mid.valueChanged.connect(
+            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_mid, value)
+        )
+        self.page_data.input_ax_low.valueChanged.connect(
+            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_low, self.page_data.s_ax_low)
+        )
+        self.page_data.input_ax_up.valueChanged.connect(
+            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_up, self.page_data.s_ax_up)
+        )
+        self.page_data.input_ax_mid.valueChanged.connect(
+            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_mid, self.page_data.s_ax_mid)
+        )
         self.page_data.s_ax_low.valueChanged.connect(self.schedule_axis_refresh)
         self.page_data.s_ax_up.valueChanged.connect(self.schedule_axis_refresh)
         self.page_data.s_ax_mid.valueChanged.connect(self.schedule_axis_refresh)
@@ -652,6 +725,7 @@ class My3DAnalyzer(QWidget):
                     },
                     block_signals=True,
                 )
+                self.sync_axis_value_boxes_from_sliders()
 
             if self._preserve_control_tab_on_next_page_sync:
                 tab_index = int(self.page_container.currentIndex())
@@ -671,12 +745,13 @@ class My3DAnalyzer(QWidget):
         axis_index = int(self.page_data.combo_ax.currentIndex())
         axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
         source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
+        low, up, mid = self._axis_input_logical_values()
 
         target_spec.params["axis_index"] = axis_index
         target_spec.params["axis_name"] = axis_name
-        target_spec.params["low"] = int(self.page_data.s_ax_low.value())
-        target_spec.params["up"] = int(self.page_data.s_ax_up.value())
-        target_spec.params["mid"] = int(self.page_data.s_ax_mid.value())
+        target_spec.params["low"] = int(low)
+        target_spec.params["up"] = int(up)
+        target_spec.params["mid"] = int(mid)
         target_spec.params["source_mode"] = source_mode
         target_spec.params["source_page_kind"] = "time_integral" if source_mode == "time_integral" else "home"
         target_spec.params["source_t_index"] = int(self.page_image.slider_time.value())
@@ -734,6 +809,11 @@ class My3DAnalyzer(QWidget):
         if current_spec is not None and current_spec.page_kind == "waterfall_edc":
             self._persist_waterfall_page_state(current_spec)
             self.global_refresh()
+
+    def flush_render_levels_refresh(self):
+        if self._syncing_controls:
+            return
+        self.global_refresh()
 
     @staticmethod
     def _normalize_denoise_methods(methods):
@@ -1013,6 +1093,199 @@ class My3DAnalyzer(QWidget):
                 return candidate
             suffix += 1
 
+    def _curve_kind_for_spec(self, spec):
+        if spec is None:
+            return None
+        if spec.page_kind in self.COMPARABLE_1D_PAGE_KINDS:
+            return spec.page_kind
+        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+            kind = spec.params.get("comparison_kind")
+            if kind in self.COMPARABLE_1D_PAGE_KINDS:
+                return kind
+        return None
+
+    @staticmethod
+    def _normalize_curve_snapshot(snapshot):
+        if not isinstance(snapshot, dict):
+            return None
+
+        try:
+            x_data = np.asarray(snapshot.get("x_data"), dtype=np.float64).ravel()
+            y_data = np.asarray(snapshot.get("y_data"), dtype=np.float64).ravel()
+        except (TypeError, ValueError):
+            return None
+        if x_data.size == 0 or x_data.size != y_data.size:
+            return None
+
+        curve_kind = snapshot.get("curve_kind")
+        title = str(snapshot.get("title") or snapshot.get("source_title") or "1D Curve")
+        source_title = str(snapshot.get("source_title") or title)
+        label = str(snapshot.get("label") or source_title)
+        xlabel = str(snapshot.get("xlabel") or "")
+        return {
+            "curve_kind": curve_kind,
+            "title": title,
+            "source_title": source_title,
+            "label": label,
+            "xlabel": xlabel,
+            "x_data": x_data.astype(float).tolist(),
+            "y_data": y_data.astype(float).tolist(),
+        }
+
+    def _curve_snapshot_from_context(self, spec, context, *, label=None):
+        if spec is None or context is None or context.get("view") != "1d":
+            return None
+
+        curve_kind = self._curve_kind_for_spec(spec)
+        if curve_kind not in self.COMPARABLE_1D_PAGE_KINDS:
+            return None
+
+        snapshot = self._normalize_curve_snapshot(
+            {
+                "curve_kind": curve_kind,
+                "title": context.get("title") or spec.title,
+                "source_title": spec.title,
+                "label": label or spec.title,
+                "xlabel": context.get("xlabel") or "",
+                "x_data": context.get("x_data"),
+                "y_data": context.get("y_data"),
+            }
+        )
+        if snapshot is not None:
+            snapshot["curve_kind"] = curve_kind
+        return snapshot
+
+    def _current_single_curve_snapshot(self):
+        spec = self.left_workspace.current_spec()
+        if spec is None or spec.page_kind not in self.COMPARABLE_1D_PAGE_KINDS:
+            return None
+
+        context = self.current_render_context
+        if context is None or context.get("view") != "1d":
+            context = self._compute_render_context(spec)
+        return self._curve_snapshot_from_context(spec, context)
+
+    @staticmethod
+    def _curve_x_data_matches(reference, candidate):
+        ref_x = np.asarray(reference.get("x_data"), dtype=np.float64).ravel()
+        candidate_x = np.asarray(candidate.get("x_data"), dtype=np.float64).ravel()
+        return ref_x.size == candidate_x.size and np.allclose(ref_x, candidate_x, rtol=1e-6, atol=1e-8)
+
+    def _current_curve_group_snapshot(self):
+        spec = self.left_workspace.current_spec()
+        kind = self._curve_kind_for_spec(spec)
+        if spec is None or kind not in self.COMPARABLE_1D_PAGE_KINDS:
+            return None
+
+        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+            base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+            if base_curve is None:
+                return None
+            base_curve["curve_kind"] = kind
+            overlay_curves = []
+            for curve in spec.params.get("overlay_curves", []):
+                normalized = self._normalize_curve_snapshot(curve)
+                if normalized is None:
+                    continue
+                normalized["curve_kind"] = kind
+                overlay_curves.append(normalized)
+            return kind, base_curve, overlay_curves
+
+        base_curve = self._current_single_curve_snapshot()
+        if base_curve is None:
+            return None
+        return kind, base_curve, []
+
+    def _can_copy_current_curve(self):
+        return self._current_single_curve_snapshot() is not None
+
+    def _can_paste_curve_to_current_page(self, *, show_message=False):
+        clipboard_curve = self._normalize_curve_snapshot(self.curve_clipboard)
+        if clipboard_curve is None:
+            if show_message:
+                self._show_message("无法粘贴曲线", "没有可粘贴的 1D 曲线。", QMessageBox.Information)
+            return False
+
+        group = self._current_curve_group_snapshot()
+        if group is None:
+            if show_message:
+                self._show_message("无法粘贴曲线", "当前页不是可比较的 1D 曲线结果页。", QMessageBox.Information)
+            return False
+
+        target_kind, base_curve, _ = group
+        if clipboard_curve.get("curve_kind") != target_kind:
+            if show_message:
+                self._show_message("无法粘贴曲线", "只能粘贴同类型的 1D 曲线。", QMessageBox.Warning)
+            return False
+
+        if not self._curve_x_data_matches(base_curve, clipboard_curve):
+            if show_message:
+                self._show_message("无法粘贴曲线", "曲线横轴不匹配，无法粘贴比较。", QMessageBox.Warning)
+            return False
+
+        return True
+
+    def _copy_current_curve_to_clipboard(self, *, show_message=False):
+        snapshot = self._current_single_curve_snapshot()
+        if snapshot is None:
+            if show_message:
+                self._show_message("无法复制曲线", "当前页没有可复制的单条 1D 曲线。", QMessageBox.Information)
+            return False
+
+        self.curve_clipboard = copy.deepcopy(snapshot)
+        return True
+
+    def _paste_curve_to_comparison_page(self, *, show_message=False):
+        if not self._can_paste_curve_to_current_page(show_message=show_message):
+            return False
+
+        clipboard_curve = self._normalize_curve_snapshot(self.curve_clipboard)
+        group = self._current_curve_group_snapshot()
+        if clipboard_curve is None or group is None:
+            return False
+
+        target_kind, base_curve, overlay_curves = group
+        clipboard_curve["curve_kind"] = target_kind
+        overlay_curves = [copy.deepcopy(curve) for curve in overlay_curves]
+        overlay_curves.append(copy.deepcopy(clipboard_curve))
+
+        current_spec = self.left_workspace.current_spec()
+        base_title = base_curve.get("source_title") or base_curve.get("title") or "1D 曲线"
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._make_unique_page_title(f"比较 - {base_title}"),
+            page_kind=self.COMPARISON_PAGE_KIND,
+            source_module="data_process",
+            source_page_id=current_spec.page_id if current_spec is not None else None,
+            params={
+                "comparison_kind": target_kind,
+                "base_curve": copy.deepcopy(base_curve),
+                "overlay_curves": overlay_curves,
+            },
+        )
+        self._seed_control_state_for_spec(spec)
+        self.left_workspace.add_page(spec)
+        return True
+
+    def _show_curve_context_menu(self, pos):
+        context = self.current_render_context
+        if context is None or context.get("view") not in {"1d", "1d_comparison"}:
+            return
+
+        can_copy = self._can_copy_current_curve()
+        can_paste = self._can_paste_curve_to_current_page(show_message=False)
+        if not can_copy and not can_paste:
+            return
+
+        menu = QMenu(self.canvas_2d)
+        if can_copy:
+            copy_action = menu.addAction("复制")
+            copy_action.triggered.connect(lambda: self._copy_current_curve_to_clipboard(show_message=True))
+        if can_paste:
+            paste_action = menu.addAction("粘贴")
+            paste_action.triggered.connect(lambda: self._paste_curve_to_comparison_page(show_message=True))
+        menu.exec_(self.canvas_2d.mapToGlobal(pos))
+
     def _get_clip_slices(self, logical_bounds=None):
         if self.core.raw_data is None:
             return None
@@ -1120,7 +1393,11 @@ class My3DAnalyzer(QWidget):
         has_data = self.base_raw_data is not None
         active_spec = self.left_workspace.current_spec()
         can_capture = active_spec is not None
-        can_export = has_data and active_spec is not None and active_spec.page_kind != "control_panel"
+        can_export = (
+            has_data
+            and active_spec is not None
+            and active_spec.page_kind not in {"control_panel", self.COMPARISON_PAGE_KIND}
+        )
         self.page_image.btn_export.setEnabled(can_export)
         self.page_data.btn_left_view_save.setEnabled(can_capture)
         self.page_data.btn_view_data_save.setEnabled(can_export)
@@ -1579,13 +1856,14 @@ class My3DAnalyzer(QWidget):
         axis_index = self.page_data.combo_ax.currentIndex()
         axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
         normalized_source_mode = self._normalize_axis_source_mode(source_mode or self.axis_source_mode)
+        low, up, mid = self._axis_input_logical_values()
 
         return {
             "axis_index": axis_index,
             "axis_name": axis_name,
-            "low": int(self.page_data.s_ax_low.value()),
-            "up": int(self.page_data.s_ax_up.value()),
-            "mid": int(self.page_data.s_ax_mid.value()),
+            "low": int(low),
+            "up": int(up),
+            "mid": int(mid),
             "source_mode": normalized_source_mode,
             "source_page_kind": "time_integral" if normalized_source_mode == "time_integral" else "home",
             "source_t_index": int(self.page_image.slider_time.value()),
@@ -1814,12 +2092,47 @@ class My3DAnalyzer(QWidget):
     def _get_edc_curve_context(self, spec, raw_data, coords):
         return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
 
+    def _get_curve_comparison_context(self, spec):
+        comparison_kind = self._curve_kind_for_spec(spec)
+        if comparison_kind not in self.COMPARABLE_1D_PAGE_KINDS:
+            return None
+
+        base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        if base_curve is None:
+            return None
+        base_curve["curve_kind"] = comparison_kind
+
+        curves = [base_curve]
+        for curve in spec.params.get("overlay_curves", []):
+            normalized = self._normalize_curve_snapshot(curve)
+            if normalized is None:
+                continue
+            if normalized.get("curve_kind") not in (None, comparison_kind):
+                continue
+            if not self._curve_x_data_matches(base_curve, normalized):
+                continue
+            normalized["curve_kind"] = comparison_kind
+            curves.append(normalized)
+
+        return {
+            "view": "1d_comparison",
+            "title": spec.title,
+            "xlabel": base_curve.get("xlabel") or "",
+            "ylabel": "Intensity (a.u.)",
+            "comparison_kind": comparison_kind,
+            "curves": curves,
+        }
+
     @staticmethod
-    def _compute_second_derivative_along_energy(data_2d, energy_axis):
-        energy_axis = np.asarray(energy_axis, dtype=np.float64).flatten()
+    def _compute_second_derivative_curvature(data_2d, sigma=1.5, threshold=0.0):
         source = np.asarray(data_2d, dtype=np.float64)
-        first = np.gradient(source, energy_axis, axis=1, edge_order=1)
-        return np.gradient(first, energy_axis, axis=1, edge_order=1)
+        if source.ndim != 2 or source.size == 0:
+            return source.copy()
+
+        smoothed = gaussian_filter(source, sigma=float(sigma))
+        curvature = -laplace(smoothed)
+        curvature[curvature < float(threshold)] = 0
+        return curvature
 
     def _second_derivative_source_label(self, params):
         if params.get("source_page_kind") == "home":
@@ -1874,11 +2187,8 @@ class My3DAnalyzer(QWidget):
         if slice_axis not in (0, 1):
             return None
 
-        energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[
-            int(plot_bounds["y_low"]):int(plot_bounds["y_up"]) + 1
-        ]
-        derivative = self._compute_second_derivative_along_energy(source_data, energy_axis)
-        title = f"Second Derivative (d2/dE2) - {self._second_derivative_plot_label(params)}"
+        derivative = self._compute_second_derivative_curvature(source_data)
+        title = f"Second Derivative (Laplacian Curvature) - {self._second_derivative_plot_label(params)}"
         source_slice_info["title_override"] = title
         return {
             "view": "2d",
@@ -2017,6 +2327,8 @@ class My3DAnalyzer(QWidget):
     def _compute_render_context(self, spec):
         if spec.page_kind == "control_panel":
             return {"view": "config"}
+        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+            return self._get_curve_comparison_context(spec)
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
@@ -2042,17 +2354,77 @@ class My3DAnalyzer(QWidget):
             return self._get_second_derivative_context(spec, raw_data, coords)
         return self._get_home_render_context(spec, raw_data, coords)
 
+    @staticmethod
+    def _display_title_for_1d_plot(title):
+        title = str(title or "")
+        if title.startswith("EDC Curve [") and title.endswith("]"):
+            return title.replace(" [", "\n[", 1)
+        return title
+
+    def _apply_1d_plot_layout(self, *, compact_title=False):
+        try:
+            self.fig.tight_layout(pad=1.8 if compact_title else 1.5)
+        except Exception:
+            pass
+
+        params = self.fig.subplotpars
+        left = min(max(params.left, 0.16), 0.30)
+        bottom = min(max(params.bottom, 0.16), 0.28)
+        right = max(min(params.right, 0.96), left + 0.35)
+        top_limit = 0.82 if compact_title else 0.88
+        top = max(min(params.top, top_limit), bottom + 0.35)
+        self.fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+
     def _render_1d_plot(self, context):
+        VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
         self.ax_2d.plot(context["x_data"], context["y_data"], color="#FF69B4", linewidth=2)
-        self.ax_2d.set_title(context["title"], color="white")
+        display_title = self._display_title_for_1d_plot(context["title"])
+        compact_title = display_title != str(context["title"])
+        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
         self.ax_2d.set_xlabel(context["xlabel"], color="white")
         self.ax_2d.set_ylabel("Intensity (a.u.)", color="white")
-        self.ax_2d.tick_params(colors="white")
-        self.fig.tight_layout()
+        self.ax_2d.tick_params(colors="white", labelsize=9)
+        self.ax_2d.margins(x=0.02, y=0.08)
+        self._apply_1d_plot_layout(compact_title=compact_title)
+        self.canvas_2d.draw()
+
+    def _render_1d_comparison_plot(self, context):
+        VisualEngine.clear_2d_colorbar(self.ax_2d)
+        self.ax_2d.clear()
+
+        colors = ["#FF69B4", "#4CC9F0", "#F9C74F", "#90BE6D", "#F3722C", "#B388FF", "#43AA8B"]
+        linestyles = ["-", "--", "-.", ":"]
+        for idx, curve in enumerate(context.get("curves", [])):
+            x_data = np.asarray(curve["x_data"], dtype=np.float64)
+            y_data = np.asarray(curve["y_data"], dtype=np.float64)
+            label = curve.get("label") or curve.get("source_title") or f"Curve {idx + 1}"
+            if idx == 0:
+                label = f"基准 - {label}"
+            self.ax_2d.plot(
+                x_data,
+                y_data,
+                color=colors[idx % len(colors)],
+                linestyle=linestyles[(idx // len(colors)) % len(linestyles)],
+                linewidth=2.0 if idx == 0 else 1.8,
+                label=label,
+            )
+
+        display_title = self._display_title_for_1d_plot(context["title"])
+        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
+        self.ax_2d.set_xlabel(context["xlabel"], color="white")
+        self.ax_2d.set_ylabel(context.get("ylabel", "Intensity (a.u.)"), color="white")
+        self.ax_2d.tick_params(colors="white", labelsize=9)
+        legend = self.ax_2d.legend(facecolor="#2A2A3A", edgecolor="#FFFFFF", fontsize=8)
+        if legend is not None:
+            for text in legend.get_texts():
+                text.set_color("white")
+        self.ax_2d.margins(x=0.02, y=0.08)
+        self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
     def _render_waterfall_plot(self, context):
+        VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
 
         energy_axis = np.asarray(context["energy_axis"], dtype=np.float64)
@@ -2230,9 +2602,101 @@ class My3DAnalyzer(QWidget):
         axis_labels = {0: "X", 1: "Y", 2: "Z"}
         tooltip_func = lambda value, idx=axis_idx: f"{axis_labels.get(idx, 'Axis')}: {self.core.logical_to_physical(idx, value):.2f}"
 
-        for slider in [self.page_data.s_ax_low, self.page_data.s_ax_up, self.page_data.s_ax_mid]:
-            slider.setRange(0, max_val)
-            slider.setToolTipConvertionFunc(tooltip_func)
+        physical_min, physical_max, physical_step = self._axis_physical_range(axis_idx)
+
+        self._syncing_axis_value_boxes = True
+        try:
+            for slider, value_box in self._axis_slider_box_pairs():
+                slider.setRange(0, max_val)
+                slider.setToolTipConvertionFunc(tooltip_func)
+                value_box.setRange(physical_min, physical_max)
+                value_box.setSingleStep(physical_step)
+                value_box.setValue(self.core.logical_to_physical(axis_idx, int(slider.value())))
+        finally:
+            self._syncing_axis_value_boxes = False
+
+    def _axis_slider_box_pairs(self):
+        return (
+            (self.page_data.s_ax_low, self.page_data.input_ax_low),
+            (self.page_data.s_ax_up, self.page_data.input_ax_up),
+            (self.page_data.s_ax_mid, self.page_data.input_ax_mid),
+        )
+
+    def _axis_physical_range(self, axis_idx):
+        axis_key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_idx), "X")
+        coords = self.core.coords.get(axis_key)
+        coords = np.asarray(coords, dtype=np.float64).flatten() if coords is not None else np.array([], dtype=np.float64)
+        finite = coords[np.isfinite(coords)]
+        if finite.size == 0:
+            return 0.0, 0.0, 0.01
+
+        physical_min = float(np.min(finite))
+        physical_max = float(np.max(finite))
+        if np.isclose(physical_min, physical_max):
+            physical_max = physical_min + 0.01
+
+        step = self._compute_axis_spacing(finite, 0.01)
+        step = max(float(step), 0.01)
+        return physical_min, physical_max, step
+
+    def _axis_physical_to_logical_index(self, axis_idx, physical_value):
+        if self.core.raw_data is None:
+            return 0
+
+        max_val = max(int(self.core.raw_data.shape[int(axis_idx)]) - 1, 0)
+        logical_value = self.core.physical_to_logical(axis_idx, float(physical_value))
+        return int(np.clip(round(logical_value), 0, max_val))
+
+    def _axis_input_logical_value(self, value_box, axis_idx):
+        return self._axis_physical_to_logical_index(axis_idx, float(value_box.value()))
+
+    def _axis_input_logical_values(self):
+        axis_idx = int(self.page_data.combo_ax.currentIndex())
+        return (
+            self._axis_input_logical_value(self.page_data.input_ax_low, axis_idx),
+            self._axis_input_logical_value(self.page_data.input_ax_up, axis_idx),
+            self._axis_input_logical_value(self.page_data.input_ax_mid, axis_idx),
+        )
+
+    def _set_axis_value_box_from_slider(self, value_box, logical_value):
+        if self.core.raw_data is None:
+            return
+
+        axis_idx = int(self.page_data.combo_ax.currentIndex())
+        physical_value = self.core.logical_to_physical(axis_idx, int(logical_value))
+        blocker = QSignalBlocker(value_box)
+        try:
+            value_box.setValue(float(physical_value))
+        finally:
+            del blocker
+
+    def sync_axis_value_boxes_from_sliders(self):
+        for slider, value_box in self._axis_slider_box_pairs():
+            self._set_axis_value_box_from_slider(value_box, int(slider.value()))
+
+    def on_axis_slider_value_changed(self, value_box, logical_value):
+        if self.core.raw_data is None:
+            return
+        if self._syncing_controls or self._syncing_axis_value_boxes:
+            return
+
+        self._set_axis_value_box_from_slider(value_box, int(logical_value))
+
+    def on_axis_physical_value_changed(self, value_box, slider):
+        if self.core.raw_data is None:
+            return
+        if self._syncing_controls or self._syncing_axis_value_boxes:
+            return
+
+        axis_idx = int(self.page_data.combo_ax.currentIndex())
+        logical_value = self._axis_physical_to_logical_index(axis_idx, float(value_box.value()))
+        if int(slider.value()) == logical_value:
+            self._set_axis_value_box_from_slider(value_box, logical_value)
+            self.schedule_axis_refresh()
+            return
+
+        slider.setValue(logical_value)
+        self._set_axis_value_box_from_slider(value_box, logical_value)
 
 
     def on_back(self):
@@ -2698,8 +3162,7 @@ class My3DAnalyzer(QWidget):
             return
 
         axis_idx = self.page_data.combo_ax.currentIndex()
-        low = self.page_data.s_ax_low.value()
-        up = self.page_data.s_ax_up.value()
+        low, up, _ = self._axis_input_logical_values()
         bounds = list(self.clip_ranges) if self.clip_ranges else list(self._get_full_logical_bounds())
 
         if axis_idx == 0:
@@ -2975,7 +3438,9 @@ class My3DAnalyzer(QWidget):
             self.left_display_stack.setCurrentIndex(0)
             self.plotter.clear_actors()
             self.plotter.clear_box_widgets()
+            VisualEngine.clear_3d_colorbar(self.plotter)
             self.plotter.render()
+            VisualEngine.clear_2d_colorbar(self.ax_2d)
             self.ax_2d.clear()
             self.canvas_2d.draw()
             return
@@ -3028,6 +3493,8 @@ class My3DAnalyzer(QWidget):
             self.plotter.clear_box_widgets()
             if render_context["view"] == "waterfall":
                 self._render_waterfall_plot(render_context)
+            elif render_context["view"] == "1d_comparison":
+                self._render_1d_comparison_plot(render_context)
             else:
                 self._render_1d_plot(render_context)
 
@@ -3120,6 +3587,9 @@ class My3DAnalyzer(QWidget):
         if spec is None or self.core.raw_data is None:
             return
         if spec.page_kind == "control_panel":
+            return
+        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+            self._show_message("无法导出数据", "比较页暂不导出叠加曲线数据，请使用左侧视图保存导出图片。", QMessageBox.Information)
             return
 
         raw_data, coords = self._get_display_state_for_spec(spec)

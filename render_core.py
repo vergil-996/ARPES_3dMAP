@@ -1,11 +1,97 @@
 import numpy as np
 import vtk
 import pyvista as pv
+from matplotlib import colormaps
+from matplotlib.colors import ListedColormap
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 
 
 class VisualEngine:
     """渲染与绘图引擎，负责所有 3D 和 2D 的视觉呈现"""
+
+    COLORBAR_TITLE = "Intensity"
+
+    @staticmethod
+    def _level_info(data, levels_params):
+        black, gamma, white = levels_params
+        source = np.asarray(data, dtype=np.float64)
+        finite = source[np.isfinite(source)]
+        if finite.size == 0:
+            d_min, d_max = 0.0, 1.0
+        else:
+            d_min, d_max = float(np.min(finite)), float(np.max(finite))
+
+        span = d_max - d_min
+        if span <= 0:
+            span = 1.0
+            d_max = d_min + span
+
+        black_pos = float(np.clip(black / 100.0, 0.0, 1.0))
+        white_pos = float(np.clip(white / 100.0, 0.0, 1.0))
+        if white_pos <= black_pos:
+            white_pos = min(1.0, black_pos + 0.01)
+        if white_pos <= black_pos:
+            black_pos = max(0.0, white_pos - 0.01)
+
+        gamma_power = float(np.power(10, (50 - gamma) / 50.0))
+        gamma_power = max(gamma_power, 1e-6)
+        gray_pos = black_pos + (white_pos - black_pos) * np.power(0.5, 1.0 / gamma_power)
+
+        return {
+            "data_min": d_min,
+            "data_max": d_max,
+            "span": span,
+            "black_pos": black_pos,
+            "gray_pos": float(gray_pos),
+            "white_pos": white_pos,
+            "black_value": d_min + black_pos * span,
+            "gray_value": d_min + float(gray_pos) * span,
+            "white_value": d_min + white_pos * span,
+            "gamma_power": gamma_power,
+        }
+
+    @staticmethod
+    def _level_mapped_positions(level_info, samples):
+        samples = np.asarray(samples, dtype=np.float64)
+        mapped = np.power(np.clip(samples, 0.0, 1.0), level_info["gamma_power"])
+        return level_info["black_pos"] + (
+            level_info["white_pos"] - level_info["black_pos"]
+        ) * mapped
+
+    @staticmethod
+    def _leveled_cmap(cmap, level_info):
+        base_cmap = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        samples = np.linspace(0.0, 1.0, 256)
+        colors = base_cmap(VisualEngine._level_mapped_positions(level_info, samples))
+        name = f"{getattr(base_cmap, 'name', 'cmap')}_levels_{level_info['gamma_power']:.4g}"
+        return ListedColormap(colors, name=name)
+
+    @staticmethod
+    def _mapped_opacity(opacity, level_info):
+        values = np.asarray(opacity, dtype=np.float64)
+        if values.size <= 1:
+            return opacity
+
+        x = np.linspace(0.0, 1.0, values.size)
+        mapped_x = np.power(x, level_info["gamma_power"])
+        return np.interp(mapped_x, x, values).tolist()
+
+    @staticmethod
+    def _level_ticks(level_info):
+        ticks = [
+            float(level_info["black_value"]),
+            float(level_info["gray_value"]),
+            float(level_info["white_value"]),
+        ]
+        deduped = []
+        for tick in ticks:
+            if not deduped or not np.isclose(tick, deduped[-1], rtol=1e-9, atol=1e-12):
+                deduped.append(tick)
+        return deduped
+
+    @staticmethod
+    def _format_level_tick(value):
+        return f"{float(value):.4g}"
 
     @staticmethod
     def apply_levels(data, black, gamma, white):
@@ -13,24 +99,148 @@ class VisualEngine:
         线性色阶处理
         black, gamma, white 均为 0-100 的整数
         """
-        # 归一化到 0-1
-        d_min, d_max = data.min(), data.max()
-        if d_max <= d_min: return data
-        img = (data - d_min) / (d_max - d_min)
+        level_info = VisualEngine._level_info(data, (black, gamma, white))
+        img = (data - level_info["data_min"]) / level_info["span"]
 
         # 黑白场拉伸
-        b = black / 100.0
-        w = white / 100.0
-        if w <= b: w = b + 0.01
+        b = level_info["black_pos"]
+        w = level_info["white_pos"]
         img = (img - b) / (w - b)
         img = np.clip(img, 0, 1)
 
         # Gamma 矫正 (灰场)
         # 50 对应 gamma=1.0, 越小图像越亮, 越大图像越暗
-        gamma_val = np.power(10, (50 - gamma) / 50.0)
-        img = np.power(img, gamma_val)
+        img = np.power(img, level_info["gamma_power"])
 
         return img
+
+    @staticmethod
+    def _plotter_text_color(plotter):
+        try:
+            bg = plotter.background_color
+            return "black" if bg[0] > 0.9 and bg[1] > 0.9 and bg[2] > 0.9 else "white"
+        except Exception:
+            return "white"
+
+    @staticmethod
+    def _remove_3d_colorbar(plotter):
+        try:
+            plotter.remove_scalar_bar(VisualEngine.COLORBAR_TITLE, render=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def clear_3d_colorbar(plotter):
+        VisualEngine._remove_3d_colorbar(plotter)
+
+    @staticmethod
+    def _3d_colorbar_args(plotter):
+        return {
+            "title": VisualEngine.COLORBAR_TITLE,
+            "vertical": True,
+            "position_x": 0.88,
+            "position_y": 0.08,
+            "width": 0.08,
+            "height": 0.84,
+            "n_labels": 3,
+            "fmt": "%.4g",
+            "color": VisualEngine._plotter_text_color(plotter),
+            "title_font_size": 12,
+            "label_font_size": 10,
+            "use_opacity": False,
+        }
+
+    @staticmethod
+    def _apply_3d_colorbar_ticks(plotter, level_info):
+        try:
+            scalar_bar = plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+            labels = vtk.vtkDoubleArray()
+            for tick in VisualEngine._level_ticks(level_info):
+                labels.InsertNextValue(float(tick))
+            scalar_bar.SetCustomLabels(labels)
+            scalar_bar.SetUseCustomLabels(True)
+            scalar_bar.SetNumberOfLabels(labels.GetNumberOfValues())
+            scalar_bar.SetLabelFormat("%.4g")
+        except Exception:
+            pass
+
+    @staticmethod
+    def clear_2d_colorbar(ax):
+        colorbar = getattr(ax, "_arpes_colorbar", None)
+        if colorbar is not None:
+            try:
+                colorbar.remove()
+            except Exception:
+                pass
+            ax._arpes_colorbar = None
+        ax._arpes_colorbar_ax = None
+
+        fig = getattr(ax, "figure", None)
+        if fig is None:
+            return
+
+        for extra_ax in list(fig.axes):
+            if extra_ax is not ax and getattr(extra_ax, "_arpes_colorbar_axis", False):
+                try:
+                    extra_ax.remove()
+                except Exception:
+                    pass
+
+        base_position = getattr(ax, "_arpes_base_position", None)
+        if base_position is not None:
+            try:
+                ax.set_position(base_position)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _2d_colorbar_positions(ax):
+        fig = getattr(ax, "figure", None)
+        base_position = getattr(ax, "_arpes_base_position", None)
+        if base_position is None:
+            try:
+                base_position = ax.get_subplotspec().get_position(fig).frozen()
+            except Exception:
+                base_position = ax.get_position().frozen()
+            ax._arpes_base_position = base_position
+
+        pad = max(0.010, min(0.025, base_position.width * 0.025))
+        colorbar_width = max(0.018, min(0.035, base_position.width * 0.045))
+        main_width = max(0.10, base_position.width - pad - colorbar_width)
+        colorbar_x = base_position.x0 + main_width + pad
+
+        return (
+            [base_position.x0, base_position.y0, main_width, base_position.height],
+            [colorbar_x, base_position.y0, colorbar_width, base_position.height],
+        )
+
+    @staticmethod
+    def _add_2d_colorbar(ax, image, level_info):
+        fig = getattr(ax, "figure", None)
+        if fig is None:
+            return
+
+        VisualEngine.clear_2d_colorbar(ax)
+        main_position, colorbar_position = VisualEngine._2d_colorbar_positions(ax)
+        ax.set_position(main_position)
+
+        colorbar_ax = fig.add_axes(colorbar_position)
+        colorbar_ax._arpes_colorbar_axis = True
+        colorbar = fig.colorbar(image, cax=colorbar_ax)
+        ticks = VisualEngine._level_ticks(level_info)
+        colorbar.set_ticks(ticks)
+        colorbar.set_ticklabels([VisualEngine._format_level_tick(tick) for tick in ticks])
+        colorbar.set_label(VisualEngine.COLORBAR_TITLE, color="white")
+        colorbar.ax.tick_params(colors="white")
+        colorbar.ax.yaxis.label.set_color("white")
+        for tick_label in colorbar.ax.get_yticklabels():
+            tick_label.set_color("white")
+        try:
+            colorbar.outline.set_edgecolor("#CCCCCC")
+        except Exception:
+            pass
+        ax._arpes_colorbar = colorbar
+        ax._arpes_colorbar_ax = colorbar_ax
 
     @staticmethod
     def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None,
@@ -45,14 +255,18 @@ class VisualEngine:
                 saved_cam = None
 
             # 2. 应用色阶
-            processed_data = VisualEngine.apply_levels(data, b, g, w)
+            level_info = VisualEngine._level_info(data, (b, g, w))
+            display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
 
             # 3. 设置透明度
             opac_dict = {"线性": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
                 "对数": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
                 "幂函数": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
                 "sigmoid": [0.006, 0.018, 0.049, 0.118, 0.268, 0.500, 0.732, 0.882, 0.951, 0.982, 0.994]}
-            selected_opac = opac_dict.get(opac_mode, opac_dict["线性"])
+            selected_opac = VisualEngine._mapped_opacity(
+                opac_dict.get(opac_mode, opac_dict["线性"]),
+                level_info,
+            )
 
             # --- 【核心修改】：重新定义数据的空间几何 ---
             sh = data.shape
@@ -72,11 +286,21 @@ class VisualEngine:
             grid.dimensions = np.array(sh)
             grid.origin = (0, 0, 0)
             grid.spacing = (dx, dy, dz)
-            grid.point_data["values"] = processed_data.flatten(order="F")
+            grid.point_data["values"] = np.asarray(data, dtype=np.float32).flatten(order="F")
 
             # 4. 添加体渲染
-            vol = plotter.add_volume(grid, cmap=cmap, opacity=selected_opac, clim=[0, 1], show_scalar_bar=False,
-                name="main_vol", render=False)
+            VisualEngine.clear_3d_colorbar(plotter)
+            vol = plotter.add_volume(
+                grid,
+                cmap=display_cmap,
+                opacity=selected_opac,
+                clim=[level_info["black_value"], level_info["white_value"]],
+                show_scalar_bar=True,
+                scalar_bar_args=VisualEngine._3d_colorbar_args(plotter),
+                name="main_vol",
+                render=False,
+            )
+            VisualEngine._apply_3d_colorbar_ticks(plotter, level_info)
 
             # 5. 处理切片限制 (Clipping Planes)
             # 注意：此处的 clip_ranges 输入必须已经是 0-200 的值
@@ -183,15 +407,25 @@ class VisualEngine:
                 img = np.flip(img, axis=(0, 1))
                 ext = [ext[1], ext[0], ext[3], ext[2]]
 
-            processed_slice = VisualEngine.apply_levels(img, b, g, w)
+            level_info = VisualEngine._level_info(img, (b, g, w))
+            display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
             title = slice_info.get("title_override", title)
             ext = slice_info.get("extent_override", ext)
             if slice_info.get("display_flip") and slice_info.get("extent_override") is not None:
                 ext = [ext[1], ext[0], ext[3], ext[2]]
 
             ax.clear()
-            ax.imshow(processed_slice, cmap=cmap, aspect='auto', origin='lower', extent=ext,
-                      interpolation='spline16')
+            image = ax.imshow(
+                img,
+                cmap=display_cmap,
+                aspect='auto',
+                origin='lower',
+                extent=ext,
+                interpolation='spline16',
+                vmin=level_info["black_value"],
+                vmax=level_info["white_value"],
+            )
+            VisualEngine._add_2d_colorbar(ax, image, level_info)
 
             ax.set_title(title, color='white')
 
@@ -206,6 +440,7 @@ class VisualEngine:
     def render_integral_dynamics(ax, canvas, x_data, y_data):
         """绘制 Page3 需要的积分动力学曲线"""
         try:
+            VisualEngine.clear_2d_colorbar(ax)
             ax.clear()
             ax.plot(x_data, y_data, color='#FF69B4', linewidth=2, marker='o', markersize=4)
 
