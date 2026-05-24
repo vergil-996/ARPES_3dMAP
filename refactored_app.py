@@ -45,6 +45,7 @@ from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from render_core import VisualEngine
 from result_workspace import AnalysisPageSpec, ResultWorkspace
+from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
 
 
 class QuickCloseMessageBox(QMessageBox):
@@ -122,6 +123,8 @@ class My3DAnalyzer(QWidget):
         self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
+        self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
+        self.waterfall_popup = WaterfallSettingsPopup(self.page_control_blank)
         self._install_page_keyboard_shortcuts()
         self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
@@ -397,6 +400,8 @@ class My3DAnalyzer(QWidget):
         self.canvas_2d.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.canvas_2d.setContextMenuPolicy(Qt.CustomContextMenu)
         self.canvas_2d.customContextMenuRequested.connect(self._show_curve_context_menu)
+        self.plotter.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.plotter.customContextMenuRequested.connect(self._show_main_context_menu)
         self.ax_2d = self.fig.add_subplot(111)
         self.axis_crop_canvas_cid = self.canvas_2d.mpl_connect("button_press_event", self._on_axis_crop_canvas_click)
         self.left_display_stack.addWidget(self.canvas_2d)
@@ -555,17 +560,6 @@ class My3DAnalyzer(QWidget):
             closeable=False,
         )
         self.left_workspace.set_home_page(home_spec)
-        self.left_workspace.add_pinned_page(
-            AnalysisPageSpec(
-                page_id="control_panel",
-                title="鍘诲櫔鍙傛暟",
-                page_kind="control_panel",
-                source_module="system",
-                closeable=False,
-            ),
-            activate=False,
-        )
-        self.left_workspace.update_page("control_panel", title="参数设置")
         self.active_page_spec = home_spec
         self.last_visual_page_id = home_spec.page_id
         home_spec.params["control_state"] = self._capture_control_state()
@@ -1317,15 +1311,27 @@ class My3DAnalyzer(QWidget):
 
     def _show_curve_context_menu(self, pos):
         context = self.current_render_context
-        if context is None or context.get("view") not in {"1d", "1d_comparison"}:
-            return
+        show_curve_actions = (
+            context is not None
+            and context.get("view") in {"1d", "1d_comparison"}
+        )
 
-        can_copy = self._can_copy_current_curve()
-        can_paste = self._can_paste_curve_to_current_page(show_message=False)
-        if not can_copy and not can_paste:
-            return
+        can_copy = self._can_copy_current_curve() if show_curve_actions else False
+        can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu = QMenu(self.canvas_2d)
+        menu.setStyleSheet("QMenu { color: white; background-color: #2A2A3A; } QMenu::item:selected { background-color: #3A3A5A; }")
+        denoise_action = menu.addAction("去噪参数设置")
+        denoise_action.triggered.connect(
+            lambda: self.denoise_popup.show_at(self.canvas_2d.mapToGlobal(pos))
+        )
+        waterfall_action = menu.addAction("瀑布图步长设置")
+        waterfall_action.triggered.connect(
+            lambda: self.waterfall_popup.show_at(self.canvas_2d.mapToGlobal(pos))
+        )
+
+        if can_copy or can_paste:
+            menu.addSeparator()
         if can_copy:
             copy_action = menu.addAction("复制")
             copy_action.triggered.connect(lambda: self._copy_current_curve_to_clipboard(show_message=True))
@@ -1333,6 +1339,19 @@ class My3DAnalyzer(QWidget):
             paste_action = menu.addAction("粘贴")
             paste_action.triggered.connect(lambda: self._paste_curve_to_comparison_page(show_message=True))
         menu.exec_(self.canvas_2d.mapToGlobal(pos))
+
+    def _show_main_context_menu(self, pos):
+        menu = QMenu(self.plotter)
+        menu.setStyleSheet("QMenu { color: white; background-color: #2A2A3A; } QMenu::item:selected { background-color: #3A3A5A; }")
+        denoise_action = menu.addAction("去噪参数设置")
+        denoise_action.triggered.connect(
+            lambda: self.denoise_popup.show_at(self.plotter.mapToGlobal(pos))
+        )
+        waterfall_action = menu.addAction("瀑布图步长设置")
+        waterfall_action.triggered.connect(
+            lambda: self.waterfall_popup.show_at(self.plotter.mapToGlobal(pos))
+        )
+        menu.exec_(self.plotter.mapToGlobal(pos))
 
     def _get_clip_slices(self, logical_bounds=None):
         if self.core.raw_data is None:
