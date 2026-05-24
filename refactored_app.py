@@ -9,6 +9,7 @@ from qt_bootstrap import configure_qt_plugin_path
 configure_qt_plugin_path()
 
 import numpy as np
+import vtk
 from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
@@ -93,6 +94,8 @@ class My3DAnalyzer(QWidget):
         self._modifier_page_shortcut_cancelled = False
         self._preserve_control_tab_on_next_page_sync = False
         self.curve_clipboard = None
+        self._orig_volume_opacity = None
+        self._box_interacting = False
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -964,14 +967,59 @@ class My3DAnalyzer(QWidget):
         if box_bounds is None:
             return
 
+        self._restore_volume_opacity_if_dimmed()
         self.plotter.clear_box_widgets()
-        self.plotter.add_box_widget(
+        box_widget = self.plotter.add_box_widget(
             callback=lambda poly: self._sync_slice_edits_from_render_bounds(poly.bounds),
             bounds=box_bounds,
             factor=1.0,
             color="#FF69B4",
             rotation_enabled=False,
         )
+        box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
+        box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
+
+    def _find_main_volume(self):
+        volumes = self.plotter.renderer.GetVolumes()
+        volumes.InitTraversal()
+        for _ in range(volumes.GetNumberOfItems()):
+            vol = volumes.GetNextItem()
+            if isinstance(vol, vtk.vtkVolume):
+                return vol
+        return None
+
+    def _on_box_interaction_start(self, obj, event):
+        if self._box_interacting:
+            return
+        self._dim_current_volume()
+        self._box_interacting = True
+
+    def _dim_current_volume(self):
+        vol = self._find_main_volume()
+        if vol is None:
+            return
+        prop = vol.GetProperty()
+        self._orig_volume_opacity = prop.GetScalarOpacity()
+        lowered = vtk.vtkPiecewiseFunction()
+        count = self._orig_volume_opacity.GetSize()
+        for i in range(count):
+            node = [0.0, 0.0, 0.0, 0.0]
+            self._orig_volume_opacity.GetNodeValue(i, node)
+            lowered.AddPoint(node[0], node[1] * 0.15, node[2], node[3])
+        prop.SetScalarOpacity(lowered)
+
+    def _on_box_interaction_end(self, obj, event):
+        if not self._box_interacting:
+            return
+        vol = self._find_main_volume()
+        if vol is not None and self._orig_volume_opacity is not None:
+            vol.GetProperty().SetScalarOpacity(self._orig_volume_opacity)
+        self._orig_volume_opacity = None
+        self._box_interacting = False
+
+    def _restore_volume_opacity_if_dimmed(self):
+        if self._box_interacting:
+            self._on_box_interaction_end(None, None)
 
     def _get_display_levels(self):
         return (
@@ -2664,6 +2712,10 @@ class My3DAnalyzer(QWidget):
 
         axis_idx = int(self.page_data.combo_ax.currentIndex())
         physical_value = self.core.logical_to_physical(axis_idx, int(logical_value))
+        if physical_value < value_box.minimum():
+            value_box.setMinimum(float(physical_value))
+        elif physical_value > value_box.maximum():
+            value_box.setMaximum(float(physical_value))
         blocker = QSignalBlocker(value_box)
         try:
             value_box.setValue(float(physical_value))
@@ -3476,6 +3528,9 @@ class My3DAnalyzer(QWidget):
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
             )
+            if self._box_interacting:
+                self._orig_volume_opacity = None
+                self._dim_current_volume()
         elif render_context["view"] == "2d":
             self.left_display_stack.setCurrentIndex(1)
             self.plotter.clear_box_widgets()
@@ -3502,6 +3557,7 @@ class My3DAnalyzer(QWidget):
             self._rebuild_interactive_box()
             self.plotter.render()
         else:
+            self._restore_volume_opacity_if_dimmed()
             self.plotter.clear_box_widgets()
             self.plotter.render()
 
@@ -3528,6 +3584,7 @@ class My3DAnalyzer(QWidget):
             self._rebuild_interactive_box()
             self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
         else:
+            self._restore_volume_opacity_if_dimmed()
             self.plotter.clear_box_widgets()
 
         if checked:

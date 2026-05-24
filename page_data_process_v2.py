@@ -84,7 +84,7 @@ class DataProcessPage(QWidget):
         spin_box.setFixedSize(self.AXIS_VALUE_BOX_WIDTH, 30)
         spin_box.setDecimals(2)
         spin_box.setKeyboardTracking(False)
-        spin_box.setRange(0.0, 0.0)
+        spin_box.setRange(-1e12, 1e12)
         spin_box.setSingleStep(0.01)
         spin_box.setAlignment(Qt.AlignCenter)
         spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -395,16 +395,62 @@ class DataProcessPage(QWidget):
     def _on_axe_low_changed(self, value):
         if self._is_updating:
             return
-        if value > self.s_ax_up.value():
-            self.s_ax_up.setValue(value)
-        self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
+        mid = int(self.s_ax_mid.value())
+        max_limit = int(self.s_ax_up.maximum())
+
+        if int(value) >= mid:
+            self._is_updating = True
+            self.s_ax_low.setValue(mid)
+            if self.s_ax_up.value() < mid:
+                self.s_ax_up.setValue(mid)
+            self._is_updating = False
+            self.locked_half_width = 0
+            return
+
+        target_up = 2 * mid - int(value)
+
+        if target_up > max_limit:
+            clamped_low = max(0, 2 * mid - max_limit)
+            self._is_updating = True
+            self.s_ax_low.setValue(clamped_low)
+            self._is_updating = False
+            self.locked_half_width = max_limit - mid
+            return
+
+        self._is_updating = True
+        self.s_ax_up.setValue(target_up)
+        self._is_updating = False
+        self.locked_half_width = target_up - mid
 
     def _on_axe_up_changed(self, value):
         if self._is_updating:
             return
-        if value < self.s_ax_low.value():
-            self.s_ax_low.setValue(value)
-        self.locked_half_width = abs(self.s_ax_up.value() - self.s_ax_low.value()) // 2
+        mid = int(self.s_ax_mid.value())
+        max_limit = int(self.s_ax_up.maximum())
+
+        if int(value) <= mid:
+            self._is_updating = True
+            self.s_ax_up.setValue(mid)
+            if self.s_ax_low.value() > mid:
+                self.s_ax_low.setValue(mid)
+            self._is_updating = False
+            self.locked_half_width = 0
+            return
+
+        target_low = 2 * mid - int(value)
+
+        if target_low < 0:
+            clamped_up = min(max_limit, 2 * mid)
+            self._is_updating = True
+            self.s_ax_up.setValue(clamped_up)
+            self._is_updating = False
+            self.locked_half_width = mid
+            return
+
+        self._is_updating = True
+        self.s_ax_low.setValue(target_low)
+        self._is_updating = False
+        self.locked_half_width = int(value) - mid
 
     def _on_axe_mid_changed(self, new_mid):
         if self._is_updating:
@@ -424,6 +470,7 @@ class DataProcessPage(QWidget):
         self.s_ax_low.setValue(actual_low)
         self.s_ax_up.setValue(actual_up)
         self._is_updating = False
+        self.locked_half_width = min(new_mid - actual_low, actual_up - new_mid)
 
     @staticmethod
     def _combo_index_for_text(combo_box, text):
@@ -570,13 +617,6 @@ class DataProcessPage(QWidget):
                 slider_maximum = slider_state.get("maximum")
                 if slider_minimum is not None and slider_maximum is not None:
                     slider.setRange(int(slider_minimum), int(slider_maximum))
-
-                box_minimum = input_state.get("minimum")
-                box_maximum = input_state.get("maximum")
-                if box_minimum is not None and box_maximum is not None:
-                    value_box.setRange(float(box_minimum), float(box_maximum))
-                elif slider_minimum is not None and slider_maximum is not None:
-                    value_box.setRange(float(slider_minimum), float(slider_maximum))
 
                 if "value" in slider_state:
                     value = int(slider_state["value"])
