@@ -31,7 +31,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
-from scipy.ndimage import gaussian_filter, laplace
+from scipy.ndimage import gaussian_filter, laplace, rotate as ndimage_rotate
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
@@ -97,6 +97,8 @@ class My3DAnalyzer(QWidget):
         self.curve_clipboard = None
         self._orig_volume_opacity = None
         self._box_interacting = False
+        self.rotation_angle = 0.0
+        self._rotation_cache = {}
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -500,6 +502,7 @@ class My3DAnalyzer(QWidget):
         self.page_image.switch_axes.toggled.connect(self.global_refresh)
         self.page_image.switch_coord.toggled.connect(self.on_toggle_interactive_box)
         self.page_image.switch_flip.toggled.connect(self.on_toggle_e_flip)
+        self.page_image.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
 
         self.page_render.btn_apply_cmap.clicked.connect(self.global_refresh)
         self.page_render.s_low.sliderReleased.connect(self.flush_render_levels_refresh)
@@ -705,6 +708,7 @@ class My3DAnalyzer(QWidget):
 
             self.axis_source_mode = control_state.get("axis_source_mode", self._page_axis_source_mode(owner_spec))
             self.page_image.restore_state(control_state.get("image"), block_signals=True)
+            self.rotation_angle = self.page_image.get_rotation_angle()
             self.page_render.restore_state(control_state.get("render"), block_signals=True)
             self.page_control_blank.restore_state(control_state.get("denoise_detail"), block_signals=True)
             self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
@@ -851,6 +855,58 @@ class My3DAnalyzer(QWidget):
         if axis_index == 1:
             return np.sum(data_3d[:, low:up + 1, :], axis=1)
         return np.sum(data_3d[:, :, low:up + 1], axis=2)
+
+    def _get_rotated_frame(self, raw_data, t_idx):
+        """Extract a time frame and apply Z-axis (Kx-Ky plane) rotation.
+
+        Caches the rotated volume by (t_idx, angle). Returns the
+        original frame directly when rotation_angle is effectively 0.
+        """
+        angle = self.rotation_angle
+        if angle is None or abs(float(angle)) < 1e-6:
+            return self._get_data_for_t_from_raw(raw_data, t_idx)
+
+        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
+        key = (int(t_idx), round(float(angle), 2))
+        cached = self._rotation_cache.get(key)
+        if cached is not None:
+            return cached
+
+        data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
+        rotated = ndimage_rotate(
+            data_3d, float(angle), axes=(0, 1), reshape=False,
+            order=1, mode='constant', cval=0.0, prefilter=True,
+        )
+        self._rotation_cache[key] = rotated
+        return rotated
+
+    def _get_rotated_time_integral(self, raw_data, t_low, t_up):
+        """Compute time-integrated 3D data and apply Z-axis rotation.
+
+        Caches the result by (t_low, t_up, angle). Skips rotation
+        entirely when rotation_angle is effectively 0.
+        """
+        angle = self.rotation_angle
+        if angle is None or abs(float(angle)) < 1e-6:
+            return self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
+
+        t_low = max(0, int(t_low))
+        t_up = min(raw_data.shape[3] - 1, int(t_up))
+        if t_low > t_up:
+            t_low, t_up = t_up, t_low
+
+        key = ("integral", int(t_low), int(t_up), round(float(angle), 2))
+        cached = self._rotation_cache.get(key)
+        if cached is not None:
+            return cached
+
+        data_3d = self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
+        rotated = ndimage_rotate(
+            data_3d, float(angle), axes=(0, 1), reshape=False,
+            order=1, mode='constant', cval=0.0, prefilter=True,
+        )
+        self._rotation_cache[key] = rotated
+        return rotated
 
     def _apply_denoise_methods_to_raw(self, raw_data, methods):
         if not methods:
@@ -1894,7 +1950,7 @@ class My3DAnalyzer(QWidget):
             return None
 
         t_idx = int(self.page_image.slider_time.value())
-        data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
+        data_3d = self._get_rotated_frame(raw_data, t_idx)
 
         if self.home_slice_info is not None:
             data_2d = self._extract_slice_data(data_3d, self.home_slice_info["axis"], self.home_slice_info["index"])
@@ -1947,11 +2003,11 @@ class My3DAnalyzer(QWidget):
             if t_low is not None and t_up is not None:
                 return {
                     "view": "3d",
-                    "data": self._get_time_integrated_data_from_raw(raw_data, int(t_low), int(t_up)),
+                    "data": self._get_rotated_time_integral(raw_data, int(t_low), int(t_up)),
                 }
 
         t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-        return {"view": "3d", "data": self._get_data_for_t_from_raw(raw_data, t_index)}
+        return {"view": "3d", "data": self._get_rotated_frame(raw_data, t_index)}
 
     def _get_time_integral_context(self, spec, raw_data, coords):
         if self._is_current_page(spec):
@@ -1961,7 +2017,7 @@ class My3DAnalyzer(QWidget):
         t_up = int(spec.params["t_up"])
         return {
             "view": "3d",
-            "data": self._get_time_integrated_data_from_raw(raw_data, t_low, t_up),
+            "data": self._get_rotated_time_integral(raw_data, t_low, t_up),
             "coords": coords,
         }
 
@@ -2060,7 +2116,7 @@ class My3DAnalyzer(QWidget):
             t_index = int(self.page_image.slider_time.value())
         else:
             t_index = int(spec.params["t_index"])
-        data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
+        data_3d = self._get_rotated_frame(raw_data, t_index)
         energy_axis = np.asarray(coords["E"], dtype=np.float64)
         clipped = False
         clip_ranges = spec.params.get("clip_ranges")
@@ -2229,7 +2285,7 @@ class My3DAnalyzer(QWidget):
             if slice_axis not in (0, 1):
                 return None
             t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-            data_3d = self._get_data_for_t_from_raw(raw_data, t_index)
+            data_3d = self._get_rotated_frame(raw_data, t_index)
             source_data = self._extract_slice_data(data_3d, slice_axis, int(params["slice_index"]))
             source_slice_info = {"axis": slice_axis, "index": int(params["slice_index"])}
             plot_axes = self._axis_plot_info(slice_axis)
@@ -2552,6 +2608,15 @@ class My3DAnalyzer(QWidget):
         self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
         self.global_refresh()
 
+    def on_rotation_angle_changed(self):
+        """Handle edit finished in the Z-axis rotation angle spin box."""
+        angle = self.page_image.get_rotation_angle()
+        self.rotation_angle = round(angle, 2)
+        self._rotation_cache.clear()
+
+        if self.core.raw_data is not None:
+            self.global_refresh()
+
     def on_apply_denoise(self):
         if self.original_raw_data is None:
             return
@@ -2616,6 +2681,8 @@ class My3DAnalyzer(QWidget):
         self.base_raw_data = np.array(self.original_raw_data, copy=True)
         self.base_coords = self._clone_coords(self.original_coords)
         self.page_denoise_cache.clear()
+        self._rotation_cache.clear()
+        self.rotation_angle = 0.0
         self.clip_ranges = None
         self.home_slice_info = None
         self.axis_source_mode = "frame"

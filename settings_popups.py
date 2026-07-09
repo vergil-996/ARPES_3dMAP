@@ -333,6 +333,7 @@ class WaterfallSettingsPopup(_NonModalPopup):
         self._blank.waterfall_step_box.setValue(value)
         self._blank._sync_waterfall_constraints()
         self._blank._waterfall_step_custom = True
+        self._blank.waterfall_step_box.editingFinished.emit()
 
     @staticmethod
     def _apply_group_style(group):

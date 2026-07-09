@@ -4,7 +4,7 @@ from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
 from siui.components.slider_ import SiSlider
-from siui.components.editbox import SiLabeledLineEdit
+from siui.components.editbox import SiDoubleSpinBox, SiLabeledLineEdit
 from siui.components.button import SiSwitchRefactor
 from siui.core import SiColor
 
@@ -111,6 +111,21 @@ class ImageControlPage(QWidget):
             h_row.addWidget(e_max)
             v_slice.addLayout(h_row)
             self.edits[min_label], self.edits[max_label] = e_min, e_max
+
+        # Z轴旋转角度
+        h_rot = QHBoxLayout()
+        self.edit_rotation = SiDoubleSpinBox(self)
+        self.edit_rotation.setTitle("Z轴旋转角度(°)")
+        self.edit_rotation.setMinimum(-360.0)
+        self.edit_rotation.setMaximum(360.0)
+        self.edit_rotation.setSingleStep(1.0)
+        self.edit_rotation.setValue(0.0)
+        self.edit_rotation.resize(self.SLICE_EDIT_WIDTH, 58)
+        self.edit_rotation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        h_rot.addWidget(self.edit_rotation)
+        h_rot.addStretch()
+        v_slice.addLayout(h_rot)
+
         self._apply_group_style(grp_slice)
         self.vbox.addWidget(grp_slice)
 
@@ -187,6 +202,7 @@ class ImageControlPage(QWidget):
         self.btn_export.clicked.connect(self.request_export)
         self.btn_save.clicked.connect(self.request_screenshot)
         self.btn_back.clicked.connect(self.request_back)
+        self.edit_rotation.editingFinished.connect(self.request_apply_rotation)
 
     def get_slice_values(self):
         try:
@@ -204,6 +220,12 @@ class ImageControlPage(QWidget):
             self.edits["Z轴上限"].setText(f"{float(bounds[5]):.2f}")
         except Exception:
             pass
+
+    def get_rotation_angle(self):
+        return float(self.edit_rotation.value())
+
+    def set_rotation_angle(self, angle):
+        self.edit_rotation.setValue(float(angle))
 
     @staticmethod
     def _sync_slider_visual(slider):
@@ -249,6 +271,7 @@ class ImageControlPage(QWidget):
             "switch_axes": bool(self.switch_axes.isChecked()),
             "switch_coord": bool(self.switch_coord.isChecked()),
             "switch_flip": bool(self.switch_flip.isChecked()),
+            "rotation_angle": self.get_rotation_angle(),
         }
 
     def restore_state(self, state, *, block_signals=True):
@@ -284,6 +307,12 @@ class ImageControlPage(QWidget):
                 self.switch_axes.setChecked(bool(state["switch_axes"]))
             if "switch_coord" in state:
                 self.switch_coord.setChecked(bool(state["switch_coord"]))
+            rotation_angle = state.get("rotation_angle")
+            if rotation_angle is not None:
+                self.set_rotation_angle(str(rotation_angle))
+            else:
+                self.set_rotation_angle(0.0)
+
             if "switch_flip" in state:
                 self.switch_flip.setChecked(bool(state["switch_flip"]))
         finally:
@@ -302,4 +331,7 @@ class ImageControlPage(QWidget):
         pass
 
     def request_back(self):
+        pass
+
+    def request_apply_rotation(self):
         pass
