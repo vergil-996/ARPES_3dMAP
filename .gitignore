@@ -1,0 +1,33 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local batch files (personal use)
+Claude-DeepSeek.bat
+
+# Submodule / vendored library (if you want to track it separately, remove this line)
+# PyQt-SiliconUI-main/
