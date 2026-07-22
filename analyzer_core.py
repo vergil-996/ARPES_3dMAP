@@ -496,6 +496,43 @@ class AnalyzerCore(QObject):
         # 执行积分 (求和)
         return np.sum(sub_data, axis=ax)
 
+    @staticmethod
+    def build_axis_prefix_sum(data_3d, axis_index):
+        """Build a float32 prefix sum for repeated inclusive range queries."""
+        source = np.asarray(data_3d, dtype=np.float32)
+        axis_index = int(axis_index)
+        if source.ndim != 3:
+            raise ValueError("Axis prefix sums require a 3D data volume.")
+        if axis_index not in (0, 1, 2):
+            raise ValueError(f"Unsupported integration axis: {axis_index}")
+        if source.shape[axis_index] == 0:
+            raise ValueError("Cannot integrate an empty axis.")
+        return np.cumsum(source, axis=axis_index, dtype=np.float32)
+
+    @staticmethod
+    def range_sum_from_axis_prefix(prefix, axis_index, low_idx, up_idx):
+        """Return an inclusive axis range sum from a 3D prefix-sum volume."""
+        prefix = np.asarray(prefix, dtype=np.float32)
+        axis_index = int(axis_index)
+        if prefix.ndim != 3:
+            raise ValueError("Axis range queries require a 3D prefix-sum volume.")
+        if axis_index not in (0, 1, 2):
+            raise ValueError(f"Unsupported integration axis: {axis_index}")
+
+        axis_max = prefix.shape[axis_index] - 1
+        if axis_max < 0:
+            raise ValueError("Cannot integrate an empty axis.")
+
+        low = int(np.clip(int(low_idx), 0, axis_max))
+        up = int(np.clip(int(up_idx), 0, axis_max))
+        if low > up:
+            low, up = up, low
+
+        result = np.array(np.take(prefix, up, axis=axis_index), copy=True)
+        if low > 0:
+            result -= np.take(prefix, low - 1, axis=axis_index)
+        return result
+
     def get_slice_dos_dynamics(self, clip_ranges):
         """
         切片态密度：给定 XYZ 范围，计算每一帧 T 的总强度

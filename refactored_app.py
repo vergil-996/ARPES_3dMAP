@@ -68,6 +68,7 @@ class QuickCloseMessageBox(QMessageBox):
 class My3DAnalyzer(QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
+    ROTATION_CACHE_LIMIT = 4
 
     def __init__(self):
         super().__init__()
@@ -99,10 +100,11 @@ class My3DAnalyzer(QWidget):
         self._box_interacting = False
         self.rotation_angle = 0.0
         self._rotation_cache = {}
+        self._axis_prefix_cache = None
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
-        self.axis_refresh_timer.setInterval(40)
+        self.axis_refresh_timer.setInterval(35)
         self.axis_refresh_timer.timeout.connect(self.auto_refresh_integral)
 
         self.current_render_context = None
@@ -521,6 +523,8 @@ class My3DAnalyzer(QWidget):
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
         self.page_data.s_t_low.valueChanged.connect(self.on_time_integral_controls_changed)
         self.page_data.s_t_up.valueChanged.connect(self.on_time_integral_controls_changed)
+        self.page_data.s_t_low.sliderReleased.connect(self.flush_axis_refresh)
+        self.page_data.s_t_up.sliderReleased.connect(self.flush_axis_refresh)
         self.page_data.s_ax_low.valueChanged.connect(
             lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_low, value)
         )
@@ -856,6 +860,64 @@ class My3DAnalyzer(QWidget):
             return np.sum(data_3d[:, low:up + 1, :], axis=1)
         return np.sum(data_3d[:, :, low:up + 1], axis=2)
 
+    def _clear_axis_prefix_cache(self, page_id=None):
+        cache = self._axis_prefix_cache
+        if cache is None:
+            return
+        if page_id is None or cache.get("page_id") == page_id:
+            self._axis_prefix_cache = None
+
+    def _axis_prefix_cache_key(self, spec, params, raw_data):
+        source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
+        if source_mode == "time_integral":
+            t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
+            time_key = ("time_integral", t_low, t_up)
+        else:
+            time_key = ("frame", int(params["source_t_index"]))
+
+        return (
+            spec.page_id,
+            self._denoise_signature(self._get_spec_denoise_methods(spec)),
+            time_key,
+            round(float(self.rotation_angle), 2),
+            int(params["axis_index"]),
+            tuple(int(size) for size in raw_data.shape),
+        )
+
+    def _get_cached_axis_range_sum(self, spec, raw_data, params):
+        axis_index = int(params["axis_index"])
+        cache_key = self._axis_prefix_cache_key(spec, params, raw_data)
+        cache = self._axis_prefix_cache
+        if cache is None or cache.get("key") != cache_key:
+            source_context = self._get_3d_source_context_for_axis(spec, raw_data)
+            prefix = AnalyzerCore.build_axis_prefix_sum(source_context["data"], axis_index)
+            cache = {
+                "key": cache_key,
+                "page_id": spec.page_id,
+                "axis_index": axis_index,
+                "prefix": prefix,
+            }
+            self._axis_prefix_cache = cache
+
+        return AnalyzerCore.range_sum_from_axis_prefix(
+            cache["prefix"],
+            axis_index,
+            int(params["low"]),
+            int(params["up"]),
+        )
+
+    def _rotation_cache_get(self, key):
+        cached = self._rotation_cache.pop(key, None)
+        if cached is not None:
+            self._rotation_cache[key] = cached
+        return cached
+
+    def _rotation_cache_store(self, key, value):
+        self._rotation_cache[key] = value
+        while len(self._rotation_cache) > self.ROTATION_CACHE_LIMIT:
+            oldest_key = next(iter(self._rotation_cache))
+            self._rotation_cache.pop(oldest_key, None)
+
     def _get_rotated_frame(self, raw_data, t_idx):
         """Extract a time frame and apply Z-axis (Kx-Ky plane) rotation.
 
@@ -867,8 +929,8 @@ class My3DAnalyzer(QWidget):
             return self._get_data_for_t_from_raw(raw_data, t_idx)
 
         t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
-        key = (int(t_idx), round(float(angle), 2))
-        cached = self._rotation_cache.get(key)
+        key = ("frame", id(raw_data), int(t_idx), round(float(angle), 2))
+        cached = self._rotation_cache_get(key)
         if cached is not None:
             return cached
 
@@ -877,7 +939,7 @@ class My3DAnalyzer(QWidget):
             data_3d, float(angle), axes=(0, 1), reshape=False,
             order=1, mode='constant', cval=0.0, prefilter=True,
         )
-        self._rotation_cache[key] = rotated
+        self._rotation_cache_store(key, rotated)
         return rotated
 
     def _get_rotated_time_integral(self, raw_data, t_low, t_up):
@@ -895,8 +957,8 @@ class My3DAnalyzer(QWidget):
         if t_low > t_up:
             t_low, t_up = t_up, t_low
 
-        key = ("integral", int(t_low), int(t_up), round(float(angle), 2))
-        cached = self._rotation_cache.get(key)
+        key = ("integral", id(raw_data), int(t_low), int(t_up), round(float(angle), 2))
+        cached = self._rotation_cache_get(key)
         if cached is not None:
             return cached
 
@@ -905,7 +967,7 @@ class My3DAnalyzer(QWidget):
             data_3d, float(angle), axes=(0, 1), reshape=False,
             order=1, mode='constant', cval=0.0, prefilter=True,
         )
-        self._rotation_cache[key] = rotated
+        self._rotation_cache_store(key, rotated)
         return rotated
 
     def _apply_denoise_methods_to_raw(self, raw_data, methods):
@@ -921,17 +983,22 @@ class My3DAnalyzer(QWidget):
             return None, None
 
         methods = self._get_spec_denoise_methods(spec)
-        signature = self._denoise_signature(methods)
-        cache_entry = self.page_denoise_cache.get(spec.page_id)
-
-        if cache_entry is not None and cache_entry["signature"] == signature:
-            raw_data = np.array(cache_entry["raw_data"], copy=True)
+        if not methods:
+            raw_data = self.original_raw_data
         else:
-            raw_data = self._apply_denoise_methods_to_raw(self.original_raw_data, methods)
-            self.page_denoise_cache[spec.page_id] = {
-                "signature": signature,
-                "raw_data": np.array(raw_data, copy=True),
-            }
+            signature = self._denoise_signature(methods)
+            cache_entry = self.page_denoise_cache.get(spec.page_id)
+            if cache_entry is not None and cache_entry["signature"] == signature:
+                raw_data = cache_entry["raw_data"]
+            else:
+                raw_data = np.ascontiguousarray(
+                    self._apply_denoise_methods_to_raw(self.original_raw_data, methods),
+                    dtype=np.float32,
+                )
+                self.page_denoise_cache[spec.page_id] = {
+                    "signature": signature,
+                    "raw_data": raw_data,
+                }
 
         coords = self._clone_coords(self.original_coords)
         return np.asarray(raw_data, dtype=np.float32), coords
@@ -1503,7 +1570,9 @@ class My3DAnalyzer(QWidget):
     def _update_time_slider_state(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
         active_spec = self._control_state_owner(self.left_workspace.current_spec())
-        self.page_image.slider_time.setEnabled(has_time_axis and not self._is_time_locked_page(active_spec))
+        is_enabled = has_time_axis and not self._is_time_locked_page(active_spec)
+        self.page_image.slider_time.setEnabled(is_enabled)
+        self.page_image.input_time.setEnabled(is_enabled)
 
     def _configure_time_controls(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
@@ -1679,14 +1748,8 @@ class My3DAnalyzer(QWidget):
         if params is None:
             return None
 
-        source_context = self._get_3d_source_context_for_axis(spec, raw_data)
         axis_index = int(params["axis_index"])
-        data_2d = self._get_axis_integrated_data_from_raw(
-            source_context["data"],
-            axis_index,
-            int(params["low"]),
-            int(params["up"]),
-        )
+        data_2d = self._get_cached_axis_range_sum(spec, raw_data, params)
         axis_info = self._axis_plot_info(axis_index)
         plot_bounds = {
             "x_low": 0,
@@ -1700,14 +1763,34 @@ class My3DAnalyzer(QWidget):
         else:
             crop_rect = self._copy_plot_rect(self.axis_crop_candidates.get(spec.page_id))
 
+        slice_info = {
+            "axis": axis_index,
+            "mode": "integral",
+            "range": (int(params["low"]), int(params["up"])),
+        }
+        if params["source_mode"] == "time_integral":
+            t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
+            delay_axis = np.asarray(coords["delay"], dtype=np.float64)
+            t_low = int(np.clip(t_low, 0, len(delay_axis) - 1))
+            t_up = int(np.clip(t_up, 0, len(delay_axis) - 1))
+            spatial_low = self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["low"]))
+            spatial_up = self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["up"]))
+            if int(params["low"]) == int(params["up"]):
+                spatial_text = f"{axis_info['integrated_axis_label']}-Slice {spatial_low:.4g}"
+            else:
+                spatial_text = (
+                    f"{axis_info['integrated_axis_label']}-Integral "
+                    f"{spatial_low:.4g}~{spatial_up:.4g}"
+                )
+            slice_info["title_override"] = (
+                f"Time-Integrated {spatial_text} "
+                f"(Delay {delay_axis[t_low]:.4g}~{delay_axis[t_up]:.4g})"
+            )
+
         return {
             "view": "2d",
             "data": np.asarray(data_2d, dtype=np.float64),
-            "slice_info": {
-                "axis": axis_index,
-                "mode": "integral",
-                "range": (int(params["low"]), int(params["up"])),
-            },
+            "slice_info": slice_info,
             "coords": coords,
             "plot_axes": {
                 "x_key": axis_info["x_key"],
@@ -1800,6 +1883,47 @@ class My3DAnalyzer(QWidget):
         up = int(np.clip(up, 0, axis_max))
         mid = int(np.clip(mid, low, up))
 
+        if params["source_mode"] == "time_integral":
+            context = self._build_axis_integral_base_context(spec, raw_data, coords)
+            if context is None:
+                return None
+
+            axis_info = self._axis_plot_info(axis_index)
+            export_data = {
+                "sample": np.asarray(context["data"], dtype=np.float32),
+                "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
+                "integrated_range": np.asarray(
+                    [
+                        self.core.logical_to_physical(axis_key, low),
+                        self.core.logical_to_physical(axis_key, up),
+                    ],
+                    dtype=np.float32,
+                ),
+                "integrated_center": np.asarray(
+                    [self.core.logical_to_physical(axis_key, mid)],
+                    dtype=np.float32,
+                ),
+                "source_mode": np.asarray(["time_integral"]),
+            }
+            if axis_index == 0:
+                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
+                export_data["E"] = np.asarray(coords["E"], dtype=np.float32)
+            elif axis_index == 1:
+                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
+                export_data["E"] = np.asarray(coords["E"], dtype=np.float32)
+            else:
+                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
+                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
+            export_data.update(self._time_integral_export_metadata(params, coords))
+
+            low_text = self._format_filename_number(self.core.logical_to_physical(axis_key, low))
+            up_text = self._format_filename_number(self.core.logical_to_physical(axis_key, up))
+            mid_text = self._format_filename_number(self.core.logical_to_physical(axis_key, mid))
+            default_name = self._sanitize_filename_component(
+                f"time_integral_{low_text}_{up_text}_{mid_text}_{axis_tag}_{self._get_loaded_npz_stem()}"
+            )
+            return {"export_data": export_data, "default_name": default_name}
+
         if axis_index == 0:
             sample = np.sum(raw_data[low:up + 1, :, :, :], axis=0)
             export_data = {
@@ -1834,6 +1958,17 @@ class My3DAnalyzer(QWidget):
 
         return {"export_data": export_data, "default_name": default_name}
 
+    @staticmethod
+    def _time_integral_export_metadata(params, coords):
+        delay_axis = np.asarray(coords["delay"], dtype=np.float64)
+        t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
+        t_low = int(np.clip(t_low, 0, len(delay_axis) - 1))
+        t_up = int(np.clip(t_up, 0, len(delay_axis) - 1))
+        return {
+            "source_t_indices": np.asarray([t_low, t_up], dtype=np.int32),
+            "source_t_range": np.asarray([delay_axis[t_low], delay_axis[t_up]], dtype=np.float32),
+        }
+
     def _get_axis_integral_crop_export_context(self, spec, raw_data, coords):
         context = self._get_axis_integral_crop_context(spec, raw_data, coords)
         if context is None:
@@ -1860,6 +1995,15 @@ class My3DAnalyzer(QWidget):
                 ],
                 dtype=np.float32,
             ),
+            "integrated_center": np.asarray(
+                [
+                    self.core.logical_to_physical(
+                        axis_info["integrated_axis_key"],
+                        int(params["mid"]),
+                    )
+                ],
+                dtype=np.float32,
+            ),
             "crop_range": np.asarray(
                 [
                     self.core.logical_to_physical(plot_axes["x_key"], x_low),
@@ -1870,6 +2014,9 @@ class My3DAnalyzer(QWidget):
                 dtype=np.float32,
             ),
         }
+        if params["source_mode"] == "time_integral":
+            export_data["source_mode"] = np.asarray(["time_integral"])
+            export_data.update(self._time_integral_export_metadata(params, coords))
         if plot_axes["y_key"] == "E":
             export_data["k"] = x_values
             export_data["E"] = y_values
@@ -2613,6 +2760,7 @@ class My3DAnalyzer(QWidget):
         angle = self.page_image.get_rotation_angle()
         self.rotation_angle = round(angle, 2)
         self._rotation_cache.clear()
+        self._clear_axis_prefix_cache()
 
         if self.core.raw_data is not None:
             self.global_refresh()
@@ -2642,6 +2790,8 @@ class My3DAnalyzer(QWidget):
         self._persist_page_ui_state(self.active_page_spec)
         target_spec.params["denoise_methods"] = methods
         self.page_denoise_cache.pop(target_spec.page_id, None)
+        self._rotation_cache.clear()
+        self._clear_axis_prefix_cache(target_spec.page_id)
         self.left_workspace.activate_page(target_spec.page_id)
 
     def on_load(self):
@@ -2682,6 +2832,7 @@ class My3DAnalyzer(QWidget):
         self.base_coords = self._clone_coords(self.original_coords)
         self.page_denoise_cache.clear()
         self._rotation_cache.clear()
+        self._clear_axis_prefix_cache()
         self.rotation_angle = 0.0
         self.clip_ranges = None
         self.home_slice_info = None
@@ -2878,6 +3029,85 @@ class My3DAnalyzer(QWidget):
             params={"t_low": low, "t_up": up},
         )
         self._seed_control_state_for_spec(spec)
+        return spec
+
+    @staticmethod
+    def _update_saved_widget_state(container, name, **values):
+        widget_state = dict(container.get(name) or {})
+        widget_state.update(values)
+        container[name] = widget_state
+
+    def _seed_time_integrated_slice_control_state(self, spec):
+        params = spec.params
+        axis_index = int(params["axis_index"])
+        slice_index = int(params["mid"])
+        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+        physical_min, physical_max, _ = self._axis_physical_range(axis_index)
+        physical_value = float(self.core.logical_to_physical(axis_index, slice_index))
+
+        control_state = spec.params.get("control_state") or self._capture_control_state()
+        control_state["axis_source_mode"] = "time_integral"
+        data_state = dict(control_state.get("data_process") or {})
+        data_state["combo_ax"] = {
+            "index": axis_index,
+            "text": ["X轴", "Y轴", "Z轴"][axis_index],
+        }
+        for slider_name in ("s_ax_low", "s_ax_up", "s_ax_mid"):
+            self._update_saved_widget_state(
+                data_state,
+                slider_name,
+                minimum=0,
+                maximum=axis_max,
+                value=slice_index,
+            )
+        for input_name in ("input_ax_low", "input_ax_up", "input_ax_mid"):
+            self._update_saved_widget_state(
+                data_state,
+                input_name,
+                minimum=physical_min,
+                maximum=physical_max,
+                value=physical_value,
+            )
+
+        self._update_saved_widget_state(data_state, "s_t_low", value=int(params["source_t_low"]))
+        self._update_saved_widget_state(data_state, "s_t_up", value=int(params["source_t_up"]))
+        data_state["locked_half_width"] = 0
+        control_state["data_process"] = data_state
+        self._store_control_state(spec, control_state)
+
+    def _build_time_integrated_slice_spec(self, source_spec):
+        slice_info = dict(self.home_slice_info or {})
+        axis_index = int(slice_info.get("axis", 0))
+        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+        slice_index = int(np.clip(int(slice_info.get("index", 0)), 0, axis_max))
+        t_low, t_up = sorted(
+            (int(self.page_data.s_t_low.value()), int(self.page_data.s_t_up.value()))
+        )
+        axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
+        title = f"时间积分_{axis_name}切片_{self._integral_length(t_low, t_up)}"
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=title,
+            page_kind="axis_integral",
+            source_module="data_process",
+            source_page_id=source_spec.page_id if source_spec is not None else None,
+            params={
+                "axis_index": axis_index,
+                "axis_name": axis_name,
+                "low": slice_index,
+                "up": slice_index,
+                "mid": slice_index,
+                "source_mode": "time_integral",
+                "source_page_kind": "time_integral",
+                "source_t_index": int(self.page_image.slider_time.value()),
+                "source_t_low": t_low,
+                "source_t_up": t_up,
+                "source_slice_axis": axis_index,
+                "source_slice_index": slice_index,
+            },
+        )
+        self._seed_control_state_for_spec(spec)
+        self._seed_time_integrated_slice_control_state(spec)
         return spec
 
     def _build_axis_integral_spec(self, source_mode=None):
@@ -3257,8 +3487,15 @@ class My3DAnalyzer(QWidget):
         if self.core.raw_data is None or not self.core.has_time_axis:
             return
 
-        candidate_spec = self._build_time_integral_spec()
         current_spec = self.left_workspace.current_spec()
+        if (
+            current_spec is not None
+            and current_spec.page_kind == "home"
+            and self.home_slice_info is not None
+        ):
+            candidate_spec = self._build_time_integrated_slice_spec(current_spec)
+        else:
+            candidate_spec = self._build_time_integral_spec()
         if current_spec is not None and "denoise_methods" in current_spec.params:
             candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
@@ -3275,12 +3512,12 @@ class My3DAnalyzer(QWidget):
         if current_spec.page_kind == "time_integral":
             self.axis_source_mode = "time_integral"
             self._persist_time_integral_page_state(current_spec)
-            self.global_refresh()
+            self.schedule_axis_refresh()
         elif self._is_time_integral_axis_page(current_spec):
             self.axis_source_mode = "time_integral"
             self._persist_axis_integral_page_state(current_spec)
             self._update_time_slider_state()
-            self.global_refresh()
+            self.schedule_axis_refresh()
 
     def on_image_time_changed(self, _):
         if self.core.raw_data is None or self._syncing_controls:
@@ -3321,7 +3558,8 @@ class My3DAnalyzer(QWidget):
         if self.core.raw_data is None:
             return
         self._persist_axis_integral_page_state()
-        self.axis_refresh_timer.start()
+        if not self.axis_refresh_timer.isActive():
+            self.axis_refresh_timer.start()
 
     def flush_axis_refresh(self):
         if self.core.raw_data is None:
@@ -3353,7 +3591,10 @@ class My3DAnalyzer(QWidget):
             self.sync_ax_sliders_to_box()
 
         current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and current_spec.page_kind == "axis_integral":
+        if current_spec is not None and current_spec.page_kind == "time_integral":
+            self._persist_time_integral_page_state(current_spec)
+            self.global_refresh()
+        elif current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(current_spec)
             self.global_refresh()
 
@@ -3639,18 +3880,24 @@ class My3DAnalyzer(QWidget):
             else:
                 self._render_1d_plot(render_context)
 
-        if self._can_show_interactive_box():
-            self._rebuild_interactive_box()
-            self.plotter.render()
+        if render_context["view"] == "3d":
+            if self._can_show_interactive_box():
+                self._rebuild_interactive_box()
+                self.plotter.render()
+            else:
+                self._restore_volume_opacity_if_dimmed()
+                self.plotter.clear_box_widgets()
+                self.plotter.render()
         else:
             self._restore_volume_opacity_if_dimmed()
             self.plotter.clear_box_widgets()
-            self.plotter.render()
 
         self._refresh_axis_crop_interaction(spec, context)
 
     def on_result_page_closed(self, page_id):
         self.page_denoise_cache.pop(page_id, None)
+        self._clear_axis_prefix_cache(page_id)
+        self._rotation_cache.clear()
         self.axis_crop_candidates.pop(page_id, None)
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
             self.current_render_context = None

@@ -166,6 +166,8 @@ class VisualEngine:
 
     @staticmethod
     def clear_2d_colorbar(ax):
+        ax._arpes_image = None
+        ax._arpes_render_signature = None
         colorbar = getattr(ax, "_arpes_colorbar", None)
         if colorbar is not None:
             try:
@@ -227,6 +229,12 @@ class VisualEngine:
         colorbar_ax = fig.add_axes(colorbar_position)
         colorbar_ax._arpes_colorbar_axis = True
         colorbar = fig.colorbar(image, cax=colorbar_ax)
+        VisualEngine._configure_2d_colorbar(colorbar, level_info)
+        ax._arpes_colorbar = colorbar
+        ax._arpes_colorbar_ax = colorbar_ax
+
+    @staticmethod
+    def _configure_2d_colorbar(colorbar, level_info):
         ticks = VisualEngine._level_ticks(level_info)
         colorbar.set_ticks(ticks)
         colorbar.set_ticklabels([VisualEngine._format_level_tick(tick) for tick in ticks])
@@ -239,8 +247,18 @@ class VisualEngine:
             colorbar.outline.set_edgecolor("#CCCCCC")
         except Exception:
             pass
-        ax._arpes_colorbar = colorbar
-        ax._arpes_colorbar_ax = colorbar_ax
+
+    @staticmethod
+    def _update_2d_colorbar(ax, image, level_info):
+        colorbar = getattr(ax, "_arpes_colorbar", None)
+        if colorbar is None or getattr(colorbar, "ax", None) is None:
+            VisualEngine._add_2d_colorbar(ax, image, level_info)
+            return
+        try:
+            colorbar.update_normal(image)
+            VisualEngine._configure_2d_colorbar(colorbar, level_info)
+        except Exception:
+            VisualEngine._add_2d_colorbar(ax, image, level_info)
 
     @staticmethod
     def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None,
@@ -414,24 +432,45 @@ class VisualEngine:
             if slice_info.get("display_flip") and slice_info.get("extent_override") is not None:
                 ext = [ext[1], ext[0], ext[3], ext[2]]
 
-            ax.clear()
-            image = ax.imshow(
-                img,
-                cmap=display_cmap,
-                aspect='auto',
-                origin='lower',
-                extent=ext,
-                interpolation='spline16',
-                vmin=level_info["black_value"],
-                vmax=level_info["white_value"],
+            render_signature = (slice_info.get("mode", "slice"), int(idx), tuple(img.shape))
+            image = getattr(ax, "_arpes_image", None)
+            can_update = (
+                image is not None
+                and getattr(ax, "_arpes_render_signature", None) == render_signature
+                and getattr(image, "axes", None) is ax
+                and image in ax.images
             )
-            VisualEngine._add_2d_colorbar(ax, image, level_info)
+            if can_update:
+                image.set_data(img)
+                image.set_cmap(display_cmap)
+                image.set_clim(level_info["black_value"], level_info["white_value"])
+                image.set_extent(ext)
+                VisualEngine._update_2d_colorbar(ax, image, level_info)
+            else:
+                VisualEngine.clear_2d_colorbar(ax)
+                ax.clear()
+                image = ax.imshow(
+                    img,
+                    cmap=display_cmap,
+                    aspect='auto',
+                    origin='lower',
+                    extent=ext,
+                    interpolation='spline16',
+                    vmin=level_info["black_value"],
+                    vmax=level_info["white_value"],
+                )
+                VisualEngine._add_2d_colorbar(ax, image, level_info)
+
+            ax._arpes_image = image
+            ax._arpes_render_signature = render_signature
+            ax.set_xlim(ext[0], ext[1])
+            ax.set_ylim(ext[2], ext[3])
 
             ax.set_title(title, color='white')
 
             # 额外加固：强制坐标轴刻度显示
             ax.tick_params(colors='white')
-            canvas.draw()
+            canvas.draw_idle()
 
         except Exception as e:
             print(f"2D Render Error: {e}")

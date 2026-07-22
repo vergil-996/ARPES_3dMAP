@@ -1,5 +1,5 @@
-from PyQt5.QtCore import QSignalBlocker
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy
+from PyQt5.QtCore import Qt, QSignalBlocker
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpinBox
 from PyQt5.QtGui import QColor
 from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
 from siui.components.titled_widget_group import SiTitledWidgetGroup
@@ -11,6 +11,46 @@ from siui.core import SiColor
 from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
 
 
+class ContinuousFrameSlider(SiSlider):
+    """A discrete frame slider whose thumb still follows the mouse smoothly."""
+
+    def _onValueChanged(self, value):
+        if self._is_dragging:
+            self._updateToolTip(flash=False)
+            return
+        super()._onValueChanged(value)
+
+    def _onRangeChanged(self, minimum, maximum):
+        if maximum == minimum:
+            self.progress_ani.stop()
+            self.setProperty(self.Property.TrackProgress, 0.0)
+            self.progress_ani.setCurrentValue(0.0)
+            self.progress_ani.setEndValue(0.0)
+            return
+        super()._onRangeChanged(minimum, maximum)
+
+    def _setValueToMousePos(self, pos):
+        thumb_width = self.style_data.thumb_width
+        if self.orientation() == Qt.Horizontal:
+            available = max(self.width() - thumb_width, 1)
+            progress = min(1.0, max((pos.x() - thumb_width / 2) / available, 0.0))
+        else:
+            available = max(self.height() - thumb_width, 1)
+            progress = min(1.0, max(1.0 - (pos.y() - thumb_width / 2) / available, 0.0))
+
+        region = self.maximum() - self.minimum()
+        self.setValue(int(self.minimum() + region * progress + 0.5))
+
+        # SiSlider normally derives the thumb position from the integer value.
+        # Keep the exact mouse progress while dragging so a 2- or 3-frame data
+        # set still has a thumb that can be moved across the complete track.
+        self.progress_ani.stop()
+        self.setProperty(self.Property.TrackProgress, progress)
+        self.progress_ani.setCurrentValue(progress)
+        self.progress_ani.setEndValue(progress)
+        self.update()
+
+
 class ImageControlPage(QWidget):
     PAGE_MARGIN = 13
     SECTION_MARGIN = 15
@@ -18,6 +58,8 @@ class ImageControlPage(QWidget):
     GROUP_MARGINS = (15, 55, 15, 20)
     GROUP_SPACING = 12
     GROUP_WIDTH = 360
+    TIME_VALUE_BOX_WIDTH = 72
+    TIME_VALUE_BOX_SPACING = 8
     SLICE_EDIT_WIDTH = 155
     BUTTON_WIDTH = 64
     MIN_GROUP_WIDTH = 344
@@ -39,13 +81,38 @@ class ImageControlPage(QWidget):
             child.reloadStyleSheet()
 
     def _create_slider(self):
-        slider = SiSlider(self)
+        slider = ContinuousFrameSlider(self)
         slider.setFixedHeight(32)
         slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         slider.style_data.main_color = QColor("#FF69B4")
         slider.style_data.background_color = QColor(255, 105, 180, 64)
         slider.style_data.handle_color = QColor("#FFFFFF")
         return slider
+
+    def _create_time_value_box(self):
+        spin_box = QSpinBox(self)
+        spin_box.setFixedSize(self.TIME_VALUE_BOX_WIDTH, 30)
+        spin_box.setRange(0, 99)
+        spin_box.setSingleStep(1)
+        spin_box.setKeyboardTracking(False)
+        spin_box.setAlignment(Qt.AlignCenter)
+        spin_box.setFocusPolicy(Qt.StrongFocus)
+        spin_box.setToolTip("当前帧")
+        spin_box.setStyleSheet(
+            "QSpinBox {"
+            "background-color: rgba(255, 255, 255, 24);"
+            "color: white;"
+            "border: 1px solid rgba(255, 255, 255, 54);"
+            "border-radius: 6px;"
+            "padding-left: 4px;"
+            "padding-right: 4px;"
+            "}"
+            "QSpinBox::up-button, QSpinBox::down-button {"
+            "width: 0px;"
+            "border: none;"
+            "}"
+        )
+        return spin_box
 
     def _create_red_btn(self, text):
         btn = SiPushButton(self)
@@ -79,10 +146,16 @@ class ImageControlPage(QWidget):
         self._adaptive_groups.append(grp_time)
         grp_time.addTitle("时间轴控制")
         self.slider_time = self._create_slider()
+        self.input_time = self._create_time_value_box()
         v_time = QVBoxLayout(grp_time)
         v_time.setContentsMargins(*self.GROUP_MARGINS)
         v_time.setSpacing(self.GROUP_SPACING)
-        v_time.addWidget(self.slider_time)
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(self.TIME_VALUE_BOX_SPACING)
+        time_row.addWidget(self.slider_time)
+        time_row.addWidget(self.input_time)
+        v_time.addLayout(time_row)
         self._apply_group_style(grp_time)
         self.vbox.addWidget(grp_time)
 
@@ -197,6 +270,9 @@ class ImageControlPage(QWidget):
         self._apply_adaptive_layout()
 
     def bind_events(self):
+        self.slider_time.valueChanged.connect(self.input_time.setValue)
+        self.slider_time.rangeChanged.connect(self.input_time.setRange)
+        self.input_time.valueChanged.connect(self.slider_time.setValue)
         self.btn_load.clicked.connect(self.request_load)
         self.btn_cut.clicked.connect(self.request_cut)
         self.btn_export.clicked.connect(self.request_export)
@@ -280,6 +356,7 @@ class ImageControlPage(QWidget):
         if block_signals:
             blockers = [
                 QSignalBlocker(self.slider_time),
+                QSignalBlocker(self.input_time),
                 QSignalBlocker(self.switch_axes),
                 QSignalBlocker(self.switch_coord),
                 QSignalBlocker(self.switch_flip),
@@ -291,10 +368,12 @@ class ImageControlPage(QWidget):
             maximum = slider_state.get("maximum")
             if minimum is not None and maximum is not None:
                 self.slider_time.setRange(int(minimum), int(maximum))
+                self.input_time.setRange(int(minimum), int(maximum))
             if "value" in slider_state:
                 value = int(slider_state["value"])
                 value = max(int(self.slider_time.minimum()), min(int(self.slider_time.maximum()), value))
                 self.slider_time.setValue(value)
+                self.input_time.setValue(value)
             self._sync_slider_visual(self.slider_time)
 
             slice_values = state.get("slice_values") or {}
