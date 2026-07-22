@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QMenu,
     QMessageBox,
     QSizePolicy,
@@ -31,7 +32,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
-from scipy.ndimage import gaussian_filter, laplace, rotate as ndimage_rotate
+from scipy.ndimage import gaussian_filter1d, rotate as ndimage_rotate
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
@@ -43,6 +44,7 @@ from data_trans import convert as convert_mat_to_npz
 from page_data_process_v2 import DataProcessPage
 from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
+from plot_coordinate_tooltip import PlotCoordinateTooltip
 from render_core import VisualEngine
 from result_workspace import AnalysisPageSpec, ResultWorkspace
 from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
@@ -101,6 +103,7 @@ class My3DAnalyzer(QWidget):
         self.rotation_angle = 0.0
         self._rotation_cache = {}
         self._axis_prefix_cache = None
+        self._second_derivative_volume_cache = None
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
@@ -408,6 +411,12 @@ class My3DAnalyzer(QWidget):
         self.plotter.customContextMenuRequested.connect(self._show_main_context_menu)
         self.ax_2d = self.fig.add_subplot(111)
         self.axis_crop_canvas_cid = self.canvas_2d.mpl_connect("button_press_event", self._on_axis_crop_canvas_click)
+        self.plot_coordinate_tooltip = PlotCoordinateTooltip(
+            self.canvas_2d,
+            self.ax_2d,
+            context_provider=lambda: self.current_render_context,
+            active_provider=lambda: self.left_display_stack.currentWidget() is self.canvas_2d,
+        )
         self.left_display_stack.addWidget(self.canvas_2d)
 
         self.page_control_blank = BlankControlPage(self.left_display_stack)
@@ -2394,17 +2403,91 @@ class My3DAnalyzer(QWidget):
         }
 
     @staticmethod
-    def _compute_second_derivative_curvature(data_2d, sigma=1.5, threshold=0.0):
-        source = np.asarray(data_2d, dtype=np.float64)
-        if source.ndim != 2 or source.size == 0:
+    def _compute_axis_second_derivative(
+        data,
+        coordinate_axis=None,
+        derivative_axis=-1,
+        sigma=1.5,
+        threshold=0.0,
+    ):
+        """Return max(0, -d2I/dq2) along one selected array axis."""
+        input_data = np.asarray(data)
+        compute_dtype = (
+            np.float32
+            if input_data.dtype.kind == "f" and input_data.dtype.itemsize <= 4
+            else np.float64
+        )
+        source = np.asarray(input_data, dtype=compute_dtype)
+        if source.ndim == 0 or source.size == 0:
             return source.copy()
 
-        smoothed = gaussian_filter(source, sigma=float(sigma))
-        curvature = -laplace(smoothed)
+        axis_index = int(derivative_axis)
+        if axis_index < 0:
+            axis_index += source.ndim
+        if axis_index < 0 or axis_index >= source.ndim:
+            raise ValueError("Derivative axis is outside the source-data dimensions.")
+        if source.shape[axis_index] < 3:
+            return np.zeros_like(source)
+
+        sigma_value = max(float(sigma), 0.0)
+        smoothed = (
+            gaussian_filter1d(source, sigma=sigma_value, axis=axis_index)
+            if sigma_value > 0
+            else source
+        )
+
+        coordinate_values = (
+            np.asarray(coordinate_axis, dtype=np.float64)
+            if coordinate_axis is not None
+            else None
+        )
+        if coordinate_values is not None:
+            coordinate_values = np.ravel(coordinate_values)
+        if (
+            coordinate_values is None
+            or coordinate_values.size != source.shape[axis_index]
+            or not np.all(np.isfinite(coordinate_values))
+        ):
+            coordinate_values = np.arange(source.shape[axis_index], dtype=np.float64)
+        else:
+            coordinate_steps = np.diff(coordinate_values)
+            if not (np.all(coordinate_steps > 0) or np.all(coordinate_steps < 0)):
+                coordinate_values = np.arange(source.shape[axis_index], dtype=np.float64)
+
+        first_derivative = np.gradient(
+            smoothed,
+            coordinate_values,
+            axis=axis_index,
+            edge_order=2,
+        )
+        curvature = -np.gradient(
+            first_derivative,
+            coordinate_values,
+            axis=axis_index,
+            edge_order=2,
+        )
         curvature[curvature < float(threshold)] = 0
         return curvature
 
+    @staticmethod
+    def _compute_energy_second_derivative(data_2d, energy_axis=None, sigma=1.5, threshold=0.0):
+        """Return the energy-axis result for a (momentum, energy) image."""
+        source = np.asarray(data_2d)
+        if source.ndim != 2 or source.size == 0:
+            return source.astype(np.float64, copy=True)
+        return My3DAnalyzer._compute_axis_second_derivative(
+            source,
+            coordinate_axis=energy_axis,
+            derivative_axis=1,
+            sigma=sigma,
+            threshold=threshold,
+        )
+
     def _second_derivative_source_label(self, params):
+        if params.get("source_view") == "3d":
+            derivative_label = self._second_derivative_axis_label(params.get("derivative_axis"))
+            source_prefix = "时间积分3D" if params.get("source_page_kind") == "time_integral" else "3D"
+            return f"{source_prefix}-{derivative_label}方向"
         if params.get("source_page_kind") == "home":
             axis_index = int(params.get("slice_axis", -1))
             axis_name = {0: "X切片", 1: "Y切片"}.get(axis_index, "切片")
@@ -2415,6 +2498,10 @@ class My3DAnalyzer(QWidget):
         return axis_name
 
     def _second_derivative_plot_label(self, params):
+        if params.get("source_view") == "3d":
+            derivative_label = self._second_derivative_axis_label(params.get("derivative_axis"))
+            source_prefix = "Time-integrated-3D" if params.get("source_page_kind") == "time_integral" else "3D"
+            return f"{source_prefix}-{derivative_label}"
         if params.get("source_page_kind") == "home":
             axis_index = int(params.get("slice_axis", -1))
             return {0: "X-slice", 1: "Y-slice"}.get(axis_index, "Slice")
@@ -2422,17 +2509,152 @@ class My3DAnalyzer(QWidget):
         axis_index = int(params.get("axis_index", -1))
         return {0: "X-integral", 1: "Y-integral"}.get(axis_index, "Axis-integral")
 
+    @staticmethod
+    def _second_derivative_axis_label(axis_index):
+        try:
+            normalized_axis = int(axis_index)
+        except (TypeError, ValueError):
+            normalized_axis = -1
+        return {0: "X", 1: "Y", 2: "E"}.get(normalized_axis, "Unknown")
+
+    def _ask_second_derivative_axis(self):
+        items = ["X 轴（Kx）", "Y 轴（Ky）", "E 轴（能量）"]
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("选择二阶导方向")
+        dialog.setLabelText("请选择 3D 数据的求导方向：")
+        dialog.setComboBoxItems(items)
+        dialog.setComboBoxEditable(False)
+        dialog.setTextValue(items[2])
+        dialog.setStyleSheet(
+            """
+            QInputDialog {
+                color: #FFFFFF;
+                background-color: #20202C;
+            }
+            QInputDialog QLabel {
+                color: #FFFFFF;
+                background-color: transparent;
+            }
+            QInputDialog QComboBox {
+                color: #FFFFFF;
+                background-color: #2A2A3A;
+                border: 1px solid #5A5A70;
+                border-radius: 4px;
+                padding: 4px 8px;
+            }
+            QInputDialog QComboBox QAbstractItemView {
+                color: #FFFFFF;
+                background-color: #2A2A3A;
+                selection-color: #FFFFFF;
+                selection-background-color: #50506A;
+            }
+            QInputDialog QPushButton {
+                color: #FFFFFF;
+                background-color: #3A3A50;
+                border: 1px solid #62627A;
+                border-radius: 4px;
+                min-width: 64px;
+                padding: 4px 10px;
+            }
+            QInputDialog QPushButton:hover {
+                background-color: #50506A;
+            }
+            """
+        )
+        if dialog.exec_() != QInputDialog.Accepted:
+            return None
+        selected = dialog.textValue()
+        return items.index(selected)
+
+    def _get_cached_3d_second_derivative(
+        self,
+        raw_data,
+        data_3d,
+        coords,
+        derivative_axis,
+        source_signature,
+    ):
+        coordinate_key = {0: "X", 1: "Y", 2: "E"}[int(derivative_axis)]
+        coordinate_values = np.asarray(coords[coordinate_key], dtype=np.float64)
+        cache_key = (
+            tuple(source_signature),
+            round(float(self.rotation_angle), 2),
+            int(derivative_axis),
+            tuple(int(size) for size in data_3d.shape),
+            coordinate_values.dtype.str,
+            coordinate_values.tobytes(),
+        )
+        cache = self._second_derivative_volume_cache
+        if (
+            cache is not None
+            and cache.get("raw_data") is raw_data
+            and cache.get("key") == cache_key
+        ):
+            return cache["data"]
+
+        derivative = self._compute_axis_second_derivative(
+            data_3d,
+            coordinate_axis=coordinate_values,
+            derivative_axis=derivative_axis,
+        )
+        self._second_derivative_volume_cache = {
+            "raw_data": raw_data,
+            "key": cache_key,
+            "data": derivative,
+        }
+        return derivative
+
     def _build_second_derivative_context_from_params(self, raw_data, coords, params):
         if raw_data is None or coords is None:
             return None
 
         source_kind = params.get("source_page_kind")
+        if params.get("source_view") == "3d" and source_kind in {"home", "time_integral"}:
+            if source_kind == "time_integral":
+                t_low, t_up = sorted(
+                    (int(params["source_t_low"]), int(params["source_t_up"]))
+                )
+                data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
+                source_signature = ("time_integral", t_low, t_up)
+                source_metadata = {
+                    "source_mode": "time_integral",
+                    "source_t_indices": (t_low, t_up),
+                }
+            else:
+                t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+                data_3d = self._get_rotated_frame(raw_data, t_index)
+                source_signature = ("frame", t_index)
+                source_metadata = {
+                    "source_mode": "frame",
+                    "source_t_index": t_index,
+                }
+
+            derivative_axis = int(params.get("derivative_axis", -1))
+            coordinate_key = {0: "X", 1: "Y", 2: "E"}.get(derivative_axis)
+            if coordinate_key is None:
+                return None
+            derivative = self._get_cached_3d_second_derivative(
+                raw_data,
+                data_3d,
+                coords,
+                derivative_axis,
+                source_signature,
+            )
+            return {
+                "view": "3d",
+                "data": derivative,
+                "coords": coords,
+                "clip_ranges": self._copy_state(params.get("clip_ranges")),
+                "derivative_axis": derivative_axis,
+                **source_metadata,
+            }
+
         if source_kind == "home":
+            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+            data_3d = self._get_rotated_frame(raw_data, t_index)
             slice_axis = int(params.get("slice_axis", -1))
             if slice_axis not in (0, 1):
                 return None
-            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-            data_3d = self._get_rotated_frame(raw_data, t_index)
             source_data = self._extract_slice_data(data_3d, slice_axis, int(params["slice_index"]))
             source_slice_info = {"axis": slice_axis, "index": int(params["slice_index"])}
             plot_axes = self._axis_plot_info(slice_axis)
@@ -2457,8 +2679,14 @@ class My3DAnalyzer(QWidget):
         if slice_axis not in (0, 1):
             return None
 
-        derivative = self._compute_second_derivative_curvature(source_data)
-        title = f"Second Derivative (Laplacian Curvature) - {self._second_derivative_plot_label(params)}"
+        energy_low = int(plot_bounds["y_low"])
+        energy_up = int(plot_bounds["y_up"])
+        energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[energy_low:energy_up + 1]
+        derivative = self._compute_energy_second_derivative(
+            source_data,
+            energy_axis=energy_axis,
+        )
+        title = f"Energy Second Derivative - {self._second_derivative_plot_label(params)}"
         source_slice_info["title_override"] = title
         return {
             "view": "2d",
@@ -2791,6 +3019,7 @@ class My3DAnalyzer(QWidget):
         target_spec.params["denoise_methods"] = methods
         self.page_denoise_cache.pop(target_spec.page_id, None)
         self._rotation_cache.clear()
+        self._second_derivative_volume_cache = None
         self._clear_axis_prefix_cache(target_spec.page_id)
         self.left_workspace.activate_page(target_spec.page_id)
 
@@ -2832,6 +3061,7 @@ class My3DAnalyzer(QWidget):
         self.base_coords = self._clone_coords(self.original_coords)
         self.page_denoise_cache.clear()
         self._rotation_cache.clear()
+        self._second_derivative_volume_cache = None
         self._clear_axis_prefix_cache()
         self.rotation_angle = 0.0
         self.clip_ranges = None
@@ -3401,32 +3631,70 @@ class My3DAnalyzer(QWidget):
             return None
 
         if current_spec.page_kind == "home":
-            if self.home_slice_info is None:
-                self._show_message("无法生成二阶导", "仅支持在当前 2D 切片或 X/Y 轴积分页面下使用该功能。", QMessageBox.Warning)
-                return None
-            slice_axis = int(self.home_slice_info.get("axis", -1))
-            if slice_axis not in (0, 1):
-                self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
-                return None
-
             source_t_index = int(self.page_image.slider_time.value())
-            source_label = self._second_derivative_source_label(
-                {"source_page_kind": "home", "slice_axis": slice_axis}
-            )
+            if self.home_slice_info is None:
+                derivative_axis = self._ask_second_derivative_axis()
+                if derivative_axis is None:
+                    return None
+                spec_params = {
+                    "source_page_id": current_spec.page_id,
+                    "source_page_kind": "home",
+                    "source_view": "3d",
+                    "derivative_axis": derivative_axis,
+                    "source_mode": "frame",
+                    "source_t_index": source_t_index,
+                    "clip_ranges": self._copy_state(self.clip_ranges),
+                }
+            else:
+                slice_axis = int(self.home_slice_info.get("axis", -1))
+                if slice_axis not in (0, 1):
+                    self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
+                    return None
+                spec_params = {
+                    "source_page_id": current_spec.page_id,
+                    "source_page_kind": "home",
+                    "source_view": "2d",
+                    "slice_axis": slice_axis,
+                    "slice_index": int(self.home_slice_info["index"]),
+                    "derivative_axis": 2,
+                    "source_mode": "frame",
+                    "source_t_index": source_t_index,
+                }
+
+            source_label = self._second_derivative_source_label(spec_params)
             spec = AnalysisPageSpec(
                 page_id=self._make_page_id(),
                 title=f"二阶导 [{source_label}]",
                 page_kind="second_derivative",
                 source_module="data_process",
                 source_page_id=current_spec.page_id,
-                params={
-                    "source_page_id": current_spec.page_id,
-                    "source_page_kind": "home",
-                    "slice_axis": slice_axis,
-                    "slice_index": int(self.home_slice_info["index"]),
-                    "source_mode": "frame",
-                    "source_t_index": source_t_index,
-                },
+                params=spec_params,
+            )
+        elif current_spec.page_kind == "time_integral":
+            self._persist_time_integral_page_state(current_spec)
+            derivative_axis = self._ask_second_derivative_axis()
+            if derivative_axis is None:
+                return None
+            t_low, t_up = sorted(
+                (int(current_spec.params["t_low"]), int(current_spec.params["t_up"]))
+            )
+            spec_params = {
+                "source_page_id": current_spec.page_id,
+                "source_page_kind": "time_integral",
+                "source_view": "3d",
+                "derivative_axis": derivative_axis,
+                "source_mode": "time_integral",
+                "source_t_low": t_low,
+                "source_t_up": t_up,
+            }
+            source_label = self._second_derivative_source_label(spec_params)
+            spec = AnalysisPageSpec(
+                page_id=self._make_page_id(),
+                title=f"二阶导 [{source_label}]",
+                page_kind="second_derivative",
+                source_module="data_process",
+                source_page_id=current_spec.page_id,
+                params=spec_params,
             )
         elif current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             params = self._resolved_axis_integral_params(current_spec)
@@ -3450,6 +3718,8 @@ class My3DAnalyzer(QWidget):
                 params={
                     "source_page_id": current_spec.page_id,
                     "source_page_kind": "axis_integral",
+                    "source_view": "2d",
+                    "derivative_axis": 2,
                     "axis_index": int(axis_index),
                     "integral_low": int(params["low"]),
                     "integral_up": int(params["up"]),
@@ -3471,13 +3741,29 @@ class My3DAnalyzer(QWidget):
                     }
                 )
         else:
-            self._show_message("无法生成二阶导", "仅支持在当前 2D 切片或 X/Y 轴积分页面下使用该功能。", QMessageBox.Warning)
+            self._show_message(
+                "无法生成二阶导",
+                "仅支持主页 3D/2D、时间积分 3D 或 X/Y 轴积分页面。",
+                QMessageBox.Warning,
+            )
             return None
 
         raw_data, coords = self._get_display_state_for_spec(current_spec)
-        context = self._build_second_derivative_context_from_params(raw_data, coords, spec.params)
+        if spec.params.get("source_view") == "3d":
+            derivative_axis = int(spec.params.get("derivative_axis", -1))
+            coordinate_key = {0: "X", 1: "Y", 2: "E"}.get(derivative_axis)
+            context = (
+                {"view": "3d"}
+                if raw_data is not None
+                and coords is not None
+                and coordinate_key is not None
+                and coords.get(coordinate_key) is not None
+                else None
+            )
+        else:
+            context = self._build_second_derivative_context_from_params(raw_data, coords, spec.params)
         if context is None:
-            self._show_message("无法生成二阶导", "当前页面不符合沿能量轴做二阶导的条件。", QMessageBox.Warning)
+            self._show_message("无法生成二阶导", "当前页面或所选方向不符合二阶导计算条件。", QMessageBox.Warning)
             return None
 
         self._seed_control_state_for_spec(spec)
@@ -3804,6 +4090,7 @@ class My3DAnalyzer(QWidget):
         if spec is None:
             return
 
+        self.plot_coordinate_tooltip.hide(redraw=False)
         self.current_render_context = None
         self._clear_axis_crop_interaction(redraw=False)
 
@@ -3898,6 +4185,7 @@ class My3DAnalyzer(QWidget):
         self.page_denoise_cache.pop(page_id, None)
         self._clear_axis_prefix_cache(page_id)
         self._rotation_cache.clear()
+        self._second_derivative_volume_cache = None
         self.axis_crop_candidates.pop(page_id, None)
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
             self.current_render_context = None
@@ -4099,34 +4387,69 @@ class My3DAnalyzer(QWidget):
             context = self._get_second_derivative_context(spec, raw_data, coords)
             if context is None:
                 return
-            axis_index = int(context["slice_info"].get("axis", -1))
-            plot_axes = context.get("plot_axes")
-            plot_bounds = context.get("plot_logical_bounds")
-            energy_axis = np.asarray(coords["E"], dtype=np.float32)
-            export_data = {
-                "sample": np.asarray(context["data"], dtype=np.float32),
-                "E": energy_axis,
-            }
-            if plot_axes is not None and plot_bounds is not None:
-                y_low = int(plot_bounds["y_low"])
-                y_up = int(plot_bounds["y_up"])
-                export_data["E"] = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
-                if axis_index == 0:
-                    export_data["ky"] = np.asarray(
-                        coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
+            if context.get("view") == "3d":
+                derivative_axis = int(context["derivative_axis"])
+                derivative_label = self._second_derivative_axis_label(derivative_axis)
+                export_data = {
+                    "sample": np.asarray(context["data"], dtype=np.float32),
+                    "kx": np.asarray(coords["X"], dtype=np.float32),
+                    "ky": np.asarray(coords["Y"], dtype=np.float32),
+                    "E": np.asarray(coords["E"], dtype=np.float32),
+                    "derivative_axis": np.asarray([derivative_label]),
+                    "source_mode": np.asarray([context["source_mode"]]),
+                }
+                if context["source_mode"] == "time_integral":
+                    t_low, t_up = context["source_t_indices"]
+                    export_data["source_t_indices"] = np.asarray(
+                        [t_low, t_up],
+                        dtype=np.int32,
+                    )
+                    export_data["source_t_range"] = np.asarray(
+                        [coords["delay"][t_low], coords["delay"][t_up]],
                         dtype=np.float32,
                     )
+                else:
+                    source_t_index = int(context["source_t_index"])
+                    export_data["source_t_index"] = np.asarray(
+                        [source_t_index],
+                        dtype=np.int32,
+                    )
+                    if coords.get("delay") is not None and len(coords["delay"]) > source_t_index:
+                        export_data["time"] = np.asarray(
+                            [coords["delay"][source_t_index]],
+                            dtype=np.float32,
+                        )
+                title = "Save 3D second-derivative result"
+                default_name = f"second_derivative_3d_{derivative_label}.mat"
+            else:
+                axis_index = int(context["slice_info"].get("axis", -1))
+                plot_axes = context.get("plot_axes")
+                plot_bounds = context.get("plot_logical_bounds")
+                energy_axis = np.asarray(coords["E"], dtype=np.float32)
+                export_data = {
+                    "sample": np.asarray(context["data"], dtype=np.float32),
+                    "E": energy_axis,
+                }
+                if plot_axes is not None and plot_bounds is not None:
+                    y_low = int(plot_bounds["y_low"])
+                    y_up = int(plot_bounds["y_up"])
+                    export_data["E"] = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
+                    if axis_index == 0:
+                        export_data["ky"] = np.asarray(
+                            coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
+                            dtype=np.float32,
+                        )
+                    elif axis_index == 1:
+                        export_data["kx"] = np.asarray(
+                            coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
+                            dtype=np.float32,
+                        )
+                elif axis_index == 0:
+                    export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
                 elif axis_index == 1:
-                    export_data["kx"] = np.asarray(
-                        coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
-                        dtype=np.float32,
-                    )
-            elif axis_index == 0:
-                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
-            elif axis_index == 1:
-                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
-            title = "Save second-derivative result"
-            default_name = "second_derivative.mat"
+                    export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
+                title = "Save second-derivative result"
+                default_name = "second_derivative.mat"
         else:
             context = self._get_energy_dos_context(spec, raw_data, coords)
             if context is None:
