@@ -10,7 +10,7 @@ configure_qt_plugin_path()
 
 import numpy as np
 import vtk
-from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt
+from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QTimer, Qt
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QInputDialog,
+    QLabel,
     QMenu,
     QMessageBox,
     QSizePolicy,
@@ -32,7 +33,7 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
-from scipy.ndimage import gaussian_filter1d, rotate as ndimage_rotate
+from scipy.ndimage import gaussian_filter1d
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
@@ -45,9 +46,11 @@ from page_data_process_v2 import DataProcessPage
 from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from plot_coordinate_tooltip import PlotCoordinateTooltip
-from render_core import VisualEngine
+from compute_backends import ArrayLRUCache, BackendManager
+from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
+from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
-from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from settings_popups import DenoiseSettingsPopup, SecondDerivativeSettingsPopup, WaterfallSettingsPopup
 
 
 class QuickCloseMessageBox(QMessageBox):
@@ -100,14 +103,32 @@ class My3DAnalyzer(QWidget):
         self.curve_clipboard = None
         self._orig_volume_opacity = None
         self._box_interacting = False
+        self._box_bounds_signature = None
         self.rotation_angle = 0.0
+        self._rendered_rotation_angle = 0.0
         self._rotation_cache = {}
+        self._computed_volume_cache = ArrayLRUCache()
+        # A preview result must not enter the exact-result cache.  It is
+        # exposed only while the corresponding PREVIEW request is rendered.
+        self._render_volume_override = None
         self._axis_prefix_cache = None
         self._second_derivative_volume_cache = None
+        self._render_exact_ready = True
+        self._last_compute_backend = "CPU"
+        self._last_ui_transfer_signature = None
+
+        self.settings = QSettings("ARPES", "ARPES_3dMAP")
+        saved_backend = self.settings.value("compute_backend", "Auto", type=str)
+        self.backend_manager = BackendManager(saved_backend)
+        self.refresh_coordinator = RefreshCoordinator(self)
+        self.refresh_coordinator.dispatch_requested.connect(self._dispatch_refresh_request)
+        self.refresh_coordinator.result_ready.connect(self._on_refresh_result)
+        self.refresh_coordinator.failed.connect(self._on_refresh_failed)
+        self.refresh_coordinator.status_changed.connect(self._on_refresh_status_changed)
 
         self.axis_refresh_timer = QTimer(self)
         self.axis_refresh_timer.setSingleShot(True)
-        self.axis_refresh_timer.setInterval(35)
+        self.axis_refresh_timer.setInterval(66)
         self.axis_refresh_timer.timeout.connect(self.auto_refresh_integral)
 
         self.current_render_context = None
@@ -127,11 +148,16 @@ class My3DAnalyzer(QWidget):
         self.setStyleSheet("background-color: #151525;")
 
         self.init_ui()
+        self.volume_session = VolumeRenderSession(self.plotter)
+        self.page_render.set_nvidia_backend_available(self.backend_manager.gpu_available)
+        self.page_render.set_backend_mode(self.backend_manager.mode)
+        self._update_render_status("complete", self.backend_manager.selected_backend_name())
         self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
         self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
         self.waterfall_popup = WaterfallSettingsPopup(self.page_control_blank)
+        self.sd_popup = SecondDerivativeSettingsPopup(self.page_control_blank)
         self._install_page_keyboard_shortcuts()
         self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
@@ -171,6 +197,8 @@ class My3DAnalyzer(QWidget):
             app.installEventFilter(self)
 
     def eventFilter(self, watched, event):
+        if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
+            self._position_render_status()
         if event.type() == QEvent.KeyPress:
             if not self._page_keyboard_shortcuts_enabled():
                 self._reset_page_keyboard_shortcut()
@@ -422,6 +450,18 @@ class My3DAnalyzer(QWidget):
         self.page_control_blank = BlankControlPage(self.left_display_stack)
         self.left_display_stack.addWidget(self.page_control_blank)
 
+        self.render_status_label = QLabel(self.left_display_stack)
+        self.render_status_label.setFixedHeight(26)
+        self.render_status_label.setMinimumWidth(210)
+        self.render_status_label.setAlignment(Qt.AlignCenter)
+        self.render_status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.render_status_label.setStyleSheet(
+            "QLabel { color: white; background: rgba(18, 18, 30, 190); "
+            "border: 1px solid rgba(255, 255, 255, 45); border-radius: 8px; padding: 2px 8px; }"
+        )
+        self.left_display_stack.installEventFilter(self)
+        self._position_render_status()
+
         self.left_workspace = ResultWorkspace(self.left_display_stack, self)
         main_layout.addWidget(self.left_workspace, stretch=7)
 
@@ -471,6 +511,355 @@ class My3DAnalyzer(QWidget):
         right_vbox.addWidget(self.page_container)
         main_layout.addWidget(self.right_panel, stretch=4)
 
+    def _position_render_status(self):
+        label = getattr(self, "render_status_label", None)
+        stack = getattr(self, "left_display_stack", None)
+        if label is None or stack is None:
+            return
+        label.adjustSize()
+        width = max(210, min(label.sizeHint().width() + 10, 330))
+        label.setFixedWidth(width)
+        label.move(max(10, stack.width() - width - 14), 12)
+        label.raise_()
+
+    def _render_device_label(self):
+        cached = getattr(self, "_render_device_name", None)
+        if cached:
+            return cached
+        name = "OpenGL渲染"
+        try:
+            report = str(self.plotter.ren_win.ReportCapabilities()).lower()
+            if "nvidia" in report:
+                name = "NVIDIA GPU渲染"
+            elif "amd" in report or "radeon" in report:
+                name = "AMD GPU渲染"
+            elif "intel" in report:
+                name = "Intel GPU渲染"
+            elif "llvmpipe" in report or "software" in report:
+                name = "软件渲染"
+        except Exception:
+            pass
+        self._render_device_name = name
+        return name
+
+    def _update_render_status(self, phase, backend=""):
+        label = getattr(self, "render_status_label", None)
+        if label is None:
+            return
+        phase_text = {
+            "preview": "预览",
+            "computing": "计算中",
+            "complete": "完整",
+            "failed": "计算失败",
+        }.get(str(phase), str(phase))
+        compute_name = backend or getattr(self, "_last_compute_backend", "CPU")
+        label.setText(f"{phase_text} · {compute_name}计算 / {self._render_device_label()}")
+        label.show()
+        self._position_render_status()
+
+    def _on_refresh_status_changed(self, phase, backend):
+        if backend:
+            self._last_compute_backend = backend
+        self._update_render_status(phase, backend)
+
+    def on_backend_mode_changed(self, mode):
+        selected = self.backend_manager.set_mode(mode)
+        if selected != mode:
+            blocker = QSignalBlocker(self.page_render.combo_backend)
+            self.page_render.set_backend_mode(selected)
+            del blocker
+        self.settings.setValue("compute_backend", selected)
+        self.backend_manager.clear_caches()
+        self._computed_volume_cache.clear()
+        self._rotation_cache.clear()
+        self._clear_axis_prefix_cache()
+        self._second_derivative_volume_cache = None
+        self._last_compute_backend = self.backend_manager.selected_backend_name()
+        if self.core.raw_data is not None:
+            self.request_refresh(RefreshCause.DATA_SOURCE, RenderQuality.EXACT, immediate=True)
+        else:
+            self._update_render_status("complete", self._last_compute_backend)
+
+    def _active_refresh_page_id(self):
+        spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
+        return spec.page_id if spec is not None else "home"
+
+    def request_refresh(self, cause, quality=RenderQuality.EXACT, *, immediate=False, interactive=False, snapshot=None):
+        if self._syncing_controls:
+            return
+        page_id = self._active_refresh_page_id()
+        values = dict(snapshot or {})
+        values.setdefault("rotation_angle", float(self.rotation_angle))
+        if interactive:
+            preview, exact = self.refresh_coordinator.make_quality_pair(page_id, cause, values)
+            self._render_exact_ready = False
+            self._update_export_button_states()
+            self.refresh_coordinator.schedule_interactive(preview, exact)
+            return
+
+        request = self.refresh_coordinator.make_request(page_id, cause, quality, values)
+        if quality == RenderQuality.PREVIEW:
+            self._render_exact_ready = False
+            self._update_export_button_states()
+            if immediate:
+                self._update_render_status("preview", self._last_compute_backend)
+                self.refresh_coordinator.dispatch_now(request)
+            else:
+                self.refresh_coordinator.schedule_preview(request)
+        elif immediate:
+            self._render_exact_ready = False
+            self._update_export_button_states()
+            self.refresh_coordinator.schedule_exact(request, immediate=True)
+        else:
+            self._render_exact_ready = False
+            self._update_export_button_states()
+            self.refresh_coordinator.schedule_exact(request)
+
+    @staticmethod
+    def _volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle):
+        if source_mode == "time_integral":
+            return (
+                "integral",
+                id(raw_data),
+                int(t_low),
+                int(t_up),
+                round(float(angle), 2),
+            )
+        return ("frame", id(raw_data), int(frame_index), round(float(angle), 2))
+
+    def _volume_source_descriptor(self, spec, request):
+        if spec is None or spec.page_kind in {"control_panel", self.COMPARISON_PAGE_KIND, "slice_dos"}:
+            return None
+        raw_data, _coords = self._get_display_state_for_spec(spec)
+        if raw_data is None or raw_data.ndim != 4:
+            return None
+
+        params = spec.params
+        source_mode = "frame"
+        frame_index = int(params.get("source_t_index", params.get("t_index", self.page_image.slider_time.value())))
+        t_low = int(params.get("source_t_low", params.get("t_low", self.page_data.s_t_low.value())))
+        t_up = int(params.get("source_t_up", params.get("t_up", self.page_data.s_t_up.value())))
+
+        if spec.page_kind == "time_integral":
+            source_mode = "time_integral"
+        elif spec.page_kind in {
+            "axis_integral",
+            "axis_integral_crop",
+            "waterfall_edc",
+            "edc_curve",
+            "second_derivative",
+        }:
+            source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
+        if spec.page_kind == "second_derivative" and params.get("source_page_kind") == "time_integral":
+            source_mode = "time_integral"
+
+        if t_low > t_up:
+            t_low, t_up = t_up, t_low
+        angle = float(request.snapshot.get("rotation_angle", self.rotation_angle))
+        key = self._volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle)
+        needs_compute = source_mode == "time_integral" or abs(angle) >= 1e-6
+        extra_metadata = {}
+        if not needs_compute:
+            operation = None
+        else:
+            operation = "prepare_volume"
+        resampled_preview = (
+            request.cause == RefreshCause.ROTATION
+            and request.quality == RenderQuality.PREVIEW
+            and spec.page_kind in {"home", "time_integral"}
+        )
+        payload = {
+            "raw_data": raw_data,
+            "source_mode": source_mode,
+            "frame_index": frame_index,
+            "t_low": t_low,
+            "t_up": t_up,
+            "angle": angle,
+            # Rotation previews use the same resampling geometry as the exact
+            # result, but on a bounded voxel count.  Rotating the VTK actor
+            # itself rotates the volume's bounding box and visibly snaps back
+            # when the exact, axis-aligned grid replaces it.
+            "preview": resampled_preview,
+            "max_voxels": 500_000 if resampled_preview else 2_500_000,
+        }
+        if resampled_preview:
+            extra_metadata["resampled_preview"] = True
+
+        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            resolved = self._resolved_axis_integral_params(spec)
+            prefix_key = self._axis_prefix_cache_key(spec, resolved, raw_data)
+            if self._axis_prefix_cache is None or self._axis_prefix_cache.get("key") != prefix_key:
+                operation = "prepare_axis_prefix"
+                payload["axis"] = int(resolved["axis_index"])
+                extra_metadata.update(
+                    {
+                        "axis_prefix_key": prefix_key,
+                        "axis_prefix_page_id": spec.page_id,
+                        "axis_prefix_axis": int(resolved["axis_index"]),
+                    }
+                )
+
+        if spec.page_kind == "second_derivative" and params.get("source_view") == "3d":
+            derivative_axis = int(params.get("derivative_axis", 2))
+            coordinate_key = {0: "X", 1: "Y", 2: "E"}[derivative_axis]
+            coordinate_values = np.asarray(self.original_coords[coordinate_key], dtype=np.float64)
+            source_signature = (
+                ("time_integral", t_low, t_up)
+                if source_mode == "time_integral"
+                else ("frame", frame_index)
+            )
+            derivative_key = (
+                tuple(source_signature),
+                round(float(angle), 2),
+                derivative_axis,
+                tuple(int(size) for size in raw_data.shape[:3]),
+                coordinate_values.dtype.str,
+                coordinate_values.tobytes(),
+            )
+            cache = self._second_derivative_volume_cache
+            if cache is None or cache.get("raw_data") is not raw_data or cache.get("key") != derivative_key:
+                operation = "prepare_second_derivative"
+                sd_params = params.get("second_derivative_params") or {}
+                payload.update({
+                    "axis": derivative_axis,
+                    "coordinates": coordinate_values,
+                    "sigma": float(sd_params.get("sigma", 1.5)),
+                    "threshold": float(sd_params.get("threshold", 0.0)),
+                })
+                extra_metadata.update(
+                    {
+                        "derivative_key": derivative_key,
+                        "derivative_raw_data": raw_data,
+                    }
+                )
+
+        if operation is None:
+            return None
+        return key, ComputeJob(operation, payload), extra_metadata
+
+    def _dispatch_refresh_request(self, request):
+        spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
+        if spec is None or request.page_id != spec.page_id:
+            return
+        self.rotation_angle = round(float(request.snapshot.get("rotation_angle", self.rotation_angle)), 2)
+        if request.cause == RefreshCause.ROTATION and request.quality == RenderQuality.PREVIEW:
+            self._apply_rotation_actor_preview(self.rotation_angle)
+            # Simple 3D source pages immediately follow the actor feedback with
+            # a low-resolution resampled preview.  Derived pages retain the
+            # lightweight actor path until their exact analysis is ready.
+            if spec.page_kind not in {"home", "time_integral"}:
+                self._finish_ui_refresh(request, self._last_compute_backend)
+                return
+
+        if request.cause == RefreshCause.TRANSFER_FUNCTION:
+            signature = self._current_transfer_signature()
+            if request.quality == RenderQuality.EXACT and signature == self._last_ui_transfer_signature:
+                self._finish_ui_refresh(request, self._last_compute_backend)
+                return
+        if request.cause in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}:
+            self._render_active_page(request.quality, request.cause)
+            self._finish_ui_refresh(request, self._last_compute_backend)
+            return
+
+        descriptor = self._volume_source_descriptor(spec, request)
+        if descriptor is None:
+            self._render_active_page(request.quality, request.cause)
+            self._finish_ui_refresh(request, self._last_compute_backend)
+            return
+        cache_key, job, extra_metadata = descriptor
+        base_cached = self._computed_volume_cache.get(cache_key) is not None
+        def analysis_cache_ready():
+            ready = not extra_metadata
+            if "axis_prefix_key" in extra_metadata:
+                ready = (
+                    self._axis_prefix_cache is not None
+                    and self._axis_prefix_cache.get("key") == extra_metadata["axis_prefix_key"]
+                )
+            if "derivative_key" in extra_metadata:
+                derivative_cache = self._second_derivative_volume_cache
+                ready = (
+                    derivative_cache is not None
+                    and derivative_cache.get("raw_data") is extra_metadata["derivative_raw_data"]
+                    and derivative_cache.get("key") == extra_metadata["derivative_key"]
+                )
+            return ready
+
+        analysis_cached = analysis_cache_ready()
+        if base_cached and analysis_cached:
+            self._render_active_page(request.quality, request.cause)
+            self._finish_ui_refresh(request, self._last_compute_backend)
+            return
+
+        def work():
+            cached = self._computed_volume_cache.get(cache_key)
+            if cached is not None and analysis_cache_ready():
+                return ComputeResult(
+                    value=cached,
+                    backend=self._last_compute_backend,
+                    metadata={"cache_key": cache_key, "cache_hit": True},
+                )
+            result = self.backend_manager.execute(job)
+            result.metadata["cache_key"] = cache_key
+            result.metadata.update(extra_metadata)
+            return result
+
+        self.refresh_coordinator.submit_compute(request, work)
+
+    def _on_refresh_result(self, request, result):
+        cache_key = result.metadata.get("cache_key")
+        value = result.value
+        if isinstance(value, dict):
+            volume_value = value.get("volume")
+        else:
+            volume_value = value
+        is_resampled_preview = bool(result.metadata.get("resampled_preview"))
+        if cache_key is not None and volume_value is not None and not is_resampled_preview:
+            self._computed_volume_cache.put(cache_key, volume_value)
+        if isinstance(value, dict) and "axis_prefix_key" in result.metadata:
+            self._axis_prefix_cache = {
+                "key": result.metadata["axis_prefix_key"],
+                "page_id": result.metadata["axis_prefix_page_id"],
+                "axis_index": result.metadata["axis_prefix_axis"],
+                "prefix": value["prefix"],
+            }
+        if isinstance(value, dict) and "derivative_key" in result.metadata:
+            self._second_derivative_volume_cache = {
+                "raw_data": result.metadata["derivative_raw_data"],
+                "key": result.metadata["derivative_key"],
+                "data": value["derivative"],
+            }
+        if request.page_id != self._active_refresh_page_id():
+            return
+        self._last_compute_backend = result.backend
+        if is_resampled_preview and cache_key is not None and volume_value is not None:
+            self._render_volume_override = (cache_key, volume_value)
+        try:
+            self._render_active_page(request.quality, request.cause)
+        finally:
+            self._render_volume_override = None
+        self._finish_ui_refresh(request, result.backend)
+
+    def _on_refresh_failed(self, request, message):
+        self._render_exact_ready = False
+        self._update_export_button_states()
+        self._update_render_status("failed", self.backend_manager.selected_backend_name())
+        print(f"Refresh failed ({request.page_id}): {message}")
+
+    def _finish_ui_refresh(self, request, backend):
+        if request.quality == RenderQuality.EXACT:
+            self._render_exact_ready = True
+            self._update_render_status("complete", backend)
+        else:
+            self._update_render_status("preview", backend)
+        self._update_export_button_states()
+
+    def _current_transfer_signature(self):
+        return (
+            tuple(self._get_display_levels()),
+            str(self.page_render.combo_map.currentText()),
+            str(self.page_render.get_selected_cmap()),
+        )
+
     def _install_data_process_save_controls(self):
         if hasattr(self.page_data, "btn_left_view_save") and hasattr(self.page_data, "btn_view_data_save"):
             return
@@ -508,19 +897,31 @@ class My3DAnalyzer(QWidget):
         self.page_image.btn_export.clicked.connect(self.export_current_result)
         self.page_image.btn_save.clicked.connect(self.on_screenshot)
         self.page_image.btn_back.clicked.connect(self.on_back)
-        self.page_image.slider_time.valueChanged.connect(self.global_refresh)
-        self.page_image.slider_time.valueChanged.connect(self.on_image_time_changed)
-        self.page_image.switch_axes.toggled.connect(self.global_refresh)
+        self.page_image.slider_time.valueChanged.connect(self.on_time_slider_changed)
+        self.page_image.slider_time.sliderReleased.connect(self.flush_time_slider_refresh)
+        self.page_image.input_time.editingFinished.connect(self.flush_time_slider_refresh)
+        self.page_image.switch_axes.toggled.connect(
+            lambda _checked: self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
+        )
         self.page_image.switch_coord.toggled.connect(self.on_toggle_interactive_box)
         self.page_image.switch_flip.toggled.connect(self.on_toggle_e_flip)
+        self.page_image.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
         self.page_image.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
 
-        self.page_render.btn_apply_cmap.clicked.connect(self.global_refresh)
+        self.page_render.btn_apply_cmap.clicked.connect(
+            lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
+        )
+        self.page_render.s_low.valueChanged.connect(self.schedule_render_levels_refresh)
+        self.page_render.s_gamma.valueChanged.connect(self.schedule_render_levels_refresh)
+        self.page_render.s_up.valueChanged.connect(self.schedule_render_levels_refresh)
         self.page_render.s_low.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_gamma.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
-        self.page_render.btn_apply_map.clicked.connect(self.global_refresh)
+        self.page_render.btn_apply_map.clicked.connect(
+            lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
+        )
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
+        self.page_render.combo_backend.currentTextChanged.connect(self.on_backend_mode_changed)
 
         self.page_control_blank.waterfall_step_box.editingFinished.connect(self.on_waterfall_step_changed)
         for button_name in ("button_increase", "button_decrease"):
@@ -688,6 +1089,8 @@ class My3DAnalyzer(QWidget):
             self._persist_time_integral_page_state(spec)
         elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(spec)
+        elif spec.page_kind == "second_derivative":
+            self._persist_second_derivative_page_state(spec)
         elif spec.page_kind == "waterfall_edc":
             self._persist_waterfall_page_state(spec)
         elif spec.page_kind == "energy_dos":
@@ -725,6 +1128,7 @@ class My3DAnalyzer(QWidget):
             self.page_render.restore_state(control_state.get("render"), block_signals=True)
             self.page_control_blank.restore_state(control_state.get("denoise_detail"), block_signals=True)
             self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
+            self._configure_second_derivative_axis_controls(owner_spec)
 
             if self.core.raw_data is not None:
                 self.update_ax_slider_range()
@@ -771,6 +1175,60 @@ class My3DAnalyzer(QWidget):
         target_spec.params["source_t_index"] = int(self.page_image.slider_time.value())
         target_spec.params["source_t_low"] = int(self.page_data.s_t_low.value())
         target_spec.params["source_t_up"] = int(self.page_data.s_t_up.value())
+
+    def _persist_second_derivative_page_state(self, spec=None):
+        target_spec = spec or self.left_workspace.current_spec()
+        if (
+            target_spec is None
+            or target_spec.page_kind != "second_derivative"
+            or target_spec.params.get("source_view") != "2d"
+        ):
+            return
+
+        params = target_spec.params
+        if params.get("source_page_kind") == "home":
+            axis_index = int(params.get("slice_axis", -1))
+            if axis_index not in (0, 1) or self.core.raw_data is None:
+                return
+            axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+            params["slice_index"] = int(
+                np.clip(int(self.page_data.s_ax_mid.value()), 0, axis_max)
+            )
+            return
+
+        if params.get("source_page_kind") != "axis_integral":
+            return
+        axis_index = int(params.get("axis_index", -1))
+        if axis_index not in (0, 1) or self.core.raw_data is None:
+            return
+        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+        low = int(np.clip(int(self.page_data.s_ax_low.value()), 0, axis_max))
+        up = int(np.clip(int(self.page_data.s_ax_up.value()), 0, axis_max))
+        if low > up:
+            low, up = up, low
+        mid = int(np.clip(int(self.page_data.s_ax_mid.value()), low, up))
+        params["integral_low"] = low
+        params["integral_up"] = up
+        params["integral_mid"] = mid
+
+    def _configure_second_derivative_axis_controls(self, spec):
+        is_derivative = spec is not None and spec.page_kind == "second_derivative"
+        is_2d = is_derivative and spec.params.get("source_view") == "2d"
+        is_slice = is_2d and spec.params.get("source_page_kind") == "home"
+        is_integral = is_2d and spec.params.get("source_page_kind") == "axis_integral"
+
+        self.page_data.combo_ax.setEnabled(not is_derivative)
+        low_up_enabled = not is_derivative or is_integral
+        mid_enabled = not is_derivative or is_slice or is_integral
+        for widget in (
+            self.page_data.s_ax_low,
+            self.page_data.s_ax_up,
+            self.page_data.input_ax_low,
+            self.page_data.input_ax_up,
+        ):
+            widget.setEnabled(low_up_enabled)
+        for widget in (self.page_data.s_ax_mid, self.page_data.input_ax_mid):
+            widget.setEnabled(mid_enabled)
 
     def _waterfall_title_from_params(self, params, k_step=None, *, ascii_only=False):
         axis_info = self._resolve_waterfall_axis_info(int(params.get("axis_index", -1)))
@@ -827,7 +1285,27 @@ class My3DAnalyzer(QWidget):
     def flush_render_levels_refresh(self):
         if self._syncing_controls:
             return
-        self.global_refresh()
+        self.request_refresh(
+            RefreshCause.TRANSFER_FUNCTION,
+            RenderQuality.EXACT,
+            immediate=True,
+        )
+
+    def schedule_render_levels_refresh(self, _value):
+        if self._syncing_controls:
+            return
+        self.request_refresh(RefreshCause.TRANSFER_FUNCTION, interactive=True)
+
+    def on_time_slider_changed(self, value):
+        self.on_image_time_changed(value)
+        if self._syncing_controls or self.core.raw_data is None:
+            return
+        self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
+
+    def flush_time_slider_refresh(self):
+        if self._syncing_controls or self.core.raw_data is None:
+            return
+        self.request_refresh(RefreshCause.DATA_SOURCE, RenderQuality.EXACT, immediate=True)
 
     @staticmethod
     def _normalize_denoise_methods(methods):
@@ -934,20 +1412,24 @@ class My3DAnalyzer(QWidget):
         original frame directly when rotation_angle is effectively 0.
         """
         angle = self.rotation_angle
+        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
+        key = ("frame", id(raw_data), int(t_idx), round(float(angle), 2))
+        override = self.__dict__.get("_render_volume_override")
+        if override is not None and override[0] == key:
+            return override[1]
+        computed_cache = self.__dict__.get("_computed_volume_cache")
+        cached = computed_cache.get(key) if computed_cache is not None else None
+        if cached is not None:
+            return cached
         if angle is None or abs(float(angle)) < 1e-6:
             return self._get_data_for_t_from_raw(raw_data, t_idx)
 
-        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
-        key = ("frame", id(raw_data), int(t_idx), round(float(angle), 2))
         cached = self._rotation_cache_get(key)
         if cached is not None:
             return cached
 
         data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
-        rotated = ndimage_rotate(
-            data_3d, float(angle), axes=(0, 1), reshape=False,
-            order=1, mode='constant', cval=0.0, prefilter=True,
-        )
+        rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
         self._rotation_cache_store(key, rotated)
         return rotated
 
@@ -958,24 +1440,28 @@ class My3DAnalyzer(QWidget):
         entirely when rotation_angle is effectively 0.
         """
         angle = self.rotation_angle
-        if angle is None or abs(float(angle)) < 1e-6:
-            return self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
-
         t_low = max(0, int(t_low))
         t_up = min(raw_data.shape[3] - 1, int(t_up))
         if t_low > t_up:
             t_low, t_up = t_up, t_low
 
         key = ("integral", id(raw_data), int(t_low), int(t_up), round(float(angle), 2))
+        override = self.__dict__.get("_render_volume_override")
+        if override is not None and override[0] == key:
+            return override[1]
+        computed_cache = self.__dict__.get("_computed_volume_cache")
+        cached = computed_cache.get(key) if computed_cache is not None else None
+        if cached is not None:
+            return cached
         cached = self._rotation_cache_get(key)
         if cached is not None:
             return cached
 
         data_3d = self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
-        rotated = ndimage_rotate(
-            data_3d, float(angle), axes=(0, 1), reshape=False,
-            order=1, mode='constant', cval=0.0, prefilter=True,
-        )
+        if angle is None or abs(float(angle)) < 1e-6:
+            rotated = np.asfortranarray(data_3d, dtype=np.float32)
+        else:
+            rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
         self._rotation_cache_store(key, rotated)
         return rotated
 
@@ -1016,10 +1502,9 @@ class My3DAnalyzer(QWidget):
         if self.base_raw_data is None or self.base_coords is None:
             return
 
-        display_raw = np.array(self.base_raw_data, copy=True)
         display_coords = self._clone_coords(self.base_coords)
 
-        self.core.raw_data = display_raw
+        self.core.raw_data = self.base_raw_data
         self.core.coords = display_coords
 
     def _get_full_logical_bounds(self):
@@ -1092,6 +1577,9 @@ class My3DAnalyzer(QWidget):
         box_bounds = self._get_render_bounds_for_box(logical_bounds)
         if box_bounds is None:
             return
+        signature = tuple(round(float(value), 5) for value in box_bounds)
+        if signature == self._box_bounds_signature:
+            return
 
         self._restore_volume_opacity_if_dimmed()
         self.plotter.clear_box_widgets()
@@ -1104,6 +1592,11 @@ class My3DAnalyzer(QWidget):
         )
         box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
         box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
+        self._box_bounds_signature = signature
+
+    def _clear_interactive_box(self):
+        self.plotter.clear_box_widgets()
+        self._box_bounds_signature = None
 
     def _find_main_volume(self):
         volumes = self.plotter.renderer.GetVolumes()
@@ -1159,12 +1652,12 @@ class My3DAnalyzer(QWidget):
             return None
 
         mirrored = list(bounds)
-        for axis_idx in range(3):
-            axis_max = max(int(shape[axis_idx]) - 1, 0)
-            low = float(bounds[axis_idx * 2])
-            up = float(bounds[axis_idx * 2 + 1])
-            mirrored[axis_idx * 2] = axis_max - up
-            mirrored[axis_idx * 2 + 1] = axis_max - low
+        axis_idx = 2
+        axis_max = max(int(shape[axis_idx]) - 1, 0)
+        low = float(bounds[axis_idx * 2])
+        up = float(bounds[axis_idx * 2 + 1])
+        mirrored[axis_idx * 2] = axis_max - up
+        mirrored[axis_idx * 2 + 1] = axis_max - low
         return mirrored
 
     def _map_visual_flip_logical_bounds(self, bounds, shape):
@@ -1180,8 +1673,33 @@ class My3DAnalyzer(QWidget):
         if view == "2d":
             render_context = dict(context)
             slice_info = dict(render_context["slice_info"])
-            slice_info["display_flip"] = True
+            slice_info["display_e_flip"] = True
             render_context["slice_info"] = slice_info
+            return render_context
+
+        if view == "1d":
+            render_context = dict(context)
+            if "energy" in str(render_context.get("xlabel", "")).lower():
+                render_context["y_data"] = np.flip(np.asarray(render_context["y_data"]), axis=0)
+            return render_context
+
+        if view == "waterfall":
+            render_context = dict(context)
+            render_context["curves"] = np.flip(np.asarray(render_context["curves"]), axis=1)
+            if render_context.get("raw_curves") is not None:
+                render_context["raw_curves"] = np.flip(np.asarray(render_context["raw_curves"]), axis=1)
+            return render_context
+
+        if view == "1d_comparison":
+            render_context = dict(context)
+            if render_context.get("comparison_kind") not in {"energy_dos", "edc_curve"}:
+                return render_context
+            curves = []
+            for curve in render_context.get("curves", []):
+                flipped_curve = dict(curve)
+                flipped_curve["y_data"] = np.flip(np.asarray(flipped_curve["y_data"]), axis=0)
+                curves.append(flipped_curve)
+            render_context["curves"] = curves
             return render_context
 
         if view != "3d":
@@ -1189,12 +1707,11 @@ class My3DAnalyzer(QWidget):
 
         render_context = dict(context)
         data = np.asarray(render_context["data"])
-        render_context["data"] = np.flip(data, axis=tuple(range(min(3, data.ndim))))
+        render_context["data"] = np.flip(data, axis=2)
 
         coords = self._clone_coords(render_context.get("coords", self.core.coords))
-        for axis_key in ("X", "Y", "E"):
-            if coords.get(axis_key) is not None:
-                coords[axis_key] = np.flip(coords[axis_key])
+        if coords.get("E") is not None:
+            coords["E"] = np.flip(coords["E"])
         render_context["coords"] = coords
 
         if render_context.get("clip_ranges") is not None:
@@ -1461,6 +1978,10 @@ class My3DAnalyzer(QWidget):
         waterfall_action.triggered.connect(
             lambda: self.waterfall_popup.show_at(self.canvas_2d.mapToGlobal(pos))
         )
+        sd_action = menu.addAction("二阶导参数设置")
+        sd_action.triggered.connect(
+            lambda: self.sd_popup.show_at(self.canvas_2d.mapToGlobal(pos))
+        )
 
         if can_copy or can_paste:
             menu.addSeparator()
@@ -1482,6 +2003,10 @@ class My3DAnalyzer(QWidget):
         waterfall_action = menu.addAction("瀑布图步长设置")
         waterfall_action.triggered.connect(
             lambda: self.waterfall_popup.show_at(self.plotter.mapToGlobal(pos))
+        )
+        sd_action = menu.addAction("二阶导参数设置")
+        sd_action.triggered.connect(
+            lambda: self.sd_popup.show_at(self.plotter.mapToGlobal(pos))
         )
         menu.exec_(self.plotter.mapToGlobal(pos))
 
@@ -1596,6 +2121,7 @@ class My3DAnalyzer(QWidget):
         can_capture = active_spec is not None
         can_export = (
             has_data
+            and self._render_exact_ready
             and active_spec is not None
             and active_spec.page_kind not in {"control_panel", self.COMPARISON_PAGE_KIND}
         )
@@ -2573,6 +3099,8 @@ class My3DAnalyzer(QWidget):
         coords,
         derivative_axis,
         source_signature,
+        sigma=1.5,
+        threshold=0.0,
     ):
         coordinate_key = {0: "X", 1: "Y", 2: "E"}[int(derivative_axis)]
         coordinate_values = np.asarray(coords[coordinate_key], dtype=np.float64)
@@ -2583,6 +3111,8 @@ class My3DAnalyzer(QWidget):
             tuple(int(size) for size in data_3d.shape),
             coordinate_values.dtype.str,
             coordinate_values.tobytes(),
+            round(float(sigma), 4),
+            round(float(threshold), 4),
         )
         cache = self._second_derivative_volume_cache
         if (
@@ -2596,6 +3126,8 @@ class My3DAnalyzer(QWidget):
             data_3d,
             coordinate_axis=coordinate_values,
             derivative_axis=derivative_axis,
+            sigma=sigma,
+            threshold=threshold,
         )
         self._second_derivative_volume_cache = {
             "raw_data": raw_data,
@@ -2633,12 +3165,15 @@ class My3DAnalyzer(QWidget):
             coordinate_key = {0: "X", 1: "Y", 2: "E"}.get(derivative_axis)
             if coordinate_key is None:
                 return None
+            sd_params = params.get("second_derivative_params") or {}
             derivative = self._get_cached_3d_second_derivative(
                 raw_data,
                 data_3d,
                 coords,
                 derivative_axis,
                 source_signature,
+                sigma=float(sd_params.get("sigma", 1.5)),
+                threshold=float(sd_params.get("threshold", 0.0)),
             )
             return {
                 "view": "3d",
@@ -2682,10 +3217,25 @@ class My3DAnalyzer(QWidget):
         energy_low = int(plot_bounds["y_low"])
         energy_up = int(plot_bounds["y_up"])
         energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[energy_low:energy_up + 1]
+
+        sd_params = params.get("second_derivative_params") or {}
+        sigma = float(sd_params.get("sigma", 1.5))
+        threshold = float(sd_params.get("threshold", 0.0))
+        cross_axis_sigma = float(sd_params.get("cross_axis_sigma", 0.8))
+
         derivative = self._compute_energy_second_derivative(
             source_data,
             energy_axis=energy_axis,
+            sigma=sigma,
+            threshold=threshold,
         )
+
+        if cross_axis_sigma > 0 and derivative.ndim == 2:
+            derivative = gaussian_filter1d(
+                derivative,
+                sigma=cross_axis_sigma,
+                axis=0,
+            )
         title = f"Energy Second Derivative - {self._second_derivative_plot_label(params)}"
         source_slice_info["title_override"] = title
         return {
@@ -2873,10 +3423,38 @@ class My3DAnalyzer(QWidget):
         top = max(min(params.top, top_limit), bottom + 0.35)
         self.fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
 
+    @staticmethod
+    def _ascending_curve_data(x_data, y_data):
+        x_values = np.asarray(x_data)
+        y_values = np.asarray(y_data)
+        if (
+            x_values.size > 1
+            and y_values.size == x_values.size
+            and float(x_values.reshape(-1)[0]) > float(x_values.reshape(-1)[-1])
+        ):
+            x_values = np.flip(x_values, axis=0)
+            y_values = np.flip(y_values, axis=0)
+        return x_values, y_values
+
     def _render_1d_plot(self, context):
         VisualEngine.clear_2d_colorbar(self.ax_2d)
-        self.ax_2d.clear()
-        self.ax_2d.plot(context["x_data"], context["y_data"], color="#FF69B4", linewidth=2)
+        x_data, y_data = self._ascending_curve_data(context["x_data"], context["y_data"])
+        line = getattr(self.ax_2d, "_arpes_line", None)
+        can_update = (
+            line is not None
+            and getattr(line, "axes", None) is self.ax_2d
+            and line in self.ax_2d.lines
+            and len(self.ax_2d.lines) == 1
+            and not self.ax_2d.images
+        )
+        if can_update:
+            line.set_data(x_data, y_data)
+            self.ax_2d.relim()
+            self.ax_2d.autoscale_view()
+        else:
+            self.ax_2d.clear()
+            line, = self.ax_2d.plot(x_data, y_data, color="#FF69B4", linewidth=2)
+        self.ax_2d._arpes_line = line
         display_title = self._display_title_for_1d_plot(context["title"])
         compact_title = display_title != str(context["title"])
         self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
@@ -2885,17 +3463,20 @@ class My3DAnalyzer(QWidget):
         self.ax_2d.tick_params(colors="white", labelsize=9)
         self.ax_2d.margins(x=0.02, y=0.08)
         self._apply_1d_plot_layout(compact_title=compact_title)
-        self.canvas_2d.draw()
+        self.canvas_2d.draw_idle()
 
     def _render_1d_comparison_plot(self, context):
         VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
+        self.ax_2d._arpes_line = None
 
         colors = ["#FF69B4", "#4CC9F0", "#F9C74F", "#90BE6D", "#F3722C", "#B388FF", "#43AA8B"]
         linestyles = ["-", "--", "-.", ":"]
         for idx, curve in enumerate(context.get("curves", [])):
-            x_data = np.asarray(curve["x_data"], dtype=np.float64)
-            y_data = np.asarray(curve["y_data"], dtype=np.float64)
+            x_data, y_data = self._ascending_curve_data(
+                np.asarray(curve["x_data"], dtype=np.float64),
+                np.asarray(curve["y_data"], dtype=np.float64),
+            )
             label = curve.get("label") or curve.get("source_title") or f"Curve {idx + 1}"
             if idx == 0:
                 label = f"基准 - {label}"
@@ -2924,9 +3505,13 @@ class My3DAnalyzer(QWidget):
     def _render_waterfall_plot(self, context):
         VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
+        self.ax_2d._arpes_line = None
 
         energy_axis = np.asarray(context["energy_axis"], dtype=np.float64)
         curves = np.asarray(context["curves"], dtype=np.float64)
+        if energy_axis.size > 1 and float(energy_axis[0]) > float(energy_axis[-1]):
+            energy_axis = np.flip(energy_axis, axis=0)
+            curves = np.flip(curves, axis=1)
         k_values = np.asarray(context["k_values"], dtype=np.float64)
         offset_step = float(context.get("offset_step", 1.2))
         xaxis_transform = self.ax_2d.get_xaxis_transform()
@@ -2955,10 +3540,12 @@ class My3DAnalyzer(QWidget):
         self.canvas_2d.draw()
 
     def global_refresh(self):
-        self._render_active_page()
-        self._update_export_button_states()
+        self.request_refresh(RefreshCause.PAGE_ACTIVATION, RenderQuality.EXACT, immediate=True)
 
     def on_result_page_activated(self, page_id):
+        previous_page_id = self.active_page_spec.page_id if self.active_page_spec is not None else None
+        if previous_page_id is not None and previous_page_id != page_id:
+            self.refresh_coordinator.cancel_page(previous_page_id)
         self._persist_active_page_state()
         spec = self.left_workspace.page_by_id(page_id)
         if spec is None:
@@ -2987,11 +3574,55 @@ class My3DAnalyzer(QWidget):
         """Handle edit finished in the Z-axis rotation angle spin box."""
         angle = self.page_image.get_rotation_angle()
         self.rotation_angle = round(angle, 2)
-        self._rotation_cache.clear()
         self._clear_axis_prefix_cache()
 
         if self.core.raw_data is not None:
-            self.global_refresh()
+            self.request_refresh(
+                RefreshCause.ROTATION,
+                RenderQuality.EXACT,
+                immediate=True,
+                snapshot={"rotation_angle": self.rotation_angle},
+            )
+
+    def on_rotation_angle_preview(self, _text=None):
+        if self._syncing_controls:
+            return
+        try:
+            angle = self.page_image.get_rotation_angle()
+        except (TypeError, ValueError):
+            return
+        self.rotation_angle = round(float(angle), 2)
+        self._clear_axis_prefix_cache()
+        if self.core.raw_data is not None:
+            self.request_refresh(
+                RefreshCause.ROTATION,
+                interactive=True,
+                snapshot={"rotation_angle": self.rotation_angle},
+            )
+
+    def _apply_rotation_actor_preview(self, angle):
+        session = getattr(self, "volume_session", None)
+        if session is None or not session.active or self.left_display_stack.currentWidget() is not self.plotter:
+            return
+        try:
+            delta = float(angle) - float(self._rendered_rotation_angle)
+            session.volume.SetOrigin(100.0, 100.0, 100.0)
+            session.volume.SetOrientation(0.0, 0.0, delta)
+            self.plotter.render()
+            session.render_count += 1
+        except Exception:
+            pass
+
+    def _reset_volume_actor_transform(self):
+        session = getattr(self, "volume_session", None)
+        if session is None or not session.active:
+            return
+        try:
+            session.volume.SetOrientation(0.0, 0.0, 0.0)
+            session.volume.SetOrigin(100.0, 100.0, 100.0)
+            session.volume.SetScale(1.0, 1.0, 1.0)
+        except Exception:
+            pass
 
     def on_apply_denoise(self):
         if self.original_raw_data is None:
@@ -3019,6 +3650,7 @@ class My3DAnalyzer(QWidget):
         target_spec.params["denoise_methods"] = methods
         self.page_denoise_cache.pop(target_spec.page_id, None)
         self._rotation_cache.clear()
+        self._computed_volume_cache.clear()
         self._second_derivative_volume_cache = None
         self._clear_axis_prefix_cache(target_spec.page_id)
         self.left_workspace.activate_page(target_spec.page_id)
@@ -3033,6 +3665,12 @@ class My3DAnalyzer(QWidget):
         if not path:
             return
         self.load_data(path)
+
+    @staticmethod
+    def _canonical_data_aliases(data):
+        canonical = np.asarray(data, dtype=np.float32)
+        canonical.setflags(write=False)
+        return canonical, canonical, canonical
 
     def load_data(self, path):
         target_path = path
@@ -3055,15 +3693,22 @@ class My3DAnalyzer(QWidget):
             return
 
         self.loaded_npz_stem = Path(target_path).stem
-        self.original_raw_data = np.array(self.core.raw_data, copy=True)
+        canonical, original, base = self._canonical_data_aliases(self.core.raw_data)
+        self.core.raw_data = canonical
+        self.original_raw_data = original
         self.original_coords = self._clone_coords()
-        self.base_raw_data = np.array(self.original_raw_data, copy=True)
+        self.base_raw_data = base
         self.base_coords = self._clone_coords(self.original_coords)
         self.page_denoise_cache.clear()
         self._rotation_cache.clear()
+        self._computed_volume_cache.clear()
+        self.backend_manager.clear_caches()
+        if hasattr(self, "volume_session"):
+            self.volume_session.clear(render=False)
         self._second_derivative_volume_cache = None
         self._clear_axis_prefix_cache()
         self.rotation_angle = 0.0
+        self._rendered_rotation_angle = 0.0
         self.clip_ranges = None
         self.home_slice_info = None
         self.axis_source_mode = "frame"
@@ -3302,6 +3947,75 @@ class My3DAnalyzer(QWidget):
         self._update_saved_widget_state(data_state, "s_t_low", value=int(params["source_t_low"]))
         self._update_saved_widget_state(data_state, "s_t_up", value=int(params["source_t_up"]))
         data_state["locked_half_width"] = 0
+        control_state["data_process"] = data_state
+        self._store_control_state(spec, control_state)
+
+    def _seed_second_derivative_axis_control_state(self, spec):
+        if (
+            spec is None
+            or spec.page_kind != "second_derivative"
+            or spec.params.get("source_view") != "2d"
+            or self.core.raw_data is None
+        ):
+            return
+
+        params = spec.params
+        if params.get("source_page_kind") == "home":
+            axis_index = int(params.get("slice_axis", -1))
+            if axis_index not in (0, 1):
+                return
+            low = up = mid = int(params["slice_index"])
+            locked_half_width = 0
+        elif params.get("source_page_kind") == "axis_integral":
+            axis_index = int(params.get("axis_index", -1))
+            if axis_index not in (0, 1):
+                return
+            low, up = sorted(
+                (int(params["integral_low"]), int(params["integral_up"]))
+            )
+            mid = int(params.get("integral_mid", round((low + up) / 2)))
+            mid = int(np.clip(mid, low, up))
+            locked_half_width = max(min(mid - low, up - mid), 0)
+        else:
+            return
+
+        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+        low = int(np.clip(low, 0, axis_max))
+        up = int(np.clip(up, 0, axis_max))
+        mid = int(np.clip(mid, low, up))
+        physical_min, physical_max, _ = self._axis_physical_range(axis_index)
+
+        control_state = spec.params.get("control_state") or self._capture_control_state()
+        data_state = dict(control_state.get("data_process") or {})
+        data_state["combo_ax"] = {
+            "index": axis_index,
+            "text": ["X轴", "Y轴", "Z轴"][axis_index],
+        }
+        for name, value in (
+            ("s_ax_low", low),
+            ("s_ax_up", up),
+            ("s_ax_mid", mid),
+        ):
+            self._update_saved_widget_state(
+                data_state,
+                name,
+                minimum=0,
+                maximum=axis_max,
+                value=value,
+            )
+        for name, value in (
+            ("input_ax_low", low),
+            ("input_ax_up", up),
+            ("input_ax_mid", mid),
+        ):
+            self._update_saved_widget_state(
+                data_state,
+                name,
+                minimum=physical_min,
+                maximum=physical_max,
+                value=float(self.core.logical_to_physical(axis_index, value)),
+            )
+        data_state["locked_half_width"] = int(locked_half_width)
         control_state["data_process"] = data_state
         self._store_control_state(spec, control_state)
 
@@ -3748,6 +4462,9 @@ class My3DAnalyzer(QWidget):
             )
             return None
 
+        sd_params = self.page_control_blank.get_second_derivative_params()
+        spec.params["second_derivative_params"] = sd_params
+
         raw_data, coords = self._get_display_state_for_spec(current_spec)
         if spec.params.get("source_view") == "3d":
             derivative_axis = int(spec.params.get("derivative_axis", -1))
@@ -3767,6 +4484,7 @@ class My3DAnalyzer(QWidget):
             return None
 
         self._seed_control_state_for_spec(spec)
+        self._seed_second_derivative_axis_control_state(spec)
         return spec
 
     def on_apply_time_integral(self):
@@ -3816,7 +4534,6 @@ class My3DAnalyzer(QWidget):
         self.axis_source_mode = "frame"
         if current_spec is not None and current_spec.page_kind == "axis_integral":
             self._persist_axis_integral_page_state(current_spec)
-            self.global_refresh()
 
     def sync_ax_sliders_to_box(self):
         if not self._can_show_interactive_box():
@@ -3843,23 +4560,26 @@ class My3DAnalyzer(QWidget):
     def schedule_axis_refresh(self):
         if self.core.raw_data is None:
             return
-        self._persist_axis_integral_page_state()
-        if not self.axis_refresh_timer.isActive():
-            self.axis_refresh_timer.start()
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is not None and current_spec.page_kind == "second_derivative":
+            self._persist_second_derivative_page_state(current_spec)
+        else:
+            self._persist_axis_integral_page_state(current_spec)
+        self.request_refresh(RefreshCause.ANALYSIS, interactive=True)
 
     def flush_axis_refresh(self):
         if self.core.raw_data is None:
             return
         if self.axis_refresh_timer.isActive():
             self.axis_refresh_timer.stop()
-        self.auto_refresh_integral()
+        self.auto_refresh_integral(exact=True)
 
     def on_axis_bound_released(self):
         if self.core.raw_data is None:
             return
         if self.axis_refresh_timer.isActive():
             self.axis_refresh_timer.stop()
-        self.auto_refresh_integral()
+        self.auto_refresh_integral(exact=True)
 
     def on_apply_axis_integral(self):
         if self.core.raw_data is None:
@@ -3872,17 +4592,28 @@ class My3DAnalyzer(QWidget):
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
         self.left_workspace.add_page(candidate_spec)
 
-    def auto_refresh_integral(self):
+    def auto_refresh_integral(self, exact=False):
         if self.page_image.switch_coord.isChecked():
             self.sync_ax_sliders_to_box()
 
         current_spec = self.left_workspace.current_spec()
         if current_spec is not None and current_spec.page_kind == "time_integral":
             self._persist_time_integral_page_state(current_spec)
-            self.global_refresh()
         elif current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(current_spec)
-            self.global_refresh()
+        elif (
+            current_spec is not None
+            and current_spec.page_kind == "second_derivative"
+            and current_spec.params.get("source_view") == "2d"
+        ):
+            self._persist_second_derivative_page_state(current_spec)
+        else:
+            return
+        self.request_refresh(
+            RefreshCause.ANALYSIS,
+            RenderQuality.EXACT if exact else RenderQuality.PREVIEW,
+            immediate=True,
+        )
 
     def on_apply_other_integral(self):
         if self.core.raw_data is None:
@@ -4085,7 +4816,7 @@ class My3DAnalyzer(QWidget):
         self.axis_crop_candidates[spec.page_id] = rect
         self._refresh_axis_crop_interaction(spec, context)
 
-    def _render_active_page(self):
+    def _render_active_page(self, quality=RenderQuality.EXACT, cause=None):
         spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
         if spec is None:
             return
@@ -4096,15 +4827,14 @@ class My3DAnalyzer(QWidget):
 
         if spec.page_kind == "control_panel":
             self.left_display_stack.setCurrentIndex(2)
-            self.plotter.clear_box_widgets()
+            self._clear_interactive_box()
             self.plotter.render()
             return
 
         if self.core.raw_data is None:
             self.left_display_stack.setCurrentIndex(0)
-            self.plotter.clear_actors()
-            self.plotter.clear_box_widgets()
-            VisualEngine.clear_3d_colorbar(self.plotter)
+            self.volume_session.clear(render=False)
+            self._clear_interactive_box()
             self.plotter.render()
             VisualEngine.clear_2d_colorbar(self.ax_2d)
             self.ax_2d.clear()
@@ -4124,6 +4854,7 @@ class My3DAnalyzer(QWidget):
         levels = self._get_display_levels()
         mapping_mode = self.page_render.combo_map.currentText()
         current_cmap = self.page_render.get_selected_cmap()
+        self._last_ui_transfer_signature = (tuple(levels), str(mapping_mode), str(current_cmap))
 
         if render_context["view"] == "3d":
             self.left_display_stack.setCurrentIndex(0)
@@ -4132,22 +4863,36 @@ class My3DAnalyzer(QWidget):
             if clip_ranges is not None:
                 render_clip = self.core.logical_to_render_bounds(clip_ranges, render_context["data"].shape)
 
-            VisualEngine.render_3d(
-                self.plotter,
-                render_context["data"],
+            volume_data = render_context["data"]
+            if (
+                quality == RenderQuality.PREVIEW
+                and cause not in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}
+                and int(np.prod(volume_data.shape, dtype=np.int64)) > 2_500_000
+            ):
+                stride = max(
+                    1,
+                    int(np.ceil((np.prod(volume_data.shape) / 2_500_000.0) ** (1.0 / 3.0))),
+                )
+                volume_data = np.asfortranarray(volume_data[::stride, ::stride, ::stride], dtype=np.float32)
+
+            self._reset_volume_actor_transform()
+            self.volume_session.render(
+                volume_data,
                 levels,
                 opac_mode=mapping_mode,
                 clip_ranges=render_clip,
                 show_axes=self.page_image.switch_axes.isChecked(),
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
+                quality=quality.value,
             )
+            self._rendered_rotation_angle = float(self.rotation_angle)
             if self._box_interacting:
                 self._orig_volume_opacity = None
                 self._dim_current_volume()
         elif render_context["view"] == "2d":
             self.left_display_stack.setCurrentIndex(1)
-            self.plotter.clear_box_widgets()
+            self._clear_interactive_box()
             VisualEngine.render_2d_slice(
                 self.ax_2d,
                 self.canvas_2d,
@@ -4159,7 +4904,7 @@ class My3DAnalyzer(QWidget):
             )
         else:
             self.left_display_stack.setCurrentIndex(1)
-            self.plotter.clear_box_widgets()
+            self._clear_interactive_box()
             if render_context["view"] == "waterfall":
                 self._render_waterfall_plot(render_context)
             elif render_context["view"] == "1d_comparison":
@@ -4170,21 +4915,21 @@ class My3DAnalyzer(QWidget):
         if render_context["view"] == "3d":
             if self._can_show_interactive_box():
                 self._rebuild_interactive_box()
-                self.plotter.render()
             else:
                 self._restore_volume_opacity_if_dimmed()
-                self.plotter.clear_box_widgets()
-                self.plotter.render()
+                self._clear_interactive_box()
         else:
             self._restore_volume_opacity_if_dimmed()
-            self.plotter.clear_box_widgets()
+            self._clear_interactive_box()
 
         self._refresh_axis_crop_interaction(spec, context)
 
     def on_result_page_closed(self, page_id):
+        self.refresh_coordinator.cancel_page(page_id)
         self.page_denoise_cache.pop(page_id, None)
         self._clear_axis_prefix_cache(page_id)
         self._rotation_cache.clear()
+        self._computed_volume_cache.clear()
         self._second_derivative_volume_cache = None
         self.axis_crop_candidates.pop(page_id, None)
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
@@ -4200,13 +4945,21 @@ class My3DAnalyzer(QWidget):
             else:
                 self.last_visual_page_id = self.left_workspace.home_page_id
 
+    def closeEvent(self, event):
+        self.refresh_coordinator.shutdown(wait_ms=2000)
+        self._computed_volume_cache.clear()
+        self.backend_manager.clear_caches()
+        if hasattr(self, "volume_session"):
+            self.volume_session.clear(render=False)
+        super().closeEvent(event)
+
     def on_toggle_interactive_box(self, checked):
         if checked and self._can_show_interactive_box():
             self._rebuild_interactive_box()
             self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
         else:
             self._restore_volume_opacity_if_dimmed()
-            self.plotter.clear_box_widgets()
+            self._clear_interactive_box()
 
         if checked:
             self._refresh_axis_crop_interaction(self.left_workspace.current_spec(), self.current_render_context)

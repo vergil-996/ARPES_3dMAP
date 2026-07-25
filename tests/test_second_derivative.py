@@ -7,6 +7,18 @@ import numpy as np
 from refactored_app import My3DAnalyzer
 
 
+class _StubControl:
+    def __init__(self, value=0):
+        self._value = value
+        self.enabled = True
+
+    def value(self):
+        return self._value
+
+    def setEnabled(self, enabled):
+        self.enabled = bool(enabled)
+
+
 class EnergySecondDerivativeTests(unittest.TestCase):
     def test_momentum_only_variation_has_no_response(self):
         momentum = np.linspace(-1.0, 1.0, 21)
@@ -149,6 +161,114 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
         self.assertEqual(integral_context["view"], "3d")
         self.assertEqual(integral_context["source_mode"], "time_integral")
         np.testing.assert_allclose(integral_context["data"], home_context["data"] * 2)
+
+
+class SecondDerivativeSliderControlTests(unittest.TestCase):
+    @staticmethod
+    def _analyzer_with_axis_controls(low=0, up=0, mid=0):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.core = SimpleNamespace(raw_data=np.zeros((10, 11, 12, 1)))
+        analyzer.page_data = SimpleNamespace(
+            combo_ax=_StubControl(),
+            s_ax_low=_StubControl(low),
+            s_ax_up=_StubControl(up),
+            s_ax_mid=_StubControl(mid),
+            input_ax_low=_StubControl(),
+            input_ax_up=_StubControl(),
+            input_ax_mid=_StubControl(),
+        )
+        return analyzer
+
+    def test_slice_result_uses_only_center_slider(self):
+        analyzer = self._analyzer_with_axis_controls(low=1, up=8, mid=6)
+        spec = SimpleNamespace(
+            page_kind="second_derivative",
+            params={
+                "source_view": "2d",
+                "source_page_kind": "home",
+                "slice_axis": 0,
+                "slice_index": 2,
+            },
+        )
+
+        analyzer._persist_second_derivative_page_state(spec)
+        analyzer._configure_second_derivative_axis_controls(spec)
+
+        self.assertEqual(spec.params["slice_index"], 6)
+        self.assertFalse(analyzer.page_data.combo_ax.enabled)
+        self.assertFalse(analyzer.page_data.s_ax_low.enabled)
+        self.assertFalse(analyzer.page_data.s_ax_up.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
+        self.assertFalse(analyzer.page_data.input_ax_low.enabled)
+        self.assertFalse(analyzer.page_data.input_ax_up.enabled)
+        self.assertTrue(analyzer.page_data.input_ax_mid.enabled)
+
+    def test_integral_result_uses_all_three_sliders(self):
+        analyzer = self._analyzer_with_axis_controls(low=9, up=2, mid=5)
+        spec = SimpleNamespace(
+            page_kind="second_derivative",
+            params={
+                "source_view": "2d",
+                "source_page_kind": "axis_integral",
+                "axis_index": 1,
+                "integral_low": 1,
+                "integral_up": 3,
+                "integral_mid": 2,
+            },
+        )
+
+        analyzer._persist_second_derivative_page_state(spec)
+        analyzer._configure_second_derivative_axis_controls(spec)
+
+        self.assertEqual(spec.params["integral_low"], 2)
+        self.assertEqual(spec.params["integral_up"], 9)
+        self.assertEqual(spec.params["integral_mid"], 5)
+        self.assertFalse(analyzer.page_data.combo_ax.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_low.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_up.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
+
+    def test_non_derivative_page_reenables_axis_controls(self):
+        analyzer = self._analyzer_with_axis_controls()
+        derivative_3d = SimpleNamespace(
+            page_kind="second_derivative",
+            params={"source_view": "3d", "source_page_kind": "home"},
+        )
+        regular_page = SimpleNamespace(page_kind="home", params={})
+
+        analyzer._configure_second_derivative_axis_controls(derivative_3d)
+        self.assertFalse(analyzer.page_data.s_ax_mid.enabled)
+        analyzer._configure_second_derivative_axis_controls(regular_page)
+
+        self.assertTrue(analyzer.page_data.combo_ax.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_low.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_up.enabled)
+        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
+
+    def test_new_slice_result_seeds_axis_and_center_control_state(self):
+        analyzer = self._analyzer_with_axis_controls()
+        analyzer.core.logical_to_physical = lambda _axis, value: float(value) * 0.25
+        analyzer._axis_physical_range = lambda _axis: (-1.0, 1.0, 0.25)
+        analyzer._capture_control_state = lambda: {"data_process": {}}
+        spec = SimpleNamespace(
+            page_kind="second_derivative",
+            params={
+                "source_view": "2d",
+                "source_page_kind": "home",
+                "slice_axis": 1,
+                "slice_index": 4,
+            },
+        )
+
+        analyzer._seed_second_derivative_axis_control_state(spec)
+
+        data_state = spec.params["control_state"]["data_process"]
+        self.assertEqual(data_state["combo_ax"]["index"], 1)
+        self.assertEqual(data_state["s_ax_low"]["value"], 4)
+        self.assertEqual(data_state["s_ax_up"]["value"], 4)
+        self.assertEqual(data_state["s_ax_mid"]["value"], 4)
+        self.assertEqual(data_state["input_ax_mid"]["value"], 1.0)
+        self.assertEqual(data_state["locked_half_width"], 0)
 
 
 if __name__ == "__main__":

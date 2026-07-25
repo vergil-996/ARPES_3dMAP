@@ -210,7 +210,7 @@ class ImageControlPage(QWidget):
         lbl_coord = SiLabel("切片交互")
         lbl_coord.setStyleSheet("color: white; font-weight: bold;")
         self.switch_flip = SiSwitchRefactor(self)
-        lbl_flip = SiLabel("图像翻转")
+        lbl_flip = SiLabel("E轴翻转")
         lbl_flip.setStyleSheet("color: white; font-weight: bold;")
 
         h_sw.setSpacing(4)
@@ -298,7 +298,14 @@ class ImageControlPage(QWidget):
             pass
 
     def get_rotation_angle(self):
-        return float(self.edit_rotation.value())
+        # SiDoubleSpinBox keeps a separate internal value which is committed on
+        # editingFinished.  Reading the visible text keeps wheel, typing and the
+        # delayed exact refresh on the same angle snapshot.
+        text = self.edit_rotation.text().strip()
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return float(self.edit_rotation.value())
 
     def set_rotation_angle(self, angle):
         self.edit_rotation.setValue(float(angle))

@@ -4,6 +4,7 @@ import pyvista as pv
 from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
 from pyvista.plotting.cube_axes_actor import make_axis_labels
+from vtkmodules.util.numpy_support import numpy_to_vtk
 
 
 class VisualEngine:
@@ -14,12 +15,20 @@ class VisualEngine:
     @staticmethod
     def _level_info(data, levels_params):
         black, gamma, white = levels_params
-        source = np.asarray(data, dtype=np.float64)
-        finite = source[np.isfinite(source)]
-        if finite.size == 0:
+        source = np.asarray(data)
+        if source.size == 0:
             d_min, d_max = 0.0, 1.0
         else:
-            d_min, d_max = float(np.min(finite)), float(np.max(finite))
+            try:
+                d_min, d_max = float(np.nanmin(source)), float(np.nanmax(source))
+            except (TypeError, ValueError):
+                d_min, d_max = 0.0, 1.0
+            if not np.isfinite(d_min) or not np.isfinite(d_max):
+                finite = source[np.isfinite(source)]
+                if finite.size == 0:
+                    d_min, d_max = 0.0, 1.0
+                else:
+                    d_min, d_max = float(np.min(finite)), float(np.max(finite))
 
         span = d_max - d_min
         if span <= 0:
@@ -421,16 +430,26 @@ class VisualEngine:
                     title = f"E-Slice ({index})"
 
             # 应用色阶处理
-            if slice_info.get("display_flip"):
-                img = np.flip(img, axis=(0, 1))
-                ext = [ext[1], ext[0], ext[3], ext[2]]
+            # E-axis flip is a data-orientation correction.  It never reverses
+            # the momentum axis and it does not leave descending 2D ticks.
+            if slice_info.get("display_e_flip") and idx in (0, 1):
+                img = np.flip(img, axis=0)
 
             level_info = VisualEngine._level_info(img, (b, g, w))
             display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
             title = slice_info.get("title_override", title)
             ext = slice_info.get("extent_override", ext)
-            if slice_info.get("display_flip") and slice_info.get("extent_override") is not None:
-                ext = [ext[1], ext[0], ext[3], ext[2]]
+
+            # Matplotlib accepts descending extents, but that makes the lower
+            # or left edge show the larger value.  Normalize both axes while
+            # flipping the corresponding pixels to preserve data mapping.
+            ext = [float(value) for value in ext]
+            if ext[0] > ext[1]:
+                img = np.flip(img, axis=1)
+                ext[0], ext[1] = ext[1], ext[0]
+            if ext[2] > ext[3]:
+                img = np.flip(img, axis=0)
+                ext[2], ext[3] = ext[3], ext[2]
 
             render_signature = (slice_info.get("mode", "slice"), int(idx), tuple(img.shape))
             image = getattr(ax, "_arpes_image", None)
@@ -495,3 +514,247 @@ class VisualEngine:
             canvas.draw()
         except Exception as e:
             print(f"Integral Plot Error: {e}")
+
+
+class VolumeRenderSession:
+    """Persistent VTK volume scene backed by retained NumPy buffers."""
+
+    OPACITY_MAPS = {
+        "linear": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        "线性": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        "log": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
+        "对数": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
+        "power": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
+        "幂函数": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
+        "sigmoid": [0.006, 0.018, 0.049, 0.118, 0.268, 0.500, 0.732, 0.882, 0.951, 0.982, 0.994],
+    }
+
+    def __init__(self, plotter):
+        self.plotter = plotter
+        self.grid = None
+        self.volume = None
+        self.host_buffer = None
+        self.vtk_scalars = None
+        self.shape = None
+        self.data_token = None
+        self.level_info = None
+        self._style_signature = None
+        self._clip_signature = None
+        self._axes_signature = None
+        self.rebuild_count = 0
+        self.data_update_count = 0
+        self.render_count = 0
+
+    @staticmethod
+    def _array_token(data):
+        source = np.asarray(data)
+        pointer = int(source.__array_interface__["data"][0]) if source.size else 0
+        return pointer, tuple(source.shape), tuple(source.strides), source.dtype.str
+
+    @property
+    def active(self):
+        return self.volume is not None and self.grid is not None
+
+    def clear(self, *, render=False):
+        try:
+            self.plotter.remove_actor("main_vol", render=False)
+        except Exception:
+            pass
+        VisualEngine.clear_3d_colorbar(self.plotter)
+        self.grid = None
+        self.volume = None
+        self.host_buffer = None
+        self.vtk_scalars = None
+        self.shape = None
+        self.data_token = None
+        self.level_info = None
+        self._style_signature = None
+        self._clip_signature = None
+        self._axes_signature = None
+        if render:
+            self.plotter.render()
+
+    def render(
+        self,
+        data,
+        levels_params,
+        opac_mode,
+        *,
+        clip_ranges=None,
+        show_axes=True,
+        core_coords=None,
+        cmap="magma",
+        quality="exact",
+        force_data=False,
+    ):
+        source = np.asarray(data, dtype=np.float32)
+        if source.ndim != 3:
+            raise ValueError("Persistent volume rendering requires a 3D array.")
+
+        saved_camera = None
+        try:
+            saved_camera = self.plotter.camera_position
+        except Exception:
+            pass
+
+        token = self._array_token(source)
+        if not self.active or self.shape != tuple(source.shape):
+            self._build_scene(source, levels_params, opac_mode, cmap)
+        elif force_data or token != self.data_token:
+            self._attach_data(source)
+
+        self._update_style(levels_params, opac_mode, cmap)
+        self._update_clipping(clip_ranges)
+        self._update_axes(bool(show_axes), core_coords)
+        self._set_interactive_quality(quality)
+
+        if saved_camera is not None:
+            try:
+                self.plotter.camera_position = saved_camera
+            except Exception:
+                pass
+        self.plotter.render()
+        self.render_count += 1
+        return self.volume
+
+    def _build_scene(self, data, levels_params, opac_mode, cmap):
+        self.clear(render=False)
+        shape = tuple(int(size) for size in data.shape)
+        spacing = tuple(200.0 / (size - 1) if size > 1 else 1.0 for size in shape)
+        self.grid = pv.ImageData(dimensions=np.asarray(shape), origin=(0, 0, 0), spacing=spacing)
+        self._attach_data(data)
+        self.level_info = VisualEngine._level_info(data, levels_params)
+        display_cmap = VisualEngine._leveled_cmap(cmap, self.level_info)
+        opacity = self._opacity_values(opac_mode, self.level_info)
+        self.volume = self.plotter.add_volume(
+            self.grid,
+            scalars="values",
+            cmap=display_cmap,
+            opacity=opacity,
+            clim=[self.level_info["black_value"], self.level_info["white_value"]],
+            show_scalar_bar=True,
+            scalar_bar_args=VisualEngine._3d_colorbar_args(self.plotter),
+            mapper="smart",
+            name="main_vol",
+            render=False,
+        )
+        self.shape = shape
+        self._style_signature = None
+        self._clip_signature = None
+        self._axes_signature = None
+        self.rebuild_count += 1
+
+    def _attach_data(self, data):
+        buffer = np.asfortranarray(np.asarray(data, dtype=np.float32))
+        flat = buffer.ravel(order="F")
+        vtk_scalars = numpy_to_vtk(flat, deep=False)
+        vtk_scalars.SetName("values")
+        self.grid.GetPointData().SetScalars(vtk_scalars)
+        vtk_scalars.Modified()
+        self.grid.Modified()
+        self.host_buffer = buffer
+        self.vtk_scalars = vtk_scalars
+        self.shape = tuple(buffer.shape)
+        self.data_token = self._array_token(data)
+        self.level_info = None
+        self._style_signature = None
+        self.data_update_count += 1
+
+    def _update_style(self, levels_params, opac_mode, cmap):
+        signature = (tuple(float(value) for value in levels_params), str(opac_mode), str(cmap), self.data_token)
+        if signature == self._style_signature:
+            return
+        self.level_info = VisualEngine._level_info(self.host_buffer, levels_params)
+        display_cmap = VisualEngine._leveled_cmap(cmap, self.level_info)
+        colors = display_cmap(np.linspace(0.0, 1.0, 256))
+        low = float(self.level_info["black_value"])
+        high = float(self.level_info["white_value"])
+        if high <= low:
+            high = low + 1.0
+
+        color_function = vtk.vtkColorTransferFunction()
+        for index, rgba in enumerate(colors):
+            value = low + (high - low) * index / max(len(colors) - 1, 1)
+            color_function.AddRGBPoint(value, float(rgba[0]), float(rgba[1]), float(rgba[2]))
+
+        opacity_values = self._opacity_values(opac_mode, self.level_info)
+        opacity_function = vtk.vtkPiecewiseFunction()
+        for index, opacity in enumerate(opacity_values):
+            value = low + (high - low) * index / max(len(opacity_values) - 1, 1)
+            opacity_function.AddPoint(value, float(opacity))
+
+        prop = self.volume.GetProperty()
+        prop.SetColor(color_function)
+        prop.SetScalarOpacity(opacity_function)
+        try:
+            self.volume.mapper.scalar_range = (low, high)
+            self.volume.mapper.lookup_table.apply_cmap(display_cmap, n_values=256)
+            self.volume.mapper.lookup_table.scalar_range = (low, high)
+        except Exception:
+            pass
+        VisualEngine._apply_3d_colorbar_ticks(self.plotter, self.level_info)
+        self._style_signature = signature
+
+    def _opacity_values(self, opac_mode, level_info):
+        values = self.OPACITY_MAPS.get(str(opac_mode), self.OPACITY_MAPS["linear"])
+        return VisualEngine._mapped_opacity(values, level_info)
+
+    def _update_clipping(self, clip_ranges):
+        signature = None if clip_ranges is None else tuple(float(value) for value in clip_ranges)
+        if signature == self._clip_signature or self.volume is None:
+            return
+        mapper = self.volume.mapper
+        if signature is None:
+            mapper.RemoveAllClippingPlanes()
+        else:
+            r = signature
+            planes = vtk.vtkPlaneCollection()
+            specs = [
+                ((r[0], 0, 0), (1, 0, 0)),
+                ((r[1], 0, 0), (-1, 0, 0)),
+                ((0, r[2], 0), (0, 1, 0)),
+                ((0, r[3], 0), (0, -1, 0)),
+                ((0, 0, r[4]), (0, 0, 1)),
+                ((0, 0, r[5]), (0, 0, -1)),
+            ]
+            for origin, normal in specs:
+                plane = vtk.vtkPlane()
+                plane.SetOrigin(origin)
+                plane.SetNormal(normal)
+                planes.AddItem(plane)
+            mapper.SetClippingPlanes(planes)
+        self._clip_signature = signature
+
+    def _update_axes(self, show_axes, coords):
+        coord_signature = None
+        if show_axes and coords:
+            pieces = []
+            for key in ("X", "Y", "E"):
+                values = np.asarray(coords.get(key, []))
+                if values.size == 0:
+                    pieces.append((key, 0, 0.0, 0.0))
+                else:
+                    pieces.append((key, len(values), float(values[0]), float(values[-1])))
+            coord_signature = tuple(pieces)
+        signature = bool(show_axes), coord_signature
+        if signature == self._axes_signature:
+            return
+        if show_axes and coords:
+            VisualEngine.render_axes(self.plotter, self.grid.dimensions, coords)
+        else:
+            self.plotter.remove_bounds_axes()
+        self._axes_signature = signature
+
+    def _set_interactive_quality(self, quality):
+        if self.volume is None:
+            return
+        try:
+            self.volume.mapper.SetAutoAdjustSampleDistances(True)
+        except Exception:
+            pass
+        interactor = getattr(self.plotter, "iren", None)
+        if interactor is not None:
+            try:
+                interactor.SetDesiredUpdateRate(15.0 if str(quality) == "preview" else 2.0)
+            except Exception:
+                pass

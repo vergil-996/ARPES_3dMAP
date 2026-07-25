@@ -354,3 +354,118 @@ class WaterfallSettingsPopup(_NonModalPopup):
         spin_box.resize(self.POPUP_WIDTH - 100, 58)
         spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         return spin_box
+
+
+class SecondDerivativeSettingsPopup(_NonModalPopup):
+    POPUP_WIDTH = 400
+
+    def __init__(self, page_control_blank, parent=None):
+        super().__init__(parent)
+        self._blank = page_control_blank
+        self.setWindowTitle("二阶导参数设置")
+        self.setMinimumWidth(self.POPUP_WIDTH)
+        self._build_ui()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(12)
+
+        group = SiTitledWidgetGroup(self)
+        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        group.setFixedWidth(self.POPUP_WIDTH - 60)
+        group.addTitle("二阶导参数")
+
+        card = SiTriSectionPanelCard(group)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        card.header().hide()
+        card.footer().hide()
+        card.body().layout().setSpacing(12)
+
+        self.sigma_box = self._create_double_spin_box(
+            parent=card,
+            title="能量轴平滑 σ",
+            value=1.5,
+            minimum=0.0,
+            maximum=10.0,
+            single_step=0.1,
+        )
+        self.threshold_box = self._create_double_spin_box(
+            parent=card,
+            title="曲率裁剪阈值",
+            value=0.0,
+            minimum=0.0,
+            maximum=1.0,
+            single_step=0.01,
+        )
+        self.cross_sigma_box = self._create_double_spin_box(
+            parent=card,
+            title="动量方向平滑 σ",
+            value=0.8,
+            minimum=0.0,
+            maximum=5.0,
+            single_step=0.1,
+        )
+
+        self.sigma_box.editingFinished.connect(self._on_sigma_changed)
+        self.threshold_box.editingFinished.connect(self._on_threshold_changed)
+        self.cross_sigma_box.editingFinished.connect(self._on_cross_sigma_changed)
+
+        card.body().addWidget(self.sigma_box)
+        card.body().addWidget(self.threshold_box)
+        card.body().addWidget(self.cross_sigma_box)
+        card.adjustSize()
+
+        group.addWidget(card)
+        self._apply_group_style(group)
+        self._controls.extend([self.sigma_box, self.threshold_box, self.cross_sigma_box])
+        root.addWidget(group)
+        root.addStretch()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_from_blank()
+
+    def _sync_from_blank(self):
+        blank = self._blank
+        self.sigma_box.setValue(blank.sd_sigma_box.value())
+        self.threshold_box.setValue(blank.sd_threshold_box.value())
+        self.cross_sigma_box.setValue(blank.sd_cross_sigma_box.value())
+
+    def _on_sigma_changed(self):
+        value = float(self.sigma_box.value())
+        self._blank.sd_sigma_box.setValue(value)
+        self._blank._sync_second_derivative_constraints()
+        self._sync_from_blank()
+
+    def _on_threshold_changed(self):
+        value = float(self.threshold_box.value())
+        self._blank.sd_threshold_box.setValue(value)
+        self._blank._sync_second_derivative_constraints()
+        self._sync_from_blank()
+
+    def _on_cross_sigma_changed(self):
+        value = float(self.cross_sigma_box.value())
+        self._blank.sd_cross_sigma_box.setValue(value)
+        self._blank._sync_second_derivative_constraints()
+        self._sync_from_blank()
+
+    @staticmethod
+    def _apply_group_style(group):
+        for child in group.findChildren(SiLabel):
+            try:
+                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
+                child.reloadStyleSheet()
+            except Exception:
+                pass
+
+    def _create_double_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
+        spin_box = SiDoubleSpinBox(parent)
+        spin_box.setTitle(title)
+        spin_box.setMinimum(minimum)
+        spin_box.setMaximum(maximum)
+        spin_box.setSingleStep(single_step)
+        spin_box.setValue(value)
+        spin_box.resize(self.POPUP_WIDTH - 100, 58)
+        spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        return spin_box

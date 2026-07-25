@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Optional NVIDIA numerical backend for the CUDA 13 release package.
+cupy-cuda13x[ctk]>=14,<15

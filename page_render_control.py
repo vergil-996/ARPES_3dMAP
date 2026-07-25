@@ -278,6 +278,28 @@ class RenderControlPage(QWidget):
         self._apply_style(grp_noise)
         self.vbox.addLayout(self._center_widget(grp_noise, self.SLIDER_GROUP_WIDTH))
 
+        # 全局计算后端（不随分析结果页保存）
+        grp_backend = SiTitledWidgetGroup(self)
+        grp_backend.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        grp_backend.setFixedWidth(self.SLIDER_GROUP_WIDTH)
+        self._adaptive_groups.append(grp_backend)
+        grp_backend.addTitle("性能与硬件")
+        v_backend = QVBoxLayout(grp_backend)
+        v_backend.setContentsMargins(*self.GROUP_MARGINS)
+        v_backend.setSpacing(self.GROUP_SPACING)
+
+        self.combo_backend = SiCapsuleComboBox(self)
+        self.combo_backend.setTitle("计算后端")
+        self.combo_backend.setFixedHeight(30)
+        self.combo_backend.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        self.combo_backend.setEditable(False)
+        self.combo_backend.addItems(["Auto", "CPU", "NVIDIA GPU"])
+        self._adaptive_row_controls.append(self.combo_backend)
+        v_backend.addLayout(self._center_widget(self.combo_backend, self.CONTROL_ROW_WIDTH))
+
+        self._apply_style(grp_backend)
+        self.vbox.addLayout(self._center_widget(grp_backend, self.SLIDER_GROUP_WIDTH))
+
         self.vbox.addStretch()
         self.container.adjustSize()
         self.scroll.setAttachment(self.container)
@@ -346,6 +368,27 @@ class RenderControlPage(QWidget):
             self.combo_n2.currentText(),
             self.combo_n3.currentText()
         ]
+
+    def get_backend_mode(self):
+        return self.combo_backend.currentText()
+
+    def set_backend_mode(self, mode):
+        index = self._combo_index_for_text(self.combo_backend, mode)
+        if index >= 0:
+            self.combo_backend.setCurrentIndex(index)
+
+    def set_nvidia_backend_available(self, available):
+        index = self._combo_index_for_text(self.combo_backend, "NVIDIA GPU")
+        if index < 0:
+            return
+        item = self.combo_backend.model().item(index)
+        if item is not None:
+            item.setEnabled(bool(available))
+        self.combo_backend.setItemData(
+            index,
+            None if available else "当前环境未安装或无法使用 CuPy/CUDA，Auto 将使用 CPU。",
+            3,
+        )
     @staticmethod
     def _combo_index_for_text(combo_box, text):
         for index in range(combo_box.count()):

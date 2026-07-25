@@ -20,6 +20,7 @@ env/
 build/
 dist/
 *.spec
+!ARPES_3dMAP_gpu.spec
 
 # OS junk
 .DS_Store

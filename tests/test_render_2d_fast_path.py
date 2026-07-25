@@ -44,6 +44,59 @@ class Render2DFastPathTests(unittest.TestCase):
         self.assertEqual(len(figure.axes), 2)
         np.testing.assert_allclose(np.asarray(first_image.get_array()), 3.0)
 
+    def test_2d_axes_always_put_smaller_ticks_at_lower_left(self):
+        figure = Figure(figsize=(4, 3))
+        canvas = FigureCanvasAgg(figure)
+        axes = figure.add_subplot(111)
+        data = np.arange(12, dtype=np.float32).reshape(3, 4)
+        coords = {
+            "X": np.linspace(-1.0, 1.0, 2),
+            "Y": np.asarray([3.0, 2.0, 1.0]),
+            "E": np.asarray([4.0, 3.0, 2.0, 1.0]),
+        }
+        VisualEngine.render_2d_slice(
+            axes,
+            canvas,
+            data,
+            {"axis": 0, "mode": "integral", "range": (0, 0)},
+            (0, 50, 100),
+            coords,
+        )
+        self.assertLess(axes.get_xlim()[0], axes.get_xlim()[1])
+        self.assertLess(axes.get_ylim()[0], axes.get_ylim()[1])
+        np.testing.assert_array_equal(
+            np.asarray(axes._arpes_image.get_array()),
+            data.T[::-1, ::-1],
+        )
+
+    def test_e_flip_reverses_only_the_energy_pixels(self):
+        figure = Figure(figsize=(4, 3))
+        canvas = FigureCanvasAgg(figure)
+        axes = figure.add_subplot(111)
+        data = np.arange(12, dtype=np.float32).reshape(3, 4)
+        coords = {
+            "X": np.linspace(-1.0, 1.0, 2),
+            "Y": np.asarray([1.0, 2.0, 3.0]),
+            "E": np.asarray([1.0, 2.0, 3.0, 4.0]),
+        }
+        VisualEngine.render_2d_slice(
+            axes,
+            canvas,
+            data,
+            {
+                "axis": 0,
+                "mode": "integral",
+                "range": (0, 0),
+                "display_e_flip": True,
+            },
+            (0, 50, 100),
+            coords,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(axes._arpes_image.get_array()),
+            data.T[::-1, :],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
