@@ -2,6 +2,25 @@ import os
 from pathlib import Path
 
 
+def configure_qt_high_dpi():
+    """Enable per-monitor Qt scaling before QApplication is created."""
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+
+    try:
+        from PyQt5.QtCore import QCoreApplication, Qt
+    except Exception:
+        return
+
+    if QCoreApplication.instance() is not None:
+        return
+
+    for attribute_name in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
+        attribute = getattr(Qt, attribute_name, None)
+        if attribute is not None:
+            QCoreApplication.setAttribute(attribute, True)
+
+
 def configure_qt_plugin_path():
     """Help Qt find platform plugins when the app lives in a non-ASCII path."""
     try:

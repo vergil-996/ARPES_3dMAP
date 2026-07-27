@@ -1,8 +1,9 @@
 import os
 import sys
 
-from qt_bootstrap import configure_qt_plugin_path
+from qt_bootstrap import configure_qt_high_dpi, configure_qt_plugin_path
 
+configure_qt_high_dpi()
 configure_qt_plugin_path()
 
 from PyQt5.QtGui import QIcon

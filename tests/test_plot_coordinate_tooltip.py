@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock
 
 from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -70,6 +71,51 @@ class PlotCoordinateTooltipTests(unittest.TestCase):
 
         self.assertIsNot(self.tooltip.annotation, old_annotation)
         self.assertTrue(self.tooltip.annotation.get_visible())
+
+    def test_motion_uses_blit_without_scheduling_a_full_canvas_draw(self):
+        self.assertIsNotNone(self.tooltip._background)
+        self.canvas.draw_idle = Mock()
+        self.canvas.blit = Mock()
+
+        self.tooltip._on_motion(self._motion_event())
+
+        self.canvas.blit.assert_called_once()
+        self.canvas.draw_idle.assert_not_called()
+        self.assertTrue(self.tooltip.annotation.get_animated())
+
+    def test_hide_restores_cached_background_with_blit(self):
+        self.tooltip._on_motion(self._motion_event())
+        self.canvas.draw_idle = Mock()
+        self.canvas.blit = Mock()
+
+        self.tooltip.hide()
+
+        self.assertFalse(self.tooltip.annotation.get_visible())
+        self.canvas.blit.assert_called_once()
+        self.canvas.draw_idle.assert_not_called()
+
+    def test_external_blit_updates_annotation_without_drawing_twice(self):
+        self.tooltip.external_blit_provider = lambda _event: True
+        self.canvas.draw_idle = Mock()
+        self.canvas.blit = Mock()
+
+        self.tooltip._on_motion(self._motion_event(1.25, 2.5))
+
+        self.assertAlmostEqual(self.tooltip.annotation.xy[0], 1.25)
+        self.assertAlmostEqual(self.tooltip.annotation.xy[1], 2.5)
+        self.assertIn("1.25", self.tooltip.annotation.get_text())
+        self.assertIn("2.5", self.tooltip.annotation.get_text())
+        self.canvas.blit.assert_not_called()
+        self.canvas.draw_idle.assert_not_called()
+
+    def test_resize_invalidates_background_until_the_next_draw(self):
+        self.assertIsNotNone(self.tooltip._background)
+
+        self.tooltip._on_resize(None)
+        self.assertIsNone(self.tooltip._background)
+
+        self.canvas.draw()
+        self.assertIsNotNone(self.tooltip._background)
 
 
 if __name__ == "__main__":

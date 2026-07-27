@@ -47,6 +47,12 @@ from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from plot_coordinate_tooltip import PlotCoordinateTooltip
 from compute_backends import ArrayLRUCache, BackendManager
+from data_scope import (
+    DataScopeDescriptor,
+    ScopedDataVolume,
+    ScopedSpatialArray,
+    scoped_descriptor_from_array,
+)
 from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
@@ -73,7 +79,11 @@ class QuickCloseMessageBox(QMessageBox):
 class My3DAnalyzer(QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
+    GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
+    SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
+    FULL_SCOPE_ID = "full"
     ROTATION_CACHE_LIMIT = 4
+    RENDER_STATUS_WIDTH = 330
 
     def __init__(self):
         super().__init__()
@@ -90,7 +100,19 @@ class My3DAnalyzer(QWidget):
         self.last_synced_slice_texts = None
         self.active_page_spec = None
         self.last_visual_page_id = None
-        self.page_denoise_cache = {}
+        self.global_denoise_methods = []
+        self.shared_denoised_raw_data = None
+        self.shared_denoise_signature = self._denoise_signature([])
+        self.shared_denoise_version = 0
+        self.data_scopes = {}
+        self._scope_generation = 0
+        self._scope_data_cache = ArrayLRUCache()
+        self._scope_committed_signatures = {}
+        self._pending_denoise_methods = None
+        self._pending_denoise_signature = None
+        self._pending_denoise_scope_id = None
+        self._pending_scope_denoise_keys = set()
+        self._pending_roi_scope_id = None
         self._syncing_controls = False
         self._syncing_axis_value_boxes = False
         self.axis_source_mode = "frame"
@@ -106,16 +128,17 @@ class My3DAnalyzer(QWidget):
         self._box_bounds_signature = None
         self.rotation_angle = 0.0
         self._rendered_rotation_angle = 0.0
+        self._actor_preview_rotation_angle = None
         self._rotation_cache = {}
         self._computed_volume_cache = ArrayLRUCache()
-        # A preview result must not enter the exact-result cache.  It is
-        # exposed only while the corresponding PREVIEW request is rendered.
-        self._render_volume_override = None
         self._axis_prefix_cache = None
         self._second_derivative_volume_cache = None
         self._render_exact_ready = True
         self._last_compute_backend = "CPU"
         self._last_ui_transfer_signature = None
+        self._saved_3d_camera_position = None
+        self._camera_e_flip_applied = False
+        self._camera_observer_id = None
 
         self.settings = QSettings("ARPES", "ARPES_3dMAP")
         saved_backend = self.settings.value("compute_backend", "Auto", type=str)
@@ -149,6 +172,13 @@ class My3DAnalyzer(QWidget):
 
         self.init_ui()
         self.volume_session = VolumeRenderSession(self.plotter)
+        try:
+            self._camera_observer_id = self.plotter.iren.add_observer(
+                "EndInteractionEvent",
+                self._capture_3d_camera_position,
+            )
+        except Exception:
+            self._camera_observer_id = None
         self.page_render.set_nvidia_backend_available(self.backend_manager.gpu_available)
         self.page_render.set_backend_mode(self.backend_manager.mode)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
@@ -444,6 +474,7 @@ class My3DAnalyzer(QWidget):
             self.ax_2d,
             context_provider=lambda: self.current_render_context,
             active_provider=lambda: self.left_display_stack.currentWidget() is self.canvas_2d,
+            external_blit_provider=self._axis_crop_selector_will_blit,
         )
         self.left_display_stack.addWidget(self.canvas_2d)
 
@@ -452,11 +483,12 @@ class My3DAnalyzer(QWidget):
 
         self.render_status_label = QLabel(self.left_display_stack)
         self.render_status_label.setFixedHeight(26)
-        self.render_status_label.setMinimumWidth(210)
+        self.render_status_label.setFixedWidth(self.RENDER_STATUS_WIDTH)
         self.render_status_label.setAlignment(Qt.AlignCenter)
         self.render_status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.render_status_label.setAttribute(Qt.WA_StyledBackground)
         self.render_status_label.setStyleSheet(
-            "QLabel { color: white; background: rgba(18, 18, 30, 190); "
+            "QLabel { color: white; background-color: #12121E; "
             "border: 1px solid rgba(255, 255, 255, 45); border-radius: 8px; padding: 2px 8px; }"
         )
         self.left_display_stack.installEventFilter(self)
@@ -516,8 +548,10 @@ class My3DAnalyzer(QWidget):
         stack = getattr(self, "left_display_stack", None)
         if label is None or stack is None:
             return
-        label.adjustSize()
-        width = max(210, min(label.sizeHint().width() + 10, 330))
+        # Keep the overlay geometry stable across status changes.  Moving or
+        # shrinking a translucent child over a native OpenGL surface can leave
+        # the previous text in the vacated pixels until the next VTK frame.
+        width = min(self.RENDER_STATUS_WIDTH, max(1, stack.width() - 28))
         label.setFixedWidth(width)
         label.move(max(10, stack.width() - width - 14), 12)
         label.raise_()
@@ -542,6 +576,73 @@ class My3DAnalyzer(QWidget):
         self._render_device_name = name
         return name
 
+    @staticmethod
+    def _copy_camera_position(camera_position):
+        try:
+            values = camera_position.to_list()
+        except AttributeError:
+            values = camera_position
+        try:
+            snapshot = tuple(
+                tuple(float(component) for component in vector)
+                for vector in values
+            )
+        except (TypeError, ValueError):
+            return None
+        return snapshot if len(snapshot) == 3 and all(len(vector) == 3 for vector in snapshot) else None
+
+    def _current_3d_camera_position(self):
+        plotter = getattr(self, "plotter", None)
+        if plotter is None:
+            return None
+        try:
+            return self._copy_camera_position(plotter.camera_position)
+        except Exception:
+            return None
+
+    def _capture_3d_camera_position(self, *_args):
+        plotter = getattr(self, "plotter", None)
+        stack = getattr(self, "left_display_stack", None)
+        if plotter is None or stack is None or stack.currentWidget() is not plotter:
+            return
+        snapshot = self._current_3d_camera_position()
+        if snapshot is not None:
+            self._saved_3d_camera_position = snapshot
+
+    def _restore_3d_camera_position(self):
+        snapshot = getattr(self, "_saved_3d_camera_position", None)
+        if snapshot is None:
+            return
+        try:
+            self.plotter.camera_position = snapshot
+        except Exception:
+            pass
+
+    def _apply_pending_e_flip_camera(self):
+        desired = bool(self.page_image.switch_flip.isChecked())
+        applied = bool(getattr(self, "_camera_e_flip_applied", False))
+        if desired == applied:
+            return
+
+        try:
+            camera = self.plotter.camera
+            # Match a vertical trackball drag through half a revolution.  This
+            # changes only the viewpoint; the volume actor and X/Y data axes
+            # are not rigidly rotated.
+            camera.Elevation(180.0)
+            camera.OrthogonalizeViewUp()
+            try:
+                self.plotter.renderer.ResetCameraClippingRange()
+            except Exception:
+                pass
+        except Exception:
+            return
+
+        self._camera_e_flip_applied = desired
+        snapshot = self._current_3d_camera_position()
+        if snapshot is not None:
+            self._saved_3d_camera_position = snapshot
+
     def _update_render_status(self, phase, backend=""):
         label = getattr(self, "render_status_label", None)
         if label is None:
@@ -553,9 +654,13 @@ class My3DAnalyzer(QWidget):
             "failed": "计算失败",
         }.get(str(phase), str(phase))
         compute_name = backend or getattr(self, "_last_compute_backend", "CPU")
-        label.setText(f"{phase_text} · {compute_name}计算 / {self._render_device_label()}")
+        scope_label = self._active_scope_label()
+        label.setText(
+            f"{phase_text} · {compute_name}计算 / {self._render_device_label()} · {scope_label}"
+        )
         label.show()
         self._position_render_status()
+        label.repaint()
 
     def _on_refresh_status_changed(self, phase, backend):
         if backend:
@@ -587,6 +692,7 @@ class My3DAnalyzer(QWidget):
     def request_refresh(self, cause, quality=RenderQuality.EXACT, *, immediate=False, interactive=False, snapshot=None):
         if self._syncing_controls:
             return
+        self._capture_3d_camera_position()
         page_id = self._active_refresh_page_id()
         values = dict(snapshot or {})
         values.setdefault("rotation_angle", float(self.rotation_angle))
@@ -617,15 +723,16 @@ class My3DAnalyzer(QWidget):
 
     @staticmethod
     def _volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle):
+        identity = My3DAnalyzer._raw_data_identity(raw_data)
         if source_mode == "time_integral":
             return (
                 "integral",
-                id(raw_data),
+                identity,
                 int(t_low),
                 int(t_up),
                 round(float(angle), 2),
             )
-        return ("frame", id(raw_data), int(frame_index), round(float(angle), 2))
+        return ("frame", identity, int(frame_index), round(float(angle), 2))
 
     def _volume_source_descriptor(self, spec, request):
         if spec is None or spec.page_kind in {"control_panel", self.COMPARISON_PAGE_KIND, "slice_dos"}:
@@ -663,27 +770,18 @@ class My3DAnalyzer(QWidget):
             operation = None
         else:
             operation = "prepare_volume"
-        resampled_preview = (
-            request.cause == RefreshCause.ROTATION
-            and request.quality == RenderQuality.PREVIEW
-            and spec.page_kind in {"home", "time_integral"}
-        )
         payload = {
-            "raw_data": raw_data,
+            "raw_data": raw_data.values if isinstance(raw_data, ScopedDataVolume) else raw_data,
             "source_mode": source_mode,
             "frame_index": frame_index,
             "t_low": t_low,
             "t_up": t_up,
             "angle": angle,
-            # Rotation previews use the same resampling geometry as the exact
-            # result, but on a bounded voxel count.  Rotating the VTK actor
-            # itself rotates the volume's bounding box and visibly snaps back
-            # when the exact, axis-aligned grid replaces it.
-            "preview": resampled_preview,
-            "max_voxels": 500_000 if resampled_preview else 2_500_000,
         }
-        if resampled_preview:
-            extra_metadata["resampled_preview"] = True
+        descriptor = scoped_descriptor_from_array(raw_data)
+        if descriptor is not None and not descriptor.is_full:
+            payload["scope_bounds"] = descriptor.spatial_bounds
+            payload["full_shape"] = descriptor.full_shape
 
         if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             resolved = self._resolved_axis_integral_params(spec)
@@ -703,33 +801,52 @@ class My3DAnalyzer(QWidget):
             derivative_axis = int(params.get("derivative_axis", 2))
             coordinate_key = {0: "X", 1: "Y", 2: "E"}[derivative_axis]
             coordinate_values = np.asarray(self.original_coords[coordinate_key], dtype=np.float64)
+            if descriptor is not None and not descriptor.is_full and abs(angle) < 1e-6:
+                coordinate_values = coordinate_values[descriptor.spatial_slices[derivative_axis]]
             source_signature = (
                 ("time_integral", t_low, t_up)
                 if source_mode == "time_integral"
                 else ("frame", frame_index)
             )
+            sd_params = params.get("second_derivative_params") or {}
+            sigma = float(sd_params.get("sigma", 1.5))
+            threshold = float(sd_params.get("threshold", 0.0))
+            prepared_shape = (
+                descriptor.compact_spatial_shape
+                if descriptor is not None
+                and not descriptor.is_full
+                and abs(angle) < 1e-6
+                else tuple(int(size) for size in raw_data.shape[:3])
+            )
             derivative_key = (
                 tuple(source_signature),
                 round(float(angle), 2),
                 derivative_axis,
-                tuple(int(size) for size in raw_data.shape[:3]),
+                tuple(int(size) for size in prepared_shape),
                 coordinate_values.dtype.str,
                 coordinate_values.tobytes(),
+                round(sigma, 4),
+                round(threshold, 4),
             )
             cache = self._second_derivative_volume_cache
-            if cache is None or cache.get("raw_data") is not raw_data or cache.get("key") != derivative_key:
+            raw_identity = self._raw_data_identity(raw_data)
+            if (
+                cache is None
+                or cache.get("raw_identity") != raw_identity
+                or cache.get("key") != derivative_key
+            ):
                 operation = "prepare_second_derivative"
-                sd_params = params.get("second_derivative_params") or {}
                 payload.update({
                     "axis": derivative_axis,
                     "coordinates": coordinate_values,
-                    "sigma": float(sd_params.get("sigma", 1.5)),
-                    "threshold": float(sd_params.get("threshold", 0.0)),
+                    "sigma": sigma,
+                    "threshold": threshold,
                 })
                 extra_metadata.update(
                     {
                         "derivative_key": derivative_key,
                         "derivative_raw_data": raw_data,
+                        "derivative_raw_identity": raw_identity,
                     }
                 )
 
@@ -743,10 +860,13 @@ class My3DAnalyzer(QWidget):
             return
         self.rotation_angle = round(float(request.snapshot.get("rotation_angle", self.rotation_angle)), 2)
         if request.cause == RefreshCause.ROTATION and request.quality == RenderQuality.PREVIEW:
-            self._apply_rotation_actor_preview(self.rotation_angle)
-            # Simple 3D source pages immediately follow the actor feedback with
-            # a low-resolution resampled preview.  Derived pages retain the
-            # lightweight actor path until their exact analysis is ready.
+            # Keep one preview representation throughout a wheel gesture.  A
+            # resampled preview has an axis-aligned box while an actor preview
+            # has a rotated box; alternating between them looks like a small
+            # rotation followed by a rebound.
+            if self._apply_rotation_actor_preview(self.rotation_angle):
+                self._finish_ui_refresh(request, self._last_compute_backend)
+                return
             if spec.page_kind not in {"home", "time_integral"}:
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
@@ -779,7 +899,8 @@ class My3DAnalyzer(QWidget):
                 derivative_cache = self._second_derivative_volume_cache
                 ready = (
                     derivative_cache is not None
-                    and derivative_cache.get("raw_data") is extra_metadata["derivative_raw_data"]
+                    and derivative_cache.get("raw_identity")
+                    == extra_metadata["derivative_raw_identity"]
                     and derivative_cache.get("key") == extra_metadata["derivative_key"]
                 )
             return ready
@@ -806,14 +927,124 @@ class My3DAnalyzer(QWidget):
         self.refresh_coordinator.submit_compute(request, work)
 
     def _on_refresh_result(self, request, result):
+        if (
+            request.cause in {RefreshCause.DENOISE, RefreshCause.DATA_SCOPE}
+            and str(request.page_id).startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
+        ):
+            scope_id = str(request.snapshot.get("scope_id", ""))
+            signature = str(request.snapshot.get("denoise_signature", ""))
+            self._pending_scope_denoise_keys.discard((scope_id, signature))
+            if (
+                request.snapshot.get("roi_commit")
+                and self.__dict__.get("_pending_roi_scope_id") != scope_id
+            ):
+                self.data_scopes.pop(scope_id, None)
+                self._scope_committed_signatures.pop(scope_id, None)
+                return
+            if (
+                signature != self.shared_denoise_signature
+                or request.snapshot.get("source_id") != id(self.original_raw_data)
+            ):
+                if request.snapshot.get("roi_commit"):
+                    self.data_scopes.pop(scope_id, None)
+                    self._scope_committed_signatures.pop(scope_id, None)
+                    if self.__dict__.get("_pending_roi_scope_id") == scope_id:
+                        self._pending_roi_scope_id = None
+                return
+            try:
+                self._store_scope_denoise_result(scope_id, result.value, signature)
+            except Exception as exc:
+                self._on_refresh_failed(request, str(exc))
+                return
+            self.shared_denoise_version += 1
+            if request.snapshot.get("roi_commit"):
+                self._invalidate_scope_render_state()
+            else:
+                self._invalidate_denoise_dependents()
+            if request.snapshot.get("roi_commit"):
+                home_spec = self.left_workspace.home_spec()
+                descriptor = self._scope_for_id(scope_id)
+                if home_spec is not None and descriptor is not None:
+                    home_spec.data_scope_id = descriptor.scope_id
+                    home_spec.params["data_scope_label"] = descriptor.label
+                    self._refresh_scope_hint(home_spec)
+                    self.clip_ranges = list(descriptor.spatial_bounds)
+                    self.home_slice_info = None
+                    self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
+                    self._persist_home_page_state(home_spec)
+                self._pending_roi_scope_id = None
+            active_spec = self.left_workspace.current_spec()
+            if (
+                active_spec is not None
+                and (
+                    getattr(active_spec, "data_scope_id", self.FULL_SCOPE_ID) == scope_id
+                    or bool(request.snapshot.get("roi_commit"))
+                )
+            ):
+                QTimer.singleShot(
+                    0,
+                    lambda: self.request_refresh(
+                        RefreshCause.DENOISE,
+                        RenderQuality.EXACT,
+                        immediate=True,
+                    ),
+                )
+            return
+
+        if (
+            request.cause == RefreshCause.DENOISE
+            and request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+        ):
+            expected_signature = request.snapshot.get("denoise_signature")
+            if (
+                expected_signature != self._pending_denoise_signature
+                or request.snapshot.get("source_id") != id(self.original_raw_data)
+            ):
+                return
+            scope_id = str(request.snapshot.get("scope_id", self.FULL_SCOPE_ID))
+            pending_scope_id = str(
+                self.__dict__.get("_pending_denoise_scope_id")
+                or self.FULL_SCOPE_ID
+            )
+            if scope_id != pending_scope_id:
+                return
+            try:
+                self._commit_shared_denoise(
+                    result.metadata.get("denoise_methods", self._pending_denoise_methods or ()),
+                    result.value,
+                    expected_signature,
+                    scope_id,
+                )
+            except Exception as exc:
+                self._on_refresh_failed(request, str(exc))
+                return
+            self._last_compute_backend = result.backend
+            self._render_exact_ready = False
+            self._update_export_button_states()
+            # Any page job queued while denoising was based on the previous
+            # shared source.  Drop it before the coordinator starts pending
+            # work, then issue one exact job against the committed source.
+            self.refresh_coordinator.cancel_page(self._active_refresh_page_id())
+            # The coordinator emits the denoise job's "complete" status after
+            # this slot returns.  Queue the dependent page refresh so its own
+            # computing/complete status remains authoritative.
+            QTimer.singleShot(
+                0,
+                lambda: self.request_refresh(
+                    RefreshCause.DENOISE,
+                    RenderQuality.EXACT,
+                    immediate=True,
+                ),
+            )
+            return
+
         cache_key = result.metadata.get("cache_key")
         value = result.value
         if isinstance(value, dict):
             volume_value = value.get("volume")
         else:
             volume_value = value
-        is_resampled_preview = bool(result.metadata.get("resampled_preview"))
-        if cache_key is not None and volume_value is not None and not is_resampled_preview:
+        if cache_key is not None and volume_value is not None:
             self._computed_volume_cache.put(cache_key, volume_value)
         if isinstance(value, dict) and "axis_prefix_key" in result.metadata:
             self._axis_prefix_cache = {
@@ -825,22 +1056,48 @@ class My3DAnalyzer(QWidget):
         if isinstance(value, dict) and "derivative_key" in result.metadata:
             self._second_derivative_volume_cache = {
                 "raw_data": result.metadata["derivative_raw_data"],
+                "raw_identity": result.metadata["derivative_raw_identity"],
                 "key": result.metadata["derivative_key"],
                 "data": value["derivative"],
             }
         if request.page_id != self._active_refresh_page_id():
             return
         self._last_compute_backend = result.backend
-        if is_resampled_preview and cache_key is not None and volume_value is not None:
-            self._render_volume_override = (cache_key, volume_value)
-        try:
-            self._render_active_page(request.quality, request.cause)
-        finally:
-            self._render_volume_override = None
+        self._render_active_page(request.quality, request.cause)
         self._finish_ui_refresh(request, result.backend)
 
     def _on_refresh_failed(self, request, message):
-        self._render_exact_ready = False
+        is_lazy_scope_denoise = (
+            request.cause in {RefreshCause.DENOISE, RefreshCause.DATA_SCOPE}
+            and str(request.page_id).startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
+        )
+        if is_lazy_scope_denoise:
+            failed_scope_id = str(request.snapshot.get("scope_id", ""))
+            self._pending_scope_denoise_keys.discard(
+                (
+                    failed_scope_id,
+                    str(request.snapshot.get("denoise_signature", "")),
+                )
+            )
+            if request.snapshot.get("roi_commit"):
+                self.data_scopes.pop(failed_scope_id, None)
+                self._scope_committed_signatures.pop(failed_scope_id, None)
+                if self.__dict__.get("_pending_roi_scope_id") == failed_scope_id:
+                    self._pending_roi_scope_id = None
+            self._render_exact_ready = True
+        is_global_denoise = (
+            request.cause == RefreshCause.DENOISE
+            and request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+        )
+        if is_global_denoise:
+            if request.snapshot.get("denoise_signature") == self._pending_denoise_signature:
+                self._pending_denoise_methods = None
+                self._pending_denoise_signature = None
+                self._pending_denoise_scope_id = None
+            # The previously committed global source is still valid and visible.
+            self._render_exact_ready = True
+        elif not is_lazy_scope_denoise:
+            self._render_exact_ready = False
         self._update_export_button_states()
         self._update_render_status("failed", self.backend_manager.selected_backend_name())
         print(f"Refresh failed ({request.page_id}): {message}")
@@ -929,7 +1186,7 @@ class My3DAnalyzer(QWidget):
             if button is not None:
                 button.clicked.connect(self.on_waterfall_step_changed)
 
-        self.page_data.combo_ax.currentIndexChanged.connect(self.update_ax_slider_range)
+        self.page_data.combo_ax.currentIndexChanged.connect(self.on_axis_selection_changed)
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
         self.page_data.s_t_low.valueChanged.connect(self.on_time_integral_controls_changed)
         self.page_data.s_t_up.valueChanged.connect(self.on_time_integral_controls_changed)
@@ -975,6 +1232,7 @@ class My3DAnalyzer(QWidget):
             page_kind="home",
             source_module="system",
             closeable=False,
+            data_scope_id=self.FULL_SCOPE_ID,
         )
         self.left_workspace.set_home_page(home_spec)
         self.active_page_spec = home_spec
@@ -993,6 +1251,145 @@ class My3DAnalyzer(QWidget):
             key: None if value is None else np.array(value, copy=True)
             for key, value in source.items()
         }
+
+    def _initialize_data_scopes(self):
+        self.data_scopes = {}
+        self._scope_generation = 0
+        self._scope_committed_signatures = {}
+        if self.original_raw_data is None:
+            return
+        descriptor = DataScopeDescriptor.full(self.original_raw_data.shape)
+        self.data_scopes[descriptor.scope_id] = descriptor
+        self._scope_data_cache = ArrayLRUCache(max_bytes=max(int(self.original_raw_data.nbytes), 1))
+        self._scope_committed_signatures[descriptor.scope_id] = self._denoise_signature([])
+
+    def _full_domain_spatial_shape(self):
+        original = self.__dict__.get("original_raw_data")
+        if original is not None:
+            return tuple(int(size) for size in original.shape[:3])
+        core = self.__dict__.get("core")
+        raw_data = getattr(core, "raw_data", None) if core is not None else None
+        if raw_data is None:
+            return None
+        return tuple(int(size) for size in raw_data.shape[:3])
+
+    def _scope_for_id(self, scope_id=None):
+        normalized = str(scope_id or self.FULL_SCOPE_ID)
+        descriptor = self.__dict__.get("data_scopes", {}).get(normalized)
+        if descriptor is not None:
+            return descriptor
+        if self.original_raw_data is None:
+            return None
+        if normalized == self.FULL_SCOPE_ID:
+            return DataScopeDescriptor.full(self.original_raw_data.shape)
+        # Never reinterpret a missing ROI page as a full-data page. Doing so
+        # pairs the full source array with the page's old ROI display bounds,
+        # which visually squeezes/clips the whole volume into the ROI.
+        return None
+
+    def _scope_for_spec(self, spec=None):
+        return self._scope_for_id(getattr(spec, "data_scope_id", self.FULL_SCOPE_ID))
+
+    def _active_scope_label(self):
+        workspace = getattr(self, "left_workspace", None)
+        spec = workspace.current_spec() if workspace is not None else None
+        descriptor = self._scope_for_spec(spec)
+        return descriptor.label if descriptor is not None else "完整数据"
+
+    def _scope_cache_key(self, scope_id, signature=None):
+        return str(scope_id), str(signature or self.shared_denoise_signature)
+
+    def _scope_values(self, descriptor, *, signature=None):
+        if descriptor is None or self.original_raw_data is None:
+            return None
+        methods = self._normalize_denoise_methods(self.global_denoise_methods)
+        if not methods:
+            return descriptor.extract(self.original_raw_data)
+
+        if descriptor.is_full and self.shared_denoised_raw_data is not None:
+            return self.shared_denoised_raw_data
+
+        cache_key = self._scope_cache_key(descriptor.scope_id, signature)
+        cache = self.__dict__.get("_scope_data_cache")
+        cached = cache.get(cache_key) if cache is not None else None
+        if cached is not None:
+            return cached
+
+        committed_signature = self.__dict__.get(
+            "_scope_committed_signatures",
+            {},
+        ).get(descriptor.scope_id)
+        if cache is not None and committed_signature:
+            committed = cache.get(
+                self._scope_cache_key(descriptor.scope_id, committed_signature)
+            )
+            if committed is not None:
+                return committed
+
+        # A scope that has not yet run the newly shared pipeline stays usable
+        # with its immutable raw ROI while its lazy background job is queued.
+        return descriptor.extract(self.original_raw_data)
+
+    def _register_roi_scope(self, index_bounds):
+        if self.original_raw_data is None:
+            raise ValueError("No source data is loaded.")
+        self._scope_generation += 1
+        scope_id = f"roi-{self._scope_generation}"
+        descriptor = DataScopeDescriptor(
+            scope_id=scope_id,
+            full_shape=tuple(int(size) for size in self.original_raw_data.shape),
+            bounds=tuple(int(value) for value in index_bounds),
+            generation=self._scope_generation,
+        )
+        self.data_scopes[scope_id] = descriptor
+        self._scope_committed_signatures[scope_id] = self._denoise_signature([])
+        return descriptor
+
+    def _scope_title_suffix(self, descriptor):
+        if descriptor is None or descriptor.is_full:
+            return ""
+        return f" [{descriptor.label}]"
+
+    def _assign_scope_to_spec(self, spec, source_spec=None):
+        if spec is None:
+            return
+        if source_spec is None and getattr(spec, "source_page_id", None):
+            source_spec = self.left_workspace.page_by_id(spec.source_page_id)
+        if source_spec is None:
+            source_spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
+        scope_id = getattr(source_spec, "data_scope_id", self.FULL_SCOPE_ID)
+        spec.data_scope_id = str(scope_id or self.FULL_SCOPE_ID)
+        descriptor = self._scope_for_spec(spec)
+        if descriptor is not None:
+            spec.params["data_scope_label"] = descriptor.label
+            suffix = self._scope_title_suffix(descriptor)
+            if suffix and not str(spec.title).endswith(suffix):
+                spec.title = f"{spec.title}{suffix}"
+
+    def _refresh_scope_hint(self, spec):
+        workspace = getattr(self, "left_workspace", None)
+        if workspace is None or spec is None:
+            return
+        button = workspace.page_buttons.get(spec.page_id)
+        if button is not None and hasattr(button, "refresh_hint"):
+            button.refresh_hint()
+
+    def _referenced_scope_descriptors(self, extra=None):
+        scope_ids = {self.FULL_SCOPE_ID}
+        workspace = getattr(self, "left_workspace", None)
+        if workspace is not None:
+            scope_ids.update(
+                str(getattr(spec, "data_scope_id", self.FULL_SCOPE_ID))
+                for spec in getattr(workspace, "page_specs", {}).values()
+            )
+        descriptors = [self._scope_for_id(scope_id) for scope_id in scope_ids]
+        if extra is not None:
+            descriptors.append(extra)
+        deduped = {}
+        for descriptor in descriptors:
+            if descriptor is not None:
+                deduped[descriptor.scope_id] = descriptor
+        return list(deduped.values())
 
     def _persist_active_page_state(self):
         self._persist_page_ui_state(self.active_page_spec)
@@ -1023,6 +1420,29 @@ class My3DAnalyzer(QWidget):
             "data_process": self.page_data.export_state(),
         }
 
+    def _capture_global_denoise_control_state(self):
+        detail_state = self.page_control_blank.export_state()
+        return {
+            "methods": list(self.page_render.get_denoise_settings()),
+            "sg": self._copy_state(detail_state.get("sg") or {}),
+            "wavelet": self._copy_state(detail_state.get("wavelet") or {}),
+        }
+
+    def _render_state_with_global_denoise(self, render_state, denoise_state):
+        merged = self._copy_state(render_state) or {}
+        methods = list((denoise_state or {}).get("methods") or ())
+        methods.extend(["None"] * (3 - len(methods)))
+        for index, key in enumerate(("combo_n1", "combo_n2", "combo_n3")):
+            merged[key] = methods[index]
+        return merged
+
+    def _detail_state_with_global_denoise(self, detail_state, denoise_state):
+        merged = self._copy_state(detail_state) or {}
+        denoise_state = denoise_state or {}
+        merged["sg"] = self._copy_state(denoise_state.get("sg") or {})
+        merged["wavelet"] = self._copy_state(denoise_state.get("wavelet") or {})
+        return merged
+
     def _store_control_state(self, spec, control_state):
         if spec is None:
             return
@@ -1047,6 +1467,7 @@ class My3DAnalyzer(QWidget):
     def _seed_control_state_for_spec(self, spec):
         if spec is None:
             return
+        self._assign_scope_to_spec(spec)
         control_state = self._capture_control_state()
         control_state["axis_source_mode"] = self._page_axis_source_mode(spec)
         self._store_control_state(spec, control_state)
@@ -1108,6 +1529,7 @@ class My3DAnalyzer(QWidget):
         if owner_spec is None:
             return
 
+        global_denoise_state = self._capture_global_denoise_control_state()
         control_state = self._copy_state(owner_spec.params.get("control_state"))
         if control_state is None:
             control_state = self._capture_control_state()
@@ -1125,8 +1547,20 @@ class My3DAnalyzer(QWidget):
             self.axis_source_mode = control_state.get("axis_source_mode", self._page_axis_source_mode(owner_spec))
             self.page_image.restore_state(control_state.get("image"), block_signals=True)
             self.rotation_angle = self.page_image.get_rotation_angle()
-            self.page_render.restore_state(control_state.get("render"), block_signals=True)
-            self.page_control_blank.restore_state(control_state.get("denoise_detail"), block_signals=True)
+            self.page_render.restore_state(
+                self._render_state_with_global_denoise(
+                    control_state.get("render"),
+                    global_denoise_state,
+                ),
+                block_signals=True,
+            )
+            self.page_control_blank.restore_state(
+                self._detail_state_with_global_denoise(
+                    control_state.get("denoise_detail"),
+                    global_denoise_state,
+                ),
+                block_signals=True,
+            )
             self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
             self._configure_second_derivative_axis_controls(owner_spec)
 
@@ -1311,22 +1745,232 @@ class My3DAnalyzer(QWidget):
     def _normalize_denoise_methods(methods):
         return [method for method in methods if method not in (None, "None")]
 
-    def _get_spec_denoise_methods(self, spec):
-        if spec is None:
-            return []
-        return self._normalize_denoise_methods(spec.params.get("denoise_methods", []))
+    def _get_spec_denoise_methods(self, _spec=None):
+        # Denoising is a data-source transform, not page state.  All live
+        # derived pages therefore resolve against the same applied pipeline.
+        return self._normalize_denoise_methods(self.global_denoise_methods)
 
     @staticmethod
     def _denoise_signature(methods):
         return repr(methods)
 
+    def _invalidate_denoise_dependents(self):
+        self._rotation_cache.clear()
+        self._computed_volume_cache.clear()
+        self._second_derivative_volume_cache = None
+        self._clear_axis_prefix_cache()
+
+    def _invalidate_scope_render_state(self):
+        """Drop geometry/texture state without releasing immutable source data."""
+        self._invalidate_denoise_dependents()
+        self.current_render_context = None
+        try:
+            self._restore_volume_opacity_if_dimmed()
+        except Exception:
+            pass
+        try:
+            self._clear_interactive_box()
+        except Exception:
+            pass
+        session = self.__dict__.get("volume_session")
+        if session is not None:
+            session.clear(render=False)
+
+    def _validate_denoise_for_descriptor(self, methods, descriptor):
+        if descriptor is None:
+            return
+        from denoise_engines import DenoiseEngines
+
+        for method_spec in self._normalize_denoise_methods(methods):
+            method_name, params = DenoiseEngines._parse_method_spec(method_spec)
+            if not DenoiseEngines._is_savgol_method(method_name):
+                continue
+            try:
+                DenoiseEngines._validated_savgol_params(
+                    descriptor.compact_shape,
+                    params.get(
+                        "window_length",
+                        DenoiseEngines.DEFAULT_SG_PARAMS["window_length"],
+                    ),
+                    params.get("polyorder", DenoiseEngines.DEFAULT_SG_PARAMS["polyorder"]),
+                    params.get(
+                        "smoothing_axis",
+                        DenoiseEngines.DEFAULT_SG_PARAMS["smoothing_axis"],
+                    ),
+                )
+            except ValueError as exc:
+                raise ValueError(f"{descriptor.label}: {exc}") from exc
+
+    def _validate_denoise_for_scopes(self, methods, extra_descriptor=None):
+        for descriptor in self._referenced_scope_descriptors(extra=extra_descriptor):
+            self._validate_denoise_for_descriptor(methods, descriptor)
+
+    def _store_scope_denoise_result(self, scope_id, raw_data, signature):
+        descriptor = self._scope_for_id(scope_id)
+        if descriptor is None:
+            raise ValueError(f"Unknown data scope: {scope_id}")
+        shared = np.ascontiguousarray(raw_data, dtype=np.float32)
+        if tuple(shared.shape) != descriptor.compact_shape:
+            raise ValueError(
+                f"Denoise result shape {shared.shape} does not match "
+                f"{descriptor.label} shape {descriptor.compact_shape}."
+            )
+        shared.setflags(write=False)
+        self._scope_data_cache.put(self._scope_cache_key(scope_id, signature), shared)
+        if scope_id != self.FULL_SCOPE_ID and self.shared_denoised_raw_data is not None:
+            full_signature = self._scope_committed_signatures.get(
+                self.FULL_SCOPE_ID,
+                signature,
+            )
+            full_cached = self._scope_data_cache.get(
+                self._scope_cache_key(self.FULL_SCOPE_ID, full_signature)
+            )
+            if full_cached is None:
+                self.shared_denoised_raw_data = None
+        self._scope_committed_signatures[scope_id] = str(signature)
+        if descriptor.is_full:
+            self.shared_denoised_raw_data = shared
+        return shared
+
+    def _request_scope_denoise_if_needed(self, spec):
+        methods = self._normalize_denoise_methods(self.global_denoise_methods)
+        descriptor = self._scope_for_spec(spec)
+        if not methods or descriptor is None:
+            return False
+
+        signature = self.shared_denoise_signature
+        cache_key = self._scope_cache_key(descriptor.scope_id, signature)
+        if self._scope_data_cache.get(cache_key) is not None:
+            return False
+        if descriptor.is_full and self.shared_denoised_raw_data is not None:
+            return False
+
+        pending_key = descriptor.scope_id, signature
+        if pending_key in self._pending_scope_denoise_keys:
+            return True
+        self._pending_scope_denoise_keys.add(pending_key)
+
+        page_id = f"{self.SCOPE_DENOISE_PAGE_PREFIX}{descriptor.scope_id}"
+        request = self.refresh_coordinator.make_request(
+            page_id,
+            RefreshCause.DENOISE,
+            RenderQuality.EXACT,
+            {
+                "denoise_signature": signature,
+                "source_id": id(self.original_raw_data),
+                "scope_id": descriptor.scope_id,
+                "lazy_scope": True,
+            },
+        )
+        job = ComputeJob(
+            "denoise_pipeline",
+            {
+                "data": descriptor.extract(self.original_raw_data),
+                "methods": self._copy_state(methods),
+            },
+        )
+
+        def work():
+            result = self.backend_manager.execute(job)
+            result.metadata["scope_id"] = descriptor.scope_id
+            result.metadata["denoise_signature"] = signature
+            return result
+
+        self.refresh_coordinator.submit_compute(request, work)
+        return True
+
+    def _submit_roi_scope_commit(self, descriptor):
+        methods = self._normalize_denoise_methods(self.global_denoise_methods)
+        if not methods:
+            return False
+        signature = self.shared_denoise_signature
+        previous_scope_id = self.__dict__.get("_pending_roi_scope_id")
+        if previous_scope_id and previous_scope_id != descriptor.scope_id:
+            self.refresh_coordinator.cancel_page(
+                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{previous_scope_id}"
+            )
+            self.data_scopes.pop(previous_scope_id, None)
+            self._scope_committed_signatures.pop(previous_scope_id, None)
+        self._pending_roi_scope_id = descriptor.scope_id
+        pending_key = descriptor.scope_id, signature
+        self._pending_scope_denoise_keys.add(pending_key)
+        request = self.refresh_coordinator.make_request(
+            f"{self.SCOPE_DENOISE_PAGE_PREFIX}{descriptor.scope_id}",
+            RefreshCause.DATA_SCOPE,
+            RenderQuality.EXACT,
+            {
+                "denoise_signature": signature,
+                "source_id": id(self.original_raw_data),
+                "scope_id": descriptor.scope_id,
+                "roi_commit": True,
+            },
+        )
+        job = ComputeJob(
+            "denoise_pipeline",
+            {
+                "data": descriptor.extract(self.original_raw_data),
+                "methods": self._copy_state(methods),
+            },
+        )
+
+        def work():
+            result = self.backend_manager.execute(job)
+            result.metadata["scope_id"] = descriptor.scope_id
+            result.metadata["denoise_signature"] = signature
+            return result
+
+        self._render_exact_ready = False
+        self._update_export_button_states()
+        self.refresh_coordinator.submit_compute(request, work)
+        return True
+
+    def _commit_shared_denoise(self, methods, raw_data, signature=None, scope_id=None):
+        normalized_methods = self._normalize_denoise_methods(methods)
+        committed_signature = (
+            str(signature)
+            if signature is not None
+            else self._denoise_signature(normalized_methods)
+        )
+        target_scope_id = str(scope_id or self.FULL_SCOPE_ID)
+
+        self.global_denoise_methods = self._copy_state(normalized_methods)
+        self.shared_denoise_signature = committed_signature
+        if normalized_methods:
+            self._store_scope_denoise_result(
+                target_scope_id,
+                raw_data,
+                committed_signature,
+            )
+        else:
+            self._scope_data_cache.clear()
+            self.shared_denoised_raw_data = None
+            for descriptor in self.data_scopes.values():
+                self._scope_committed_signatures[descriptor.scope_id] = committed_signature
+
+        self.shared_denoise_version += 1
+        self._pending_denoise_methods = None
+        self._pending_denoise_signature = None
+        self._pending_denoise_scope_id = None
+        self._invalidate_denoise_dependents()
+
+        # Remove legacy page-local copies so newly persisted page state cannot
+        # accidentally resurrect the old per-page behavior.
+        workspace = getattr(self, "left_workspace", None)
+        if workspace is not None:
+            for page_spec in workspace.page_specs.values():
+                page_spec.params.pop("denoise_methods", None)
+
     @staticmethod
     def _get_data_for_t_from_raw(raw_data, t_idx):
+        if isinstance(raw_data, ScopedDataVolume):
+            return raw_data.frame(t_idx)
         t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
         return raw_data[:, :, :, t_idx]
 
     @staticmethod
     def _get_time_integrated_data_from_raw(raw_data, t_low, t_up):
+        if isinstance(raw_data, ScopedDataVolume):
+            return raw_data.time_integral(t_low, t_up)
         t_low = max(0, int(t_low))
         t_up = min(raw_data.shape[3] - 1, int(t_up))
         if t_low > t_up:
@@ -1336,6 +1980,27 @@ class My3DAnalyzer(QWidget):
     @staticmethod
     def _get_axis_integrated_data_from_raw(data_3d, axis_index, low_idx, up_idx):
         axis_index = int(axis_index)
+        descriptor = scoped_descriptor_from_array(data_3d)
+        if descriptor is not None and not descriptor.is_full:
+            local_range = descriptor.local_range(axis_index, low_idx, up_idx)
+            remaining_axes = [axis for axis in range(3) if axis != axis_index]
+            full_result_shape = tuple(descriptor.full_shape[axis] for axis in remaining_axes)
+            result = np.zeros(full_result_shape, dtype=np.float32)
+            if local_range is None:
+                return result
+
+            low, up = local_range
+            compact_slices = [slice(None)] * 3
+            compact_slices[axis_index] = slice(low, up + 1)
+            compact_result = np.sum(
+                np.asarray(data_3d)[tuple(compact_slices)],
+                axis=axis_index,
+                dtype=np.float32,
+            )
+            output_slices = tuple(descriptor.spatial_slices[axis] for axis in remaining_axes)
+            result[output_slices] = compact_result
+            return result
+
         low = max(0, int(low_idx))
         up = min(data_3d.shape[axis_index] - 1, int(up_idx))
         if low > up:
@@ -1346,6 +2011,49 @@ class My3DAnalyzer(QWidget):
         if axis_index == 1:
             return np.sum(data_3d[:, low:up + 1, :], axis=1)
         return np.sum(data_3d[:, :, low:up + 1], axis=2)
+
+    @staticmethod
+    def _embed_scoped_axis_result(compact_result, descriptor, axis_index):
+        remaining_axes = [axis for axis in range(3) if axis != int(axis_index)]
+        full_shape = tuple(descriptor.full_shape[axis] for axis in remaining_axes)
+        output = np.zeros(full_shape, dtype=np.asarray(compact_result).dtype)
+        output_slices = tuple(descriptor.spatial_slices[axis] for axis in remaining_axes)
+        output[output_slices] = compact_result
+        return output
+
+    @staticmethod
+    def _scoped_axis_sum_4d(raw_data, axis_index, low, up):
+        descriptor = raw_data.descriptor
+        local_range = descriptor.local_range(axis_index, low, up)
+        remaining_axes = [axis for axis in range(3) if axis != int(axis_index)]
+        output_shape = tuple(descriptor.compact_spatial_shape[axis] for axis in remaining_axes)
+        output_shape += (descriptor.full_shape[3],)
+        if local_range is None:
+            return np.zeros(output_shape, dtype=np.float32)
+        slices = [slice(None)] * 4
+        slices[int(axis_index)] = slice(local_range[0], local_range[1] + 1)
+        return np.sum(
+            raw_data.values[tuple(slices)],
+            axis=int(axis_index),
+            dtype=np.float32,
+        )
+
+    @staticmethod
+    def _raw_data_identity(raw_data):
+        if isinstance(raw_data, ScopedDataVolume):
+            scope_id = raw_data.scope_id
+            source = np.asarray(raw_data.values)
+        else:
+            scope_id = My3DAnalyzer.FULL_SCOPE_ID
+            source = np.asarray(raw_data)
+        pointer = int(source.__array_interface__["data"][0]) if source.size else 0
+        return (
+            scope_id,
+            pointer,
+            tuple(int(size) for size in source.shape),
+            tuple(int(stride) for stride in source.strides),
+            source.dtype.str,
+        )
 
     def _clear_axis_prefix_cache(self, page_id=None):
         cache = self._axis_prefix_cache
@@ -1364,20 +2072,24 @@ class My3DAnalyzer(QWidget):
 
         return (
             spec.page_id,
+            int(getattr(self, "shared_denoise_version", 0)),
             self._denoise_signature(self._get_spec_denoise_methods(spec)),
             time_key,
             round(float(self.rotation_angle), 2),
             int(params["axis_index"]),
             tuple(int(size) for size in raw_data.shape),
+            self._raw_data_identity(raw_data),
         )
 
     def _get_cached_axis_range_sum(self, spec, raw_data, params):
         axis_index = int(params["axis_index"])
         cache_key = self._axis_prefix_cache_key(spec, params, raw_data)
         cache = self._axis_prefix_cache
+        source_context = self._get_3d_source_context_for_axis(spec, raw_data)
+        source_data = source_context["data"]
+        descriptor = scoped_descriptor_from_array(source_data)
         if cache is None or cache.get("key") != cache_key:
-            source_context = self._get_3d_source_context_for_axis(spec, raw_data)
-            prefix = AnalyzerCore.build_axis_prefix_sum(source_context["data"], axis_index)
+            prefix = AnalyzerCore.build_axis_prefix_sum(source_data, axis_index)
             cache = {
                 "key": cache_key,
                 "page_id": spec.page_id,
@@ -1386,12 +2098,29 @@ class My3DAnalyzer(QWidget):
             }
             self._axis_prefix_cache = cache
 
-        return AnalyzerCore.range_sum_from_axis_prefix(
-            cache["prefix"],
-            axis_index,
-            int(params["low"]),
-            int(params["up"]),
-        )
+        low = int(params["low"])
+        up = int(params["up"])
+        if descriptor is not None and not descriptor.is_full:
+            local_range = descriptor.local_range(axis_index, low, up)
+            if local_range is None:
+                remaining_axes = [axis for axis in range(3) if axis != axis_index]
+                return np.zeros(
+                    tuple(descriptor.full_shape[axis] for axis in remaining_axes),
+                    dtype=np.float32,
+                )
+            compact_result = AnalyzerCore.range_sum_from_axis_prefix(
+                cache["prefix"],
+                axis_index,
+                local_range[0],
+                local_range[1],
+            )
+            return self._embed_scoped_axis_result(
+                compact_result,
+                descriptor,
+                axis_index,
+            )
+
+        return AnalyzerCore.range_sum_from_axis_prefix(cache["prefix"], axis_index, low, up)
 
     def _rotation_cache_get(self, key):
         cached = self._rotation_cache.pop(key, None)
@@ -1405,6 +2134,29 @@ class My3DAnalyzer(QWidget):
             oldest_key = next(iter(self._rotation_cache))
             self._rotation_cache.pop(oldest_key, None)
 
+    @staticmethod
+    def _restore_scoped_spatial(raw_data, value, angle):
+        if (
+            isinstance(raw_data, ScopedDataVolume)
+            and not raw_data.descriptor.is_full
+            and abs(float(angle)) < 1e-6
+        ):
+            descriptor = raw_data.descriptor
+            source = np.asarray(value, dtype=np.float32)
+            expected_shape = tuple(descriptor.compact_spatial_shape)
+            full_shape = tuple(descriptor.full_shape[:3])
+            if tuple(source.shape) == full_shape:
+                # A stale full-domain cache entry must be reduced to the
+                # descriptor's absolute ROI before it can carry ROI geometry.
+                source = source[descriptor.spatial_slices]
+            if tuple(source.shape) != expected_shape:
+                raise ValueError(
+                    f"{descriptor.label} 的三维结果尺寸为 {source.shape}，"
+                    f"但紧凑 ROI 应为 {expected_shape}。"
+                )
+            return ScopedSpatialArray(source, descriptor)
+        return value
+
     def _get_rotated_frame(self, raw_data, t_idx):
         """Extract a time frame and apply Z-axis (Kx-Ky plane) rotation.
 
@@ -1413,22 +2165,26 @@ class My3DAnalyzer(QWidget):
         """
         angle = self.rotation_angle
         t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
-        key = ("frame", id(raw_data), int(t_idx), round(float(angle), 2))
-        override = self.__dict__.get("_render_volume_override")
-        if override is not None and override[0] == key:
-            return override[1]
+        key = (
+            "frame",
+            self._raw_data_identity(raw_data),
+            int(t_idx),
+            round(float(angle), 2),
+        )
         computed_cache = self.__dict__.get("_computed_volume_cache")
         cached = computed_cache.get(key) if computed_cache is not None else None
         if cached is not None:
-            return cached
+            return self._restore_scoped_spatial(raw_data, cached, angle)
         if angle is None or abs(float(angle)) < 1e-6:
             return self._get_data_for_t_from_raw(raw_data, t_idx)
 
         cached = self._rotation_cache_get(key)
         if cached is not None:
-            return cached
+            return self._restore_scoped_spatial(raw_data, cached, angle)
 
         data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
+        if isinstance(raw_data, ScopedDataVolume):
+            data_3d = raw_data.materialize_3d(data_3d)
         rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
         self._rotation_cache_store(key, rotated)
         return rotated
@@ -1445,22 +2201,30 @@ class My3DAnalyzer(QWidget):
         if t_low > t_up:
             t_low, t_up = t_up, t_low
 
-        key = ("integral", id(raw_data), int(t_low), int(t_up), round(float(angle), 2))
-        override = self.__dict__.get("_render_volume_override")
-        if override is not None and override[0] == key:
-            return override[1]
+        key = (
+            "integral",
+            self._raw_data_identity(raw_data),
+            int(t_low),
+            int(t_up),
+            round(float(angle), 2),
+        )
         computed_cache = self.__dict__.get("_computed_volume_cache")
         cached = computed_cache.get(key) if computed_cache is not None else None
         if cached is not None:
-            return cached
+            return self._restore_scoped_spatial(raw_data, cached, angle)
         cached = self._rotation_cache_get(key)
         if cached is not None:
-            return cached
+            return self._restore_scoped_spatial(raw_data, cached, angle)
 
         data_3d = self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
         if angle is None or abs(float(angle)) < 1e-6:
             rotated = np.asfortranarray(data_3d, dtype=np.float32)
+            descriptor = scoped_descriptor_from_array(data_3d)
+            if descriptor is not None:
+                rotated = ScopedSpatialArray(rotated, descriptor)
         else:
+            if isinstance(raw_data, ScopedDataVolume):
+                data_3d = raw_data.materialize_3d(data_3d)
             rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
         self._rotation_cache_store(key, rotated)
         return rotated
@@ -1477,26 +2241,19 @@ class My3DAnalyzer(QWidget):
         if self.original_raw_data is None or self.original_coords is None:
             return None, None
 
-        methods = self._get_spec_denoise_methods(spec)
-        if not methods:
-            raw_data = self.original_raw_data
+        descriptor = self._scope_for_spec(spec)
+        if descriptor is None:
+            return None, None
+        values = self._scope_values(descriptor)
+        if values is None:
+            return None, None
+        if descriptor.is_full:
+            raw_data = values
         else:
-            signature = self._denoise_signature(methods)
-            cache_entry = self.page_denoise_cache.get(spec.page_id)
-            if cache_entry is not None and cache_entry["signature"] == signature:
-                raw_data = cache_entry["raw_data"]
-            else:
-                raw_data = np.ascontiguousarray(
-                    self._apply_denoise_methods_to_raw(self.original_raw_data, methods),
-                    dtype=np.float32,
-                )
-                self.page_denoise_cache[spec.page_id] = {
-                    "signature": signature,
-                    "raw_data": raw_data,
-                }
+            raw_data = ScopedDataVolume(descriptor, values)
 
         coords = self._clone_coords(self.original_coords)
-        return np.asarray(raw_data, dtype=np.float32), coords
+        return raw_data, coords
 
     def _refresh_core_display_state(self):
         if self.base_raw_data is None or self.base_coords is None:
@@ -1508,10 +2265,10 @@ class My3DAnalyzer(QWidget):
         self.core.coords = display_coords
 
     def _get_full_logical_bounds(self):
-        if self.core.raw_data is None:
+        shape = self._full_domain_spatial_shape()
+        if shape is None:
             return None
 
-        shape = self.core.raw_data.shape[:3]
         return [
             0.0,
             max(shape[0] - 1, 0),
@@ -1540,24 +2297,27 @@ class My3DAnalyzer(QWidget):
         self.last_synced_slice_texts = self.page_image.get_slice_values()
 
     def _sync_slice_edits_from_render_bounds(self, render_bounds):
-        if self.core.raw_data is None:
+        shape = self._full_domain_spatial_shape()
+        if shape is None:
             return
 
-        shape = self.core.raw_data.shape[:3]
         logical_bounds = self.core.render_to_logical_bounds(render_bounds, shape)
-        logical_bounds = self._map_visual_flip_logical_bounds(logical_bounds, shape)
         self._sync_slice_edits_from_logical_bounds(logical_bounds)
 
     def _get_render_bounds_for_box(self, logical_bounds=None):
-        if self.core.raw_data is None:
+        shape = self._full_domain_spatial_shape()
+        if shape is None:
             return None
 
-        bounds = logical_bounds if logical_bounds is not None else self.clip_ranges
+        if logical_bounds is not None:
+            bounds = logical_bounds
+        elif self.precise_logical_bounds is not None:
+            bounds = self.precise_logical_bounds
+        else:
+            bounds = self.clip_ranges
         if bounds is None:
             bounds = self._get_full_logical_bounds()
 
-        shape = self.core.raw_data.shape[:3]
-        bounds = self._map_visual_flip_logical_bounds(bounds, shape)
         return self.core.logical_to_render_bounds(bounds, shape)
 
     def _can_show_interactive_box(self):
@@ -1661,9 +2421,10 @@ class My3DAnalyzer(QWidget):
         return mirrored
 
     def _map_visual_flip_logical_bounds(self, bounds, shape):
-        if not self.page_image.switch_flip.isChecked():
-            return bounds
-        return self._mirror_logical_bounds_for_display(bounds, shape)
+        # The 3D E reversal is camera-driven.  Camera.Elevation(180) already
+        # reverses the displayed vertical direction, so mirroring ROI/box
+        # geometry here would apply the same transform twice.
+        return bounds
 
     def _render_context_for_visual_flip(self, context):
         if not self.page_image.switch_flip.isChecked() or context is None:
@@ -1706,19 +2467,22 @@ class My3DAnalyzer(QWidget):
             return context
 
         render_context = dict(context)
-        data = np.asarray(render_context["data"])
-        render_context["data"] = np.flip(data, axis=2)
+        data = render_context["data"]
+        # In 3D, E flip changes the coordinate interpretation and camera
+        # viewpoint.  Keep voxel ordering untouched so this is not confused
+        # with a data reflection or a rigid actor rotation.
+        render_context["data"] = data
 
         coords = self._clone_coords(render_context.get("coords", self.core.coords))
         if coords.get("E") is not None:
             coords["E"] = np.flip(coords["E"])
         render_context["coords"] = coords
 
-        if render_context.get("clip_ranges") is not None:
-            render_context["clip_ranges"] = self._mirror_logical_bounds_for_display(
-                render_context["clip_ranges"],
-                data.shape,
-            )
+        # Keep compact ROI geometry in the original absolute voxel domain.
+        # The camera elevation supplies the requested visual 180° drag.  If
+        # data_bounds or clip_ranges are mirrored as well, a feature's world
+        # position becomes dependent on the current E ROI limits and the whole
+        # image appears to follow the E-axis box handle.
         return render_context
 
     def _current_delay_text(self, t_index):
@@ -2011,7 +2775,8 @@ class My3DAnalyzer(QWidget):
         menu.exec_(self.plotter.mapToGlobal(pos))
 
     def _get_clip_slices(self, logical_bounds=None):
-        if self.core.raw_data is None:
+        shape = self._full_domain_spatial_shape()
+        if shape is None:
             return None
 
         bounds = logical_bounds if logical_bounds is not None else self.clip_ranges
@@ -2020,7 +2785,6 @@ class My3DAnalyzer(QWidget):
 
         slices = []
         index_bounds = []
-        shape = self.core.raw_data.shape[:3]
 
         for axis_idx in range(3):
             axis_max = max(shape[axis_idx] - 1, 0)
@@ -2083,6 +2847,19 @@ class My3DAnalyzer(QWidget):
             np.savez(path, **serializable)
         else:
             savemat(path, serializable)
+
+    def _scope_export_metadata(self, descriptor, coords):
+        if descriptor is None or descriptor.is_full:
+            return {
+                "data_scope_id": np.asarray([self.FULL_SCOPE_ID]),
+                "data_scope_label": np.asarray(["完整数据"]),
+            }
+        return {
+            "data_scope_id": np.asarray([descriptor.scope_id]),
+            "data_scope_label": np.asarray([descriptor.label]),
+            "roi_index_bounds": np.asarray(descriptor.spatial_bounds, dtype=np.int32),
+            "roi_physical_bounds": descriptor.physical_bounds(coords),
+        }
 
     def _is_time_integral_axis_page(self, spec):
         return (
@@ -2322,7 +3099,7 @@ class My3DAnalyzer(QWidget):
                 f"(Delay {delay_axis[t_low]:.4g}~{delay_axis[t_up]:.4g})"
             )
 
-        return {
+        context = {
             "view": "2d",
             "data": np.asarray(data_2d, dtype=np.float64),
             "slice_info": slice_info,
@@ -2337,6 +3114,30 @@ class My3DAnalyzer(QWidget):
             "crop_rect": crop_rect,
             "integral_params": params,
         }
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        if (
+            descriptor is not None
+            and not descriptor.is_full
+            and abs(float(self.rotation_angle)) < 1e-6
+        ):
+            axis_by_key = {"X": 0, "Y": 1, "E": 2}
+            x_axis = axis_by_key[axis_info["x_key"]]
+            y_axis = axis_by_key[axis_info["y_key"]]
+            compact_bounds = {
+                "x_low": descriptor.axis_bounds(x_axis)[0],
+                "x_up": descriptor.axis_bounds(x_axis)[1],
+                "y_low": descriptor.axis_bounds(y_axis)[0],
+                "y_up": descriptor.axis_bounds(y_axis)[1],
+            }
+            context["compact_data"] = np.asarray(
+                data_2d[
+                    descriptor.spatial_slices[x_axis],
+                    descriptor.spatial_slices[y_axis],
+                ],
+                dtype=np.float64,
+            )
+            context["compact_plot_logical_bounds"] = compact_bounds
+        return context
 
     def _apply_axis_crop_to_context(self, context, crop_rect):
         if context is None or crop_rect is None:
@@ -2372,6 +3173,25 @@ class My3DAnalyzer(QWidget):
         updated["slice_info"] = slice_info
         updated["plot_logical_bounds"] = cropped_rect
         updated["crop_rect"] = cropped_rect
+        compact_bounds = context.get("compact_plot_logical_bounds")
+        compact_data = context.get("compact_data")
+        if compact_bounds is not None and compact_data is not None:
+            compact_crop = self._intersect_plot_rects(compact_bounds, cropped_rect)
+            if compact_crop is not None:
+                compact_x_offset = int(compact_crop["x_low"]) - int(compact_bounds["x_low"])
+                compact_y_offset = int(compact_crop["y_low"]) - int(compact_bounds["y_low"])
+                updated["compact_data"] = np.asarray(
+                    compact_data[
+                        compact_x_offset : compact_x_offset
+                        + int(compact_crop["x_up"] - compact_crop["x_low"])
+                        + 1,
+                        compact_y_offset : compact_y_offset
+                        + int(compact_crop["y_up"] - compact_crop["y_low"])
+                        + 1,
+                    ],
+                    dtype=np.float64,
+                )
+                updated["compact_plot_logical_bounds"] = compact_crop
         return updated
 
     def _axis_crop_title(self, params, crop_rect):
@@ -2424,8 +3244,16 @@ class My3DAnalyzer(QWidget):
                 return None
 
             axis_info = self._axis_plot_info(axis_index)
+            sample = np.asarray(context["data"], dtype=np.float32)
+            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+            if descriptor is not None and not descriptor.is_full:
+                remaining_axes = [axis for axis in range(3) if axis != axis_index]
+                sample = sample[
+                    descriptor.spatial_slices[remaining_axes[0]],
+                    descriptor.spatial_slices[remaining_axes[1]],
+                ]
             export_data = {
-                "sample": np.asarray(context["data"], dtype=np.float32),
+                "sample": sample,
                 "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
                 "integrated_range": np.asarray(
                     [
@@ -2441,14 +3269,20 @@ class My3DAnalyzer(QWidget):
                 "source_mode": np.asarray(["time_integral"]),
             }
             if axis_index == 0:
-                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
-                export_data["E"] = np.asarray(coords["E"], dtype=np.float32)
+                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
+                export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
+                export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
             elif axis_index == 1:
-                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
-                export_data["E"] = np.asarray(coords["E"], dtype=np.float32)
+                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
+                export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
+                export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
             else:
-                export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
-                export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
+                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+                export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
+                export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
             export_data.update(self._time_integral_export_metadata(params, coords))
 
             low_text = self._format_filename_number(self.core.logical_to_physical(axis_key, low))
@@ -2459,7 +3293,23 @@ class My3DAnalyzer(QWidget):
             )
             return {"export_data": export_data, "default_name": default_name}
 
-        if axis_index == 0:
+        if isinstance(raw_data, ScopedDataVolume):
+            descriptor = raw_data.descriptor
+            sample = self._scoped_axis_sum_4d(raw_data, axis_index, low, up)
+            remaining_axes = [axis for axis in range(3) if axis != axis_index]
+            coordinate_keys = ("X", "Y", "E")
+            export_data = {
+                "sample": np.asarray(sample, dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
+            }
+            export_names = {"X": "kx", "Y": "ky", "E": "E"}
+            for remaining_axis in remaining_axes:
+                key = coordinate_keys[remaining_axis]
+                export_data[export_names[key]] = np.asarray(
+                    coords[key][descriptor.spatial_slices[remaining_axis]],
+                    dtype=np.float32,
+                )
+        elif axis_index == 0:
             sample = np.sum(raw_data[low:up + 1, :, :, :], axis=0)
             export_data = {
                 "sample": np.asarray(sample, dtype=np.float32),
@@ -2510,7 +3360,26 @@ class My3DAnalyzer(QWidget):
             return None
 
         plot_axes = context["plot_axes"]
-        plot_bounds = context["plot_logical_bounds"]
+        plot_bounds = dict(context["plot_logical_bounds"])
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        sample = np.asarray(context["data"], dtype=np.float32)
+        if descriptor is not None and not descriptor.is_full:
+            axis_by_key = {"X": 0, "Y": 1, "E": 2}
+            scope_rect = {
+                "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
+                "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
+                "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
+                "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
+            }
+            compact_bounds = self._intersect_plot_rects(plot_bounds, scope_rect)
+            if compact_bounds is not None:
+                x_offset = int(compact_bounds["x_low"]) - int(plot_bounds["x_low"])
+                y_offset = int(compact_bounds["y_low"]) - int(plot_bounds["y_low"])
+                sample = sample[
+                    x_offset : x_offset + int(compact_bounds["x_up"] - compact_bounds["x_low"]) + 1,
+                    y_offset : y_offset + int(compact_bounds["y_up"] - compact_bounds["y_low"]) + 1,
+                ]
+                plot_bounds = compact_bounds
         x_low = int(plot_bounds["x_low"])
         x_up = int(plot_bounds["x_up"])
         y_low = int(plot_bounds["y_low"])
@@ -2521,7 +3390,7 @@ class My3DAnalyzer(QWidget):
         y_values = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
 
         export_data = {
-            "sample": np.asarray(context["data"], dtype=np.float32),
+            "sample": sample,
             "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
             "integrated_range": np.asarray(
                 [
@@ -2620,6 +3489,22 @@ class My3DAnalyzer(QWidget):
         return self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
 
     def _extract_slice_data(self, data_3d, axis_idx, index):
+        descriptor = scoped_descriptor_from_array(data_3d)
+        if descriptor is not None and not descriptor.is_full:
+            axis_idx = int(axis_idx)
+            remaining_axes = [axis for axis in range(3) if axis != axis_idx]
+            output = np.zeros(
+                tuple(descriptor.full_shape[axis] for axis in remaining_axes),
+                dtype=np.float32,
+            )
+            local_index = descriptor.local_index(axis_idx, int(index))
+            if local_index is None:
+                return output
+            compact = np.take(np.asarray(data_3d), local_index, axis=axis_idx)
+            output_slices = tuple(descriptor.spatial_slices[axis] for axis in remaining_axes)
+            output[output_slices] = compact
+            return output
+
         safe_index = int(np.clip(index, 0, data_3d.shape[axis_idx] - 1))
         if axis_idx == 0:
             return data_3d[safe_index, :, :]
@@ -2638,7 +3523,26 @@ class My3DAnalyzer(QWidget):
             data_2d = self._extract_slice_data(data_3d, self.home_slice_info["axis"], self.home_slice_info["index"])
             return {"view": "2d", "data": data_2d, "slice_info": self.home_slice_info, "coords": coords}
 
-        return {"view": "3d", "data": data_3d, "clip_ranges": self.clip_ranges, "coords": coords}
+        descriptor = scoped_descriptor_from_array(data_3d)
+        context = {
+            "view": "3d",
+            "data": data_3d,
+            "clip_ranges": self.clip_ranges,
+            "coords": coords,
+        }
+        if descriptor is not None and not descriptor.is_full:
+            context.update(
+                {
+                    "data_bounds": descriptor.spatial_bounds,
+                    "full_shape": descriptor.full_shape[:3],
+                    "include_zero": True,
+                }
+            )
+            # The compact grid already occupies exactly the committed ROI.
+            # Reapplying the same clipping planes is redundant and can expose
+            # mapper-dependent boundary/resampling artefacts.
+            context["clip_ranges"] = None
+        return context
 
     def _is_current_page(self, spec):
         current_spec = self.left_workspace.current_spec()
@@ -2683,13 +3587,21 @@ class My3DAnalyzer(QWidget):
             t_low = params.get("source_t_low")
             t_up = params.get("source_t_up")
             if t_low is not None and t_up is not None:
-                return {
+                context = {
                     "view": "3d",
                     "data": self._get_rotated_time_integral(raw_data, int(t_low), int(t_up)),
                 }
+                descriptor = scoped_descriptor_from_array(context["data"])
+                if descriptor is not None:
+                    context["data_scope"] = descriptor
+                return context
 
         t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-        return {"view": "3d", "data": self._get_rotated_frame(raw_data, t_index)}
+        context = {"view": "3d", "data": self._get_rotated_frame(raw_data, t_index)}
+        descriptor = scoped_descriptor_from_array(context["data"])
+        if descriptor is not None:
+            context["data_scope"] = descriptor
+        return context
 
     def _get_time_integral_context(self, spec, raw_data, coords):
         if self._is_current_page(spec):
@@ -2697,11 +3609,22 @@ class My3DAnalyzer(QWidget):
 
         t_low = int(spec.params["t_low"])
         t_up = int(spec.params["t_up"])
-        return {
+        data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
+        context = {
             "view": "3d",
-            "data": self._get_rotated_time_integral(raw_data, t_low, t_up),
+            "data": data_3d,
             "coords": coords,
         }
+        descriptor = scoped_descriptor_from_array(data_3d)
+        if descriptor is not None and not descriptor.is_full:
+            context.update(
+                {
+                    "data_bounds": descriptor.spatial_bounds,
+                    "full_shape": descriptor.full_shape[:3],
+                    "include_zero": True,
+                }
+            )
+        return context
 
 
     def _compute_slice_dos(self, raw_data, logical_bounds):
@@ -2709,7 +3632,12 @@ class My3DAnalyzer(QWidget):
         if clip_info is None:
             return None
 
-        slices, _ = clip_info
+        slices, index_bounds = clip_info
+        if isinstance(raw_data, ScopedDataVolume):
+            compact, _intersection = raw_data.extract_bounds(tuple(index_bounds))
+            if compact.size == 0:
+                return np.zeros(raw_data.shape[3], dtype=np.float32)
+            return np.sum(compact, axis=(0, 1, 2), dtype=np.float32)
         return np.sum(raw_data[slices[0], slices[1], slices[2], :], axis=(0, 1, 2))
 
     def _get_slice_dos_context(self, spec, raw_data, coords):
@@ -2800,19 +3728,30 @@ class My3DAnalyzer(QWidget):
             t_index = int(spec.params["t_index"])
         data_3d = self._get_rotated_frame(raw_data, t_index)
         energy_axis = np.asarray(coords["E"], dtype=np.float64)
+        descriptor = scoped_descriptor_from_array(data_3d)
         clipped = False
         clip_ranges = spec.params.get("clip_ranges")
-        if clip_ranges is not None:
+        if clip_ranges is not None and descriptor is None:
             clip_info = self._get_clip_slices(clip_ranges)
             if clip_info is not None:
                 slices, _ = clip_info
                 data_3d = data_3d[slices[0], slices[1], slices[2]]
                 energy_axis = energy_axis[slices[2]]
                 clipped = True
+        if descriptor is not None and not descriptor.is_full:
+            compact_intensity = np.sum(
+                np.asarray(data_3d),
+                axis=(0, 1),
+                dtype=np.float32,
+            )
+            intensity = np.zeros(descriptor.full_shape[2], dtype=np.float32)
+            intensity[descriptor.spatial_slices[2]] = compact_intensity
+        else:
+            intensity = np.sum(data_3d, axis=(0, 1))
         return {
             "view": "1d",
             "x_data": energy_axis,
-            "y_data": np.sum(data_3d, axis=(0, 1)),
+            "y_data": intensity,
             "title": f"Energy DOS ({'Clipped, ' if clipped else ''}T={self._current_delay_text(t_index)})",
             "xlabel": "Energy (eV)",
         }
@@ -2842,19 +3781,36 @@ class My3DAnalyzer(QWidget):
         if source_spec is None:
             return None
         source_context = self._get_3d_source_context_for_axis(source_spec, raw_data)
-        source_data = np.asarray(source_context["data"], dtype=np.float64)
+        source_volume = source_context["data"]
+        source_data = np.asarray(source_volume, dtype=np.float64)
+        descriptor = scoped_descriptor_from_array(source_volume)
 
-        x_low = int(np.clip(crop_rect["x_low"], 0, source_data.shape[0] - 1))
-        x_up = int(np.clip(crop_rect["x_up"], 0, source_data.shape[0] - 1))
-        y_low = int(np.clip(crop_rect["y_low"], 0, source_data.shape[1] - 1))
-        y_up = int(np.clip(crop_rect["y_up"], 0, source_data.shape[1] - 1))
+        full_x_size = raw_data.shape[0]
+        full_y_size = raw_data.shape[1]
+        x_low = int(np.clip(crop_rect["x_low"], 0, full_x_size - 1))
+        x_up = int(np.clip(crop_rect["x_up"], 0, full_x_size - 1))
+        y_low = int(np.clip(crop_rect["y_low"], 0, full_y_size - 1))
+        y_up = int(np.clip(crop_rect["y_up"], 0, full_y_size - 1))
         if x_low > x_up:
             x_low, x_up = x_up, x_low
         if y_low > y_up:
             y_low, y_up = y_up, y_low
 
-        selected_cube = source_data[x_low:x_up + 1, y_low:y_up + 1, :]
-        intensity = np.sum(selected_cube, axis=(0, 1))
+        if descriptor is not None and not descriptor.is_full:
+            local_x = descriptor.local_range(0, x_low, x_up)
+            local_y = descriptor.local_range(1, y_low, y_up)
+            intensity = np.zeros(descriptor.full_shape[2], dtype=np.float64)
+            if local_x is not None and local_y is not None:
+                selected_cube = source_data[
+                    local_x[0] : local_x[1] + 1,
+                    local_y[0] : local_y[1] + 1,
+                    :,
+                ]
+                compact_intensity = np.sum(selected_cube, axis=(0, 1))
+                intensity[descriptor.spatial_slices[2]] = compact_intensity
+        else:
+            selected_cube = source_data[x_low:x_up + 1, y_low:y_up + 1, :]
+            intensity = np.sum(selected_cube, axis=(0, 1))
         energy_axis = np.asarray(coords["E"], dtype=np.float64)
 
         source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
@@ -3104,6 +4060,11 @@ class My3DAnalyzer(QWidget):
     ):
         coordinate_key = {0: "X", 1: "Y", 2: "E"}[int(derivative_axis)]
         coordinate_values = np.asarray(coords[coordinate_key], dtype=np.float64)
+        descriptor = scoped_descriptor_from_array(data_3d)
+        if descriptor is not None and not descriptor.is_full:
+            coordinate_values = coordinate_values[
+                descriptor.spatial_slices[int(derivative_axis)]
+            ]
         cache_key = (
             tuple(source_signature),
             round(float(self.rotation_angle), 2),
@@ -3115,12 +4076,17 @@ class My3DAnalyzer(QWidget):
             round(float(threshold), 4),
         )
         cache = self._second_derivative_volume_cache
+        raw_identity = self._raw_data_identity(raw_data)
         if (
             cache is not None
-            and cache.get("raw_data") is raw_data
+            and cache.get("raw_identity", self._raw_data_identity(cache.get("raw_data")))
+            == raw_identity
             and cache.get("key") == cache_key
         ):
-            return cache["data"]
+            cached = cache["data"]
+            if descriptor is not None and not descriptor.is_full:
+                return ScopedSpatialArray(cached, descriptor)
+            return cached
 
         derivative = self._compute_axis_second_derivative(
             data_3d,
@@ -3131,9 +4097,12 @@ class My3DAnalyzer(QWidget):
         )
         self._second_derivative_volume_cache = {
             "raw_data": raw_data,
+            "raw_identity": raw_identity,
             "key": cache_key,
             "data": derivative,
         }
+        if descriptor is not None and not descriptor.is_full:
+            return ScopedSpatialArray(derivative, descriptor)
         return derivative
 
     def _build_second_derivative_context_from_params(self, raw_data, coords, params):
@@ -3175,7 +4144,7 @@ class My3DAnalyzer(QWidget):
                 sigma=float(sd_params.get("sigma", 1.5)),
                 threshold=float(sd_params.get("threshold", 0.0)),
             )
-            return {
+            context = {
                 "view": "3d",
                 "data": derivative,
                 "coords": coords,
@@ -3183,7 +4152,19 @@ class My3DAnalyzer(QWidget):
                 "derivative_axis": derivative_axis,
                 **source_metadata,
             }
+            descriptor = scoped_descriptor_from_array(derivative)
+            if descriptor is not None and not descriptor.is_full:
+                context.update(
+                    {
+                        "data_bounds": descriptor.spatial_bounds,
+                        "full_shape": descriptor.full_shape[:3],
+                        "include_zero": True,
+                    }
+                )
+            return context
 
+        compact_source_data = None
+        compact_plot_bounds = None
         if source_kind == "home":
             t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
             data_3d = self._get_rotated_frame(raw_data, t_index)
@@ -3199,6 +4180,25 @@ class My3DAnalyzer(QWidget):
                 "y_low": 0,
                 "y_up": max(int(source_data.shape[1]) - 1, 0),
             }
+            descriptor = scoped_descriptor_from_array(data_3d)
+            if descriptor is not None and not descriptor.is_full:
+                local_index = descriptor.local_index(
+                    slice_axis,
+                    int(params["slice_index"]),
+                )
+                if local_index is not None:
+                    compact_source_data = np.take(
+                        np.asarray(data_3d),
+                        local_index,
+                        axis=slice_axis,
+                    )
+                    axis_by_key = {"X": 0, "Y": 1, "E": 2}
+                    compact_plot_bounds = {
+                        "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
+                        "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
+                        "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
+                        "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
+                    }
         elif source_kind == "axis_integral":
             base_context = self._build_axis_like_context_from_params(raw_data, coords, params)
             if base_context is None:
@@ -3207,6 +4207,8 @@ class My3DAnalyzer(QWidget):
             source_slice_info = dict(base_context["slice_info"])
             plot_axes = dict(base_context["plot_axes"])
             plot_bounds = dict(base_context["plot_logical_bounds"])
+            compact_source_data = base_context.get("compact_data")
+            compact_plot_bounds = base_context.get("compact_plot_logical_bounds")
         else:
             return None
 
@@ -3214,8 +4216,14 @@ class My3DAnalyzer(QWidget):
         if slice_axis not in (0, 1):
             return None
 
-        energy_low = int(plot_bounds["y_low"])
-        energy_up = int(plot_bounds["y_up"])
+        derivative_source = (
+            np.asarray(compact_source_data)
+            if compact_source_data is not None
+            else source_data
+        )
+        derivative_bounds = compact_plot_bounds or plot_bounds
+        energy_low = int(derivative_bounds["y_low"])
+        energy_up = int(derivative_bounds["y_up"])
         energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[energy_low:energy_up + 1]
 
         sd_params = params.get("second_derivative_params") or {}
@@ -3224,7 +4232,7 @@ class My3DAnalyzer(QWidget):
         cross_axis_sigma = float(sd_params.get("cross_axis_sigma", 0.8))
 
         derivative = self._compute_energy_second_derivative(
-            source_data,
+            derivative_source,
             energy_axis=energy_axis,
             sigma=sigma,
             threshold=threshold,
@@ -3236,6 +4244,15 @@ class My3DAnalyzer(QWidget):
                 sigma=cross_axis_sigma,
                 axis=0,
             )
+        if compact_source_data is not None and compact_plot_bounds is not None:
+            embedded = np.zeros_like(source_data, dtype=np.asarray(derivative).dtype)
+            x_offset = int(compact_plot_bounds["x_low"]) - int(plot_bounds["x_low"])
+            y_offset = int(compact_plot_bounds["y_low"]) - int(plot_bounds["y_low"])
+            embedded[
+                x_offset : x_offset + derivative.shape[0],
+                y_offset : y_offset + derivative.shape[1],
+            ] = derivative
+            derivative = embedded
         title = f"Energy Second Derivative - {self._second_derivative_plot_label(params)}"
         source_slice_info["title_override"] = title
         return {
@@ -3556,6 +4573,7 @@ class My3DAnalyzer(QWidget):
             self.last_visual_page_id = spec.page_id
         self._sync_controls_from_page(spec)
         self._update_time_slider_state()
+        self._request_scope_denoise_if_needed(spec)
         self.global_refresh()
 
     def _sync_controls_from_page(self, spec):
@@ -3594,6 +4612,9 @@ class My3DAnalyzer(QWidget):
         self.rotation_angle = round(float(angle), 2)
         self._clear_axis_prefix_cache()
         if self.core.raw_data is not None:
+            # Actor rotation is cheap enough to follow each wheel step and does
+            # not need to wait for the throttled numerical-preview timer.
+            self._apply_rotation_actor_preview(self.rotation_angle)
             self.request_refresh(
                 RefreshCause.ROTATION,
                 interactive=True,
@@ -3603,17 +4624,24 @@ class My3DAnalyzer(QWidget):
     def _apply_rotation_actor_preview(self, angle):
         session = getattr(self, "volume_session", None)
         if session is None or not session.active or self.left_display_stack.currentWidget() is not self.plotter:
-            return
+            return False
+        target_angle = float(angle)
+        if getattr(self, "_actor_preview_rotation_angle", None) == target_angle:
+            return True
         try:
-            delta = float(angle) - float(self._rendered_rotation_angle)
+            delta = target_angle - float(self._rendered_rotation_angle)
             session.volume.SetOrigin(100.0, 100.0, 100.0)
             session.volume.SetOrientation(0.0, 0.0, delta)
+            session._set_interactive_quality(RenderQuality.PREVIEW.value)
             self.plotter.render()
             session.render_count += 1
+            self._actor_preview_rotation_angle = target_angle
+            return True
         except Exception:
-            pass
+            return False
 
     def _reset_volume_actor_transform(self):
+        self._actor_preview_rotation_angle = None
         session = getattr(self, "volume_session", None)
         if session is None or not session.active:
             return
@@ -3627,6 +4655,18 @@ class My3DAnalyzer(QWidget):
     def on_apply_denoise(self):
         if self.original_raw_data is None:
             return
+
+        if not self.__dict__.get("data_scopes"):
+            self._initialize_data_scopes()
+
+        pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
+        if pending_roi_scope_id:
+            self.refresh_coordinator.cancel_page(
+                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{pending_roi_scope_id}"
+            )
+            self.data_scopes.pop(pending_roi_scope_id, None)
+            self._scope_committed_signatures.pop(pending_roi_scope_id, None)
+            self._pending_roi_scope_id = None
 
         current_spec = self.left_workspace.current_spec()
         if current_spec is not None and current_spec.page_kind != "control_panel":
@@ -3646,14 +4686,91 @@ class My3DAnalyzer(QWidget):
             self._show_message("Savitzky-Golay 参数无效", str(exc), QMessageBox.Warning)
             return
 
+        methods = self._normalize_denoise_methods(methods)
+        try:
+            self._validate_denoise_for_scopes(methods)
+        except ValueError as exc:
+            self._show_message(
+                "Savitzky-Golay 参数与数据范围不兼容",
+                str(exc),
+                QMessageBox.Warning,
+            )
+            return
+        signature = self._denoise_signature(methods)
         self._persist_page_ui_state(self.active_page_spec)
-        target_spec.params["denoise_methods"] = methods
-        self.page_denoise_cache.pop(target_spec.page_id, None)
-        self._rotation_cache.clear()
-        self._computed_volume_cache.clear()
-        self._second_derivative_volume_cache = None
-        self._clear_axis_prefix_cache(target_spec.page_id)
-        self.left_workspace.activate_page(target_spec.page_id)
+        if current_spec is None or current_spec.page_id != target_spec.page_id:
+            self.left_workspace.activate_page(target_spec.page_id)
+
+        if signature == self._pending_denoise_signature:
+            return
+
+        # Every Apply creates a new global generation.  This invalidates a
+        # still-running older pipeline without attempting an unsafe hard cancel.
+        target_descriptor = self._scope_for_spec(target_spec)
+        target_scope_id = (
+            target_descriptor.scope_id if target_descriptor is not None else self.FULL_SCOPE_ID
+        )
+        request = self.refresh_coordinator.make_request(
+            self.GLOBAL_DENOISE_PAGE_ID,
+            RefreshCause.DENOISE,
+            RenderQuality.EXACT,
+            {
+                "denoise_signature": signature,
+                "source_id": id(self.original_raw_data),
+                "scope_id": target_scope_id,
+            },
+        )
+
+        if not methods:
+            self._commit_shared_denoise((), None, signature, target_scope_id)
+            self.request_refresh(
+                RefreshCause.DENOISE,
+                RenderQuality.EXACT,
+                immediate=True,
+            )
+            return
+
+        cached_scope_result = None
+        if hasattr(self, "_scope_data_cache"):
+            cached_scope_result = self._scope_data_cache.get(
+                self._scope_cache_key(target_scope_id, signature)
+            )
+        if signature == self.shared_denoise_signature and (
+            cached_scope_result is not None
+            or (
+                target_scope_id == self.FULL_SCOPE_ID
+                and self.shared_denoised_raw_data is not None
+            )
+        ):
+            self._pending_denoise_methods = None
+            self._pending_denoise_signature = None
+            self.request_refresh(
+                RefreshCause.DENOISE,
+                RenderQuality.EXACT,
+                immediate=True,
+            )
+            return
+
+        self._pending_denoise_methods = self._copy_state(methods)
+        self._pending_denoise_signature = signature
+        self._pending_denoise_scope_id = target_scope_id
+        self._render_exact_ready = False
+        self._update_export_button_states()
+        job = ComputeJob(
+            "denoise_pipeline",
+            {
+                "data": target_descriptor.extract(self.original_raw_data),
+                "methods": self._copy_state(methods),
+            },
+        )
+
+        def work():
+            result = self.backend_manager.execute(job)
+            result.metadata["denoise_methods"] = self._copy_state(methods)
+            result.metadata["scope_id"] = target_scope_id
+            return result
+
+        self.refresh_coordinator.submit_compute(request, work)
 
     def on_load(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3699,7 +4816,17 @@ class My3DAnalyzer(QWidget):
         self.original_coords = self._clone_coords()
         self.base_raw_data = base
         self.base_coords = self._clone_coords(self.original_coords)
-        self.page_denoise_cache.clear()
+        self.refresh_coordinator.cancel_page(self.GLOBAL_DENOISE_PAGE_ID)
+        self.global_denoise_methods = []
+        self.shared_denoised_raw_data = None
+        self.shared_denoise_signature = self._denoise_signature([])
+        self.shared_denoise_version += 1
+        self._initialize_data_scopes()
+        self._pending_denoise_methods = None
+        self._pending_denoise_signature = None
+        self._pending_denoise_scope_id = None
+        self._pending_scope_denoise_keys = set()
+        self._pending_roi_scope_id = None
         self._rotation_cache.clear()
         self._computed_volume_cache.clear()
         self.backend_manager.clear_caches()
@@ -3709,6 +4836,8 @@ class My3DAnalyzer(QWidget):
         self._clear_axis_prefix_cache()
         self.rotation_angle = 0.0
         self._rendered_rotation_angle = 0.0
+        self._saved_3d_camera_position = None
+        self._camera_e_flip_applied = False
         self.clip_ranges = None
         self.home_slice_info = None
         self.axis_source_mode = "frame"
@@ -3745,13 +4874,17 @@ class My3DAnalyzer(QWidget):
         self._configure_time_controls()
         home_spec = self.left_workspace.home_spec()
         if home_spec is not None:
+            home_spec.data_scope_id = self.FULL_SCOPE_ID
             home_spec.params.clear()
+            home_spec.params["data_scope_label"] = "完整数据"
             home_spec.params["control_state"] = self._capture_control_state()
             self._persist_home_page_state(home_spec)
+            self._refresh_scope_hint(home_spec)
         self.left_workspace.reset_to_home()
         self.plotter.set_background("white")
         self.global_refresh()
         self.plotter.reset_camera()
+        self._capture_3d_camera_position()
 
     def update_ax_slider_range(self):
         if self.core.raw_data is None:
@@ -3774,6 +4907,12 @@ class My3DAnalyzer(QWidget):
                 value_box.setValue(self.core.logical_to_physical(axis_idx, int(slider.value())))
         finally:
             self._syncing_axis_value_boxes = False
+
+    def on_axis_selection_changed(self, _index=None):
+        self.update_ax_slider_range()
+        if self.core.raw_data is None or self._syncing_controls:
+            return
+        self.schedule_axis_refresh()
 
     def _axis_slider_box_pairs(self):
         return (
@@ -3864,18 +5003,55 @@ class My3DAnalyzer(QWidget):
 
 
     def on_back(self):
-        if self.left_workspace.home_page_id is not None:
-            self.left_workspace.activate_page(self.left_workspace.home_page_id)
+        pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
+        if pending_roi_scope_id:
+            self.refresh_coordinator.cancel_page(
+                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{pending_roi_scope_id}"
+            )
+            self.data_scopes.pop(pending_roi_scope_id, None)
+            self._scope_committed_signatures.pop(pending_roi_scope_id, None)
+            self._pending_roi_scope_id = None
 
-        if self.core.raw_data is None:
+        current_spec = self.left_workspace.current_spec()
+        home_spec = self.left_workspace.home_spec()
+        if current_spec is not None and current_spec.page_kind != "home":
+            if home_spec is not None:
+                self.left_workspace.activate_page(home_spec.page_id)
             return
 
-        self.clip_ranges = None
-        self.home_slice_info = None
+        if self.core.raw_data is None or home_spec is None:
+            return
+
+        descriptor = self._scope_for_spec(home_spec)
+        if self.home_slice_info is not None:
+            self.home_slice_info = None
+            self.clip_ranges = (
+                list(descriptor.spatial_bounds)
+                if descriptor is not None and not descriptor.is_full
+                else None
+            )
+            self._sync_slice_edits_from_logical_bounds(
+                self.clip_ranges or self._get_full_logical_bounds()
+            )
+            self._persist_home_page_state(home_spec)
+            self.global_refresh()
+            return
+
+        if descriptor is not None and not descriptor.is_full:
+            home_spec.data_scope_id = self.FULL_SCOPE_ID
+            home_spec.params["data_scope_label"] = "完整数据"
+            self._refresh_scope_hint(home_spec)
+            self.clip_ranges = None
+            self._invalidate_scope_render_state()
+        else:
+            self.clip_ranges = None
+
         self._sync_slice_edits_from_logical_bounds(self._get_full_logical_bounds())
+        self._persist_home_page_state(home_spec)
         self.global_refresh()
         self.plotter.reset_camera()
         self.plotter.render()
+        self._capture_3d_camera_position()
 
 
     def on_screenshot(self):
@@ -4185,7 +5361,11 @@ class My3DAnalyzer(QWidget):
                     }
                 )
             title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._waterfall_crop_suffix(spec_params)}]"
-        elif current_spec.page_kind == "home" and self.clip_ranges is not None:
+        elif (
+            current_spec.page_kind == "home"
+            and self.clip_ranges is not None
+            and (self._scope_for_spec(current_spec) or DataScopeDescriptor.full(self.original_raw_data.shape)).is_full
+        ):
             spec_params["clip_ranges"] = list(self.clip_ranges)
             title = f"Energy-DOS [Clipped T={t_index}/{delay_text}]"
 
@@ -4500,8 +5680,6 @@ class My3DAnalyzer(QWidget):
             candidate_spec = self._build_time_integrated_slice_spec(current_spec)
         else:
             candidate_spec = self._build_time_integral_spec()
-        if current_spec is not None and "denoise_methods" in current_spec.params:
-            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
         self.left_workspace.add_page(candidate_spec)
 
@@ -4514,9 +5692,11 @@ class My3DAnalyzer(QWidget):
             return
 
         if current_spec.page_kind == "time_integral":
+            # A 3D result is immutable while its source controls are edited.
+            # The values remain available to the Apply buttons, but moving a
+            # slider must not rebuild the active volume.
             self.axis_source_mode = "time_integral"
-            self._persist_time_integral_page_state(current_spec)
-            self.schedule_axis_refresh()
+            return
         elif self._is_time_integral_axis_page(current_spec):
             self.axis_source_mode = "time_integral"
             self._persist_axis_integral_page_state(current_spec)
@@ -4541,7 +5721,10 @@ class My3DAnalyzer(QWidget):
 
         axis_idx = self.page_data.combo_ax.currentIndex()
         low, up, _ = self._axis_input_logical_values()
-        bounds = list(self.clip_ranges) if self.clip_ranges else list(self._get_full_logical_bounds())
+        # Each integration-axis selection describes a slab through the whole
+        # current data volume.  Start from full bounds so restrictions from a
+        # previously selected axis never accumulate.
+        bounds = list(self._get_full_logical_bounds())
 
         if axis_idx == 0:
             bounds[0], bounds[1] = low, up
@@ -4557,10 +5740,35 @@ class My3DAnalyzer(QWidget):
         self._rebuild_interactive_box(bounds)
         self._sync_slice_edits_from_logical_bounds(bounds)
 
+    @staticmethod
+    def _analysis_sliders_control_active_2d_page(spec):
+        if spec is None:
+            return False
+        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            return True
+        return (
+            spec.page_kind == "second_derivative"
+            and spec.params.get("source_view") == "2d"
+        )
+
     def schedule_axis_refresh(self):
-        if self.core.raw_data is None:
+        if (
+            self.core.raw_data is None
+            or self._syncing_controls
+            or self._syncing_axis_value_boxes
+        ):
             return
+
+        # On the home 3D view these controls are only a convenient way to move
+        # the interactive selection box.  Do not enqueue a render request:
+        # its delayed EXACT pass would rebuild the box from stale clip bounds.
+        if self._can_show_interactive_box():
+            self.sync_ax_sliders_to_box()
+
         current_spec = self.left_workspace.current_spec()
+        if not self._analysis_sliders_control_active_2d_page(current_spec):
+            return
+
         if current_spec is not None and current_spec.page_kind == "second_derivative":
             self._persist_second_derivative_page_state(current_spec)
         else:
@@ -4586,9 +5794,6 @@ class My3DAnalyzer(QWidget):
             return
 
         candidate_spec = self._build_axis_integral_spec()
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and "denoise_methods" in current_spec.params:
-            candidate_spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
         self.left_workspace.add_page(candidate_spec)
 
@@ -4597,13 +5802,13 @@ class My3DAnalyzer(QWidget):
             self.sync_ax_sliders_to_box()
 
         current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and current_spec.page_kind == "time_integral":
-            self._persist_time_integral_page_state(current_spec)
-        elif current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+        if not self._analysis_sliders_control_active_2d_page(current_spec):
+            return
+
+        if current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(current_spec)
         elif (
-            current_spec is not None
-            and current_spec.page_kind == "second_derivative"
+            current_spec.page_kind == "second_derivative"
             and current_spec.params.get("source_view") == "2d"
         ):
             self._persist_second_derivative_page_state(current_spec)
@@ -4638,9 +5843,6 @@ class My3DAnalyzer(QWidget):
             spec = self._build_second_derivative_spec()
 
         if spec is not None:
-            current_spec = self.left_workspace.current_spec()
-            if current_spec is not None and "denoise_methods" in current_spec.params:
-                spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
             spec.title = self._make_unique_page_title(spec.title)
             self.left_workspace.add_page(spec)
 
@@ -4711,6 +5913,16 @@ class My3DAnalyzer(QWidget):
             return False
         return int(context.get("slice_info", {}).get("axis", -1)) in (0, 1, 2)
 
+    def _axis_crop_selector_will_blit(self, event):
+        selector = self.axis_crop_selector
+        return bool(
+            selector is not None
+            and selector.active
+            and event is not None
+            and event.inaxes is self.ax_2d
+            and getattr(selector, "_eventpress", None) is not None
+        )
+
     def _current_axis_crop_rect(self, spec, context):
         if spec is None or context is None:
             return None
@@ -4772,7 +5984,7 @@ class My3DAnalyzer(QWidget):
         self.axis_crop_selector = RectangleSelector(
             self.ax_2d,
             self._on_axis_crop_selected,
-            useblit=False,
+            useblit=True,
             button=[1],
             minspanx=1e-12,
             minspany=1e-12,
@@ -4861,12 +6073,17 @@ class My3DAnalyzer(QWidget):
             clip_ranges = render_context.get("clip_ranges")
             render_clip = None
             if clip_ranges is not None:
-                render_clip = self.core.logical_to_render_bounds(clip_ranges, render_context["data"].shape)
+                clip_shape = render_context.get(
+                    "full_shape",
+                    render_context["data"].shape,
+                )
+                render_clip = self.core.logical_to_render_bounds(clip_ranges, clip_shape)
 
             volume_data = render_context["data"]
             if (
                 quality == RenderQuality.PREVIEW
                 and cause not in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}
+                and render_context.get("data_bounds") is None
                 and int(np.prod(volume_data.shape, dtype=np.int64)) > 2_500_000
             ):
                 stride = max(
@@ -4875,6 +6092,8 @@ class My3DAnalyzer(QWidget):
                 )
                 volume_data = np.asfortranarray(volume_data[::stride, ::stride, ::stride], dtype=np.float32)
 
+            self._restore_3d_camera_position()
+            self._apply_pending_e_flip_camera()
             self._reset_volume_actor_transform()
             self.volume_session.render(
                 volume_data,
@@ -4885,7 +6104,11 @@ class My3DAnalyzer(QWidget):
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
                 quality=quality.value,
+                data_bounds=render_context.get("data_bounds"),
+                full_shape=render_context.get("full_shape"),
+                include_zero=bool(render_context.get("include_zero", False)),
             )
+            self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
             if self._box_interacting:
                 self._orig_volume_opacity = None
@@ -4926,7 +6149,6 @@ class My3DAnalyzer(QWidget):
 
     def on_result_page_closed(self, page_id):
         self.refresh_coordinator.cancel_page(page_id)
-        self.page_denoise_cache.pop(page_id, None)
         self._clear_axis_prefix_cache(page_id)
         self._rotation_cache.clear()
         self._computed_volume_cache.clear()
@@ -4992,10 +6214,16 @@ class My3DAnalyzer(QWidget):
                 self._show_message("Crop failed", "Unable to build a cropped axis-integral page from the current selection.", QMessageBox.Warning)
                 return
 
-            if "denoise_methods" in current_spec.params:
-                spec.params["denoise_methods"] = current_spec.params["denoise_methods"]
             spec.title = self._make_unique_page_title(spec.title)
             self.left_workspace.add_page(spec)
+            return
+
+        if current_spec is None or current_spec.page_kind != "home":
+            self._show_message(
+                "无法提交 ROI",
+                "全局 ROI 只能在原始视图主页中提交。",
+                QMessageBox.Information,
+            )
             return
 
         texts = self.page_image.get_slice_values()
@@ -5008,9 +6236,58 @@ class My3DAnalyzer(QWidget):
         if not result:
             return
 
-        self.clip_ranges = result.get("clip_ranges")
-        self.home_slice_info = result.get("slice_info")
+        proposed_clip = result.get("clip_ranges")
+        proposed_slice = result.get("slice_info")
+        if proposed_clip is None:
+            # A one-layer selection remains a temporary 2D view and never
+            # changes the page's committed data scope.
+            self.clip_ranges = None
+            self.home_slice_info = proposed_slice
+            self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
+            self._persist_home_page_state(current_spec)
+            self.global_refresh()
+            return
+
+        if abs(float(self.rotation_angle)) >= 1e-6:
+            self._show_message(
+                "无法提交 ROI",
+                "请先将 Z 轴旋转角恢复为 0°，再提交全局 ROI。",
+                QMessageBox.Warning,
+            )
+            return
+
+        clip_info = self._get_clip_slices(proposed_clip)
+        if clip_info is None:
+            return
+        _slices, index_bounds = clip_info
+        candidate = DataScopeDescriptor(
+            scope_id=f"roi-{self._scope_generation + 1}",
+            full_shape=tuple(int(size) for size in self.original_raw_data.shape),
+            bounds=tuple(index_bounds),
+            generation=self._scope_generation + 1,
+        )
+        try:
+            self._validate_denoise_for_descriptor(self.global_denoise_methods, candidate)
+        except ValueError as exc:
+            self._show_message(
+                "ROI 与去噪参数不兼容",
+                str(exc),
+                QMessageBox.Warning,
+            )
+            return
+
+        descriptor = self._register_roi_scope(index_bounds)
+        if self._submit_roi_scope_commit(descriptor):
+            return
+        current_spec.data_scope_id = descriptor.scope_id
+        current_spec.params["data_scope_label"] = descriptor.label
+        self._refresh_scope_hint(current_spec)
+        self.clip_ranges = list(index_bounds)
+        self.home_slice_info = None
         self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
+        self._persist_home_page_state(current_spec)
+        self._invalidate_scope_render_state()
+        self._request_scope_denoise_if_needed(current_spec)
         self.global_refresh()
 
     def export_current_result(self):
@@ -5028,13 +6305,17 @@ class My3DAnalyzer(QWidget):
             return
 
         if spec.page_kind == "home":
-            clip_info = self._get_clip_slices()
-            if clip_info is None:
-                self._show_message("No slice configured", "Please configure a slice or cut range first.", QMessageBox.Warning)
-                return
-
-            slices, _ = clip_info
-            sample = raw_data[slices[0], slices[1], slices[2], :]
+            if isinstance(raw_data, ScopedDataVolume):
+                descriptor = raw_data.descriptor
+                slices = descriptor.spatial_slices
+                sample = raw_data.values
+            else:
+                clip_info = self._get_clip_slices()
+                if clip_info is None:
+                    self._show_message("No slice configured", "Please configure a slice or cut range first.", QMessageBox.Warning)
+                    return
+                slices, _ = clip_info
+                sample = raw_data[slices[0], slices[1], slices[2], :]
             if not self.core.has_time_axis:
                 sample = sample[..., 0]
 
@@ -5052,11 +6333,15 @@ class My3DAnalyzer(QWidget):
             context = self._get_time_integral_context(spec, raw_data, coords)
             t_low = int(spec.params["t_low"])
             t_up = int(spec.params["t_up"])
+            descriptor = scoped_descriptor_from_array(context["data"])
+            x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+            y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+            e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
             export_data = {
                 "sample": np.asarray(context["data"], dtype=np.float32),
-                "kx": np.asarray(coords["X"], dtype=np.float32),
-                "ky": np.asarray(coords["Y"], dtype=np.float32),
-                "E": np.asarray(coords["E"], dtype=np.float32),
+                "kx": np.asarray(coords["X"][x_slice], dtype=np.float32),
+                "ky": np.asarray(coords["Y"][y_slice], dtype=np.float32),
+                "E": np.asarray(coords["E"][e_slice], dtype=np.float32),
             }
             title = "Save time-integral result"
             default_name = self._build_time_integral_default_name(t_low, t_up)
@@ -5085,9 +6370,16 @@ class My3DAnalyzer(QWidget):
             context = self._get_edc_curve_context(spec, raw_data, coords)
             if context is None:
                 return
+            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+            e_slice = (
+                descriptor.spatial_slices[2]
+                if descriptor is not None
+                and len(context["x_data"]) == descriptor.full_shape[2]
+                else slice(None)
+            )
             export_data = {
-                "E": np.asarray(context["x_data"], dtype=np.float32),
-                "intensity": np.asarray(context["y_data"], dtype=np.float32),
+                "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
+                "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
                 "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
                 "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
                 "source_mode": np.asarray([context["source_mode"]]),
@@ -5117,10 +6409,26 @@ class My3DAnalyzer(QWidget):
                 return
             if context is None:
                 return
+            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+            if descriptor is not None:
+                k_axis = 1 if int(spec.params.get("axis_index", 0)) == 0 else 0
+                k_slice = (
+                    descriptor.spatial_slices[k_axis]
+                    if len(context["k_values"]) == descriptor.full_shape[k_axis]
+                    else slice(None)
+                )
+                e_slice = (
+                    descriptor.spatial_slices[2]
+                    if len(context["energy_axis"]) == descriptor.full_shape[2]
+                    else slice(None)
+                )
+            else:
+                k_slice = slice(None)
+                e_slice = slice(None)
             export_data = {
-                "k": np.asarray(context["k_values"], dtype=np.float32),
-                "E": np.asarray(context["energy_axis"], dtype=np.float32),
-                "intensity": np.asarray(context["raw_curves"], dtype=np.float32),
+                "k": np.asarray(context["k_values"][k_slice], dtype=np.float32),
+                "E": np.asarray(context["energy_axis"][e_slice], dtype=np.float32),
+                "intensity": np.asarray(context["raw_curves"][k_slice, e_slice], dtype=np.float32),
                 "integrated_axis": np.asarray([context["integrated_axis_label"]]),
                 "integrated_range": np.asarray(context["integrated_range"], dtype=np.float32),
             }
@@ -5143,11 +6451,15 @@ class My3DAnalyzer(QWidget):
             if context.get("view") == "3d":
                 derivative_axis = int(context["derivative_axis"])
                 derivative_label = self._second_derivative_axis_label(derivative_axis)
+                descriptor = scoped_descriptor_from_array(context["data"])
+                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
                 export_data = {
                     "sample": np.asarray(context["data"], dtype=np.float32),
-                    "kx": np.asarray(coords["X"], dtype=np.float32),
-                    "ky": np.asarray(coords["Y"], dtype=np.float32),
-                    "E": np.asarray(coords["E"], dtype=np.float32),
+                    "kx": np.asarray(coords["X"][x_slice], dtype=np.float32),
+                    "ky": np.asarray(coords["Y"][y_slice], dtype=np.float32),
+                    "E": np.asarray(coords["E"][e_slice], dtype=np.float32),
                     "derivative_axis": np.asarray([derivative_label]),
                     "source_mode": np.asarray([context["source_mode"]]),
                 }
@@ -5177,10 +6489,37 @@ class My3DAnalyzer(QWidget):
             else:
                 axis_index = int(context["slice_info"].get("axis", -1))
                 plot_axes = context.get("plot_axes")
-                plot_bounds = context.get("plot_logical_bounds")
+                plot_bounds = (
+                    dict(context["plot_logical_bounds"])
+                    if context.get("plot_logical_bounds") is not None
+                    else None
+                )
+                sample = np.asarray(context["data"], dtype=np.float32)
+                descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+                if descriptor is not None and plot_axes is not None and plot_bounds is not None:
+                    axis_by_key = {"X": 0, "Y": 1, "E": 2}
+                    scope_rect = {
+                        "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
+                        "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
+                        "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
+                        "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
+                    }
+                    compact_bounds = self._intersect_plot_rects(plot_bounds, scope_rect)
+                    if compact_bounds is not None:
+                        x_offset = int(compact_bounds["x_low"]) - int(plot_bounds["x_low"])
+                        y_offset = int(compact_bounds["y_low"]) - int(plot_bounds["y_low"])
+                        sample = sample[
+                            x_offset : x_offset
+                            + int(compact_bounds["x_up"] - compact_bounds["x_low"])
+                            + 1,
+                            y_offset : y_offset
+                            + int(compact_bounds["y_up"] - compact_bounds["y_low"])
+                            + 1,
+                        ]
+                        plot_bounds = compact_bounds
                 energy_axis = np.asarray(coords["E"], dtype=np.float32)
                 export_data = {
-                    "sample": np.asarray(context["data"], dtype=np.float32),
+                    "sample": sample,
                     "E": energy_axis,
                 }
                 if plot_axes is not None and plot_bounds is not None:
@@ -5207,9 +6546,16 @@ class My3DAnalyzer(QWidget):
             context = self._get_energy_dos_context(spec, raw_data, coords)
             if context is None:
                 return
+            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+            e_slice = (
+                descriptor.spatial_slices[2]
+                if descriptor is not None
+                and len(context["x_data"]) == descriptor.full_shape[2]
+                else slice(None)
+            )
             export_data = {
-                "E": np.asarray(context["x_data"], dtype=np.float32),
-                "intensity": np.asarray(context["y_data"], dtype=np.float32),
+                "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
+                "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
             }
             source_kind = spec.params.get("source_page_kind", "home")
             if source_kind == "axis_integral":
@@ -5236,6 +6582,8 @@ class My3DAnalyzer(QWidget):
                 export_data["clip_ranges"] = np.asarray(spec.params["clip_ranges"], dtype=np.float32)
             title = "Save Energy-DOS result"
             default_name = "energy_dos.mat"
+
+        export_data.update(self._scope_export_metadata(self._scope_for_spec(spec), coords))
 
         path = self._choose_export_path(title, default_name)
         if not path:

@@ -6,14 +6,25 @@ class PlotCoordinateTooltip:
 
     SUPPORTED_VIEWS = {"2d", "1d", "1d_comparison", "waterfall"}
 
-    def __init__(self, canvas, axes, context_provider, active_provider=None):
+    def __init__(
+        self,
+        canvas,
+        axes,
+        context_provider,
+        active_provider=None,
+        external_blit_provider=None,
+    ):
         self.canvas = canvas
         self.axes = axes
         self.context_provider = context_provider
         self.active_provider = active_provider
+        self.external_blit_provider = external_blit_provider
         self.annotation = None
+        self._background = None
         self.motion_cid = canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.leave_cid = canvas.mpl_connect("figure_leave_event", self._on_leave)
+        self.draw_cid = canvas.mpl_connect("draw_event", self._on_draw)
+        self.resize_cid = canvas.mpl_connect("resize_event", self._on_resize)
 
     @staticmethod
     def _format_value(value):
@@ -86,8 +97,54 @@ class PlotCoordinateTooltip:
             annotation_clip=False,
             zorder=1000,
         )
+        self.annotation.set_animated(self._supports_blit())
         self.annotation.set_visible(False)
         return self.annotation
+
+    def _supports_blit(self):
+        return bool(
+            getattr(self.canvas, "supports_blit", False)
+            and hasattr(self.canvas, "copy_from_bbox")
+            and hasattr(self.canvas, "restore_region")
+            and hasattr(self.canvas, "blit")
+        )
+
+    def _on_draw(self, _event):
+        if not self._supports_blit():
+            self._background = None
+            return
+        try:
+            self._background = self.canvas.copy_from_bbox(self.axes.bbox)
+        except (AttributeError, RuntimeError):
+            self._background = None
+
+    def _on_resize(self, _event):
+        self._background = None
+
+    def _external_blit_will_draw(self, event):
+        if self.external_blit_provider is None:
+            return False
+        try:
+            return bool(self.external_blit_provider(event))
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+
+    def _redraw_overlay(self):
+        annotation = self.annotation
+        if not self._supports_blit() or self._background is None:
+            self.canvas.draw_idle()
+            return False
+
+        try:
+            self.canvas.restore_region(self._background)
+            if annotation is not None and annotation.get_visible():
+                self.axes.draw_artist(annotation)
+            self.canvas.blit(self.axes.bbox)
+            return True
+        except (AttributeError, RuntimeError):
+            self._background = None
+            self.canvas.draw_idle()
+            return False
 
     def _position_annotation(self, annotation, event):
         axes_bounds = self.axes.get_window_extent()
@@ -120,7 +177,8 @@ class PlotCoordinateTooltip:
         )
         self._position_annotation(annotation, event)
         annotation.set_visible(True)
-        self.canvas.draw_idle()
+        if not self._external_blit_will_draw(event):
+            self._redraw_overlay()
 
     def _on_leave(self, _event):
         self.hide()
@@ -130,4 +188,4 @@ class PlotCoordinateTooltip:
             return
         self.annotation.set_visible(False)
         if redraw:
-            self.canvas.draw_idle()
+            self._redraw_overlay()

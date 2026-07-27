@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 import pyvista as pv
+from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from render_core import VolumeRenderSession
 
@@ -37,6 +38,13 @@ class VolumeRenderSessionTests(unittest.TestCase):
             replacement = np.asfortranarray(data * 2)
             session.render(replacement, (0, 50, 100), "linear", show_axes=False)
             self.assertIs(session.volume, actor)
+            mapper_values = vtk_to_numpy(
+                session.volume.mapper.GetInput().GetPointData().GetScalars()
+            )
+            np.testing.assert_array_equal(
+                mapper_values,
+                replacement.ravel(order="F"),
+            )
             self.assertEqual(session.rebuild_count, 1)
             self.assertEqual(session.data_update_count, uploads + 1)
             self.assertEqual(session.render_count, 4)

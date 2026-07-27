@@ -1,3 +1,6 @@
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pywt
 from scipy.ndimage import gaussian_filter, median_filter
@@ -24,11 +27,12 @@ class DenoiseEngines:
     }
 
     @staticmethod
-    def apply_pipeline(data, methods):
+    def apply_pipeline(data, methods, *, max_workers=None):
         if data is None:
             return None
 
-        processed_data = np.asarray(data, dtype=np.float32).copy()
+        source_data = np.asarray(data, dtype=np.float32)
+        worker_count = max(1, int(max_workers or (os.cpu_count() or 1)))
         active_methods = []
 
         for method_spec in methods:
@@ -37,29 +41,43 @@ class DenoiseEngines:
                 continue
             active_methods.append((method_name, params))
 
+        if not active_methods:
+            return source_data.copy()
+
+        processed_data = source_data
         for method_name, params in active_methods:
             if method_name == "卡尔曼滤波" and processed_data.ndim == 4:
                 processed_data = DenoiseEngines.kalman_filter_4d(processed_data)
                 continue
 
             if DenoiseEngines._is_savgol_method(method_name) and processed_data.ndim == 4:
-                processed_data = DenoiseEngines.savitzky_golay_filter_4d(processed_data, **params)
+                processed_data = DenoiseEngines.savitzky_golay_filter_4d(
+                    processed_data,
+                    **params,
+                )
                 continue
 
             if DenoiseEngines._is_wavelet_method(method_name) and processed_data.ndim == 4:
-                processed_data = DenoiseEngines.wavelet_denoise_4d(processed_data, **params)
+                processed_data = DenoiseEngines.wavelet_denoise_4d(
+                    processed_data,
+                    max_workers=worker_count,
+                    **params,
+                )
                 continue
 
             if processed_data.ndim == 4:
                 frames = [
-                    DenoiseEngines.dispatch(processed_data[frame_index], method_name, params)
-                    for frame_index in range(processed_data.shape[0])
+                    DenoiseEngines.dispatch(processed_data[..., frame_index], method_name, params)
+                    for frame_index in range(processed_data.shape[-1])
                 ]
-                processed_data = np.stack(frames, axis=0).astype(np.float32, copy=False)
+                processed_data = np.stack(frames, axis=-1).astype(np.float32, copy=False)
             else:
                 processed_data = DenoiseEngines.dispatch(processed_data, method_name, params)
 
-        return processed_data.astype(np.float32, copy=False)
+        processed_data = processed_data.astype(np.float32, copy=False)
+        if np.shares_memory(processed_data, source_data):
+            processed_data = processed_data.copy()
+        return processed_data
 
     @staticmethod
     def _parse_method_spec(method_spec):
@@ -197,6 +215,24 @@ class DenoiseEngines:
     @staticmethod
     def savitzky_golay_filter_3d(data_3d, window_length=5, polyorder=2, smoothing_axis="e"):
         frame = np.asanyarray(data_3d, dtype=np.float32)
+        axis_index, window_length, polyorder = DenoiseEngines._validated_savgol_params(
+            frame.shape,
+            window_length,
+            polyorder,
+            smoothing_axis,
+        )
+
+        filtered = savgol_filter(
+            frame,
+            window_length=window_length,
+            polyorder=polyorder,
+            axis=axis_index,
+            mode="interp",
+        )
+        return np.asarray(filtered, dtype=np.float32)
+
+    @staticmethod
+    def _validated_savgol_params(shape, window_length=5, polyorder=2, smoothing_axis="e"):
         axis_aliases = {
             "e": 2,
             "energy": 2,
@@ -207,7 +243,7 @@ class DenoiseEngines:
         if axis_key not in axis_aliases:
             raise ValueError("窗口滑动轴仅支持 kx、ky 或 e。")
         axis_index = axis_aliases[axis_key]
-        axis_size = frame.shape[axis_index]
+        axis_size = int(shape[axis_index])
 
         window_length = int(window_length)
         polyorder = int(polyorder)
@@ -225,29 +261,30 @@ class DenoiseEngines:
         if polyorder >= window_length:
             raise ValueError("多项式阶数必须小于滑动窗口长度。")
 
+        return axis_index, window_length, polyorder
+
+    @staticmethod
+    def savitzky_golay_filter_4d(data_4d, window_length=5, polyorder=2, smoothing_axis="e"):
+        data_4d = np.asanyarray(data_4d, dtype=np.float32)
+        if data_4d.ndim != 4:
+            raise ValueError("Savitzky-Golay 4D filtering requires an [X, Y, E, T] array.")
+        axis_index, window_length, polyorder = DenoiseEngines._validated_savgol_params(
+            data_4d.shape,
+            window_length,
+            polyorder,
+            smoothing_axis,
+        )
+        # SciPy processes all X/Y/E lines for every T frame in compiled code.
+        # Filtering the whole array is equivalent to stacking frame-by-frame
+        # results, without the Python loop and intermediate frame list.
         filtered = savgol_filter(
-            frame,
+            data_4d,
             window_length=window_length,
             polyorder=polyorder,
             axis=axis_index,
             mode="interp",
         )
         return np.asarray(filtered, dtype=np.float32)
-
-    @staticmethod
-    def savitzky_golay_filter_4d(data_4d, window_length=5, polyorder=2, smoothing_axis="e"):
-        data_4d = np.asanyarray(data_4d, dtype=np.float32)
-        frame_count = data_4d.shape[-1]
-        frames = [
-            DenoiseEngines.savitzky_golay_filter_3d(
-                data_4d[..., frame_index],
-                window_length=window_length,
-                polyorder=polyorder,
-                smoothing_axis=smoothing_axis,
-            )
-            for frame_index in range(frame_count)
-        ]
-        return np.stack(frames, axis=-1).astype(np.float32, copy=False)
 
     @staticmethod
     def wavelet_denoise_3d(
@@ -329,11 +366,22 @@ class DenoiseEngines:
         threshold_rule="universal",
         threshold_mode="soft",
         strength=1.0,
+        max_workers=None,
     ):
         data_4d = np.asanyarray(data_4d, dtype=np.float32)
+        if data_4d.ndim != 4:
+            raise ValueError("Wavelet 4D denoising requires an [X, Y, E, T] array.")
         frame_count = data_4d.shape[-1]
-        frames = [
-            DenoiseEngines.wavelet_denoise_3d(
+        if frame_count == 0:
+            return data_4d.copy()
+
+        # Each time frame is independent.  Keep the pool deliberately small:
+        # wavelet reconstruction uses several frame-sized temporaries, so an
+        # unbounded CPU-count pool can make a low-memory machine slower.
+        workers = max(1, min(int(max_workers or (os.cpu_count() or 1)), frame_count, 4))
+
+        def denoise_frame(frame_index):
+            return DenoiseEngines.wavelet_denoise_3d(
                 data_4d[..., frame_index],
                 wavelet=wavelet,
                 level=level,
@@ -341,9 +389,17 @@ class DenoiseEngines:
                 threshold_mode=threshold_mode,
                 strength=strength,
             )
-            for frame_index in range(frame_count)
-        ]
-        return np.stack(frames, axis=-1).astype(np.float32, copy=False)
+
+        output = np.empty(data_4d.shape, dtype=np.float32)
+        if workers == 1:
+            for frame_index in range(frame_count):
+                output[..., frame_index] = denoise_frame(frame_index)
+            return output
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for frame_index, frame in enumerate(executor.map(denoise_frame, range(frame_count))):
+                output[..., frame_index] = frame
+        return output
 
     @staticmethod
     def kalman_filter_4d(data_4d):

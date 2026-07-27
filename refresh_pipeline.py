@@ -14,6 +14,8 @@ class RenderQuality(Enum):
 
 class RefreshCause(Enum):
     DATA_SOURCE = auto()
+    DATA_SCOPE = auto()
+    DENOISE = auto()
     ANALYSIS = auto()
     ROTATION = auto()
     TRANSFER_FUNCTION = auto()

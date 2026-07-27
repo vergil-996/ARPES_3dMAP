@@ -7,7 +7,8 @@ def scroll_content_width(scroll, minimum, maximum, *, gutter=12):
     return bounded_width(available, minimum, maximum)
 
 
-def align_scroll_content(scroll, container, *, center_y_when_short=True):
+def align_scroll_content(scroll, container, *, center_y_when_short=False):
+    """Center control pages horizontally and keep their first section at the top."""
     x = max(0, (int(scroll.width()) - int(container.width())) // 2)
 
     if center_y_when_short and int(container.height()) <= int(scroll.height()):

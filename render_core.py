@@ -13,7 +13,7 @@ class VisualEngine:
     COLORBAR_TITLE = "Intensity"
 
     @staticmethod
-    def _level_info(data, levels_params):
+    def _level_info(data, levels_params, include_zero=False):
         black, gamma, white = levels_params
         source = np.asarray(data)
         if source.size == 0:
@@ -29,6 +29,9 @@ class VisualEngine:
                     d_min, d_max = 0.0, 1.0
                 else:
                     d_min, d_max = float(np.min(finite)), float(np.max(finite))
+        if include_zero:
+            d_min = min(d_min, 0.0)
+            d_max = max(d_max, 0.0)
 
         span = d_max - d_min
         if span <= 0:
@@ -541,6 +544,7 @@ class VolumeRenderSession:
         self._style_signature = None
         self._clip_signature = None
         self._axes_signature = None
+        self._domain_signature = None
         self.rebuild_count = 0
         self.data_update_count = 0
         self.render_count = 0
@@ -571,6 +575,7 @@ class VolumeRenderSession:
         self._style_signature = None
         self._clip_signature = None
         self._axes_signature = None
+        self._domain_signature = None
         if render:
             self.plotter.render()
 
@@ -586,6 +591,9 @@ class VolumeRenderSession:
         cmap="magma",
         quality="exact",
         force_data=False,
+        data_bounds=None,
+        full_shape=None,
+        include_zero=False,
     ):
         source = np.asarray(data, dtype=np.float32)
         if source.ndim != 3:
@@ -598,12 +606,59 @@ class VolumeRenderSession:
             pass
 
         token = self._array_token(source)
-        if not self.active or self.shape != tuple(source.shape):
-            self._build_scene(source, levels_params, opac_mode, cmap)
+        normalized_full_shape = tuple(int(size) for size in (full_shape or source.shape))
+        normalized_bounds = (
+            tuple(int(value) for value in data_bounds)
+            if data_bounds is not None
+            else (
+                0,
+                normalized_full_shape[0] - 1,
+                0,
+                normalized_full_shape[1] - 1,
+                0,
+                normalized_full_shape[2] - 1,
+            )
+        )
+        if len(normalized_bounds) != 6:
+            raise ValueError("Volume data bounds must contain six inclusive indices.")
+        expected_shape = tuple(
+            normalized_bounds[2 * axis + 1] - normalized_bounds[2 * axis] + 1
+            for axis in range(3)
+        )
+        if any(
+            normalized_bounds[2 * axis] < 0
+            or normalized_bounds[2 * axis + 1] < normalized_bounds[2 * axis]
+            or normalized_bounds[2 * axis + 1] >= normalized_full_shape[axis]
+            for axis in range(3)
+        ):
+            raise ValueError(
+                f"Volume data bounds {normalized_bounds} exceed full shape "
+                f"{normalized_full_shape}."
+            )
+        if tuple(source.shape) != expected_shape:
+            raise ValueError(
+                f"Volume data shape {source.shape} does not match data bounds "
+                f"{normalized_bounds}; expected {expected_shape}."
+            )
+        domain_signature = (normalized_full_shape, normalized_bounds)
+        if (
+            not self.active
+            or self.shape != tuple(source.shape)
+            or self._domain_signature != domain_signature
+        ):
+            self._build_scene(
+                source,
+                levels_params,
+                opac_mode,
+                cmap,
+                data_bounds=normalized_bounds,
+                full_shape=normalized_full_shape,
+                include_zero=bool(include_zero),
+            )
         elif force_data or token != self.data_token:
             self._attach_data(source)
 
-        self._update_style(levels_params, opac_mode, cmap)
+        self._update_style(levels_params, opac_mode, cmap, include_zero=bool(include_zero))
         self._update_clipping(clip_ranges)
         self._update_axes(bool(show_axes), core_coords)
         self._set_interactive_quality(quality)
@@ -617,13 +672,44 @@ class VolumeRenderSession:
         self.render_count += 1
         return self.volume
 
-    def _build_scene(self, data, levels_params, opac_mode, cmap):
+    def _build_scene(
+        self,
+        data,
+        levels_params,
+        opac_mode,
+        cmap,
+        *,
+        data_bounds,
+        full_shape,
+        include_zero=False,
+    ):
         self.clear(render=False)
         shape = tuple(int(size) for size in data.shape)
-        spacing = tuple(200.0 / (size - 1) if size > 1 else 1.0 for size in shape)
-        self.grid = pv.ImageData(dimensions=np.asarray(shape), origin=(0, 0, 0), spacing=spacing)
+        spacing = tuple(
+            200.0 / (int(full_shape[axis]) - 1) if int(full_shape[axis]) > 1 else 1.0
+            for axis in range(3)
+        )
+        # Preserve absolute full-domain voxel indices in VTK itself.  Moving
+        # ImageData.origin for every ROI leaves the compact texture zero-based
+        # and has produced stale texture/transform behaviour on some integrated
+        # GPU drivers after a second crop.  A non-zero extent carries the same
+        # compact point count while making the ROI's absolute X/Y/E indices
+        # explicit and keeping the dataset origin stable across scope changes.
+        self.grid = pv.ImageData()
+        self.grid.extent = tuple(int(value) for value in data_bounds)
+        self.grid.origin = (0.0, 0.0, 0.0)
+        self.grid.spacing = spacing
+        if tuple(int(size) for size in self.grid.dimensions) != shape:
+            raise ValueError(
+                f"VTK extent {data_bounds} produced dimensions "
+                f"{self.grid.dimensions}, expected {shape}."
+            )
         self._attach_data(data)
-        self.level_info = VisualEngine._level_info(data, levels_params)
+        self.level_info = VisualEngine._level_info(
+            data,
+            levels_params,
+            include_zero=include_zero,
+        )
         display_cmap = VisualEngine._leveled_cmap(cmap, self.level_info)
         opacity = self._opacity_values(opac_mode, self.level_info)
         self.volume = self.plotter.add_volume(
@@ -642,29 +728,52 @@ class VolumeRenderSession:
         self._style_signature = None
         self._clip_signature = None
         self._axes_signature = None
+        self._domain_signature = (tuple(full_shape), tuple(data_bounds))
         self.rebuild_count += 1
 
     def _attach_data(self, data):
         buffer = np.asfortranarray(np.asarray(data, dtype=np.float32))
         flat = buffer.ravel(order="F")
-        vtk_scalars = numpy_to_vtk(flat, deep=False)
-        vtk_scalars.SetName("values")
-        self.grid.GetPointData().SetScalars(vtk_scalars)
-        vtk_scalars.Modified()
+        if self.vtk_scalars is None:
+            vtk_scalars = numpy_to_vtk(flat, deep=False)
+            vtk_scalars.SetName("values")
+            self.grid.GetPointData().SetScalars(vtk_scalars)
+            self.vtk_scalars = vtk_scalars
+        else:
+            # add_volume keeps a shallow copy of the ImageData and therefore
+            # retains this vtkDataArray object.  Replacing the grid's scalar
+            # object leaves the mapper connected to the old array.  Repoint
+            # the existing shared array instead so an exact same-shape result
+            # immediately invalidates the GPU volume texture.
+            self.vtk_scalars.SetVoidArray(flat, int(flat.size), 1)
+
+        self.vtk_scalars.Modified()
+        self.grid.GetPointData().Modified()
         self.grid.Modified()
+        if self.volume is not None:
+            self.volume.mapper.Modified()
         self.host_buffer = buffer
-        self.vtk_scalars = vtk_scalars
         self.shape = tuple(buffer.shape)
         self.data_token = self._array_token(data)
         self.level_info = None
         self._style_signature = None
         self.data_update_count += 1
 
-    def _update_style(self, levels_params, opac_mode, cmap):
-        signature = (tuple(float(value) for value in levels_params), str(opac_mode), str(cmap), self.data_token)
+    def _update_style(self, levels_params, opac_mode, cmap, *, include_zero=False):
+        signature = (
+            tuple(float(value) for value in levels_params),
+            str(opac_mode),
+            str(cmap),
+            self.data_token,
+            bool(include_zero),
+        )
         if signature == self._style_signature:
             return
-        self.level_info = VisualEngine._level_info(self.host_buffer, levels_params)
+        self.level_info = VisualEngine._level_info(
+            self.host_buffer,
+            levels_params,
+            include_zero=include_zero,
+        )
         display_cmap = VisualEngine._leveled_cmap(cmap, self.level_info)
         colors = display_cmap(np.linspace(0.0, 1.0, 256))
         low = float(self.level_info["black_value"])

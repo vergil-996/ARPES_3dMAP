@@ -19,6 +19,7 @@ class AnalysisPageSpec:
     activation_seq: int = 0
     closeable: bool = True
     source_page_id: Optional[str] = None
+    data_scope_id: str = "full"
 
 
 class ResultPageButton(PageButton):
@@ -42,7 +43,7 @@ class ResultPageButton(PageButton):
         super().__init__(parent)
         self.spec = spec
         self.resize(40, 40)
-        self.setHint(spec.title)
+        self.refresh_hint()
         self.attachment().setSvgSize(20, 20)
         self.attachment().load(SiGlobal.siui.iconpack.get(self.ICON_MAP.get(spec.page_kind, "ic_fluent_document_data_filled")))
         self.colorGroup().assign(SiColor.BUTTON_OFF, "#00FFFFFF")
@@ -52,6 +53,14 @@ class ResultPageButton(PageButton):
 
     def _emit_page_activated(self):
         self.activated_with_id.emit(self.spec.page_id)
+
+    def refresh_hint(self):
+        scope_label = self.spec.params.get(
+            "data_scope_label",
+            "完整数据" if self.spec.data_scope_id == "full" else self.spec.data_scope_id,
+        )
+        title = str(self.spec.title)
+        self.setHint(title if scope_label in title else f"{title} · {scope_label}")
 
     def set_active(self, active: bool):
         self.setChecked(active)
@@ -311,7 +320,7 @@ class ResultWorkspace(QWidget):
         button = self.page_buttons.get(page_id)
         if button is not None:
             button.spec = spec
-            button.setHint(spec.title)
+            button.refresh_hint()
 
     def page_by_id(self, page_id: Optional[str]) -> Optional[AnalysisPageSpec]:
         if page_id is None:

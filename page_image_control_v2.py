@@ -53,7 +53,7 @@ class ContinuousFrameSlider(SiSlider):
 
 class ImageControlPage(QWidget):
     PAGE_MARGIN = 13
-    SECTION_MARGIN = 15
+    SECTION_MARGIN = 10
     SECTION_SPACING = 20
     GROUP_MARGINS = (15, 55, 15, 20)
     GROUP_SPACING = 12

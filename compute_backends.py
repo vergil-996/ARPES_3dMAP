@@ -99,6 +99,29 @@ def _preview_stride(shape, max_voxels=2_500_000):
     return max(1, int(np.ceil((voxel_count / float(max_voxels)) ** (1.0 / len(shape)))))
 
 
+def _embed_compact_volume(volume, scope_bounds=None, full_shape=None):
+    source = np.asarray(volume, dtype=np.float32)
+    if scope_bounds is None or full_shape is None:
+        return source
+    full_spatial_shape = tuple(int(size) for size in tuple(full_shape)[:3])
+    if tuple(source.shape) == full_spatial_shape:
+        return source
+    bounds = tuple(int(value) for value in scope_bounds)
+    if len(bounds) != 6:
+        raise ValueError("Scoped volume bounds must contain six indices.")
+    output = np.zeros(full_spatial_shape, dtype=np.float32)
+    slices = tuple(
+        slice(bounds[2 * axis], bounds[2 * axis + 1] + 1)
+        for axis in range(3)
+    )
+    if tuple(output[slices].shape) != tuple(source.shape):
+        raise ValueError(
+            f"Compact volume shape {source.shape} does not match scoped target {output[slices].shape}."
+        )
+    output[slices] = source
+    return output
+
+
 class ComputeBackend(ABC):
     name = "Unknown"
 
@@ -156,6 +179,14 @@ class CpuComputeBackend(ComputeBackend):
             value = self.second_derivative(**payload)
         elif operation == "preview_downsample":
             value = self.preview_downsample(**payload)
+        elif operation == "denoise_pipeline":
+            from denoise_engines import DenoiseEngines
+
+            value = DenoiseEngines.apply_pipeline(
+                payload["data"],
+                payload.get("methods", ()),
+                max_workers=self.max_workers,
+            )
         else:
             raise ValueError(f"Unsupported CPU compute operation: {operation}")
         return ComputeResult(value=value, backend=self.name)
@@ -170,6 +201,8 @@ class CpuComputeBackend(ComputeBackend):
         angle=0.0,
         preview=False,
         max_voxels=2_500_000,
+        scope_bounds=None,
+        full_shape=None,
     ):
         raw_data = np.asarray(raw_data, dtype=np.float32)
         if source_mode == "time_integral":
@@ -179,6 +212,12 @@ class CpuComputeBackend(ComputeBackend):
             frame_index = int(np.clip(int(frame_index), 0, raw_data.shape[3] - 1))
             volume = raw_data[..., frame_index]
 
+        if abs(float(angle)) >= 1e-6:
+            volume = _embed_compact_volume(
+                volume,
+                scope_bounds=scope_bounds,
+                full_shape=full_shape,
+            )
         if preview:
             volume = self.preview_downsample(volume, max_voxels=max_voxels)
         return self.rotate_volume(volume, angle)
@@ -370,9 +409,68 @@ class CupyComputeBackend(ComputeBackend):
             source = cp.asarray(payload["data"], dtype=cp.float32)
             stride = _preview_stride(source.shape, payload.get("max_voxels", 2_500_000))
             value = self._to_host_fortran(source[tuple(slice(None, None, stride) for _ in source.shape)])
+        elif operation == "denoise_pipeline":
+            value = self.denoise_pipeline(
+                payload["data"],
+                payload.get("methods", ()),
+            )
         else:
             raise ValueError(f"Unsupported CUDA compute operation: {operation}")
         return ComputeResult(value=value, backend=self.name, metadata={"memory_budget": self.memory_budget})
+
+    def denoise_pipeline(self, data, methods):
+        """Run the exact S-G pipeline on CUDA when CuPy provides it.
+
+        PyWavelets has no compatible CuPy implementation, so mixed or wavelet
+        pipelines deliberately raise here and are retried once by the existing
+        CPU fallback path.
+        """
+        from denoise_engines import DenoiseEngines
+
+        active_methods = []
+        for method_spec in methods:
+            method_name, params = DenoiseEngines._parse_method_spec(method_spec)
+            if method_name in (None, "None"):
+                continue
+            if not DenoiseEngines._is_savgol_method(method_name):
+                raise RuntimeError(
+                    "The selected denoise pipeline is not available on CUDA; using the CPU path."
+                )
+            active_methods.append((method_name, params))
+
+        try:
+            from cupyx.scipy import signal as cupy_signal
+        except Exception as exc:
+            raise RuntimeError("CuPy Savitzky-Golay support is unavailable.") from exc
+        if not hasattr(cupy_signal, "savgol_filter"):
+            raise RuntimeError("This CuPy version does not provide savgol_filter.")
+
+        source = np.asarray(data, dtype=np.float32)
+        working_bytes = int(source.nbytes) * 3
+        if self.memory_budget and working_bytes > self.memory_budget:
+            raise MemoryError(
+                f"The denoise pipeline needs about {working_bytes / 1024 ** 3:.2f} GiB of CUDA working memory."
+            )
+
+        device_data = self._cp.asarray(source, dtype=self._cp.float32)
+        for _method_name, params in active_methods:
+            axis, window_length, polyorder = DenoiseEngines._validated_savgol_params(
+                device_data.shape,
+                params.get("window_length", DenoiseEngines.DEFAULT_SG_PARAMS["window_length"]),
+                params.get("polyorder", DenoiseEngines.DEFAULT_SG_PARAMS["polyorder"]),
+                params.get("smoothing_axis", DenoiseEngines.DEFAULT_SG_PARAMS["smoothing_axis"]),
+            )
+            device_data = cupy_signal.savgol_filter(
+                device_data,
+                window_length=window_length,
+                polyorder=polyorder,
+                axis=axis,
+                mode="interp",
+            ).astype(self._cp.float32, copy=False)
+        # The shared 4D source is consumed in C order.  Avoid the F-order host
+        # conversion used by VTK volume jobs, which would otherwise be copied
+        # back to C order immediately when the global result is committed.
+        return np.ascontiguousarray(self._cp.asnumpy(device_data), dtype=np.float32)
 
     def prepare_volume(
         self,
@@ -384,10 +482,17 @@ class CupyComputeBackend(ComputeBackend):
         angle=0.0,
         preview=False,
         max_voxels=2_500_000,
+        scope_bounds=None,
+        full_shape=None,
     ):
         cp = self._cp
         raw_data = np.asarray(raw_data, dtype=np.float32)
-        volume_bytes = int(np.prod(raw_data.shape[:3], dtype=np.int64) * np.dtype(np.float32).itemsize)
+        target_shape = (
+            tuple(int(size) for size in tuple(full_shape)[:3])
+            if scope_bounds is not None and full_shape is not None and abs(float(angle)) >= 1e-6
+            else tuple(int(size) for size in raw_data.shape[:3])
+        )
+        volume_bytes = int(np.prod(target_shape, dtype=np.int64) * np.dtype(np.float32).itemsize)
         working_multiplier = 3 if abs(float(angle)) >= 1e-6 else 2
         if self.memory_budget and volume_bytes * working_multiplier > self.memory_budget:
             raise MemoryError(
@@ -406,6 +511,15 @@ class CupyComputeBackend(ComputeBackend):
         else:
             frame_index = int(np.clip(int(frame_index), 0, raw_data.shape[3] - 1))
             volume = cp.asarray(raw_data[..., frame_index], dtype=cp.float32)
+        if scope_bounds is not None and full_shape is not None and abs(float(angle)) >= 1e-6:
+            bounds = tuple(int(value) for value in scope_bounds)
+            full_volume = cp.zeros(target_shape, dtype=cp.float32, order="F")
+            slices = tuple(
+                slice(bounds[2 * axis], bounds[2 * axis + 1] + 1)
+                for axis in range(3)
+            )
+            full_volume[slices] = volume
+            volume = full_volume
         if preview:
             stride = _preview_stride(volume.shape, max_voxels)
             volume = volume[::stride, ::stride, ::stride]
