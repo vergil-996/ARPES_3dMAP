@@ -106,27 +106,6 @@ class VisualEngine:
         return f"{float(value):.4g}"
 
     @staticmethod
-    def apply_levels(data, black, gamma, white):
-        """
-        线性色阶处理
-        black, gamma, white 均为 0-100 的整数
-        """
-        level_info = VisualEngine._level_info(data, (black, gamma, white))
-        img = (data - level_info["data_min"]) / level_info["span"]
-
-        # 黑白场拉伸
-        b = level_info["black_pos"]
-        w = level_info["white_pos"]
-        img = (img - b) / (w - b)
-        img = np.clip(img, 0, 1)
-
-        # Gamma 矫正 (灰场)
-        # 50 对应 gamma=1.0, 越小图像越亮, 越大图像越暗
-        img = np.power(img, level_info["gamma_power"])
-
-        return img
-
-    @staticmethod
     def _plotter_text_color(plotter):
         try:
             bg = plotter.background_color
@@ -476,96 +455,6 @@ class VisualEngine:
             return False
 
     @staticmethod
-    def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None,
-                  cmap="magma"):
-        try:
-            b, g, w = levels_params
-
-            # 1. 记录相机位置
-            try:
-                saved_cam = plotter.camera_position
-            except:
-                saved_cam = None
-
-            # 2. 应用色阶
-            level_info = VisualEngine._level_info(data, (b, g, w))
-            display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
-
-            # 3. 设置透明度
-            opac_dict = {"线性": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                "对数": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
-                "幂函数": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
-                "sigmoid": [0.006, 0.018, 0.049, 0.118, 0.268, 0.500, 0.732, 0.882, 0.951, 0.982, 0.994]}
-            selected_opac = VisualEngine._mapped_opacity(
-                opac_dict.get(opac_mode, opac_dict["线性"]),
-                level_info,
-            )
-
-            # --- 【核心修改】：重新定义数据的空间几何 ---
-            sh = data.shape
-            target_size = 200.0
-
-            # 计算步长，强制全轴填满 200 单位
-            dx = target_size / (sh[0] - 1) if sh[0] > 1 else 1.0
-            dy = target_size / (sh[1] - 1) if sh[1] > 1 else 1.0
-            dz = target_size / (sh[2] - 1) if sh[2] > 1 else 1.0
-
-            # 创建网格并强制赋予 0-200 的坐标系
-            if hasattr(pv, 'ImageData'):
-                grid = pv.ImageData()
-            else:
-                grid = pv.UniformGrid()
-
-            grid.dimensions = np.array(sh)
-            grid.origin = (0, 0, 0)
-            grid.spacing = (dx, dy, dz)
-            grid.point_data["values"] = np.asarray(data, dtype=np.float32).flatten(order="F")
-
-            # 4. 添加体渲染
-            VisualEngine.clear_3d_colorbar(plotter)
-            vol = plotter.add_volume(
-                grid,
-                cmap=display_cmap,
-                opacity=selected_opac,
-                clim=[level_info["black_value"], level_info["white_value"]],
-                show_scalar_bar=True,
-                scalar_bar_args=VisualEngine._3d_colorbar_args(plotter),
-                name="main_vol",
-                render=False,
-            )
-            VisualEngine._apply_3d_colorbar_ticks(plotter, level_info)
-
-            # 5. 处理切片限制 (Clipping Planes)
-            # 注意：此处的 clip_ranges 输入必须已经是 0-200 的值
-            if clip_ranges:
-                r = clip_ranges
-                planes = vtk.vtkPlaneCollection()
-                specs = [((r[0], 0, 0), (1, 0, 0)), ((r[1], 0, 0), (-1, 0, 0)), ((0, r[2], 0), (0, 1, 0)),
-                         ((0, r[3], 0), (0, -1, 0)), ((0, 0, r[4]), (0, 0, 1)), ((0, 0, r[5]), (0, 0, -1))]
-                for o, n in specs:
-                    p = vtk.vtkPlane()
-                    p.SetOrigin(o)
-                    p.SetNormal(n)
-                    planes.AddItem(p)
-                vol.mapper.SetClippingPlanes(planes)
-            else:
-                vol.mapper.RemoveAllClippingPlanes()
-
-            # 6. 处理标尺 (强制 0-200 逻辑)
-            if show_axes and core_coords:
-                VisualEngine.render_axes(plotter, grid.dimensions, core_coords)
-            else:
-                plotter.remove_bounds_axes()
-
-            # 7. 恢复相机并渲染
-            if saved_cam:
-                plotter.camera_position = saved_cam
-            plotter.render()
-
-        except Exception as e:
-            print(f"3D Render Error: {e}")
-
-    @staticmethod
     def render_axes(plotter, data_shape, coords):
         try:
             # 获取物理范围用于 Title 显示
@@ -757,28 +646,6 @@ class VisualEngine:
 
         except Exception as e:
             print(f"2D Render Error: {e}")
-
-    @staticmethod
-    def render_integral_dynamics(ax, canvas, x_data, y_data):
-        """绘制 Page3 需要的积分动力学曲线"""
-        try:
-            VisualEngine.clear_2d_colorbar(ax)
-            ax.clear()
-            ax.plot(x_data, y_data, color='#FF69B4', linewidth=2, marker='o', markersize=4)
-
-            text_color = 'black' if ax.get_facecolor() == (1, 1, 1, 1) else 'white'
-            ax.set_title("Integrated Intensity Dynamics", color=text_color, fontsize=12)
-            ax.set_xlabel("Delay", color=text_color)
-            ax.set_ylabel("Summed Intensity", color=text_color)
-            ax.tick_params(colors=text_color)
-
-            for spine in ax.spines.values():
-                spine.set_color('#555555')
-
-            canvas.draw()
-        except Exception as e:
-            print(f"Integral Plot Error: {e}")
-
 
 class VolumeRenderSession:
     """Persistent VTK volume scene backed by retained NumPy buffers."""

@@ -346,21 +346,6 @@ class BlankControlPage(QWidget):
         spin_box.setValue(value)
         return spin_box.value()
 
-    def reset_savgol_defaults(self):
-        self.sg_window_box.setMaximum(9999)
-        self.sg_window_box.setValue(self.DEFAULT_SG_PARAMS["window_length"])
-        self.sg_polyorder_box.setMaximum(
-            min(self.MAX_SG_POLYORDER, self.DEFAULT_SG_PARAMS["window_length"] - 1)
-        )
-        self.sg_polyorder_box.setValue(self.DEFAULT_SG_PARAMS["polyorder"])
-        self.sg_axis_combo.setCurrentIndex(
-            self._find_combo_index(
-                self.sg_axis_combo,
-                self.SG_AXIS_KEY_TO_LABEL[self.DEFAULT_SG_PARAMS["smoothing_axis"]]
-            )
-        )
-        self._sync_savgol_constraints()
-
     def _sync_savgol_constraints(self):
         window_length = self._commit_spinbox_value(
             self.sg_window_box,

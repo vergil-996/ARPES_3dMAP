@@ -273,12 +273,6 @@ class ImageControlPage(QWidget):
         self.slider_time.valueChanged.connect(self.input_time.setValue)
         self.slider_time.rangeChanged.connect(self.input_time.setRange)
         self.input_time.valueChanged.connect(self.slider_time.setValue)
-        self.btn_load.clicked.connect(self.request_load)
-        self.btn_cut.clicked.connect(self.request_cut)
-        self.btn_export.clicked.connect(self.request_export)
-        self.btn_save.clicked.connect(self.request_screenshot)
-        self.btn_back.clicked.connect(self.request_back)
-        self.edit_rotation.editingFinished.connect(self.request_apply_rotation)
 
     def get_slice_values(self):
         try:
@@ -404,20 +398,3 @@ class ImageControlPage(QWidget):
         finally:
             del blockers
 
-    def request_load(self):
-        pass
-
-    def request_cut(self):
-        pass
-
-    def request_export(self):
-        pass
-
-    def request_screenshot(self):
-        pass
-
-    def request_back(self):
-        pass
-
-    def request_apply_rotation(self):
-        pass

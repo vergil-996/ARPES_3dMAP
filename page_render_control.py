@@ -369,9 +369,6 @@ class RenderControlPage(QWidget):
             self.combo_n3.currentText()
         ]
 
-    def get_backend_mode(self):
-        return self.combo_backend.currentText()
-
     def set_backend_mode(self, mode):
         index = self._combo_index_for_text(self.combo_backend, mode)
         if index >= 0:

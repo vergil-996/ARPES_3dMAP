@@ -13,7 +13,6 @@ class _NonModalPopup(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
-        self._controls = []
 
     def closeEvent(self, event):
         event.ignore()
@@ -93,7 +92,6 @@ class DenoiseSettingsPopup(_NonModalPopup):
 
         group.addWidget(card)
         self._apply_group_style(group)
-        self._controls.extend([self.sg_window_box, self.sg_polyorder_box, self.sg_axis_combo])
         return group
 
     def _create_wavelet_group(self):
@@ -158,11 +156,6 @@ class DenoiseSettingsPopup(_NonModalPopup):
 
         group.addWidget(card)
         self._apply_group_style(group)
-        self._controls.extend([
-            self.wavelet_combo, self.wavelet_level_box,
-            self.wavelet_threshold_rule_combo, self.wavelet_threshold_mode_combo,
-            self.wavelet_strength_box,
-        ])
         return group
 
     def showEvent(self, event):
@@ -316,7 +309,6 @@ class WaterfallSettingsPopup(_NonModalPopup):
 
         group.addWidget(card)
         self._apply_group_style(group)
-        self._controls.append(self.waterfall_step_box)
         root.addWidget(group)
         root.addStretch()
 

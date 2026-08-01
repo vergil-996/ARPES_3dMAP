@@ -2229,14 +2229,6 @@ class My3DAnalyzer(QWidget):
         self._rotation_cache_store(key, rotated)
         return rotated
 
-    def _apply_denoise_methods_to_raw(self, raw_data, methods):
-        if not methods:
-            return np.asarray(raw_data, dtype=np.float32)
-
-        from denoise_engines import DenoiseEngines
-
-        return DenoiseEngines.apply_pipeline(raw_data, methods)
-
     def _get_display_state_for_spec(self, spec):
         if self.original_raw_data is None or self.original_coords is None:
             return None, None
@@ -2406,19 +2398,6 @@ class My3DAnalyzer(QWidget):
             self.page_render.s_gamma.value(),
             self.page_render.s_up.value(),
         )
-
-    def _mirror_logical_bounds_for_display(self, bounds, shape):
-        if bounds is None:
-            return None
-
-        mirrored = list(bounds)
-        axis_idx = 2
-        axis_max = max(int(shape[axis_idx]) - 1, 0)
-        low = float(bounds[axis_idx * 2])
-        up = float(bounds[axis_idx * 2 + 1])
-        mirrored[axis_idx * 2] = axis_max - up
-        mirrored[axis_idx * 2 + 1] = axis_max - low
-        return mirrored
 
     def _map_visual_flip_logical_bounds(self, bounds, shape):
         # The 3D E reversal is camera-driven.  Camera.Elevation(180) already
@@ -4774,7 +4753,7 @@ class My3DAnalyzer(QWidget):
                 self._show_message("MAT 转换失败", f"无法将 .mat 文件转换为 .npz：\n{exc}", QMessageBox.Critical)
                 return
 
-        success, info = self.core.load_npz(target_path, is_flip=False)
+        success, info = self.core.load_npz(target_path)
         if not success:
             self._show_message("数据加载失败", f"无法加载文件：\n{info}", QMessageBox.Critical)
             return
