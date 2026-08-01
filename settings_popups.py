@@ -4,8 +4,7 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.container import SiTriSectionPanelCard
 from siui.components.editbox import SiDoubleSpinBox, SiSpinBox
 from siui.components.titled_widget_group import SiTitledWidgetGroup
-from siui.components.widgets import SiLabel
-from siui.core import SiColor
+from control_layout_utils import apply_label_color
 
 
 class _NonModalPopup(QWidget):
@@ -91,7 +90,7 @@ class DenoiseSettingsPopup(_NonModalPopup):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         return group
 
     def _create_wavelet_group(self):
@@ -155,7 +154,7 @@ class DenoiseSettingsPopup(_NonModalPopup):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         return group
 
     def showEvent(self, event):
@@ -222,15 +221,6 @@ class DenoiseSettingsPopup(_NonModalPopup):
             if combo_box.itemText(index) == text:
                 return index
         return -1
-
-    @staticmethod
-    def _apply_group_style(group):
-        for child in group.findChildren(SiLabel):
-            try:
-                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
-                child.reloadStyleSheet()
-            except Exception:
-                pass
 
     def _create_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
         spin_box = SiSpinBox(parent)
@@ -308,7 +298,7 @@ class WaterfallSettingsPopup(_NonModalPopup):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         root.addWidget(group)
         root.addStretch()
 
@@ -326,15 +316,6 @@ class WaterfallSettingsPopup(_NonModalPopup):
         self._blank._sync_waterfall_constraints()
         self._blank._waterfall_step_custom = True
         self._blank.waterfall_step_box.editingFinished.emit()
-
-    @staticmethod
-    def _apply_group_style(group):
-        for child in group.findChildren(SiLabel):
-            try:
-                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
-                child.reloadStyleSheet()
-            except Exception:
-                pass
 
     def _create_double_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
         spin_box = SiDoubleSpinBox(parent)

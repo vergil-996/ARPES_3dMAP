@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from control_layout_utils import align_scroll_content
+from control_layout_utils import align_scroll_content, combo_index_for_text, sync_slider_visual
 from qt_bootstrap import configure_qt_high_dpi
 
 
@@ -43,7 +43,89 @@ class _GeometryStub:
         self.updated = True
 
 
+class _ComboStub:
+    def __init__(self, items):
+        self.items = list(items)
+
+    def count(self):
+        return len(self.items)
+
+    def itemText(self, index):
+        return self.items[index]
+
+
+class _ProgressAnimation:
+    def __init__(self):
+        self.current = None
+        self.end = None
+        self.synced = False
+
+    def fromProperty(self):
+        self.synced = True
+
+    def setCurrentValue(self, value):
+        self.current = value
+
+    def setEndValue(self, value):
+        self.end = value
+
+
+class _SliderStub:
+    class Property:
+        TrackProgress = "track-progress"
+
+    def __init__(self, minimum, maximum, value):
+        self._minimum = minimum
+        self._maximum = maximum
+        self._value = value
+        self.progress_ani = _ProgressAnimation()
+        self.properties = {}
+        self.tooltip_flash = None
+        self.updated = False
+
+    def minimum(self):
+        return self._minimum
+
+    def maximum(self):
+        return self._maximum
+
+    def value(self):
+        return self._value
+
+    def setProperty(self, key, value):
+        self.properties[key] = value
+
+    def _updateToolTip(self, *, flash):
+        self.tooltip_flash = flash
+
+    def update(self):
+        self.updated = True
+
+
 class ControlLayoutUtilsTests(unittest.TestCase):
+    def test_combo_lookup_supports_explicit_legacy_aliases(self):
+        combo = _ComboStub(["切片内强度积分", "能级态密度"])
+
+        index = combo_index_for_text(
+            combo,
+            "切片态密度",
+            aliases={"切片态密度": "切片内强度积分"},
+        )
+
+        self.assertEqual(index, 0)
+
+    def test_slider_visual_sync_updates_every_optional_surface(self):
+        slider = _SliderStub(10, 30, 15)
+
+        sync_slider_visual(slider)
+
+        self.assertEqual(slider.properties[slider.Property.TrackProgress], 0.25)
+        self.assertTrue(slider.progress_ani.synced)
+        self.assertEqual(slider.progress_ani.current, 0.25)
+        self.assertEqual(slider.progress_ani.end, 0.25)
+        self.assertFalse(slider.tooltip_flash)
+        self.assertTrue(slider.updated)
+
     def test_short_content_is_top_aligned_by_default(self):
         scroll = _GeometryStub(500, 700)
         scroll.widget_scroll_animation = _Animation()

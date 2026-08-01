@@ -7,7 +7,15 @@ from siui.components.slider_ import SiSlider
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiColor
 
-from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
+from control_layout_utils import (
+    align_scroll_content,
+    apply_label_color,
+    bounded_width,
+    centered_widget_row,
+    combo_index_for_text,
+    scroll_content_width,
+    sync_slider_visual,
+)
 
 
 class DataProcessPage(QWidget):
@@ -35,6 +43,8 @@ class DataProcessPage(QWidget):
     MAX_COMBO_WIDTH = 230
     MIN_BUTTON_WIDTH = 92
     MAX_BUTTON_WIDTH = 112
+    COMBO_TEXT_ALIASES = {"切片态密度": "切片内强度积分"}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.locked_half_width = 0
@@ -48,14 +58,6 @@ class DataProcessPage(QWidget):
         self._adaptive_combo_controls = []
         self._adaptive_buttons = []
         self.init_ui()
-
-    def _apply_style(self, grp):
-        for child in grp.findChildren(SiLabel):
-            try:
-                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
-                child.reloadStyleSheet()
-            except Exception:
-                pass
 
     def _create_red_btn(self, text):
         btn = SiPushButton(self)
@@ -105,15 +107,6 @@ class DataProcessPage(QWidget):
         self._adaptive_axis_value_boxes.append(spin_box)
         return spin_box
 
-    def _center_widget(self, widget, max_width=None):
-        if max_width is not None:
-            widget.setMaximumWidth(max_width)
-        row = QHBoxLayout()
-        row.addStretch()
-        row.addWidget(widget)
-        row.addStretch()
-        return row
-
     def _create_labeled_slider_block(self, text, slider, value_box=None):
         container = QWidget(self)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -137,7 +130,7 @@ class DataProcessPage(QWidget):
         return container
 
     def _add_centered_slider_block(self, layout, text, slider, value_box=None):
-        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider, value_box)))
+        layout.addLayout(centered_widget_row(self._create_labeled_slider_block(text, slider, value_box)))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -172,9 +165,9 @@ class DataProcessPage(QWidget):
         self.btn_t_apply = self._create_red_btn("应用")
         self._add_centered_slider_block(v_t, "积分上限", self.s_t_up)
         self._add_centered_slider_block(v_t, "积分下限", self.s_t_low)
-        v_t.addLayout(self._center_widget(self.btn_t_apply, self.BUTTON_WIDTH))
-        self._apply_style(grp_t)
-        self.vbox.addLayout(self._center_widget(grp_t, self.SLIDER_GROUP_WIDTH))
+        v_t.addLayout(centered_widget_row(self.btn_t_apply, self.BUTTON_WIDTH))
+        apply_label_color(grp_t, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_t, self.SLIDER_GROUP_WIDTH))
 
         grp_ax = SiTitledWidgetGroup(self)
         grp_ax.setFixedWidth(self.SLIDER_GROUP_WIDTH)
@@ -210,13 +203,13 @@ class DataProcessPage(QWidget):
 
         self.btn_ax_apply = self._create_red_btn("应用")
 
-        v_ax.addLayout(self._center_widget(self.combo_ax, self.COMBO_WIDTH))
+        v_ax.addLayout(centered_widget_row(self.combo_ax, self.COMBO_WIDTH))
         self._add_centered_slider_block(v_ax, "积分上限", self.s_ax_up, self.input_ax_up)
         self._add_centered_slider_block(v_ax, "积分下限", self.s_ax_low, self.input_ax_low)
         self._add_centered_slider_block(v_ax, "中心位置", self.s_ax_mid, self.input_ax_mid)
-        v_ax.addLayout(self._center_widget(self.btn_ax_apply, self.BUTTON_WIDTH))
-        self._apply_style(grp_ax)
-        self.vbox.addLayout(self._center_widget(grp_ax, self.SLIDER_GROUP_WIDTH))
+        v_ax.addLayout(centered_widget_row(self.btn_ax_apply, self.BUTTON_WIDTH))
+        apply_label_color(grp_ax, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_ax, self.SLIDER_GROUP_WIDTH))
 
         grp_other = SiTitledWidgetGroup(self)
         grp_other.setFixedWidth(self.SLIDER_GROUP_WIDTH)
@@ -242,12 +235,12 @@ class DataProcessPage(QWidget):
         self.btn_other_apply = self._create_red_btn("应用")
         self.btn_other_save = self._create_red_btn("保存")
 
-        v_other.addLayout(self._center_widget(self.combo_other, self.COMBO_WIDTH))
-        v_other.addLayout(self._center_widget(self.btn_other_apply, self.BUTTON_WIDTH))
-        v_other.addLayout(self._center_widget(self.btn_other_save, self.BUTTON_WIDTH))
+        v_other.addLayout(centered_widget_row(self.combo_other, self.COMBO_WIDTH))
+        v_other.addLayout(centered_widget_row(self.btn_other_apply, self.BUTTON_WIDTH))
+        v_other.addLayout(centered_widget_row(self.btn_other_save, self.BUTTON_WIDTH))
 
-        self._apply_style(grp_other)
-        self.vbox.addLayout(self._center_widget(grp_other, self.SLIDER_GROUP_WIDTH))
+        apply_label_color(grp_other, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_other, self.SLIDER_GROUP_WIDTH))
 
         self.vbox.addStretch()
         self.container.adjustSize()
@@ -405,48 +398,6 @@ class DataProcessPage(QWidget):
         self._is_updating = False
         self.locked_half_width = min(new_mid - actual_low, actual_up - new_mid)
 
-    @staticmethod
-    def _combo_index_for_text(combo_box, text):
-        if text == "切片态密度":
-            text = "切片内强度积分"
-        for index in range(combo_box.count()):
-            if combo_box.itemText(index) == text:
-                return index
-        return -1
-
-    @staticmethod
-    def _sync_slider_visual(slider):
-        minimum = int(slider.minimum())
-        maximum = int(slider.maximum())
-        value = int(slider.value())
-        if maximum == minimum:
-            progress = 0.0
-        else:
-            progress = (value - minimum) / (maximum - minimum)
-
-        try:
-            slider.setProperty(slider.Property.TrackProgress, progress)
-        except Exception:
-            pass
-
-        progress_ani = getattr(slider, "progress_ani", None)
-        if progress_ani is not None:
-            try:
-                progress_ani.fromProperty()
-                progress_ani.setCurrentValue(progress)
-                progress_ani.setEndValue(progress)
-            except Exception:
-                pass
-
-        update_tooltip = getattr(slider, "_updateToolTip", None)
-        if callable(update_tooltip):
-            try:
-                update_tooltip(flash=False)
-            except Exception:
-                pass
-
-        slider.update()
-
     def export_state(self):
         return {
             "s_t_low": {
@@ -529,12 +480,16 @@ class DataProcessPage(QWidget):
                     value = int(slider_state["value"])
                     value = max(int(slider.minimum()), min(int(slider.maximum()), value))
                     slider.setValue(value)
-                self._sync_slider_visual(slider)
+                sync_slider_visual(slider)
 
             combo_ax_state = state.get("combo_ax") or {}
             combo_ax_index = combo_ax_state.get("index")
             if combo_ax_index is None and "text" in combo_ax_state:
-                combo_ax_index = self._combo_index_for_text(self.combo_ax, combo_ax_state["text"])
+                combo_ax_index = combo_index_for_text(
+                    self.combo_ax,
+                    combo_ax_state["text"],
+                    aliases=self.COMBO_TEXT_ALIASES,
+                )
             if combo_ax_index is not None and 0 <= int(combo_ax_index) < self.combo_ax.count():
                 self.combo_ax.setCurrentIndex(int(combo_ax_index))
 
@@ -562,12 +517,16 @@ class DataProcessPage(QWidget):
                     value_box.setValue(box_value)
                 elif "value" in slider_state:
                     value_box.setValue(float(slider.value()))
-                self._sync_slider_visual(slider)
+                sync_slider_visual(slider)
 
             combo_other_state = state.get("combo_other") or {}
             combo_other_index = combo_other_state.get("index")
             if combo_other_index is None and "text" in combo_other_state:
-                combo_other_index = self._combo_index_for_text(self.combo_other, combo_other_state["text"])
+                combo_other_index = combo_index_for_text(
+                    self.combo_other,
+                    combo_other_state["text"],
+                    aliases=self.COMBO_TEXT_ALIASES,
+                )
             if combo_other_index is not None and 0 <= int(combo_other_index) < self.combo_other.count():
                 self.combo_other.setCurrentIndex(int(combo_other_index))
 

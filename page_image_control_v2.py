@@ -8,7 +8,13 @@ from siui.components.editbox import SiDoubleSpinBox, SiLabeledLineEdit
 from siui.components.button import SiSwitchRefactor
 from siui.core import SiColor
 
-from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
+from control_layout_utils import (
+    align_scroll_content,
+    apply_label_color,
+    bounded_width,
+    scroll_content_width,
+    sync_slider_visual,
+)
 
 
 class ContinuousFrameSlider(SiSlider):
@@ -74,11 +80,6 @@ class ImageControlPage(QWidget):
         self._slice_edits = []
         self.init_ui()
         self.bind_events()
-
-    def _apply_group_style(self, grp):
-        for child in grp.findChildren(SiLabel):
-            child.colorGroup().assign(SiColor.TEXT_A, "#FF69B4")
-            child.reloadStyleSheet()
 
     def _create_slider(self):
         slider = ContinuousFrameSlider(self)
@@ -156,7 +157,7 @@ class ImageControlPage(QWidget):
         time_row.addWidget(self.slider_time)
         time_row.addWidget(self.input_time)
         v_time.addLayout(time_row)
-        self._apply_group_style(grp_time)
+        apply_label_color(grp_time, "#FF69B4", suppress_errors=False)
         self.vbox.addWidget(grp_time)
 
         grp_slice = SiTitledWidgetGroup(self)
@@ -199,7 +200,7 @@ class ImageControlPage(QWidget):
         h_rot.addStretch()
         v_slice.addLayout(h_rot)
 
-        self._apply_group_style(grp_slice)
+        apply_label_color(grp_slice, "#FF69B4", suppress_errors=False)
         self.vbox.addWidget(grp_slice)
 
         h_sw = QHBoxLayout()
@@ -304,39 +305,6 @@ class ImageControlPage(QWidget):
     def set_rotation_angle(self, angle):
         self.edit_rotation.setValue(float(angle))
 
-    @staticmethod
-    def _sync_slider_visual(slider):
-        minimum = int(slider.minimum())
-        maximum = int(slider.maximum())
-        value = int(slider.value())
-        if maximum == minimum:
-            progress = 0.0
-        else:
-            progress = (value - minimum) / (maximum - minimum)
-
-        try:
-            slider.setProperty(slider.Property.TrackProgress, progress)
-        except Exception:
-            pass
-
-        progress_ani = getattr(slider, "progress_ani", None)
-        if progress_ani is not None:
-            try:
-                progress_ani.fromProperty()
-                progress_ani.setCurrentValue(progress)
-                progress_ani.setEndValue(progress)
-            except Exception:
-                pass
-
-        update_tooltip = getattr(slider, "_updateToolTip", None)
-        if callable(update_tooltip):
-            try:
-                update_tooltip(flash=False)
-            except Exception:
-                pass
-
-        slider.update()
-
     def export_state(self):
         return {
             "slider_time": {
@@ -375,7 +343,7 @@ class ImageControlPage(QWidget):
                 value = max(int(self.slider_time.minimum()), min(int(self.slider_time.maximum()), value))
                 self.slider_time.setValue(value)
                 self.input_time.setValue(value)
-            self._sync_slider_visual(self.slider_time)
+            sync_slider_visual(self.slider_time)
 
             slice_values = state.get("slice_values") or {}
             for key, value in slice_values.items():

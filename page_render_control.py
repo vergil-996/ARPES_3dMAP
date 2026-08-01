@@ -7,7 +7,15 @@ from siui.components.slider_ import SiSlider
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.core import SiColor
 
-from control_layout_utils import align_scroll_content, bounded_width, scroll_content_width
+from control_layout_utils import (
+    align_scroll_content,
+    apply_label_color,
+    bounded_width,
+    centered_widget_row,
+    combo_index_for_text,
+    scroll_content_width,
+    sync_slider_visual,
+)
 
 
 class RenderControlPage(QWidget):
@@ -56,14 +64,6 @@ class RenderControlPage(QWidget):
         self._adaptive_buttons = []
         self.init_ui()
 
-    def _apply_style(self, grp):
-        for child in grp.findChildren(SiLabel):
-            try:
-                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
-                child.reloadStyleSheet()
-            except:
-                pass
-
     def _create_red_btn(self, text):
         """统一小尺寸红色按钮"""
         btn = SiPushButton(self)
@@ -97,15 +97,6 @@ class RenderControlPage(QWidget):
         self._adaptive_row_controls.append(combo)
         return combo
 
-    def _center_widget(self, widget, max_width=None):
-        if max_width is not None:
-            widget.setMaximumWidth(max_width)
-        row = QHBoxLayout()
-        row.addStretch()
-        row.addWidget(widget)
-        row.addStretch()
-        return row
-
     def _create_labeled_slider_block(self, text, slider):
         container = QWidget(self)
         container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -121,7 +112,7 @@ class RenderControlPage(QWidget):
         return container
 
     def _add_centered_slider_block(self, layout, text, slider):
-        layout.addLayout(self._center_widget(self._create_labeled_slider_block(text, slider)))
+        layout.addLayout(centered_widget_row(self._create_labeled_slider_block(text, slider)))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -165,8 +156,8 @@ class RenderControlPage(QWidget):
         h_cmap.addStretch()
         v_cmap.addLayout(h_cmap)
 
-        self._apply_style(grp_cmap)
-        self.vbox.addLayout(self._center_widget(grp_cmap, self.SLIDER_GROUP_WIDTH))
+        apply_label_color(grp_cmap, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_cmap, self.SLIDER_GROUP_WIDTH))
 
         #  色阶调整
         grp_exp = SiTitledWidgetGroup(self)
@@ -204,11 +195,11 @@ class RenderControlPage(QWidget):
 
         self.btn_apply_map = self._create_red_btn("应用设置")
 
-        v_exp.addLayout(self._center_widget(self.combo_map, self.CONTROL_ROW_WIDTH))
-        v_exp.addLayout(self._center_widget(self.btn_apply_map, self.BUTTON_WIDTH))
+        v_exp.addLayout(centered_widget_row(self.combo_map, self.CONTROL_ROW_WIDTH))
+        v_exp.addLayout(centered_widget_row(self.btn_apply_map, self.BUTTON_WIDTH))
 
-        self._apply_style(grp_exp)
-        self.vbox.addLayout(self._center_widget(grp_exp, self.SLIDER_GROUP_WIDTH))
+        apply_label_color(grp_exp, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_exp, self.SLIDER_GROUP_WIDTH))
 
         # 去噪处理
         grp_noise = SiTitledWidgetGroup(self)
@@ -230,13 +221,13 @@ class RenderControlPage(QWidget):
         self.btn_apply_noise = self._create_red_btn("应用设置")
 
 
-        v_noise.addLayout(self._center_widget(self.combo_n1, self.CONTROL_ROW_WIDTH))
-        v_noise.addLayout(self._center_widget(self.combo_n2, self.CONTROL_ROW_WIDTH))
-        v_noise.addLayout(self._center_widget(self.combo_n3, self.CONTROL_ROW_WIDTH))
-        v_noise.addLayout(self._center_widget(self.btn_apply_noise, self.BUTTON_WIDTH))
+        v_noise.addLayout(centered_widget_row(self.combo_n1, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(centered_widget_row(self.combo_n2, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(centered_widget_row(self.combo_n3, self.CONTROL_ROW_WIDTH))
+        v_noise.addLayout(centered_widget_row(self.btn_apply_noise, self.BUTTON_WIDTH))
 
-        self._apply_style(grp_noise)
-        self.vbox.addLayout(self._center_widget(grp_noise, self.SLIDER_GROUP_WIDTH))
+        apply_label_color(grp_noise, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_noise, self.SLIDER_GROUP_WIDTH))
 
         # 全局计算后端（不随分析结果页保存）
         grp_backend = SiTitledWidgetGroup(self)
@@ -255,10 +246,10 @@ class RenderControlPage(QWidget):
         self.combo_backend.setEditable(False)
         self.combo_backend.addItems(["Auto", "CPU", "NVIDIA GPU"])
         self._adaptive_row_controls.append(self.combo_backend)
-        v_backend.addLayout(self._center_widget(self.combo_backend, self.CONTROL_ROW_WIDTH))
+        v_backend.addLayout(centered_widget_row(self.combo_backend, self.CONTROL_ROW_WIDTH))
 
-        self._apply_style(grp_backend)
-        self.vbox.addLayout(self._center_widget(grp_backend, self.SLIDER_GROUP_WIDTH))
+        apply_label_color(grp_backend, "#FFFFFF")
+        self.vbox.addLayout(centered_widget_row(grp_backend, self.SLIDER_GROUP_WIDTH))
 
         self.vbox.addStretch()
         self.container.adjustSize()
@@ -330,12 +321,12 @@ class RenderControlPage(QWidget):
         ]
 
     def set_backend_mode(self, mode):
-        index = self._combo_index_for_text(self.combo_backend, mode)
+        index = combo_index_for_text(self.combo_backend, mode)
         if index >= 0:
             self.combo_backend.setCurrentIndex(index)
 
     def set_nvidia_backend_available(self, available):
-        index = self._combo_index_for_text(self.combo_backend, "NVIDIA GPU")
+        index = combo_index_for_text(self.combo_backend, "NVIDIA GPU")
         if index < 0:
             return
         item = self.combo_backend.model().item(index)
@@ -346,46 +337,6 @@ class RenderControlPage(QWidget):
             None if available else "当前环境未安装或无法使用 CuPy/CUDA，Auto 将使用 CPU。",
             3,
         )
-    @staticmethod
-    def _combo_index_for_text(combo_box, text):
-        for index in range(combo_box.count()):
-            if combo_box.itemText(index) == text:
-                return index
-        return -1
-
-    @staticmethod
-    def _sync_slider_visual(slider):
-        minimum = int(slider.minimum())
-        maximum = int(slider.maximum())
-        value = int(slider.value())
-        if maximum == minimum:
-            progress = 0.0
-        else:
-            progress = (value - minimum) / (maximum - minimum)
-
-        try:
-            slider.setProperty(slider.Property.TrackProgress, progress)
-        except Exception:
-            pass
-
-        progress_ani = getattr(slider, "progress_ani", None)
-        if progress_ani is not None:
-            try:
-                progress_ani.fromProperty()
-                progress_ani.setCurrentValue(progress)
-                progress_ani.setEndValue(progress)
-            except Exception:
-                pass
-
-        update_tooltip = getattr(slider, "_updateToolTip", None)
-        if callable(update_tooltip):
-            try:
-                update_tooltip(flash=False)
-            except Exception:
-                pass
-
-        slider.update()
-
     def export_state(self):
         return {
             "combo_cmap": self.combo_cmap.currentText(),
@@ -435,7 +386,7 @@ class RenderControlPage(QWidget):
                     value = int(slider_state["value"])
                     value = max(int(slider.minimum()), min(int(slider.maximum()), value))
                     slider.setValue(value)
-                self._sync_slider_visual(slider)
+                sync_slider_visual(slider)
 
             for combo_name, combo in (
                 ("combo_cmap", self.combo_cmap),
@@ -446,7 +397,7 @@ class RenderControlPage(QWidget):
             ):
                 if combo_name not in state:
                     continue
-                index = self._combo_index_for_text(combo, state[combo_name])
+                index = combo_index_for_text(combo, state[combo_name])
                 if index >= 0:
                     combo.setCurrentIndex(index)
         finally:

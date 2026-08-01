@@ -4,8 +4,9 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.container import SiTriSectionPanelCard
 from siui.components.editbox import SiDoubleSpinBox, SiSpinBox
 from siui.components.titled_widget_group import SiTitledWidgetGroup
-from siui.components.widgets import SiLabel, SiScrollArea
-from siui.core import SiColor
+from siui.components.widgets import SiScrollArea
+
+from control_layout_utils import apply_label_color
 
 
 class BlankControlPage(QWidget):
@@ -116,7 +117,7 @@ class BlankControlPage(QWidget):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         self._sync_savgol_constraints()
         return group
 
@@ -178,7 +179,7 @@ class BlankControlPage(QWidget):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         self._sync_wavelet_constraints()
         return group
 
@@ -214,7 +215,7 @@ class BlankControlPage(QWidget):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         self._sync_waterfall_constraints()
         return group
 
@@ -245,7 +246,7 @@ class BlankControlPage(QWidget):
         card.adjustSize()
 
         group.addWidget(card)
-        self._apply_group_style(group)
+        apply_label_color(group, "#FFFFFF")
         return group
 
     def _sync_second_derivative_constraints(self):
@@ -304,15 +305,6 @@ class BlankControlPage(QWidget):
             if combo_box.itemText(index) == text:
                 return index
         return -1
-
-    @staticmethod
-    def _apply_group_style(group):
-        for child in group.findChildren(SiLabel):
-            try:
-                child.colorGroup().assign(SiColor.TEXT_A, "#FFFFFF")
-                child.reloadStyleSheet()
-            except Exception:
-                pass
 
     @staticmethod
     def _commit_spinbox_value(spin_box, fallback):
