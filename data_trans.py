@@ -157,7 +157,7 @@ def convert(src, dst):
         ky = read_array(data, ky_key)
         energy = read_array(data, e_key)
 
-        sample = np.array(data[s_key]) if mode == "h5py" else np.array(data[s_key])
+        sample = np.array(data[s_key])
         print("原始 sample shape:", sample.shape)
 
         coord_lengths = {}

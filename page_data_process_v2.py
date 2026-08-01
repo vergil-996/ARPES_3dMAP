@@ -163,50 +163,15 @@ class DataProcessPage(QWidget):
         v_t.setContentsMargins(*self.GROUP_MARGINS)
         v_t.setSpacing(self.GROUP_SPACING)
 
-        h_t1 = QHBoxLayout()
-        lbl1 = SiLabel("积分上限")
-        lbl1.setStyleSheet("color: white; font-weight: bold;")
-        lbl1.setFixedWidth(60)
-        h_t1.addWidget(lbl1)
         self.s_t_up = self._create_pink_slider()
-        h_t1.addWidget(self.s_t_up)
-
-        h_t2 = QHBoxLayout()
-        lbl2 = SiLabel("积分下限")
-        lbl2.setStyleSheet("color: white; font-weight: bold;")
-        lbl2.setFixedWidth(60)
-        h_t2.addWidget(lbl2)
         self.s_t_low = self._create_pink_slider()
-        h_t2.addWidget(self.s_t_low)
 
         self.s_t_low.valueChanged.connect(self._on_t_low_changed)
         self.s_t_up.valueChanged.connect(self._on_t_up_changed)
 
         self.btn_t_apply = self._create_red_btn("应用")
-        v_t.addLayout(h_t1)
-        v_t.addLayout(h_t2)
-        for _ in range(2):
-            item = v_t.takeAt(v_t.count() - 1)
-            row = item.layout() if item is not None else None
-            if row is None:
-                continue
-            while row.count():
-                child = row.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
-        for _ in range(2):
-            item = v_t.takeAt(v_t.count() - 1)
-            row = item.layout() if item is not None else None
-            if row is None:
-                continue
-            while row.count():
-                child = row.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
-        self._add_centered_slider_block(v_t, lbl1.text(), self.s_t_up)
-        self._add_centered_slider_block(v_t, lbl2.text(), self.s_t_low)
+        self._add_centered_slider_block(v_t, "积分上限", self.s_t_up)
+        self._add_centered_slider_block(v_t, "积分下限", self.s_t_low)
         v_t.addLayout(self._center_widget(self.btn_t_apply, self.BUTTON_WIDTH))
         self._apply_style(grp_t)
         self.vbox.addLayout(self._center_widget(grp_t, self.SLIDER_GROUP_WIDTH))
@@ -227,35 +192,17 @@ class DataProcessPage(QWidget):
         self.combo_ax.setEditable(False)
         self.combo_ax.addItems(["X轴", "Y轴", "Z轴"])
 
-        h_ax1 = QHBoxLayout()
-        lbl3 = SiLabel("积分上限")
-        lbl3.setStyleSheet("color: white; font-weight: bold;")
-        lbl3.setFixedWidth(60)
-        h_ax1.addWidget(lbl3)
         self.s_ax_up = self._create_pink_slider()
         self._adaptive_axis_sliders.append(self.s_ax_up)
         self.input_ax_up = self._create_axis_value_box()
-        h_ax1.addWidget(self.s_ax_up)
 
-        h_ax2 = QHBoxLayout()
-        lbl4 = SiLabel("积分下限")
-        lbl4.setStyleSheet("color: white; font-weight: bold;")
-        lbl4.setFixedWidth(60)
-        h_ax2.addWidget(lbl4)
         self.s_ax_low = self._create_pink_slider()
         self._adaptive_axis_sliders.append(self.s_ax_low)
         self.input_ax_low = self._create_axis_value_box()
-        h_ax2.addWidget(self.s_ax_low)
 
-        h_ax3 = QHBoxLayout()
-        lbl5 = SiLabel("中心位置")
-        lbl5.setStyleSheet("color: white; font-weight: bold;")
-        lbl5.setFixedWidth(60)
-        h_ax3.addWidget(lbl5)
         self.s_ax_mid = self._create_pink_slider()
         self._adaptive_axis_sliders.append(self.s_ax_mid)
         self.input_ax_mid = self._create_axis_value_box()
-        h_ax3.addWidget(self.s_ax_mid)
 
         self.s_ax_low.valueChanged.connect(self._on_axe_low_changed)
         self.s_ax_up.valueChanged.connect(self._on_axe_up_changed)
@@ -264,23 +211,9 @@ class DataProcessPage(QWidget):
         self.btn_ax_apply = self._create_red_btn("应用")
 
         v_ax.addLayout(self._center_widget(self.combo_ax, self.COMBO_WIDTH))
-        v_ax.addLayout(h_ax1)
-        v_ax.addLayout(h_ax2)
-        v_ax.addLayout(h_ax3)
-        for _ in range(3):
-            item = v_ax.takeAt(v_ax.count() - 1)
-            row = item.layout() if item is not None else None
-            if row is None:
-                continue
-            while row.count():
-                child = row.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
-        # Keep the axis selector row in place; only rebuild the slider rows below it.
-        self._add_centered_slider_block(v_ax, lbl3.text(), self.s_ax_up, self.input_ax_up)
-        self._add_centered_slider_block(v_ax, lbl4.text(), self.s_ax_low, self.input_ax_low)
-        self._add_centered_slider_block(v_ax, lbl5.text(), self.s_ax_mid, self.input_ax_mid)
+        self._add_centered_slider_block(v_ax, "积分上限", self.s_ax_up, self.input_ax_up)
+        self._add_centered_slider_block(v_ax, "积分下限", self.s_ax_low, self.input_ax_low)
+        self._add_centered_slider_block(v_ax, "中心位置", self.s_ax_mid, self.input_ax_mid)
         v_ax.addLayout(self._center_widget(self.btn_ax_apply, self.BUTTON_WIDTH))
         self._apply_style(grp_ax)
         self.vbox.addLayout(self._center_widget(grp_ax, self.SLIDER_GROUP_WIDTH))

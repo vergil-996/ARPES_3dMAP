@@ -577,7 +577,6 @@ class BackendManager:
     def __init__(self, mode="Auto", *, cpu_backend=None, gpu_backend=None):
         self.cpu = cpu_backend or CpuComputeBackend()
         self.gpu = gpu_backend if gpu_backend is not None else CupyComputeBackend()
-        self.mode = "Auto"
         self.set_mode(mode)
         self.last_fallback_error: Optional[str] = None
 

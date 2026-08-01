@@ -718,14 +718,10 @@ class My3DAnalyzer(QWidget):
                 self.refresh_coordinator.dispatch_now(request)
             else:
                 self.refresh_coordinator.schedule_preview(request)
-        elif immediate:
-            self._render_exact_ready = False
-            self._update_export_button_states()
-            self.refresh_coordinator.schedule_exact(request, immediate=True)
         else:
             self._render_exact_ready = False
             self._update_export_button_states()
-            self.refresh_coordinator.schedule_exact(request)
+            self.refresh_coordinator.schedule_exact(request, immediate=immediate)
 
     @staticmethod
     def _volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle):
@@ -1680,7 +1676,7 @@ class My3DAnalyzer(QWidget):
             center_physical,
             step_value,
             ascii_only=ascii_only,
-        ) + self._waterfall_crop_suffix(params, ascii_only=ascii_only)
+        ) + self._waterfall_crop_suffix(params)
 
     def _persist_waterfall_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
@@ -2446,12 +2442,9 @@ class My3DAnalyzer(QWidget):
             return context
 
         render_context = dict(context)
-        data = render_context["data"]
         # In 3D, E flip changes the coordinate interpretation and camera
         # viewpoint.  Keep voxel ordering untouched so this is not confused
         # with a data reflection or a rigid actor rotation.
-        render_context["data"] = data
-
         coords = self._clone_coords(render_context.get("coords", self.core.coords))
         if coords.get("E") is not None:
             coords["E"] = np.flip(coords["E"])
@@ -3682,7 +3675,7 @@ class My3DAnalyzer(QWidget):
             y_up = int(plot_bounds["y_up"])
             energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[y_low:y_up + 1]
             axis_label = {0: "X-integral", 1: "Y-integral"}.get(int(spec.params.get("axis_index", -1)), "Axis-integral")
-            crop_suffix = self._waterfall_crop_suffix(spec.params, ascii_only=True)
+            crop_suffix = self._waterfall_crop_suffix(spec.params)
             return {
                 "view": "1d",
                 "x_data": energy_axis,
@@ -4225,7 +4218,7 @@ class My3DAnalyzer(QWidget):
             return None
         return self._apply_axis_crop_to_context(context, self._axis_crop_rect_from_params(spec.params))
 
-    def _waterfall_crop_suffix(self, params, *, ascii_only=False):
+    def _waterfall_crop_suffix(self, params):
         crop_rect = self._axis_crop_rect_from_params(params)
         if crop_rect is None:
             return ""
@@ -4239,8 +4232,6 @@ class My3DAnalyzer(QWidget):
         k_up = self._format_filename_number(self.core.logical_to_physical(axis_info["k_axis_key"], crop_rect["x_up"]))
         e_low = self._format_filename_number(self.core.logical_to_physical("E", crop_rect["y_low"]))
         e_up = self._format_filename_number(self.core.logical_to_physical("E", crop_rect["y_up"]))
-        if ascii_only:
-            return f", {axis_info['k_axis_label']} {k_low}~{k_up}, E {e_low}~{e_up}"
         return f", {axis_info['k_axis_label']} {k_low}~{k_up}, E {e_low}~{e_up}"
 
     def _build_waterfall_context_from_axis_params(self, raw_data, coords, params):
@@ -4314,7 +4305,7 @@ class My3DAnalyzer(QWidget):
             center_physical,
             k_step,
             ascii_only=True,
-        ) + self._waterfall_crop_suffix(params, ascii_only=True)
+        ) + self._waterfall_crop_suffix(params)
 
         return {
             "view": "waterfall",

@@ -503,38 +503,19 @@ class VisualEngine:
             y_start, y_end = float(yp[0]), float(yp[-1])
             e_start, e_end = float(zp[0]), float(zp[-1])
 
+            idx = int(slice_info["axis"])
+            axis_views = {
+                0: ("X", [y_start, y_end, e_start, e_end]),
+                1: ("Y", [x_start, x_end, e_start, e_end]),
+                2: ("E", [x_start, x_end, y_start, y_end]),
+            }
+            axis_label, ext = axis_views.get(idx, axis_views[2])
+            img = data.T
             if slice_info.get("mode") == "integral":
-                idx = slice_info["axis"]
                 low, up = slice_info["range"]
-
-                if idx == 0:  # X轴积分，横轴 Y，纵轴 E
-                    img = data.T
-                    ext = [y_start, y_end, e_start, e_end]
-                    title = f"X-Integral ({low}~{up})"
-                elif idx == 1:  # Y轴积分，横轴 X，纵轴 E
-                    img = data.T
-                    ext = [x_start, x_end, e_start, e_end]
-                    title = f"Y-Integral ({low}~{up})"
-                else:  # E轴积分，横轴 X，纵轴 Y
-                    img = data.T
-                    ext = [x_start, x_end, y_start, y_end]
-                    title = f"E-Integral ({low}~{up})"
+                title = f"{axis_label}-Integral ({low}~{up})"
             else:
-                idx = slice_info["axis"]
-                index = slice_info["index"]
-
-                if idx == 0:  # X切片，横轴 Y，纵轴 E
-                    img = data.T
-                    ext = [y_start, y_end, e_start, e_end]
-                    title = f"X-Slice ({index})"
-                elif idx == 1:  # Y切片，横轴 X，纵轴 E
-                    img = data.T
-                    ext = [x_start, x_end, e_start, e_end]
-                    title = f"Y-Slice ({index})"
-                else:  # E切片，横轴 X，纵轴 Y
-                    img = data.T
-                    ext = [x_start, x_end, y_start, y_end]
-                    title = f"E-Slice ({index})"
+                title = f"{axis_label}-Slice ({slice_info['index']})"
 
             # 应用色阶处理
             # E-axis flip is a data-orientation correction.  It never reverses

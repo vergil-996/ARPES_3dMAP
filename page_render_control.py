@@ -41,6 +41,10 @@ class RenderControlPage(QWidget):
         "spring", "summer", "autumn", "winter", "cool", "hsv", "terrain",
         "ocean", "gnuplot", "gnuplot2",
     ]
+    DENOISE_METHODS = (
+        "None", "频域平滑", "滑动平均", "Savitzky-Golay滤波",
+        "小波去噪", "卡尔曼滤波", "贝叶斯去噪",
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,6 +86,16 @@ class RenderControlPage(QWidget):
         s.style_data.background_color = QColor(255, 105, 180, 64)
         s.style_data.handle_color = QColor("#FFFFFF")
         return s
+
+    def _create_denoise_combo(self, title):
+        combo = SiCapsuleComboBox(self)
+        combo.setTitle(title)
+        combo.setFixedHeight(30)
+        combo.setFixedWidth(self.CONTROL_ROW_WIDTH)
+        combo.setEditable(False)
+        combo.addItems(self.DENOISE_METHODS)
+        self._adaptive_row_controls.append(combo)
+        return combo
 
     def _center_widget(self, widget, max_width=None):
         if max_width is not None:
@@ -164,55 +178,21 @@ class RenderControlPage(QWidget):
         v_exp.setContentsMargins(*self.GROUP_MARGINS)
         v_exp.setSpacing(self.GROUP_SPACING)
 
-        # 上限色
-        h_up = QHBoxLayout()
         self.s_up = self._create_pink_slider()
         self.s_up.setRange(0, 100)
         self.s_up.setValue(100)  # 默认不截断高光
-        lbl_up = SiLabel("白场")
-        lbl_up.setStyleSheet("color: white; font-weight: bold;")
-        lbl_up.setFixedWidth(50)
-        h_up.addWidget(lbl_up)
-        h_up.addWidget(self.s_up)
 
-        # 中间调
-        h_gamma = QHBoxLayout()
         self.s_gamma = self._create_pink_slider()
         self.s_gamma.setRange(0, 100)
         self.s_gamma.setValue(50)  # 默认线性映射 (Gamma 1.0)
-        lbl_gamma = SiLabel("灰场")
-        lbl_gamma.setStyleSheet("color: white; font-weight: bold;")
-        lbl_gamma.setFixedWidth(50)
-        h_gamma.addWidget(lbl_gamma)
-        h_gamma.addWidget(self.s_gamma)
 
-        # 下限色
-        h_low = QHBoxLayout()
         self.s_low = self._create_pink_slider()
         self.s_low.setRange(0, 100)
         self.s_low.setValue(0)    # 默认不截断低光
-        lbl_low = SiLabel("黑场")
-        lbl_low.setStyleSheet("color: white; font-weight: bold;")
-        lbl_low.setFixedWidth(50)
-        h_low.addWidget(lbl_low)
-        h_low.addWidget(self.s_low)
 
-        v_exp.addLayout(h_up)
-        v_exp.addLayout(h_gamma)
-        v_exp.addLayout(h_low)
-        for _ in range(3):
-            item = v_exp.takeAt(v_exp.count() - 1)
-            row = item.layout() if item is not None else None
-            if row is None:
-                continue
-            while row.count():
-                child = row.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
-        self._add_centered_slider_block(v_exp, lbl_up.text(), self.s_up)
-        self._add_centered_slider_block(v_exp, lbl_gamma.text(), self.s_gamma)
-        self._add_centered_slider_block(v_exp, lbl_low.text(), self.s_low)
+        self._add_centered_slider_block(v_exp, "白场", self.s_up)
+        self._add_centered_slider_block(v_exp, "灰场", self.s_gamma)
+        self._add_centered_slider_block(v_exp, "黑场", self.s_low)
 
         self.combo_map = SiCapsuleComboBox(self)
         self.combo_map.setTitle("强度映射方式")
@@ -243,29 +223,9 @@ class RenderControlPage(QWidget):
         lbl_noise.setStyleSheet("color: white; font-weight: bold;")
         v_noise.addWidget(lbl_noise)
 
-        self.combo_n1 = SiCapsuleComboBox(self)
-        self.combo_n1.setTitle("一级去噪")
-        self.combo_n1.setFixedHeight(30)
-        self.combo_n1.setFixedWidth(self.CONTROL_ROW_WIDTH)
-        self._adaptive_row_controls.append(self.combo_n1)
-        self.combo_n1.setEditable(False)
-        self.combo_n1.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
-
-        self.combo_n2 = SiCapsuleComboBox(self)
-        self.combo_n2.setTitle("二级去噪")
-        self.combo_n2.setFixedHeight(30)
-        self.combo_n2.setFixedWidth(self.CONTROL_ROW_WIDTH)
-        self._adaptive_row_controls.append(self.combo_n2)
-        self.combo_n2.setEditable(False)
-        self.combo_n2.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
-
-        self.combo_n3 = SiCapsuleComboBox(self)
-        self.combo_n3.setTitle("三级去噪")
-        self.combo_n3.setFixedHeight(30)
-        self.combo_n3.setFixedWidth(self.CONTROL_ROW_WIDTH)
-        self._adaptive_row_controls.append(self.combo_n3)
-        self.combo_n3.setEditable(False)
-        self.combo_n3.addItems(["None", "频域平滑", "滑动平均", "Savitzky-Golay滤波", "小波去噪", "卡尔曼滤波", "贝叶斯去噪"])
+        self.combo_n1 = self._create_denoise_combo("一级去噪")
+        self.combo_n2 = self._create_denoise_combo("二级去噪")
+        self.combo_n3 = self._create_denoise_combo("三级去噪")
 
         self.btn_apply_noise = self._create_red_btn("应用设置")
 
