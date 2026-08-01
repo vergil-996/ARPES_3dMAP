@@ -19,6 +19,7 @@ env/
 # PyInstaller build artifacts
 build/
 dist/
+release/
 *.spec
 !ARPES_3dMAP_gpu.spec
 

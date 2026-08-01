@@ -56,6 +56,8 @@ from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoo
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
 from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from app_metadata import APP_NAME, APP_VERSION, display_version
+from update_controller import UpdateController
 
 
 class QuickCloseMessageBox(QMessageBox):
@@ -164,7 +166,7 @@ class My3DAnalyzer(QWidget):
             SiGlobal.siui.windows["TOOL_TIP"].setOpacity(0)
         self._apply_feedback_styles()
 
-        self.setWindowTitle("能带分析工具")
+        self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.resize(1550, 950)
         self.setStyleSheet("background-color: #151525;")
 
@@ -189,6 +191,12 @@ class My3DAnalyzer(QWidget):
         self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
+        self.update_controller = UpdateController(
+            self,
+            self.settings,
+            version_button=self.btn_check_update,
+        )
+        QTimer.singleShot(5000, self.update_controller.check_automatically)
 
     def _apply_feedback_styles(self):
         tooltip_window = SiGlobal.siui.windows.get("TOOL_TIP")
@@ -519,11 +527,19 @@ class My3DAnalyzer(QWidget):
         self.btn_page3.setText("处理分析")
         self.btn_page3.setCheckable(True)
 
+        self.btn_check_update = SiCapsuleButton(self)
+        self.btn_check_update.setText(f"v{APP_VERSION}")
+        self.btn_check_update.setFixedWidth(82)
+        self.btn_check_update.setToolTip(f"{display_version()} · 点击检查更新")
+
         self.button_group = QButtonGroup(self)
         for btn in [self.btn_page1, self.btn_page2, self.btn_page3]:
             self.button_group.addButton(btn)
             nav_layout.addWidget(btn)
         self.button_group.setExclusive(True)
+
+        nav_layout.addSpacing(6)
+        nav_layout.addWidget(self.btn_check_update)
 
         nav_layout.addStretch()
         right_vbox.addWidget(nav_group)
@@ -1159,6 +1175,9 @@ class My3DAnalyzer(QWidget):
         self.btn_page1.clicked.connect(lambda: self._select_control_page(0))
         self.btn_page2.clicked.connect(lambda: self._select_control_page(1))
         self.btn_page3.clicked.connect(lambda: self._select_control_page(2))
+        self.btn_check_update.clicked.connect(
+            lambda: self.update_controller.check_for_updates(manual=True)
+        )
 
         self.page_image.btn_load.clicked.connect(self.on_load)
         self.page_image.btn_cut.clicked.connect(self.on_cut)
@@ -6256,6 +6275,9 @@ class My3DAnalyzer(QWidget):
                 self.last_visual_page_id = self.left_workspace.home_page_id
 
     def closeEvent(self, event):
+        update_controller = getattr(self, "update_controller", None)
+        if update_controller is not None:
+            update_controller.shutdown(wait_ms=2000)
         self.refresh_coordinator.shutdown(wait_ms=2000)
         self._computed_volume_cache.clear()
         self.backend_manager.clear_caches()

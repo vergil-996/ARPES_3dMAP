@@ -1,6 +1,6 @@
-# ARPES-3d-MAP
+# BandScope
 
-三维数据可视化与分析工具，面向本地桌面实验环境，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出等能力。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出等能力。当前版本为 **v1.1.1**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
@@ -47,6 +47,28 @@
 
 ## 安装与运行
 
+### Windows 安装包（推荐）
+
+正式发布后可从 [GitHub Releases](https://github.com/vergil-996/ARPES_3dMAP/releases) 下载与电脑环境对应的安装包：
+
+- `BandScope-<版本>-Windows-x64-CPU-Setup.exe`：通用 CPU 版
+- `BandScope-<版本>-Windows-x64-NVIDIA-Setup.exe`：包含 NVIDIA CUDA 数值后端的版本
+
+安装器默认安装到当前用户的 `%LocalAppData%\Programs\BandScope`，不要求管理员权限。CPU 与 NVIDIA 安装包使用相同的应用标识，可以直接互相覆盖升级，用户设置仍保存在独立的 `QSettings` 中。
+
+以前使用压缩包的用户需要手动运行一次 BandScope 安装器；自动更新能力从这次安装完成后开始生效。
+
+安装版启动约 5 秒后会在后台检查 GitHub 最新正式 Release，每 24 小时最多自动检查一次；也可以点击右侧顶部的版本按钮手动检查。发现新版后，BandScope 会：
+
+1. 选择与当前 CPU / NVIDIA 构建一致的安装包
+2. 下载到当前用户的更新缓存目录
+3. 使用 GitHub Release API 返回的 SHA-256 摘要校验完整性
+4. 经用户确认后启动安装器并退出，由安装器在原目录完成覆盖升级
+
+从源码运行时只会提示新版并打开 Release 页面，不会尝试覆盖源码目录。尚未配置代码签名证书时，更新确认框会明确警告；正式对外分发前建议签名安装包，并在 `app_metadata.py` 中填写发布证书的 SHA-256 指纹。
+
+### 从源码运行
+
 Windows PowerShell:
 
 ```powershell
@@ -78,13 +100,32 @@ python start.py
 - 启动入口为 [start.py](start.py)
 - `requirements.txt` 中包含 `PyQt-SiliconUI` 的 GitHub 依赖，首次安装需要联网
 
-如果需要打包为桌面程序，可直接使用仓库中的 PyInstaller 配置：
+如果需要在本机打包桌面程序，可使用仓库中的 PyInstaller 和 Inno Setup 配置：
 
 ```powershell
 pyinstaller ARPES_3dMAP.spec
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.1 /DBuildFlavor=CPU installer\BandScope.iss
 ```
 
-配置文件见 [ARPES_3dMAP.spec](ARPES_3dMAP.spec)。
+NVIDIA 版使用 `ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。生成的安装包位于 `release` 目录。
+
+### 发布新版本（维护者）
+
+仓库中的 `.github/workflows/release.yml` 会在推送 `vX.Y.Z` 标签时自动执行完整测试，构建 CPU / NVIDIA 两个 PyInstaller 应用和 Inno Setup 安装包，生成 `.sha256` 文件，最后发布 GitHub Release。
+
+```powershell
+# 1. 先在 app_metadata.py 中更新 APP_VERSION，然后提交并推送代码
+python scripts\check_release_version.py v1.1.1
+python -m unittest discover -s tests -v
+
+# 2. 为已经提交的版本创建并推送同号标签
+git tag v1.1.1
+git push origin v1.1.1
+```
+
+标签中的版本必须与 `app_metadata.APP_VERSION` 完全一致，否则工作流会停止。已经公开的版本号及其 Release 资源不应被覆盖；后续修复应发布新的补丁版本，例如 `v1.1.2`。
+
+如需在 Actions 中签名安装器，请配置仓库 Secrets `WINDOWS_SIGNING_PFX_BASE64`（PFX 文件的 Base64 内容）和 `WINDOWS_SIGNING_PFX_PASSWORD`。可选变量 `WINDOWS_TIMESTAMP_URL` 用于覆盖默认时间戳服务。签名证书确定后，还应把证书的 SHA-256 指纹写入 `app_metadata.TRUSTED_SIGNER_CERT_SHA256`，使客户端不仅验证文件摘要和签名状态，还会固定校验发布者证书。
 
 ---
 

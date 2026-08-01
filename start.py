@@ -9,6 +9,8 @@ configure_qt_plugin_path()
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication
 
+from app_metadata import APP_NAME, APP_PUBLISHER, APP_VERSION
+
 
 APP_FEEDBACK_STYLE = """
 QMessageBox {
@@ -44,6 +46,10 @@ def resource_path(relative_path):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName(APP_PUBLISHER)
     app.setStyleSheet(APP_FEEDBACK_STYLE)
 
     # SiliconUI creates font-backed widgets while refactored_app is imported,
