@@ -1,6 +1,17 @@
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal
 
+from axis_mapping import (
+    NPZ_COORD_CANDIDATES,
+    canonicalize_array,
+    find_first_key,
+    infer_axis_roles,
+    legacy_hdf5_axis_roles,
+    metadata_axis_roles,
+    role_order_for_shape,
+)
+
+
 class AnalyzerCore(QObject):
     progress_changed = pyqtSignal(int)
     data_loaded = pyqtSignal(tuple)
@@ -30,160 +41,16 @@ class AnalyzerCore(QObject):
                 except (KeyError, ValueError):
                     return None
 
-            search_map = {
-                'X': ['kx', 'x', 'X'],
-                'Y': ['ky', 'y', 'Y'],
-                'E': ['E', 'energy', 'En', 'Ef'],
-                'T': ['time', 'delay', 't', 'T'],
+            search_map = NPZ_COORD_CANDIDATES
+            coord_keys = {
+                role: find_first_key(data, candidates)
+                for role, candidates in search_map.items()
             }
-            expected_axis_mapping_version = "mat_keyed_v2"
-
-            def find_coord_key(role):
-                return next((k for k in search_map[role] if k in data), None)
-
-            def coord_length(role):
-                key = find_coord_key(role)
-                if key is None:
-                    return None
-                arr = safe_get_array(key)
-                if arr is None:
-                    return None
-                return int(arr.size)
-
-            def normalize_role_name(value):
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8", errors="ignore")
-                value = str(value).strip()
-                aliases = {
-                    "kx": "X",
-                    "x": "X",
-                    "X": "X",
-                    "ky": "Y",
-                    "y": "Y",
-                    "Y": "Y",
-                    "E": "E",
-                    "energy": "E",
-                    "En": "E",
-                    "Ef": "E",
-                    "time": "T",
-                    "delay": "T",
-                    "t": "T",
-                    "T": "T",
-                }
-                return aliases.get(value, value)
-
-            def get_string_metadata(key):
-                arr = safe_get_array(key)
-                if arr is None:
-                    return ""
-                values = np.asarray(arr).reshape(-1)
-                if values.size == 0:
-                    return ""
-                value = values[0]
-                if isinstance(value, bytes):
-                    return value.decode("utf-8", errors="ignore")
-                return str(value)
-
-            def roles_from_axis_order(role_order):
-                if get_string_metadata("axis_mapping_version") != expected_axis_mapping_version:
-                    return None
-
-                axis_order_arr = safe_get_array("axis_order")
-                if axis_order_arr is None:
-                    return None
-
-                axis_order = [
-                    normalize_role_name(item)
-                    for item in np.asarray(axis_order_arr).reshape(-1).tolist()
-                ]
-                if len(axis_order) != len(role_order):
-                    return None
-                if set(axis_order) != set(role_order):
-                    return None
-                return {role: axis_order.index(role) for role in role_order}
-
-            def roles_from_legacy_hdf5_shape(shape, role_order):
-                x_len = coord_length('X')
-                y_len = coord_length('Y')
-                e_len = coord_length('E')
-                t_len = coord_length('T')
-
-                if len(shape) == 3 and {'X', 'Y', 'E'} == set(role_order):
-                    # Legacy converter saved MATLAB v7.3 HDF5 data as (E, X, Y).
-                    if (
-                        x_len is not None and y_len is not None and e_len is not None
-                        and shape[0] == e_len and shape[1] == x_len and shape[2] == y_len
-                        and not (shape[0] == x_len and shape[1] == y_len and shape[2] == e_len)
-                    ):
-                        return {'X': 1, 'Y': 2, 'E': 0}
-
-                if len(shape) == 4 and {'X', 'Y', 'E', 'T'} == set(role_order):
-                    # Legacy converter saved MATLAB v7.3 HDF5 data as (T, E, X, Y).
-                    if (
-                        x_len is not None and y_len is not None and t_len is not None
-                        and shape[0] == t_len and shape[2] == x_len and shape[3] == y_len
-                        and (e_len is None or shape[1] == e_len)
-                        and not (shape[0] == x_len and shape[1] == y_len and (e_len is None or shape[2] == e_len) and shape[3] == t_len)
-                    ):
-                        return {'X': 2, 'Y': 3, 'E': 1, 'T': 0}
-
-                return None
-
-            def roles_from_coord_lengths(shape, role_order):
-                roles = {}
-                remaining = list(range(len(shape)))
-
-                def assign_unique(role):
-                    length = coord_length(role)
-                    if length is None:
-                        return
-                    matches = [idx for idx in remaining if shape[idx] == length]
-                    if len(matches) == 1:
-                        roles[role] = matches[0]
-                        remaining.remove(matches[0])
-
-                def assign_first(role):
-                    length = coord_length(role)
-                    if length is None:
-                        return
-                    matches = [idx for idx in remaining if shape[idx] == length]
-                    if matches:
-                        roles[role] = matches[0]
-                        remaining.remove(matches[0])
-
-                for role in ('T', 'E'):
-                    if role in role_order:
-                        assign_unique(role)
-
-                for role in ('X', 'Y'):
-                    if role in role_order:
-                        assign_first(role)
-
-                fallback_roles = []
-                if ('X' in roles or 'Y' in roles) and 'E' in role_order and 'E' not in roles:
-                    fallback_roles.append('E')
-                fallback_roles.extend(role for role in role_order if role not in roles and role not in fallback_roles)
-
-                for role in fallback_roles:
-                    if not remaining:
-                        break
-                    roles[role] = remaining.pop(0)
-
-                return roles
-
-            def canonicalize_raw(raw, roles, role_order):
-                present_roles = [role for role in role_order if role in roles]
-                present_axes = [roles[role] for role in present_roles]
-                if len(set(present_axes)) != len(present_axes):
-                    raise ValueError(f"轴映射重复: {roles}")
-                if set(present_axes) != set(range(raw.ndim)):
-                    raise ValueError(f"轴映射不完整: shape={raw.shape}, roles={roles}")
-
-                canonical = raw.transpose(*present_axes) if present_axes else raw
-                for axis_idx, role in enumerate(role_order):
-                    if role not in roles:
-                        canonical = np.expand_dims(canonical, axis=axis_idx)
-                return canonical
+            coord_lengths = {}
+            for role, key in coord_keys.items():
+                values = safe_get_array(key) if key is not None else None
+                if values is not None:
+                    coord_lengths[role] = int(values.size)
 
             # 1. 自动寻找 4 维或 3 维数据矩阵
             main_key = None
@@ -206,33 +73,37 @@ class AnalyzerCore(QObject):
 
             raw = data[main_key]
             sh = list(raw.shape)
-            has_time_coord_axis = coord_length('T') in sh
-            if main_ndim == 4 or has_time_coord_axis:
-                role_order = ['X', 'Y', 'E', 'T']
-            else:
-                role_order = ['X', 'Y', 'E']
+            has_time_coord_axis = coord_lengths.get("T") in sh
+            role_order = role_order_for_shape(sh, main_ndim == 4 or has_time_coord_axis)
 
             roles = (
-                roles_from_axis_order(role_order)
-                or roles_from_legacy_hdf5_shape(sh, role_order)
-                or roles_from_coord_lengths(sh, role_order)
+                metadata_axis_roles(
+                    safe_get_array("axis_mapping_version"),
+                    safe_get_array("axis_order"),
+                    role_order,
+                )
+                or legacy_hdf5_axis_roles(sh, coord_lengths, role_order)
+                or infer_axis_roles(sh, coord_lengths, role_order)
             )
             self.has_time_axis = 'T' in role_order
 
             # 3. 重排与内存优化
             if self.has_time_axis:
-                raw_4d = canonicalize_raw(raw, roles, role_order)
+                raw_4d = canonicalize_array(raw, roles, role_order)
                 self.raw_data = np.ascontiguousarray(raw_4d, dtype=np.float32)
             else:
-                raw_3d = np.ascontiguousarray(canonicalize_raw(raw, roles, role_order), dtype=np.float32)
+                raw_3d = np.ascontiguousarray(
+                    canonicalize_array(raw, roles, role_order),
+                    dtype=np.float32,
+                )
                 self.raw_data = raw_3d[..., np.newaxis]
 
             # 4. 坐标映射与单位同步
             self.coords = {}
 
             # 助手函数：安全提取坐标
-            def get_coord(role_key, keys, fallback_shape_idx):
-                actual_key = next((k for k in keys if k in data), None)
+            def get_coord(role_key, fallback_shape_idx):
+                actual_key = coord_keys[role_key]
                 if actual_key:
                     loaded_arr = safe_get_array(actual_key)
                     if loaded_arr is not None:
@@ -245,11 +116,11 @@ class AnalyzerCore(QObject):
                 return arr
 
             # 获取各轴坐标
-            self.coords['X'] = get_coord('X', search_map['X'], 0)
-            self.coords['Y'] = get_coord('Y', search_map['Y'], 1)
-            self.coords['E'] = get_coord('E', search_map['E'], 2)
+            self.coords['X'] = get_coord('X', 0)
+            self.coords['Y'] = get_coord('Y', 1)
+            self.coords['E'] = get_coord('E', 2)
             if self.has_time_axis:
-                self.coords['delay'] = get_coord('T', search_map['T'], 3)
+                self.coords['delay'] = get_coord('T', 3)
             else:
                 self.coords['delay'] = np.array([0.0], dtype=np.float32)
 

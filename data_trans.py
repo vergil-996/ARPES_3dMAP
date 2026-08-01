@@ -5,6 +5,15 @@ import os
 import tkinter as tk
 from tkinter import filedialog
 
+from axis_mapping import (
+    AXIS_MAPPING_VERSION,
+    MAT_COORD_CANDIDATES as COORD_CANDIDATES,
+    canonicalize_array,
+    find_first_key,
+    infer_axis_roles,
+    role_order_for_shape,
+)
+
 
 # ===== 文件选择 =====
 def select_input_file():
@@ -39,93 +48,6 @@ def load_mat_auto(file_path):
         return "loadmat", data
 
 
-# ===== 自动找变量 =====
-def find_key(keys, candidates):
-    for name in candidates:
-        if name in keys:
-            return name
-    return None
-
-
-AXIS_MAPPING_VERSION = "mat_keyed_v2"
-COORD_CANDIDATES = {
-    "X": ["kx", "X", "x"],
-    "Y": ["ky", "Y", "y"],
-    "E": ["E", "energy", "En", "Ef"],
-    "T": ["time", "delay", "t", "T"],
-}
-
-
-def infer_axis_roles(shape, coord_lengths, has_time_coord):
-    """Infer source array dimensions from coordinate key names and lengths."""
-    roles = {}
-    remaining = list(range(len(shape)))
-
-    def assign_unique(role):
-        length = coord_lengths.get(role)
-        if length is None:
-            return
-        matches = [idx for idx in remaining if shape[idx] == length]
-        if len(matches) == 1:
-            roles[role] = matches[0]
-            remaining.remove(matches[0])
-
-    def assign_first(role):
-        length = coord_lengths.get(role)
-        if length is None:
-            return
-        matches = [idx for idx in remaining if shape[idx] == length]
-        if matches:
-            roles[role] = matches[0]
-            remaining.remove(matches[0])
-
-    # T/E are anchors when their lengths uniquely identify a dimension.
-    for role in ("T", "E"):
-        assign_unique(role)
-
-    # Equal-length momentum axes are assigned by coordinate key identity.
-    for role in ("X", "Y"):
-        assign_first(role)
-
-    output_roles = ["X", "Y", "E"]
-    if has_time_coord or len(shape) == 4:
-        output_roles.append("T")
-
-    fallback_roles = []
-    if ("X" in roles or "Y" in roles) and "E" not in roles:
-        fallback_roles.append("E")
-    fallback_roles.extend(role for role in output_roles if role not in roles and role not in fallback_roles)
-
-    for role in fallback_roles:
-        if not remaining:
-            break
-        roles[role] = remaining.pop(0)
-
-    if remaining:
-        raise ValueError(f"❌ 无法识别多余维度: shape={shape}, remaining={remaining}, roles={roles}")
-
-    return roles
-
-
-def canonicalize_sample(sample, roles, has_time_coord):
-    has_time_axis = "T" in roles or (has_time_coord and sample.ndim == 4)
-    output_roles = ["X", "Y", "E"] + (["T"] if has_time_axis else [])
-    present_roles = [role for role in output_roles if role in roles]
-    present_axes = [roles[role] for role in present_roles]
-
-    if len(set(present_axes)) != len(present_axes):
-        raise ValueError(f"❌ 轴映射重复: {roles}")
-    if set(present_axes) != set(range(sample.ndim)):
-        raise ValueError(f"❌ 轴映射不完整: shape={sample.shape}, roles={roles}")
-
-    canonical = sample.transpose(present_axes) if present_axes else sample
-    for axis, role in enumerate(output_roles):
-        if role not in roles:
-            canonical = np.expand_dims(canonical, axis=axis)
-
-    return canonical, output_roles
-
-
 # ===== 核心转换 =====
 def convert(src, dst):
     mode, data = load_mat_auto(src)
@@ -138,11 +60,11 @@ def convert(src, dst):
         print("变量列表:", keys)
 
         # 自动匹配
-        kx_key = find_key(keys, COORD_CANDIDATES["X"])
-        ky_key = find_key(keys, COORD_CANDIDATES["Y"])
-        e_key = find_key(keys, COORD_CANDIDATES["E"])
-        t_key = find_key(keys, COORD_CANDIDATES["T"])
-        s_key  = find_key(keys, ['sample', 'binned', 'data'])
+        kx_key = find_first_key(keys, COORD_CANDIDATES["X"])
+        ky_key = find_first_key(keys, COORD_CANDIDATES["Y"])
+        e_key = find_first_key(keys, COORD_CANDIDATES["E"])
+        t_key = find_first_key(keys, COORD_CANDIDATES["T"])
+        s_key = find_first_key(keys, ("sample", "binned", "data"))
 
         if s_key is None:
             raise ValueError("❌ 未找到 sample/binned/data")
@@ -173,8 +95,9 @@ def convert(src, dst):
         if sample.ndim not in (2, 3, 4):
             raise ValueError(f"❌ 不支持维度: {sample.ndim}")
 
-        roles = infer_axis_roles(sample.shape, coord_lengths, raw_time is not None)
-        sample, axis_order = canonicalize_sample(sample, roles, raw_time is not None)
+        axis_order = role_order_for_shape(sample.shape, raw_time is not None)
+        roles = infer_axis_roles(sample.shape, coord_lengths, axis_order)
+        sample = canonicalize_array(sample, roles, axis_order)
         print("轴映射:", roles)
         print("规范化 sample shape:", sample.shape)
 
