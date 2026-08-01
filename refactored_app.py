@@ -4108,73 +4108,79 @@ class My3DAnalyzer(QWidget):
             return ScopedSpatialArray(derivative, descriptor)
         return derivative
 
-    def _build_second_derivative_context_from_params(self, raw_data, coords, params):
-        if raw_data is None or coords is None:
-            return None
-
+    def _build_3d_second_derivative_context(self, raw_data, coords, params):
         source_kind = params.get("source_page_kind")
-        if params.get("source_view") == "3d" and source_kind in {"home", "time_integral"}:
-            if source_kind == "time_integral":
-                t_low, t_up = sorted(
-                    (int(params["source_t_low"]), int(params["source_t_up"]))
-                )
-                data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
-                source_signature = ("time_integral", t_low, t_up)
-                source_metadata = {
-                    "source_mode": "time_integral",
-                    "source_t_indices": (t_low, t_up),
-                }
-            else:
-                t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
-                data_3d = self._get_rotated_frame(raw_data, t_index)
-                source_signature = ("frame", t_index)
-                source_metadata = {
-                    "source_mode": "frame",
-                    "source_t_index": t_index,
-                }
-
-            derivative_axis = int(params.get("derivative_axis", -1))
-            coordinate_key = {0: "X", 1: "Y", 2: "E"}.get(derivative_axis)
-            if coordinate_key is None:
-                return None
-            sd_params = params.get("second_derivative_params") or {}
-            derivative = self._get_cached_3d_second_derivative(
-                raw_data,
-                data_3d,
-                coords,
-                derivative_axis,
-                source_signature,
-                threshold=float(sd_params.get("threshold", 0.0)),
+        if source_kind == "time_integral":
+            t_low, t_up = sorted(
+                (int(params["source_t_low"]), int(params["source_t_up"]))
             )
-            context = {
-                "view": "3d",
-                "data": derivative,
-                "coords": coords,
-                "clip_ranges": self._copy_state(params.get("clip_ranges")),
-                "derivative_axis": derivative_axis,
-                **source_metadata,
+            data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
+            source_signature = ("time_integral", t_low, t_up)
+            source_metadata = {
+                "source_mode": "time_integral",
+                "source_t_indices": (t_low, t_up),
             }
-            descriptor = scoped_descriptor_from_array(derivative)
-            if descriptor is not None and not descriptor.is_full:
-                context.update(
-                    {
-                        "data_bounds": descriptor.spatial_bounds,
-                        "full_shape": descriptor.full_shape[:3],
-                        "include_zero": True,
-                    }
-                )
-            return context
+        else:
+            t_index = int(
+                params.get("source_t_index", int(self.page_image.slider_time.value()))
+            )
+            data_3d = self._get_rotated_frame(raw_data, t_index)
+            source_signature = ("frame", t_index)
+            source_metadata = {
+                "source_mode": "frame",
+                "source_t_index": t_index,
+            }
 
+        derivative_axis = int(params.get("derivative_axis", -1))
+        if derivative_axis not in (0, 1, 2):
+            return None
+        sd_params = params.get("second_derivative_params") or {}
+        derivative = self._get_cached_3d_second_derivative(
+            raw_data,
+            data_3d,
+            coords,
+            derivative_axis,
+            source_signature,
+            threshold=float(sd_params.get("threshold", 0.0)),
+        )
+        context = {
+            "view": "3d",
+            "data": derivative,
+            "coords": coords,
+            "clip_ranges": self._copy_state(params.get("clip_ranges")),
+            "derivative_axis": derivative_axis,
+            **source_metadata,
+        }
+        descriptor = scoped_descriptor_from_array(derivative)
+        if descriptor is not None and not descriptor.is_full:
+            context.update(
+                {
+                    "data_bounds": descriptor.spatial_bounds,
+                    "full_shape": descriptor.full_shape[:3],
+                    "include_zero": True,
+                }
+            )
+        return context
+
+    def _build_2d_second_derivative_source(self, raw_data, coords, params):
+        source_kind = params.get("source_page_kind")
         compact_source_data = None
         compact_plot_bounds = None
         if source_kind == "home":
-            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+            t_index = int(
+                params.get("source_t_index", int(self.page_image.slider_time.value()))
+            )
             data_3d = self._get_rotated_frame(raw_data, t_index)
             slice_axis = int(params.get("slice_axis", -1))
             if slice_axis not in (0, 1):
                 return None
-            source_data = self._extract_slice_data(data_3d, slice_axis, int(params["slice_index"]))
-            source_slice_info = {"axis": slice_axis, "index": int(params["slice_index"])}
+            source_data = self._extract_slice_data(
+                data_3d, slice_axis, int(params["slice_index"])
+            )
+            source_slice_info = {
+                "axis": slice_axis,
+                "index": int(params["slice_index"]),
+            }
             plot_axes = self._axis_plot_info(slice_axis)
             plot_bounds = {
                 "x_low": 0,
@@ -4196,13 +4202,23 @@ class My3DAnalyzer(QWidget):
                     )
                     axis_by_key = {"X": 0, "Y": 1, "E": 2}
                     compact_plot_bounds = {
-                        "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
-                        "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
-                        "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
-                        "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
+                        "x_low": descriptor.axis_bounds(
+                            axis_by_key[plot_axes["x_key"]]
+                        )[0],
+                        "x_up": descriptor.axis_bounds(
+                            axis_by_key[plot_axes["x_key"]]
+                        )[1],
+                        "y_low": descriptor.axis_bounds(
+                            axis_by_key[plot_axes["y_key"]]
+                        )[0],
+                        "y_up": descriptor.axis_bounds(
+                            axis_by_key[plot_axes["y_key"]]
+                        )[1],
                     }
         elif source_kind == "axis_integral":
-            base_context = self._build_axis_like_context_from_params(raw_data, coords, params)
+            base_context = self._build_axis_like_context_from_params(
+                raw_data, coords, params
+            )
             if base_context is None:
                 return None
             source_data = base_context["data"]
@@ -4213,6 +4229,35 @@ class My3DAnalyzer(QWidget):
             compact_plot_bounds = base_context.get("compact_plot_logical_bounds")
         else:
             return None
+
+        return {
+            "data": source_data,
+            "slice_info": source_slice_info,
+            "plot_axes": plot_axes,
+            "plot_bounds": plot_bounds,
+            "compact_data": compact_source_data,
+            "compact_bounds": compact_plot_bounds,
+        }
+
+    def _build_second_derivative_context_from_params(self, raw_data, coords, params):
+        if raw_data is None or coords is None:
+            return None
+
+        source_kind = params.get("source_page_kind")
+        if params.get("source_view") == "3d" and source_kind in {"home", "time_integral"}:
+            return self._build_3d_second_derivative_context(raw_data, coords, params)
+        return self._build_2d_second_derivative_context(raw_data, coords, params)
+
+    def _build_2d_second_derivative_context(self, raw_data, coords, params):
+        source = self._build_2d_second_derivative_source(raw_data, coords, params)
+        if source is None:
+            return None
+        source_data = source["data"]
+        source_slice_info = source["slice_info"]
+        plot_axes = source["plot_axes"]
+        plot_bounds = source["plot_bounds"]
+        compact_source_data = source["compact_data"]
+        compact_plot_bounds = source["compact_bounds"]
 
         slice_axis = int(source_slice_info.get("axis", -1))
         if slice_axis not in (0, 1):
@@ -4776,26 +4821,22 @@ class My3DAnalyzer(QWidget):
         canonical.setflags(write=False)
         return canonical, canonical, canonical
 
-    def load_data(self, path):
-        target_path = path
-
+    def _prepare_load_target(self, path):
         if path.lower().endswith(".mat"):
             default_name = os.path.splitext(os.path.basename(path))[0] + ".npz"
             target_path, _ = QFileDialog.getSaveFileName(self, "保存转换后的 npz", default_name, "NumPy Files (*.npz)")
             if not target_path:
-                return
+                return None
 
             try:
                 convert_mat_to_npz(path, target_path)
             except Exception as exc:
                 self._show_message("MAT 转换失败", f"无法将 .mat 文件转换为 .npz：\n{exc}", QMessageBox.Critical)
-                return
+                return None
+            return target_path
+        return path
 
-        success, info = self.core.load_npz(target_path)
-        if not success:
-            self._show_message("数据加载失败", f"无法加载文件：\n{info}", QMessageBox.Critical)
-            return
-
+    def _reset_loaded_data_state(self, target_path):
         self.loaded_npz_stem = Path(target_path).stem
         canonical, original, base = self._canonical_data_aliases(self.core.raw_data)
         self.core.raw_data = canonical
@@ -4829,6 +4870,7 @@ class My3DAnalyzer(QWidget):
         self.home_slice_info = None
         self.axis_source_mode = "frame"
 
+    def _restore_initial_controls_after_load(self):
         self._syncing_controls = True
         try:
             self.page_image.restore_state(self.initial_control_state.get("image"), block_signals=True)
@@ -4839,8 +4881,7 @@ class My3DAnalyzer(QWidget):
         finally:
             self._syncing_controls = False
 
-        self._refresh_core_display_state()
-
+    def _configure_loaded_time_controls(self, info):
         t_max = info[3] - 1
         slider_max = max(t_max, 1)
         time_func = lambda value: f"Delay: {self.core.coords['delay'][min(int(value), len(self.core.coords['delay']) - 1)]:.4f} fs"
@@ -4856,6 +4897,7 @@ class My3DAnalyzer(QWidget):
         self.page_data.s_t_low.setToolTipConvertionFunc(time_func)
         self.page_data.s_t_up.setToolTipConvertionFunc(time_func)
 
+    def _reset_workspace_after_load(self):
         self.update_ax_slider_range()
         self._sync_slice_edits_from_logical_bounds()
         self._configure_time_controls()
@@ -4872,6 +4914,22 @@ class My3DAnalyzer(QWidget):
         self.global_refresh()
         self.plotter.reset_camera()
         self._capture_3d_camera_position()
+
+    def load_data(self, path):
+        target_path = self._prepare_load_target(path)
+        if not target_path:
+            return
+
+        success, info = self.core.load_npz(target_path)
+        if not success:
+            self._show_message("数据加载失败", f"无法加载文件：\n{info}", QMessageBox.Critical)
+            return
+
+        self._reset_loaded_data_state(target_path)
+        self._restore_initial_controls_after_load()
+        self._refresh_core_display_state()
+        self._configure_loaded_time_controls(info)
+        self._reset_workspace_after_load()
 
     def update_ax_slider_range(self):
         if self.core.raw_data is None:
@@ -6320,289 +6378,371 @@ class My3DAnalyzer(QWidget):
         self._request_scope_denoise_if_needed(current_spec)
         self.global_refresh()
 
+    def _build_home_export_payload(self, raw_data, coords):
+        if isinstance(raw_data, ScopedDataVolume):
+            descriptor = raw_data.descriptor
+            slices = descriptor.spatial_slices
+            sample = raw_data.values
+        else:
+            clip_info = self._get_clip_slices()
+            if clip_info is None:
+                self._show_message(
+                    "No slice configured",
+                    "Please configure a slice or cut range first.",
+                    QMessageBox.Warning,
+                )
+                return None
+            slices, _ = clip_info
+            sample = raw_data[slices[0], slices[1], slices[2], :]
+        if not self.core.has_time_axis:
+            sample = sample[..., 0]
+
+        return (
+            "Save current slice cube",
+            "slice_cube.mat",
+            {
+                "sample": np.asarray(sample, dtype=np.float32),
+                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
+                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
+                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
+                "time": np.asarray(coords["delay"], dtype=np.float32),
+            },
+        )
+
+    def _build_time_integral_export_payload(self, spec, raw_data, coords):
+        self._persist_time_integral_page_state(spec)
+        context = self._get_time_integral_context(spec, raw_data, coords)
+        t_low = int(spec.params["t_low"])
+        t_up = int(spec.params["t_up"])
+        descriptor = scoped_descriptor_from_array(context["data"])
+        slices = (
+            descriptor.spatial_slices
+            if descriptor is not None
+            else (slice(None),) * 3
+        )
+        return (
+            "Save time-integral result",
+            self._build_time_integral_default_name(t_low, t_up),
+            {
+                "sample": np.asarray(context["data"], dtype=np.float32),
+                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
+                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
+                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
+            },
+        )
+
+    def _build_axis_integral_export_payload(self, spec, raw_data, coords):
+        is_crop = spec.page_kind == "axis_integral_crop"
+        context_builder = (
+            self._get_axis_integral_crop_export_context
+            if is_crop
+            else self._get_axis_integral_export_context
+        )
+        context = context_builder(spec, raw_data, coords)
+        if context is None:
+            return None
+        return (
+            "Save cropped axis-integral result" if is_crop else "Save axis-integral result",
+            context["default_name"],
+            context["export_data"],
+        )
+
+    def _build_slice_dos_export_payload(self, spec, raw_data, coords):
+        return (
+            "Save slice-integrated intensity",
+            "slice_dos.mat",
+            {
+                "time": np.asarray(coords["delay"], dtype=np.float32),
+                "intensity": np.asarray(
+                    self._compute_slice_dos(raw_data, spec.params["clip_ranges"]),
+                    dtype=np.float32,
+                ),
+            },
+        )
+
+    def _build_edc_export_payload(self, spec, raw_data, coords):
+        context = self._get_edc_curve_context(spec, raw_data, coords)
+        if context is None:
+            return None
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        e_slice = (
+            descriptor.spatial_slices[2]
+            if descriptor is not None
+            and len(context["x_data"]) == descriptor.full_shape[2]
+            else slice(None)
+        )
+        export_data = {
+            "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
+            "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
+            "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
+            "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
+            "source_mode": np.asarray([context["source_mode"]]),
+            "crop_rect": self._crop_rect_export_array(context["crop_rect"]),
+        }
+        if context["source_mode"] == "time_integral":
+            export_data["source_t_range"] = np.asarray(
+                context["source_t_range"], dtype=np.float32
+            )
+            export_data["source_t_indices"] = np.asarray(
+                context["source_t_indices"], dtype=np.int32
+            )
+        else:
+            export_data["source_t_index"] = np.asarray(
+                [context["source_t_index"]], dtype=np.int32
+            )
+            export_data["source_t_value"] = np.asarray(
+                [context["source_t_value"]], dtype=np.float32
+            )
+        return "Save EDC curve result", "edc_curve.mat", export_data
+
+    def _build_waterfall_export_payload(self, spec, raw_data, coords):
+        try:
+            context = self._get_waterfall_edc_context(spec, raw_data, coords)
+        except ValueError as exc:
+            self._show_message("Save failed", str(exc), QMessageBox.Warning)
+            return None
+        if context is None:
+            return None
+
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        if descriptor is not None:
+            k_axis = 1 if int(spec.params.get("axis_index", 0)) == 0 else 0
+            k_slice = (
+                descriptor.spatial_slices[k_axis]
+                if len(context["k_values"]) == descriptor.full_shape[k_axis]
+                else slice(None)
+            )
+            e_slice = (
+                descriptor.spatial_slices[2]
+                if len(context["energy_axis"]) == descriptor.full_shape[2]
+                else slice(None)
+            )
+        else:
+            k_slice = slice(None)
+            e_slice = slice(None)
+
+        export_data = {
+            "k": np.asarray(context["k_values"][k_slice], dtype=np.float32),
+            "E": np.asarray(context["energy_axis"][e_slice], dtype=np.float32),
+            "intensity": np.asarray(
+                context["raw_curves"][k_slice, e_slice], dtype=np.float32
+            ),
+            "integrated_axis": np.asarray([context["integrated_axis_label"]]),
+            "integrated_range": np.asarray(
+                context["integrated_range"], dtype=np.float32
+            ),
+        }
+        if context.get("crop_rect") is not None:
+            export_data["crop_rect"] = self._crop_rect_export_array(
+                context["crop_rect"]
+            )
+        return "Save EDC waterfall result", "waterfall_edc.mat", export_data
+
+    def _build_second_derivative_3d_export_payload(self, context, coords):
+        derivative_axis = int(context["derivative_axis"])
+        derivative_label = self._second_derivative_axis_label(derivative_axis)
+        descriptor = scoped_descriptor_from_array(context["data"])
+        slices = (
+            descriptor.spatial_slices
+            if descriptor is not None
+            else (slice(None),) * 3
+        )
+        export_data = {
+            "sample": np.asarray(context["data"], dtype=np.float32),
+            "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
+            "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
+            "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
+            "derivative_axis": np.asarray([derivative_label]),
+            "source_mode": np.asarray([context["source_mode"]]),
+        }
+        if context["source_mode"] == "time_integral":
+            t_low, t_up = context["source_t_indices"]
+            export_data["source_t_indices"] = np.asarray(
+                [t_low, t_up], dtype=np.int32
+            )
+            export_data["source_t_range"] = np.asarray(
+                [coords["delay"][t_low], coords["delay"][t_up]],
+                dtype=np.float32,
+            )
+        else:
+            source_t_index = int(context["source_t_index"])
+            export_data["source_t_index"] = np.asarray(
+                [source_t_index], dtype=np.int32
+            )
+            if coords.get("delay") is not None and len(coords["delay"]) > source_t_index:
+                export_data["time"] = np.asarray(
+                    [coords["delay"][source_t_index]], dtype=np.float32
+                )
+        return (
+            "Save 3D second-derivative result",
+            f"second_derivative_3d_{derivative_label}.mat",
+            export_data,
+        )
+
+    def _build_second_derivative_2d_export_payload(self, context, raw_data, coords):
+        axis_index = int(context["slice_info"].get("axis", -1))
+        plot_axes = context.get("plot_axes")
+        plot_bounds = (
+            dict(context["plot_logical_bounds"])
+            if context.get("plot_logical_bounds") is not None
+            else None
+        )
+        sample = np.asarray(context["data"], dtype=np.float32)
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        if descriptor is not None and plot_axes is not None and plot_bounds is not None:
+            axis_by_key = {"X": 0, "Y": 1, "E": 2}
+            scope_rect = {
+                "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
+                "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
+                "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
+                "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
+            }
+            compact_bounds = self._intersect_plot_rects(plot_bounds, scope_rect)
+            if compact_bounds is not None:
+                x_offset = int(compact_bounds["x_low"]) - int(plot_bounds["x_low"])
+                y_offset = int(compact_bounds["y_low"]) - int(plot_bounds["y_low"])
+                sample = sample[
+                    x_offset : x_offset
+                    + int(compact_bounds["x_up"] - compact_bounds["x_low"])
+                    + 1,
+                    y_offset : y_offset
+                    + int(compact_bounds["y_up"] - compact_bounds["y_low"])
+                    + 1,
+                ]
+                plot_bounds = compact_bounds
+
+        export_data = {
+            "sample": sample,
+            "E": np.asarray(coords["E"], dtype=np.float32),
+        }
+        if plot_axes is not None and plot_bounds is not None:
+            y_low = int(plot_bounds["y_low"])
+            y_up = int(plot_bounds["y_up"])
+            export_data["E"] = np.asarray(
+                coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32
+            )
+            if axis_index == 0:
+                export_data["ky"] = np.asarray(
+                    coords[plot_axes["x_key"]][
+                        int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1
+                    ],
+                    dtype=np.float32,
+                )
+            elif axis_index == 1:
+                export_data["kx"] = np.asarray(
+                    coords[plot_axes["x_key"]][
+                        int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1
+                    ],
+                    dtype=np.float32,
+                )
+        elif axis_index == 0:
+            export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
+        elif axis_index == 1:
+            export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
+        return "Save second-derivative result", "second_derivative.mat", export_data
+
+    def _build_second_derivative_export_payload(self, spec, raw_data, coords):
+        context = self._get_second_derivative_context(spec, raw_data, coords)
+        if context is None:
+            return None
+        if context.get("view") == "3d":
+            return self._build_second_derivative_3d_export_payload(context, coords)
+        return self._build_second_derivative_2d_export_payload(context, raw_data, coords)
+
+    def _build_energy_dos_export_payload(self, spec, raw_data, coords):
+        context = self._get_energy_dos_context(spec, raw_data, coords)
+        if context is None:
+            return None
+        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        e_slice = (
+            descriptor.spatial_slices[2]
+            if descriptor is not None
+            and len(context["x_data"]) == descriptor.full_shape[2]
+            else slice(None)
+        )
+        export_data = {
+            "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
+            "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
+        }
+        source_kind = spec.params.get("source_page_kind", "home")
+        if source_kind == "axis_integral":
+            if spec.params.get("source_mode") == "time_integral":
+                export_data["time_range"] = np.asarray(
+                    [
+                        coords["delay"][int(spec.params["source_t_low"])],
+                        coords["delay"][int(spec.params["source_t_up"])],
+                    ],
+                    dtype=np.float32,
+                )
+            else:
+                t_index = int(
+                    spec.params.get(
+                        "source_t_index", int(self.page_image.slider_time.value())
+                    )
+                )
+                export_data["time"] = np.asarray(
+                    [coords["delay"][t_index]], dtype=np.float32
+                )
+        else:
+            if self._is_current_page(spec):
+                t_index = int(self.page_image.slider_time.value())
+            else:
+                t_index = int(
+                    spec.params.get(
+                        "t_index", int(self.page_image.slider_time.value())
+                    )
+                )
+            export_data["time"] = np.asarray(
+                [coords["delay"][t_index]], dtype=np.float32
+            )
+        if "clip_ranges" in spec.params:
+            export_data["clip_ranges"] = np.asarray(
+                spec.params["clip_ranges"], dtype=np.float32
+            )
+        return "Save Energy-DOS result", "energy_dos.mat", export_data
+
+    def _build_export_payload(self, spec, raw_data, coords):
+        if spec.page_kind == "home":
+            return self._build_home_export_payload(raw_data, coords)
+        elif spec.page_kind == "time_integral":
+            return self._build_time_integral_export_payload(spec, raw_data, coords)
+        elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            return self._build_axis_integral_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == "slice_dos":
+            return self._build_slice_dos_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == "edc_curve":
+            return self._build_edc_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == "waterfall_edc":
+            return self._build_waterfall_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == "second_derivative":
+            return self._build_second_derivative_export_payload(spec, raw_data, coords)
+        else:
+            return self._build_energy_dos_export_payload(spec, raw_data, coords)
+
     def export_current_result(self):
         spec = self.left_workspace.current_spec()
-        if spec is None or self.core.raw_data is None:
-            return
-        if spec.page_kind == "control_panel":
+        if spec is None or self.core.raw_data is None or spec.page_kind == "control_panel":
             return
         if spec.page_kind == self.COMPARISON_PAGE_KIND:
-            self._show_message("无法导出数据", "比较页暂不导出叠加曲线数据，请使用左侧视图保存导出图片。", QMessageBox.Information)
+            self._show_message(
+                "无法导出数据",
+                "比较页暂不导出叠加曲线数据，请使用左侧视图保存导出图片。",
+                QMessageBox.Information,
+            )
             return
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
             return
 
-        if spec.page_kind == "home":
-            if isinstance(raw_data, ScopedDataVolume):
-                descriptor = raw_data.descriptor
-                slices = descriptor.spatial_slices
-                sample = raw_data.values
-            else:
-                clip_info = self._get_clip_slices()
-                if clip_info is None:
-                    self._show_message("No slice configured", "Please configure a slice or cut range first.", QMessageBox.Warning)
-                    return
-                slices, _ = clip_info
-                sample = raw_data[slices[0], slices[1], slices[2], :]
-            if not self.core.has_time_axis:
-                sample = sample[..., 0]
-
-            export_data = {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
-                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
-                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            }
-            title = "Save current slice cube"
-            default_name = "slice_cube.mat"
-        elif spec.page_kind == "time_integral":
-            self._persist_time_integral_page_state(spec)
-            context = self._get_time_integral_context(spec, raw_data, coords)
-            t_low = int(spec.params["t_low"])
-            t_up = int(spec.params["t_up"])
-            descriptor = scoped_descriptor_from_array(context["data"])
-            x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
-            y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
-            e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
-            export_data = {
-                "sample": np.asarray(context["data"], dtype=np.float32),
-                "kx": np.asarray(coords["X"][x_slice], dtype=np.float32),
-                "ky": np.asarray(coords["Y"][y_slice], dtype=np.float32),
-                "E": np.asarray(coords["E"][e_slice], dtype=np.float32),
-            }
-            title = "Save time-integral result"
-            default_name = self._build_time_integral_default_name(t_low, t_up)
-        elif spec.page_kind == "axis_integral":
-            axis_context = self._get_axis_integral_export_context(spec, raw_data, coords)
-            if axis_context is None:
-                return
-            export_data = axis_context["export_data"]
-            title = "Save axis-integral result"
-            default_name = axis_context["default_name"]
-        elif spec.page_kind == "axis_integral_crop":
-            axis_context = self._get_axis_integral_crop_export_context(spec, raw_data, coords)
-            if axis_context is None:
-                return
-            export_data = axis_context["export_data"]
-            title = "Save cropped axis-integral result"
-            default_name = axis_context["default_name"]
-        elif spec.page_kind == "slice_dos":
-            export_data = {
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-                "intensity": np.asarray(self._compute_slice_dos(raw_data, spec.params["clip_ranges"]), dtype=np.float32),
-            }
-            title = "Save slice-integrated intensity"
-            default_name = "slice_dos.mat"
-        elif spec.page_kind == "edc_curve":
-            context = self._get_edc_curve_context(spec, raw_data, coords)
-            if context is None:
-                return
-            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
-            e_slice = (
-                descriptor.spatial_slices[2]
-                if descriptor is not None
-                and len(context["x_data"]) == descriptor.full_shape[2]
-                else slice(None)
-            )
-            export_data = {
-                "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
-                "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
-                "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
-                "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
-                "source_mode": np.asarray([context["source_mode"]]),
-                "crop_rect": self._crop_rect_export_array(context["crop_rect"]),
-            }
-            if context["source_mode"] == "time_integral":
-                export_data["source_t_range"] = np.asarray(context["source_t_range"], dtype=np.float32)
-                export_data["source_t_indices"] = np.asarray(context["source_t_indices"], dtype=np.int32)
-            else:
-                export_data["source_t_index"] = np.asarray([context["source_t_index"]], dtype=np.int32)
-                export_data["source_t_value"] = np.asarray([context["source_t_value"]], dtype=np.float32)
-            title = "Save EDC curve result"
-            default_name = "edc_curve.mat"
-        elif spec.page_kind == "waterfall_edc":
-            try:
-                context = self._get_waterfall_edc_context(spec, raw_data, coords)
-            except ValueError as exc:
-                self._show_message("Save failed", str(exc), QMessageBox.Warning)
-                return
-            if context is None:
-                return
-            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
-            if descriptor is not None:
-                k_axis = 1 if int(spec.params.get("axis_index", 0)) == 0 else 0
-                k_slice = (
-                    descriptor.spatial_slices[k_axis]
-                    if len(context["k_values"]) == descriptor.full_shape[k_axis]
-                    else slice(None)
-                )
-                e_slice = (
-                    descriptor.spatial_slices[2]
-                    if len(context["energy_axis"]) == descriptor.full_shape[2]
-                    else slice(None)
-                )
-            else:
-                k_slice = slice(None)
-                e_slice = slice(None)
-            export_data = {
-                "k": np.asarray(context["k_values"][k_slice], dtype=np.float32),
-                "E": np.asarray(context["energy_axis"][e_slice], dtype=np.float32),
-                "intensity": np.asarray(context["raw_curves"][k_slice, e_slice], dtype=np.float32),
-                "integrated_axis": np.asarray([context["integrated_axis_label"]]),
-                "integrated_range": np.asarray(context["integrated_range"], dtype=np.float32),
-            }
-            if context.get("crop_rect") is not None:
-                export_data["crop_rect"] = self._crop_rect_export_array(
-                    context["crop_rect"]
-                )
-            title = "Save EDC waterfall result"
-            default_name = "waterfall_edc.mat"
-        elif spec.page_kind == "second_derivative":
-            context = self._get_second_derivative_context(spec, raw_data, coords)
-            if context is None:
-                return
-            if context.get("view") == "3d":
-                derivative_axis = int(context["derivative_axis"])
-                derivative_label = self._second_derivative_axis_label(derivative_axis)
-                descriptor = scoped_descriptor_from_array(context["data"])
-                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
-                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
-                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
-                export_data = {
-                    "sample": np.asarray(context["data"], dtype=np.float32),
-                    "kx": np.asarray(coords["X"][x_slice], dtype=np.float32),
-                    "ky": np.asarray(coords["Y"][y_slice], dtype=np.float32),
-                    "E": np.asarray(coords["E"][e_slice], dtype=np.float32),
-                    "derivative_axis": np.asarray([derivative_label]),
-                    "source_mode": np.asarray([context["source_mode"]]),
-                }
-                if context["source_mode"] == "time_integral":
-                    t_low, t_up = context["source_t_indices"]
-                    export_data["source_t_indices"] = np.asarray(
-                        [t_low, t_up],
-                        dtype=np.int32,
-                    )
-                    export_data["source_t_range"] = np.asarray(
-                        [coords["delay"][t_low], coords["delay"][t_up]],
-                        dtype=np.float32,
-                    )
-                else:
-                    source_t_index = int(context["source_t_index"])
-                    export_data["source_t_index"] = np.asarray(
-                        [source_t_index],
-                        dtype=np.int32,
-                    )
-                    if coords.get("delay") is not None and len(coords["delay"]) > source_t_index:
-                        export_data["time"] = np.asarray(
-                            [coords["delay"][source_t_index]],
-                            dtype=np.float32,
-                        )
-                title = "Save 3D second-derivative result"
-                default_name = f"second_derivative_3d_{derivative_label}.mat"
-            else:
-                axis_index = int(context["slice_info"].get("axis", -1))
-                plot_axes = context.get("plot_axes")
-                plot_bounds = (
-                    dict(context["plot_logical_bounds"])
-                    if context.get("plot_logical_bounds") is not None
-                    else None
-                )
-                sample = np.asarray(context["data"], dtype=np.float32)
-                descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
-                if descriptor is not None and plot_axes is not None and plot_bounds is not None:
-                    axis_by_key = {"X": 0, "Y": 1, "E": 2}
-                    scope_rect = {
-                        "x_low": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[0],
-                        "x_up": descriptor.axis_bounds(axis_by_key[plot_axes["x_key"]])[1],
-                        "y_low": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[0],
-                        "y_up": descriptor.axis_bounds(axis_by_key[plot_axes["y_key"]])[1],
-                    }
-                    compact_bounds = self._intersect_plot_rects(plot_bounds, scope_rect)
-                    if compact_bounds is not None:
-                        x_offset = int(compact_bounds["x_low"]) - int(plot_bounds["x_low"])
-                        y_offset = int(compact_bounds["y_low"]) - int(plot_bounds["y_low"])
-                        sample = sample[
-                            x_offset : x_offset
-                            + int(compact_bounds["x_up"] - compact_bounds["x_low"])
-                            + 1,
-                            y_offset : y_offset
-                            + int(compact_bounds["y_up"] - compact_bounds["y_low"])
-                            + 1,
-                        ]
-                        plot_bounds = compact_bounds
-                energy_axis = np.asarray(coords["E"], dtype=np.float32)
-                export_data = {
-                    "sample": sample,
-                    "E": energy_axis,
-                }
-                if plot_axes is not None and plot_bounds is not None:
-                    y_low = int(plot_bounds["y_low"])
-                    y_up = int(plot_bounds["y_up"])
-                    export_data["E"] = np.asarray(coords[plot_axes["y_key"]][y_low:y_up + 1], dtype=np.float32)
-                    if axis_index == 0:
-                        export_data["ky"] = np.asarray(
-                            coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
-                            dtype=np.float32,
-                        )
-                    elif axis_index == 1:
-                        export_data["kx"] = np.asarray(
-                            coords[plot_axes["x_key"]][int(plot_bounds["x_low"]):int(plot_bounds["x_up"]) + 1],
-                            dtype=np.float32,
-                        )
-                elif axis_index == 0:
-                    export_data["ky"] = np.asarray(coords["Y"], dtype=np.float32)
-                elif axis_index == 1:
-                    export_data["kx"] = np.asarray(coords["X"], dtype=np.float32)
-                title = "Save second-derivative result"
-                default_name = "second_derivative.mat"
-        else:
-            context = self._get_energy_dos_context(spec, raw_data, coords)
-            if context is None:
-                return
-            descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
-            e_slice = (
-                descriptor.spatial_slices[2]
-                if descriptor is not None
-                and len(context["x_data"]) == descriptor.full_shape[2]
-                else slice(None)
-            )
-            export_data = {
-                "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
-                "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
-            }
-            source_kind = spec.params.get("source_page_kind", "home")
-            if source_kind == "axis_integral":
-                if spec.params.get("source_mode") == "time_integral":
-                    export_data["time_range"] = np.asarray(
-                        [
-                            coords["delay"][int(spec.params["source_t_low"])],
-                            coords["delay"][int(spec.params["source_t_up"])],
-                        ],
-                        dtype=np.float32,
-                    )
-                else:
-                    export_data["time"] = np.asarray(
-                        [coords["delay"][int(spec.params.get("source_t_index", int(self.page_image.slider_time.value())))]] ,
-                        dtype=np.float32,
-                    )
-            else:
-                if self._is_current_page(spec):
-                    t_index = int(self.page_image.slider_time.value())
-                else:
-                    t_index = int(spec.params.get("t_index", int(self.page_image.slider_time.value())))
-                export_data["time"] = np.asarray([coords["delay"][t_index]], dtype=np.float32)
-            if "clip_ranges" in spec.params:
-                export_data["clip_ranges"] = np.asarray(spec.params["clip_ranges"], dtype=np.float32)
-            title = "Save Energy-DOS result"
-            default_name = "energy_dos.mat"
-
-        export_data.update(self._scope_export_metadata(self._scope_for_spec(spec), coords))
+        payload = self._build_export_payload(spec, raw_data, coords)
+        if payload is None:
+            return
+        title, default_name, export_data = payload
+        export_data.update(
+            self._scope_export_metadata(self._scope_for_spec(spec), coords)
+        )
 
         path = self._choose_export_path(title, default_name)
-        if not path:
-            return
-
-        self._save_dict_to_path(path, export_data)
+        if path:
+            self._save_dict_to_path(path, export_data)
