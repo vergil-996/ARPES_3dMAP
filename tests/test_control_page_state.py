@@ -6,11 +6,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication
 
 from blank_control_page import BlankControlPage
+from denoise_config import (
+    DEFAULT_SG_PARAMS,
+    DEFAULT_WAVELET_PARAMS,
+    SG_AXIS_LABEL_TO_KEY,
+    THRESHOLD_MODE_OPTIONS,
+    THRESHOLD_RULE_OPTIONS,
+    WAVELET_OPTIONS,
+)
 from page_data_process_v2 import DataProcessPage
 from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from qt_bootstrap import configure_qt_plugin_path
-from settings_popups import WaterfallSettingsPopup
+from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
 
 
 configure_qt_plugin_path()
@@ -74,6 +82,31 @@ class ControlPageStateTests(unittest.TestCase):
 
         self.assertAlmostEqual(blank.get_waterfall_step(), 0.25)
         self.assertEqual(received, [True])
+
+    def test_denoise_pages_share_defaults_and_options(self):
+        blank = BlankControlPage()
+        popup = DenoiseSettingsPopup(blank)
+
+        self.assertEqual(blank.get_savgol_params(), DEFAULT_SG_PARAMS)
+        self.assertEqual(blank.get_wavelet_params(), DEFAULT_WAVELET_PARAMS)
+        self.assertEqual(
+            [blank.sg_axis_combo.itemText(i) for i in range(blank.sg_axis_combo.count())],
+            list(SG_AXIS_LABEL_TO_KEY),
+        )
+        self.assertEqual(
+            [popup.wavelet_combo.itemText(i) for i in range(popup.wavelet_combo.count())],
+            list(WAVELET_OPTIONS),
+        )
+        self.assertEqual(
+            [popup.wavelet_threshold_rule_combo.itemText(i)
+             for i in range(popup.wavelet_threshold_rule_combo.count())],
+            list(THRESHOLD_RULE_OPTIONS),
+        )
+        self.assertEqual(
+            [popup.wavelet_threshold_mode_combo.itemText(i)
+             for i in range(popup.wavelet_threshold_mode_combo.count())],
+            list(THRESHOLD_MODE_OPTIONS),
+        )
 
 
 if __name__ == "__main__":

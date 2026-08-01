@@ -7,24 +7,23 @@ from scipy.ndimage import gaussian_filter, median_filter
 from scipy.signal import savgol_filter
 from skimage.restoration import denoise_nl_means, estimate_sigma
 
+from denoise_config import (
+    DEFAULT_SG_PARAMS as CONFIG_DEFAULT_SG_PARAMS,
+    DEFAULT_WAVELET_PARAMS as CONFIG_DEFAULT_WAVELET_PARAMS,
+    SG_METHOD_ALIASES as CONFIG_SG_METHOD_ALIASES,
+    SG_METHOD_NAME as CONFIG_SG_METHOD_NAME,
+    WAVELET_METHOD_ALIASES as CONFIG_WAVELET_METHOD_ALIASES,
+    WAVELET_METHOD_NAME as CONFIG_WAVELET_METHOD_NAME,
+)
+
 
 class DenoiseEngines:
-    SG_METHOD_NAME = "Savitzky-Golay滤波"
-    WAVELET_METHOD_NAME = "小波去噪"
-    SG_METHOD_ALIASES = {"Savitzky-Golay滤波", "Savitzky-Golay婊ゆ尝"}
-    WAVELET_METHOD_ALIASES = {"小波去噪", "灏忔尝鍘诲櫔"}
-    DEFAULT_SG_PARAMS = {
-        "window_length": 5,
-        "polyorder": 2,
-        "smoothing_axis": "e",
-    }
-    DEFAULT_WAVELET_PARAMS = {
-        "wavelet": "db4",
-        "level": 3,
-        "threshold_rule": "universal",
-        "threshold_mode": "soft",
-        "strength": 1.0,
-    }
+    SG_METHOD_NAME = CONFIG_SG_METHOD_NAME
+    WAVELET_METHOD_NAME = CONFIG_WAVELET_METHOD_NAME
+    SG_METHOD_ALIASES = CONFIG_SG_METHOD_ALIASES
+    WAVELET_METHOD_ALIASES = CONFIG_WAVELET_METHOD_ALIASES
+    DEFAULT_SG_PARAMS = CONFIG_DEFAULT_SG_PARAMS
+    DEFAULT_WAVELET_PARAMS = CONFIG_DEFAULT_WAVELET_PARAMS
 
     @staticmethod
     def apply_pipeline(data, methods, *, max_workers=None):

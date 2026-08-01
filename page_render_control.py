@@ -16,6 +16,7 @@ from control_layout_utils import (
     scroll_content_width,
     sync_slider_visual,
 )
+from denoise_config import DENOISE_METHODS as CONFIG_DENOISE_METHODS
 
 
 class RenderControlPage(QWidget):
@@ -49,10 +50,7 @@ class RenderControlPage(QWidget):
         "spring", "summer", "autumn", "winter", "cool", "hsv", "terrain",
         "ocean", "gnuplot", "gnuplot2",
     ]
-    DENOISE_METHODS = (
-        "None", "频域平滑", "滑动平均", "Savitzky-Golay滤波",
-        "小波去噪", "卡尔曼滤波", "贝叶斯去噪",
-    )
+    DENOISE_METHODS = CONFIG_DENOISE_METHODS
 
     def __init__(self, parent=None):
         super().__init__(parent)

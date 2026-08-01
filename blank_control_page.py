@@ -1,41 +1,42 @@
 from PyQt5.QtCore import QSignalBlocker, Qt
-from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
-from siui.components.combobox_ import SiCapsuleComboBox
-from siui.components.container import SiTriSectionPanelCard
-from siui.components.editbox import SiDoubleSpinBox, SiSpinBox
-from siui.components.titled_widget_group import SiTitledWidgetGroup
+from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from siui.components.widgets import SiScrollArea
 
-from control_layout_utils import apply_label_color
+from control_layout_utils import combo_index_for_text
+from denoise_config import (
+    DEFAULT_SG_PARAMS as CONFIG_DEFAULT_SG_PARAMS,
+    DEFAULT_WAVELET_PARAMS as CONFIG_DEFAULT_WAVELET_PARAMS,
+    MAX_SG_POLYORDER as CONFIG_MAX_SG_POLYORDER,
+    SG_AXIS_KEY_TO_LABEL as CONFIG_SG_AXIS_KEY_TO_LABEL,
+    SG_AXIS_LABEL_TO_KEY as CONFIG_SG_AXIS_LABEL_TO_KEY,
+    SG_METHOD_NAME as CONFIG_SG_METHOD_NAME,
+    THRESHOLD_MODE_OPTIONS as CONFIG_THRESHOLD_MODE_OPTIONS,
+    THRESHOLD_RULE_OPTIONS as CONFIG_THRESHOLD_RULE_OPTIONS,
+    WAVELET_METHOD_NAME as CONFIG_WAVELET_METHOD_NAME,
+    WAVELET_OPTIONS as CONFIG_WAVELET_OPTIONS,
+)
+from denoise_control_utils import (
+    create_double_spin_box,
+    create_parameter_group,
+    create_savgol_control_group,
+    create_wavelet_control_group,
+    finish_parameter_group,
+)
 
 
 class BlankControlPage(QWidget):
-    SG_METHOD_NAME = "Savitzky-Golay滤波"
+    SG_METHOD_NAME = CONFIG_SG_METHOD_NAME
     GROUP_WIDTH = 560
     DEFAULT_WATERFALL_STEP = 0.01
-    DEFAULT_SG_PARAMS = {
-        "window_length": 5,
-        "polyorder": 2,
-        "smoothing_axis": "e",
-    }
-    SG_AXIS_LABEL_TO_KEY = {
-        "E轴": "e",
-        "Kx轴": "kx",
-        "Ky轴": "ky",
-    }
-    SG_AXIS_KEY_TO_LABEL = {value: key for key, value in SG_AXIS_LABEL_TO_KEY.items()}
-    MAX_SG_POLYORDER = 4
-    WAVELET_METHOD_NAME = "小波去噪"
-    DEFAULT_WAVELET_PARAMS = {
-        "wavelet": "db4",
-        "level": 3,
-        "threshold_rule": "universal",
-        "threshold_mode": "soft",
-        "strength": 1.0,
-    }
-    WAVELET_OPTIONS = ["haar", "db2", "db4", "sym4", "coif1"]
-    THRESHOLD_RULE_OPTIONS = ["universal", "sure", "bayes"]
-    THRESHOLD_MODE_OPTIONS = ["soft", "hard"]
+    DEFAULT_SG_PARAMS = CONFIG_DEFAULT_SG_PARAMS
+    SG_AXIS_LABEL_TO_KEY = CONFIG_SG_AXIS_LABEL_TO_KEY
+    SG_AXIS_KEY_TO_LABEL = CONFIG_SG_AXIS_KEY_TO_LABEL
+    MAX_SG_POLYORDER = CONFIG_MAX_SG_POLYORDER
+    WAVELET_METHOD_NAME = CONFIG_WAVELET_METHOD_NAME
+    DEFAULT_WAVELET_PARAMS = CONFIG_DEFAULT_WAVELET_PARAMS
+    WAVELET_OPTIONS = CONFIG_WAVELET_OPTIONS
+    THRESHOLD_RULE_OPTIONS = CONFIG_THRESHOLD_RULE_OPTIONS
+    THRESHOLD_MODE_OPTIONS = CONFIG_THRESHOLD_MODE_OPTIONS
 
     DEFAULT_SECOND_DERIVATIVE_PARAMS = {
         "threshold": 0.0,
@@ -59,7 +60,7 @@ class BlankControlPage(QWidget):
         self.content_layout.setSpacing(18)
         self.content_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
-        self.group_savgol = self._create_method_group(self.SG_METHOD_NAME)
+        self.group_savgol = self._create_method_group()
         self.group_wavelet = self._create_wavelet_method_group()
         self.group_second_derivative = self._create_second_derivative_group()
         self.group_waterfall = self._create_waterfall_group()
@@ -73,130 +74,44 @@ class BlankControlPage(QWidget):
         self.scroll.setAttachment(self.container)
         root.addWidget(self.scroll)
 
-    def _create_method_group(self, title):
-        group = SiTitledWidgetGroup(self.container)
-        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        group.setFixedWidth(self.GROUP_WIDTH)
-        group.addTitle(title)
-
-        card = SiTriSectionPanelCard(group)
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        card.header().hide()
-        card.footer().hide()
-        card.body().layout().setSpacing(12)
-
-        self.sg_window_box = self._create_spin_box(
-            parent=card,
-            title="滑动窗口长度",
-            value=self.DEFAULT_SG_PARAMS["window_length"],
-            minimum=3,
-            maximum=9999,
-            single_step=2,
+    def _create_method_group(self):
+        controls = create_savgol_control_group(
+            self.container,
+            self.GROUP_WIDTH,
+            self.GROUP_WIDTH - 80,
         )
-        self.sg_polyorder_box = self._create_spin_box(
-            parent=card,
-            title="多项式阶数",
-            value=self.DEFAULT_SG_PARAMS["polyorder"],
-            minimum=0,
-            maximum=min(self.MAX_SG_POLYORDER, self.DEFAULT_SG_PARAMS["window_length"] - 1),
-            single_step=1,
-        )
-        self.sg_axis_combo = self._create_combo_box(
-            parent=card,
-            title="窗口滑动轴",
-            items=list(self.SG_AXIS_LABEL_TO_KEY.keys()),
-            current_text=self.SG_AXIS_KEY_TO_LABEL[self.DEFAULT_SG_PARAMS["smoothing_axis"]],
-        )
+        self.sg_window_box = controls.window_box
+        self.sg_polyorder_box = controls.polyorder_box
+        self.sg_axis_combo = controls.axis_combo
 
         self.sg_window_box.editingFinished.connect(self._sync_savgol_constraints)
         self.sg_polyorder_box.editingFinished.connect(self._sync_savgol_constraints)
-
-        card.body().addWidget(self.sg_window_box)
-        card.body().addWidget(self.sg_polyorder_box)
-        card.body().addWidget(self.sg_axis_combo)
-        card.adjustSize()
-
-        group.addWidget(card)
-        apply_label_color(group, "#FFFFFF")
         self._sync_savgol_constraints()
-        return group
+        return controls.group
 
     def _create_wavelet_method_group(self):
-        group = SiTitledWidgetGroup(self.container)
-        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        group.setFixedWidth(self.GROUP_WIDTH)
-        group.addTitle(self.WAVELET_METHOD_NAME)
-
-        card = SiTriSectionPanelCard(group)
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        card.header().hide()
-        card.footer().hide()
-        card.body().layout().setSpacing(12)
-
-        self.wavelet_combo = self._create_combo_box(
-            parent=card,
-            title="wavelet",
-            items=self.WAVELET_OPTIONS,
-            current_text=self.DEFAULT_WAVELET_PARAMS["wavelet"],
+        controls = create_wavelet_control_group(
+            self.container,
+            self.GROUP_WIDTH,
+            self.GROUP_WIDTH - 80,
         )
-        self.wavelet_level_box = self._create_spin_box(
-            parent=card,
-            title="level",
-            value=self.DEFAULT_WAVELET_PARAMS["level"],
-            minimum=1,
-            maximum=6,
-            single_step=1,
-        )
-        self.wavelet_threshold_rule_combo = self._create_combo_box(
-            parent=card,
-            title="threshold_rule",
-            items=self.THRESHOLD_RULE_OPTIONS,
-            current_text=self.DEFAULT_WAVELET_PARAMS["threshold_rule"],
-        )
-        self.wavelet_threshold_mode_combo = self._create_combo_box(
-            parent=card,
-            title="threshold_mode",
-            items=self.THRESHOLD_MODE_OPTIONS,
-            current_text=self.DEFAULT_WAVELET_PARAMS["threshold_mode"],
-        )
-        self.wavelet_strength_box = self._create_double_spin_box(
-            parent=card,
-            title="strength",
-            value=self.DEFAULT_WAVELET_PARAMS["strength"],
-            minimum=0.0,
-            maximum=10.0,
-            single_step=0.1,
-        )
+        self.wavelet_combo = controls.wavelet_combo
+        self.wavelet_level_box = controls.level_box
+        self.wavelet_threshold_rule_combo = controls.threshold_rule_combo
+        self.wavelet_threshold_mode_combo = controls.threshold_mode_combo
+        self.wavelet_strength_box = controls.strength_box
 
         self.wavelet_level_box.editingFinished.connect(self._sync_wavelet_constraints)
         self.wavelet_strength_box.editingFinished.connect(self._sync_wavelet_constraints)
-
-        card.body().addWidget(self.wavelet_combo)
-        card.body().addWidget(self.wavelet_level_box)
-        card.body().addWidget(self.wavelet_threshold_rule_combo)
-        card.body().addWidget(self.wavelet_threshold_mode_combo)
-        card.body().addWidget(self.wavelet_strength_box)
-        card.adjustSize()
-
-        group.addWidget(card)
-        apply_label_color(group, "#FFFFFF")
         self._sync_wavelet_constraints()
-        return group
+        return controls.group
 
     def _create_waterfall_group(self):
-        group = SiTitledWidgetGroup(self.container)
-        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        group.setFixedWidth(self.GROUP_WIDTH)
-        group.addTitle("瀑布图参数")
+        group, card = create_parameter_group(self.container, "瀑布图参数", self.GROUP_WIDTH)
 
-        card = SiTriSectionPanelCard(group)
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        card.header().hide()
-        card.footer().hide()
-        card.body().layout().setSpacing(12)
-
-        self.waterfall_step_box = self._create_double_spin_box(
+        self.waterfall_step_box = create_double_spin_box(
             parent=card,
+            width=self.GROUP_WIDTH - 80,
             title="k步长 (1/Å)",
             value=self.DEFAULT_WATERFALL_STEP,
             minimum=0.0001,
@@ -211,28 +126,16 @@ class BlankControlPage(QWidget):
         if text_changed is not None:
             text_changed.connect(self._on_waterfall_step_value_changed)
 
-        card.body().addWidget(self.waterfall_step_box)
-        card.adjustSize()
-
-        group.addWidget(card)
-        apply_label_color(group, "#FFFFFF")
+        finish_parameter_group(group, card, (self.waterfall_step_box,))
         self._sync_waterfall_constraints()
         return group
 
     def _create_second_derivative_group(self):
-        group = SiTitledWidgetGroup(self.container)
-        group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        group.setFixedWidth(self.GROUP_WIDTH)
-        group.addTitle("二阶导参数")
+        group, card = create_parameter_group(self.container, "二阶导参数", self.GROUP_WIDTH)
 
-        card = SiTriSectionPanelCard(group)
-        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        card.header().hide()
-        card.footer().hide()
-        card.body().layout().setSpacing(12)
-
-        self.sd_threshold_box = self._create_double_spin_box(
+        self.sd_threshold_box = create_double_spin_box(
             parent=card,
+            width=self.GROUP_WIDTH - 80,
             title="曲率裁剪阈值",
             value=self.DEFAULT_SECOND_DERIVATIVE_PARAMS["threshold"],
             minimum=0.0,
@@ -242,11 +145,7 @@ class BlankControlPage(QWidget):
 
         self.sd_threshold_box.editingFinished.connect(self._sync_second_derivative_constraints)
 
-        card.body().addWidget(self.sd_threshold_box)
-        card.adjustSize()
-
-        group.addWidget(card)
-        apply_label_color(group, "#FFFFFF")
+        finish_parameter_group(group, card, (self.sd_threshold_box,))
         return group
 
     def _sync_second_derivative_constraints(self):
@@ -262,49 +161,6 @@ class BlankControlPage(QWidget):
         return {
             "threshold": float(self.sd_threshold_box.value()),
         }
-
-    def _create_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
-        spin_box = SiSpinBox(parent)
-        spin_box.setTitle(title)
-        spin_box.setMinimum(minimum)
-        spin_box.setMaximum(maximum)
-        spin_box.setSingleStep(single_step)
-        spin_box.setValue(value)
-        spin_box.resize(self.GROUP_WIDTH - 80, 58)
-        spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        return spin_box
-
-    def _create_double_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
-        spin_box = SiDoubleSpinBox(parent)
-        spin_box.setTitle(title)
-        spin_box.setMinimum(minimum)
-        spin_box.setMaximum(maximum)
-        spin_box.setSingleStep(single_step)
-        spin_box.setValue(value)
-        spin_box.resize(self.GROUP_WIDTH - 80, 58)
-        spin_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        return spin_box
-
-    def _create_combo_box(self, *, parent, title, items, current_text):
-        combo_box = SiCapsuleComboBox(parent)
-        combo_box.setTitle(title)
-        combo_box.setMinimumHeight(36)
-        combo_box.setEditable(False)
-        combo_box.addItems(items)
-        combo_box.resize(self.GROUP_WIDTH - 80, 36)
-        combo_box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        current_index = self._find_combo_index(combo_box, current_text)
-        if current_index >= 0:
-            combo_box.setCurrentIndex(current_index)
-        return combo_box
-
-    @staticmethod
-    def _find_combo_index(combo_box, text):
-        for index in range(combo_box.count()):
-            if combo_box.itemText(index) == text:
-                return index
-        return -1
 
     @staticmethod
     def _commit_spinbox_value(spin_box, fallback):
@@ -507,27 +363,27 @@ class BlankControlPage(QWidget):
             if "polyorder" in sg_state:
                 self.sg_polyorder_box.setValue(int(sg_state["polyorder"]))
             if "smoothing_axis" in sg_state:
-                axis_index = self._find_combo_index(self.sg_axis_combo, sg_state["smoothing_axis"])
+                axis_index = combo_index_for_text(self.sg_axis_combo, sg_state["smoothing_axis"])
                 if axis_index >= 0:
                     self.sg_axis_combo.setCurrentIndex(axis_index)
             self._sync_savgol_constraints()
 
             wavelet_state = state.get("wavelet") or {}
             if "wavelet" in wavelet_state:
-                wavelet_index = self._find_combo_index(self.wavelet_combo, wavelet_state["wavelet"])
+                wavelet_index = combo_index_for_text(self.wavelet_combo, wavelet_state["wavelet"])
                 if wavelet_index >= 0:
                     self.wavelet_combo.setCurrentIndex(wavelet_index)
             if "level" in wavelet_state:
                 self.wavelet_level_box.setValue(int(wavelet_state["level"]))
             if "threshold_rule" in wavelet_state:
-                threshold_rule_index = self._find_combo_index(
+                threshold_rule_index = combo_index_for_text(
                     self.wavelet_threshold_rule_combo,
                     wavelet_state["threshold_rule"],
                 )
                 if threshold_rule_index >= 0:
                     self.wavelet_threshold_rule_combo.setCurrentIndex(threshold_rule_index)
             if "threshold_mode" in wavelet_state:
-                threshold_mode_index = self._find_combo_index(
+                threshold_mode_index = combo_index_for_text(
                     self.wavelet_threshold_mode_combo,
                     wavelet_state["threshold_mode"],
                 )

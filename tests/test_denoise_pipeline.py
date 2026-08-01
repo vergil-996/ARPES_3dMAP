@@ -5,12 +5,19 @@ from unittest.mock import patch
 import numpy as np
 
 from compute_backends import CpuComputeBackend
+from denoise_config import SG_METHOD_ALIASES, WAVELET_METHOD_ALIASES
 from denoise_engines import DenoiseEngines
 from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RenderQuality
 from refactored_app import My3DAnalyzer
 
 
 class DenoiseNumericsTests(unittest.TestCase):
+    def test_historical_mojibake_method_aliases_remain_supported(self):
+        self.assertIn("Savitzky-Golay婊ゆ尝", SG_METHOD_ALIASES)
+        self.assertIn("灏忔尝鍘诲櫔", WAVELET_METHOD_ALIASES)
+        self.assertTrue(DenoiseEngines._is_savgol_method("Savitzky-Golay婊ゆ尝"))
+        self.assertTrue(DenoiseEngines._is_wavelet_method("灏忔尝鍘诲櫔"))
+
     def test_vectorized_4d_savgol_matches_frame_by_frame_result(self):
         data = np.random.default_rng(12).normal(size=(9, 8, 11, 4)).astype(np.float32)
         params = {
