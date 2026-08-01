@@ -83,6 +83,10 @@ class My3DAnalyzer(QWidget):
     FULL_SCOPE_ID = "full"
     ROTATION_CACHE_LIMIT = 4
     RENDER_STATUS_WIDTH = 330
+    CONTEXT_MENU_STYLE = (
+        "QMenu { color: white; background-color: #2A2A3A; } "
+        "QMenu::item:selected { background-color: #3A3A5A; }"
+    )
 
     def __init__(self):
         super().__init__()
@@ -937,18 +941,24 @@ class My3DAnalyzer(QWidget):
                 request.snapshot.get("roi_commit")
                 and self.__dict__.get("_pending_roi_scope_id") != scope_id
             ):
-                self.data_scopes.pop(scope_id, None)
-                self._scope_committed_signatures.pop(scope_id, None)
+                self._discard_roi_scope(
+                    scope_id,
+                    cancel_task=False,
+                    clear_cache=False,
+                    clear_pending=False,
+                )
                 return
             if (
                 signature != self.shared_denoise_signature
                 or request.snapshot.get("source_id") != id(self.original_raw_data)
             ):
                 if request.snapshot.get("roi_commit"):
-                    self.data_scopes.pop(scope_id, None)
-                    self._scope_committed_signatures.pop(scope_id, None)
-                    if self.__dict__.get("_pending_roi_scope_id") == scope_id:
-                        self._pending_roi_scope_id = None
+                    self._discard_roi_scope(
+                        scope_id,
+                        cancel_task=False,
+                        clear_cache=False,
+                        clear_pending=True,
+                    )
                 return
             try:
                 self._store_scope_denoise_result(scope_id, result.value, signature)
@@ -1079,10 +1089,12 @@ class My3DAnalyzer(QWidget):
                 )
             )
             if request.snapshot.get("roi_commit"):
-                self.data_scopes.pop(failed_scope_id, None)
-                self._scope_committed_signatures.pop(failed_scope_id, None)
-                if self.__dict__.get("_pending_roi_scope_id") == failed_scope_id:
-                    self._pending_roi_scope_id = None
+                self._discard_roi_scope(
+                    failed_scope_id,
+                    cancel_task=False,
+                    clear_cache=False,
+                    clear_pending=True,
+                )
             self._render_exact_ready = True
         is_global_denoise = (
             request.cause == RefreshCause.DENOISE
@@ -1602,9 +1614,7 @@ class My3DAnalyzer(QWidget):
         target_spec.params["mid"] = int(mid)
         target_spec.params["source_mode"] = source_mode
         target_spec.params["source_page_kind"] = "time_integral" if source_mode == "time_integral" else "home"
-        target_spec.params["source_t_index"] = int(self.page_image.slider_time.value())
-        target_spec.params["source_t_low"] = int(self.page_data.s_t_low.value())
-        target_spec.params["source_t_up"] = int(self.page_data.s_t_up.value())
+        target_spec.params.update(self._source_time_params())
 
     def _persist_second_derivative_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
@@ -1801,6 +1811,42 @@ class My3DAnalyzer(QWidget):
         for descriptor in self._referenced_scope_descriptors(extra=extra_descriptor):
             self._validate_denoise_for_descriptor(methods, descriptor)
 
+    def _build_denoise_job(self, descriptor, methods):
+        return ComputeJob(
+            "denoise_pipeline",
+            {
+                "data": descriptor.extract(self.original_raw_data),
+                "methods": self._copy_state(methods),
+            },
+        )
+
+    def _discard_roi_scope(
+        self,
+        scope_id,
+        *,
+        cancel_task,
+        clear_cache,
+        clear_pending,
+    ):
+        if not scope_id:
+            return
+
+        scope_id = str(scope_id)
+        if cancel_task:
+            self.refresh_coordinator.cancel_page(
+                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{scope_id}"
+            )
+        self.data_scopes.pop(scope_id, None)
+        self._scope_committed_signatures.pop(scope_id, None)
+        if clear_cache:
+            self._scope_data_cache.clear()
+        if clear_pending:
+            self._pending_scope_denoise_keys = {
+                key for key in self._pending_scope_denoise_keys if key[0] != scope_id
+            }
+            if self.__dict__.get("_pending_roi_scope_id") == scope_id:
+                self._pending_roi_scope_id = None
+
     def _store_scope_denoise_result(self, scope_id, raw_data, signature):
         descriptor = self._scope_for_id(scope_id)
         if descriptor is None:
@@ -1858,13 +1904,7 @@ class My3DAnalyzer(QWidget):
                 "lazy_scope": True,
             },
         )
-        job = ComputeJob(
-            "denoise_pipeline",
-            {
-                "data": descriptor.extract(self.original_raw_data),
-                "methods": self._copy_state(methods),
-            },
-        )
+        job = self._build_denoise_job(descriptor, methods)
 
         def work():
             result = self.backend_manager.execute(job)
@@ -1882,11 +1922,12 @@ class My3DAnalyzer(QWidget):
         signature = self.shared_denoise_signature
         previous_scope_id = self.__dict__.get("_pending_roi_scope_id")
         if previous_scope_id and previous_scope_id != descriptor.scope_id:
-            self.refresh_coordinator.cancel_page(
-                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{previous_scope_id}"
+            self._discard_roi_scope(
+                previous_scope_id,
+                cancel_task=True,
+                clear_cache=False,
+                clear_pending=True,
             )
-            self.data_scopes.pop(previous_scope_id, None)
-            self._scope_committed_signatures.pop(previous_scope_id, None)
         self._pending_roi_scope_id = descriptor.scope_id
         pending_key = descriptor.scope_id, signature
         self._pending_scope_denoise_keys.add(pending_key)
@@ -1901,13 +1942,7 @@ class My3DAnalyzer(QWidget):
                 "roi_commit": True,
             },
         )
-        job = ComputeJob(
-            "denoise_pipeline",
-            {
-                "data": descriptor.extract(self.original_raw_data),
-                "methods": self._copy_state(methods),
-            },
-        )
+        job = self._build_denoise_job(descriptor, methods)
 
         def work():
             result = self.backend_manager.execute(job)
@@ -2694,6 +2729,20 @@ class My3DAnalyzer(QWidget):
         self.left_workspace.add_page(spec)
         return True
 
+    def _create_settings_context_menu(self, owner, pos):
+        global_pos = owner.mapToGlobal(pos)
+        menu = QMenu(owner)
+        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
+        for label, popup in (
+            ("去噪参数设置", self.denoise_popup),
+            ("瀑布图步长设置", self.waterfall_popup),
+        ):
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, target=popup: target.show_at(global_pos)
+            )
+        return menu, global_pos
+
     def _show_curve_context_menu(self, pos):
         context = self.current_render_context
         show_curve_actions = (
@@ -2704,16 +2753,7 @@ class My3DAnalyzer(QWidget):
         can_copy = self._can_copy_current_curve() if show_curve_actions else False
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
-        menu = QMenu(self.canvas_2d)
-        menu.setStyleSheet("QMenu { color: white; background-color: #2A2A3A; } QMenu::item:selected { background-color: #3A3A5A; }")
-        denoise_action = menu.addAction("去噪参数设置")
-        denoise_action.triggered.connect(
-            lambda: self.denoise_popup.show_at(self.canvas_2d.mapToGlobal(pos))
-        )
-        waterfall_action = menu.addAction("瀑布图步长设置")
-        waterfall_action.triggered.connect(
-            lambda: self.waterfall_popup.show_at(self.canvas_2d.mapToGlobal(pos))
-        )
+        menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
 
         if can_copy or can_paste:
             menu.addSeparator()
@@ -2723,20 +2763,11 @@ class My3DAnalyzer(QWidget):
         if can_paste:
             paste_action = menu.addAction("粘贴")
             paste_action.triggered.connect(lambda: self._paste_curve_to_comparison_page(show_message=True))
-        menu.exec_(self.canvas_2d.mapToGlobal(pos))
+        menu.exec_(global_pos)
 
     def _show_main_context_menu(self, pos):
-        menu = QMenu(self.plotter)
-        menu.setStyleSheet("QMenu { color: white; background-color: #2A2A3A; } QMenu::item:selected { background-color: #3A3A5A; }")
-        denoise_action = menu.addAction("去噪参数设置")
-        denoise_action.triggered.connect(
-            lambda: self.denoise_popup.show_at(self.plotter.mapToGlobal(pos))
-        )
-        waterfall_action = menu.addAction("瀑布图步长设置")
-        waterfall_action.triggered.connect(
-            lambda: self.waterfall_popup.show_at(self.plotter.mapToGlobal(pos))
-        )
-        menu.exec_(self.plotter.mapToGlobal(pos))
+        menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
+        menu.exec_(global_pos)
 
     def _get_clip_slices(self, logical_bounds=None):
         shape = self._full_domain_spatial_shape()
@@ -2992,6 +3023,18 @@ class My3DAnalyzer(QWidget):
             }
         )
 
+    @staticmethod
+    def _crop_rect_export_array(crop_rect):
+        return np.asarray(
+            [
+                int(crop_rect["x_low"]),
+                int(crop_rect["x_up"]),
+                int(crop_rect["y_low"]),
+                int(crop_rect["y_up"]),
+            ],
+            dtype=np.int32,
+        )
+
     def _resolved_axis_integral_params(self, spec):
         if spec is None:
             return None
@@ -3014,9 +3057,7 @@ class My3DAnalyzer(QWidget):
             "up": up,
             "mid": mid,
             "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
-            "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
-            "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
-            "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+            **self._source_time_params(params),
         }
 
     def _build_axis_integral_base_context(self, spec, raw_data, coords):
@@ -3517,6 +3558,20 @@ class My3DAnalyzer(QWidget):
             return "frame"
         return "time_integral" if mode == "time_integral" else "frame"
 
+    def _source_time_params(self, params=None):
+        params = params or {}
+        return {
+            "source_t_index": int(
+                params.get("source_t_index", int(self.page_image.slider_time.value()))
+            ),
+            "source_t_low": int(
+                params.get("source_t_low", int(self.page_data.s_t_low.value()))
+            ),
+            "source_t_up": int(
+                params.get("source_t_up", int(self.page_data.s_t_up.value()))
+            ),
+        }
+
     def _persist_time_integral_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
         if target_spec is None or target_spec.page_kind != "time_integral":
@@ -3539,9 +3594,7 @@ class My3DAnalyzer(QWidget):
             "mid": int(mid),
             "source_mode": normalized_source_mode,
             "source_page_kind": "time_integral" if normalized_source_mode == "time_integral" else "home",
-            "source_t_index": int(self.page_image.slider_time.value()),
-            "source_t_low": int(self.page_data.s_t_low.value()),
-            "source_t_up": int(self.page_data.s_t_up.value()),
+            **self._source_time_params(),
         }
 
     def _get_3d_source_context_for_axis(self, spec, raw_data):
@@ -3629,9 +3682,7 @@ class My3DAnalyzer(QWidget):
             "up": int(up),
             "mid": int(params.get("integral_mid", params.get("mid", mid_default))),
             "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
-            "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
-            "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
-            "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+            **self._source_time_params(params),
         }
 
         crop_rect = self._axis_crop_rect_from_params(params)
@@ -4253,9 +4304,7 @@ class My3DAnalyzer(QWidget):
                 "up": int(params["integral_up"]),
                 "mid": int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
                 "source_mode": params.get("source_mode", "frame"),
-                "source_t_index": int(params.get("source_t_index", int(self.page_image.slider_time.value()))),
-                "source_t_low": int(params.get("source_t_low", int(self.page_data.s_t_low.value()))),
-                "source_t_up": int(params.get("source_t_up", int(self.page_data.s_t_up.value()))),
+                **self._source_time_params(params),
             },
         )
         context = self._build_axis_integral_base_context(source_spec, raw_data, coords)
@@ -4393,6 +4442,14 @@ class My3DAnalyzer(QWidget):
             y_values = np.flip(y_values, axis=0)
         return x_values, y_values
 
+    def _style_1d_axes(self, context, *, ylabel):
+        display_title = self._display_title_for_1d_plot(context["title"])
+        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
+        self.ax_2d.set_xlabel(context["xlabel"], color="white")
+        self.ax_2d.set_ylabel(ylabel, color="white")
+        self.ax_2d.tick_params(colors="white", labelsize=9)
+        return display_title
+
     def _render_1d_plot(self, context):
         VisualEngine.clear_2d_colorbar(self.ax_2d)
         x_data, y_data = self._ascending_curve_data(context["x_data"], context["y_data"])
@@ -4412,14 +4469,11 @@ class My3DAnalyzer(QWidget):
             self.ax_2d.clear()
             line, = self.ax_2d.plot(x_data, y_data, color="#FF69B4", linewidth=2)
         self.ax_2d._arpes_line = line
-        display_title = self._display_title_for_1d_plot(context["title"])
-        compact_title = display_title != str(context["title"])
-        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
-        self.ax_2d.set_xlabel(context["xlabel"], color="white")
-        self.ax_2d.set_ylabel("Intensity (a.u.)", color="white")
-        self.ax_2d.tick_params(colors="white", labelsize=9)
+        display_title = self._style_1d_axes(context, ylabel="Intensity (a.u.)")
         self.ax_2d.margins(x=0.02, y=0.08)
-        self._apply_1d_plot_layout(compact_title=compact_title)
+        self._apply_1d_plot_layout(
+            compact_title=display_title != str(context["title"])
+        )
         self.canvas_2d.draw_idle()
 
     def _render_1d_comparison_plot(self, context):
@@ -4446,11 +4500,10 @@ class My3DAnalyzer(QWidget):
                 label=label,
             )
 
-        display_title = self._display_title_for_1d_plot(context["title"])
-        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
-        self.ax_2d.set_xlabel(context["xlabel"], color="white")
-        self.ax_2d.set_ylabel(context.get("ylabel", "Intensity (a.u.)"), color="white")
-        self.ax_2d.tick_params(colors="white", labelsize=9)
+        self._style_1d_axes(
+            context,
+            ylabel=context.get("ylabel", "Intensity (a.u.)"),
+        )
         legend = self.ax_2d.legend(facecolor="#2A2A3A", edgecolor="#FFFFFF", fontsize=8)
         if legend is not None:
             for text in legend.get_texts():
@@ -4601,12 +4654,12 @@ class My3DAnalyzer(QWidget):
 
         pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
         if pending_roi_scope_id:
-            self.refresh_coordinator.cancel_page(
-                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{pending_roi_scope_id}"
+            self._discard_roi_scope(
+                pending_roi_scope_id,
+                cancel_task=True,
+                clear_cache=False,
+                clear_pending=True,
             )
-            self.data_scopes.pop(pending_roi_scope_id, None)
-            self._scope_committed_signatures.pop(pending_roi_scope_id, None)
-            self._pending_roi_scope_id = None
 
         current_spec = self.left_workspace.current_spec()
         if current_spec is not None and current_spec.page_kind != "control_panel":
@@ -4696,13 +4749,7 @@ class My3DAnalyzer(QWidget):
         self._pending_denoise_scope_id = target_scope_id
         self._render_exact_ready = False
         self._update_export_button_states()
-        job = ComputeJob(
-            "denoise_pipeline",
-            {
-                "data": target_descriptor.extract(self.original_raw_data),
-                "methods": self._copy_state(methods),
-            },
-        )
+        job = self._build_denoise_job(target_descriptor, methods)
 
         def work():
             result = self.backend_manager.execute(job)
@@ -4945,12 +4992,12 @@ class My3DAnalyzer(QWidget):
     def on_back(self):
         pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
         if pending_roi_scope_id:
-            self.refresh_coordinator.cancel_page(
-                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{pending_roi_scope_id}"
+            self._discard_roi_scope(
+                pending_roi_scope_id,
+                cancel_task=True,
+                clear_cache=False,
+                clear_pending=True,
             )
-            self.data_scopes.pop(pending_roi_scope_id, None)
-            self._scope_committed_signatures.pop(pending_roi_scope_id, None)
-            self._pending_roi_scope_id = None
 
         current_spec = self.left_workspace.current_spec()
         home_spec = self.left_workspace.home_spec()
@@ -6366,15 +6413,7 @@ class My3DAnalyzer(QWidget):
                 "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
                 "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
                 "source_mode": np.asarray([context["source_mode"]]),
-                "crop_rect": np.asarray(
-                    [
-                        int(context["crop_rect"]["x_low"]),
-                        int(context["crop_rect"]["x_up"]),
-                        int(context["crop_rect"]["y_low"]),
-                        int(context["crop_rect"]["y_up"]),
-                    ],
-                    dtype=np.int32,
-                ),
+                "crop_rect": self._crop_rect_export_array(context["crop_rect"]),
             }
             if context["source_mode"] == "time_integral":
                 export_data["source_t_range"] = np.asarray(context["source_t_range"], dtype=np.float32)
@@ -6416,14 +6455,8 @@ class My3DAnalyzer(QWidget):
                 "integrated_range": np.asarray(context["integrated_range"], dtype=np.float32),
             }
             if context.get("crop_rect") is not None:
-                export_data["crop_rect"] = np.asarray(
-                    [
-                        int(context["crop_rect"]["x_low"]),
-                        int(context["crop_rect"]["x_up"]),
-                        int(context["crop_rect"]["y_low"]),
-                        int(context["crop_rect"]["y_up"]),
-                    ],
-                    dtype=np.int32,
+                export_data["crop_rect"] = self._crop_rect_export_array(
+                    context["crop_rect"]
                 )
             title = "Save EDC waterfall result"
             default_name = "waterfall_edc.mat"
