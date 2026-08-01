@@ -39,7 +39,6 @@ class EnergySecondDerivativeTests(unittest.TestCase):
         actual = My3DAnalyzer._compute_energy_second_derivative(
             source,
             energy_axis=energy,
-            sigma=0.0,
         )
 
         np.testing.assert_allclose(actual, 2.0, rtol=1e-11, atol=1e-11)
@@ -51,7 +50,6 @@ class EnergySecondDerivativeTests(unittest.TestCase):
         actual = My3DAnalyzer._compute_energy_second_derivative(
             source,
             energy_axis=energy,
-            sigma=0.0,
         )
 
         np.testing.assert_allclose(actual, 2.0, rtol=1e-11, atol=1e-11)
@@ -102,7 +100,6 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
                     source,
                     coordinate_axis=coordinates,
                     derivative_axis=derivative_axis,
-                    sigma=0.0,
                 )
 
                 np.testing.assert_allclose(actual, 2.0, rtol=1e-11, atol=1e-11)
@@ -116,7 +113,6 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
             source,
             coordinate_axis=x,
             derivative_axis=0,
-            sigma=0.0,
         )
 
         np.testing.assert_allclose(actual, 0.0, atol=1e-12)

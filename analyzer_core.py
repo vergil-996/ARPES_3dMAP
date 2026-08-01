@@ -528,9 +528,12 @@ class AnalyzerCore(QObject):
         if low > up:
             low, up = up, low
 
-        result = np.array(np.take(prefix, up, axis=axis_index), copy=True)
+        plane = [slice(None)] * prefix.ndim
+        plane[axis_index] = up
+        result = np.array(prefix[tuple(plane)], copy=True)
         if low > 0:
-            result -= np.take(prefix, low - 1, axis=axis_index)
+            plane[axis_index] = low - 1
+            result -= prefix[tuple(plane)]
         return result
 
     def get_slice_dos_dynamics(self, clip_ranges):

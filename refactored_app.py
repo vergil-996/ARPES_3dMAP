@@ -33,7 +33,6 @@ from matplotlib.backend_bases import MouseButton
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
-from scipy.ndimage import gaussian_filter1d
 from scipy.io import savemat
 from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
@@ -56,7 +55,7 @@ from data_scope import (
 from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
-from settings_popups import DenoiseSettingsPopup, SecondDerivativeSettingsPopup, WaterfallSettingsPopup
+from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
 
 
 class QuickCloseMessageBox(QMessageBox):
@@ -149,11 +148,6 @@ class My3DAnalyzer(QWidget):
         self.refresh_coordinator.failed.connect(self._on_refresh_failed)
         self.refresh_coordinator.status_changed.connect(self._on_refresh_status_changed)
 
-        self.axis_refresh_timer = QTimer(self)
-        self.axis_refresh_timer.setSingleShot(True)
-        self.axis_refresh_timer.setInterval(66)
-        self.axis_refresh_timer.timeout.connect(self.auto_refresh_integral)
-
         self.current_render_context = None
         self.axis_crop_selector = None
         self.axis_crop_overlay = None
@@ -187,7 +181,6 @@ class My3DAnalyzer(QWidget):
         self._initialize_result_workspace()
         self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
         self.waterfall_popup = WaterfallSettingsPopup(self.page_control_blank)
-        self.sd_popup = SecondDerivativeSettingsPopup(self.page_control_blank)
         self._install_page_keyboard_shortcuts()
         self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
@@ -689,7 +682,16 @@ class My3DAnalyzer(QWidget):
         spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
         return spec.page_id if spec is not None else "home"
 
-    def request_refresh(self, cause, quality=RenderQuality.EXACT, *, immediate=False, interactive=False, snapshot=None):
+    def request_refresh(
+        self,
+        cause,
+        quality=RenderQuality.EXACT,
+        *,
+        immediate=False,
+        interactive=False,
+        snapshot=None,
+        preview_interval_ms=None,
+    ):
         if self._syncing_controls:
             return
         self._capture_3d_camera_position()
@@ -700,7 +702,11 @@ class My3DAnalyzer(QWidget):
             preview, exact = self.refresh_coordinator.make_quality_pair(page_id, cause, values)
             self._render_exact_ready = False
             self._update_export_button_states()
-            self.refresh_coordinator.schedule_interactive(preview, exact)
+            self.refresh_coordinator.schedule_interactive(
+                preview,
+                exact,
+                preview_interval_ms=preview_interval_ms,
+            )
             return
 
         request = self.refresh_coordinator.make_request(page_id, cause, quality, values)
@@ -809,7 +815,6 @@ class My3DAnalyzer(QWidget):
                 else ("frame", frame_index)
             )
             sd_params = params.get("second_derivative_params") or {}
-            sigma = float(sd_params.get("sigma", 1.5))
             threshold = float(sd_params.get("threshold", 0.0))
             prepared_shape = (
                 descriptor.compact_spatial_shape
@@ -825,7 +830,6 @@ class My3DAnalyzer(QWidget):
                 tuple(int(size) for size in prepared_shape),
                 coordinate_values.dtype.str,
                 coordinate_values.tobytes(),
-                round(sigma, 4),
                 round(threshold, 4),
             )
             cache = self._second_derivative_volume_cache
@@ -839,7 +843,6 @@ class My3DAnalyzer(QWidget):
                 payload.update({
                     "axis": derivative_axis,
                     "coordinates": coordinate_values,
-                    "sigma": sigma,
                     "threshold": threshold,
                 })
                 extra_metadata.update(
@@ -1535,9 +1538,6 @@ class My3DAnalyzer(QWidget):
             control_state = self._capture_control_state()
             control_state["axis_source_mode"] = self._page_axis_source_mode(owner_spec)
             self._store_control_state(owner_spec, control_state)
-
-        if self.axis_refresh_timer.isActive():
-            self.axis_refresh_timer.stop()
 
         self._syncing_controls = True
         try:
@@ -2742,10 +2742,6 @@ class My3DAnalyzer(QWidget):
         waterfall_action.triggered.connect(
             lambda: self.waterfall_popup.show_at(self.canvas_2d.mapToGlobal(pos))
         )
-        sd_action = menu.addAction("二阶导参数设置")
-        sd_action.triggered.connect(
-            lambda: self.sd_popup.show_at(self.canvas_2d.mapToGlobal(pos))
-        )
 
         if can_copy or can_paste:
             menu.addSeparator()
@@ -2767,10 +2763,6 @@ class My3DAnalyzer(QWidget):
         waterfall_action = menu.addAction("瀑布图步长设置")
         waterfall_action.triggered.connect(
             lambda: self.waterfall_popup.show_at(self.plotter.mapToGlobal(pos))
-        )
-        sd_action = menu.addAction("二阶导参数设置")
-        sd_action.triggered.connect(
-            lambda: self.sd_popup.show_at(self.plotter.mapToGlobal(pos))
         )
         menu.exec_(self.plotter.mapToGlobal(pos))
 
@@ -3889,7 +3881,6 @@ class My3DAnalyzer(QWidget):
         data,
         coordinate_axis=None,
         derivative_axis=-1,
-        sigma=1.5,
         threshold=0.0,
     ):
         """Return max(0, -d2I/dq2) along one selected array axis."""
@@ -3911,13 +3902,6 @@ class My3DAnalyzer(QWidget):
         if source.shape[axis_index] < 3:
             return np.zeros_like(source)
 
-        sigma_value = max(float(sigma), 0.0)
-        smoothed = (
-            gaussian_filter1d(source, sigma=sigma_value, axis=axis_index)
-            if sigma_value > 0
-            else source
-        )
-
         coordinate_values = (
             np.asarray(coordinate_axis, dtype=np.float64)
             if coordinate_axis is not None
@@ -3937,7 +3921,7 @@ class My3DAnalyzer(QWidget):
                 coordinate_values = np.arange(source.shape[axis_index], dtype=np.float64)
 
         first_derivative = np.gradient(
-            smoothed,
+            source,
             coordinate_values,
             axis=axis_index,
             edge_order=2,
@@ -3952,7 +3936,7 @@ class My3DAnalyzer(QWidget):
         return curvature
 
     @staticmethod
-    def _compute_energy_second_derivative(data_2d, energy_axis=None, sigma=1.5, threshold=0.0):
+    def _compute_energy_second_derivative(data_2d, energy_axis=None, threshold=0.0):
         """Return the energy-axis result for a (momentum, energy) image."""
         source = np.asarray(data_2d)
         if source.ndim != 2 or source.size == 0:
@@ -3961,7 +3945,6 @@ class My3DAnalyzer(QWidget):
             source,
             coordinate_axis=energy_axis,
             derivative_axis=1,
-            sigma=sigma,
             threshold=threshold,
         )
 
@@ -4055,7 +4038,6 @@ class My3DAnalyzer(QWidget):
         coords,
         derivative_axis,
         source_signature,
-        sigma=1.5,
         threshold=0.0,
     ):
         coordinate_key = {0: "X", 1: "Y", 2: "E"}[int(derivative_axis)]
@@ -4072,7 +4054,6 @@ class My3DAnalyzer(QWidget):
             tuple(int(size) for size in data_3d.shape),
             coordinate_values.dtype.str,
             coordinate_values.tobytes(),
-            round(float(sigma), 4),
             round(float(threshold), 4),
         )
         cache = self._second_derivative_volume_cache
@@ -4092,7 +4073,6 @@ class My3DAnalyzer(QWidget):
             data_3d,
             coordinate_axis=coordinate_values,
             derivative_axis=derivative_axis,
-            sigma=sigma,
             threshold=threshold,
         )
         self._second_derivative_volume_cache = {
@@ -4141,7 +4121,6 @@ class My3DAnalyzer(QWidget):
                 coords,
                 derivative_axis,
                 source_signature,
-                sigma=float(sd_params.get("sigma", 1.5)),
                 threshold=float(sd_params.get("threshold", 0.0)),
             )
             context = {
@@ -4227,23 +4206,14 @@ class My3DAnalyzer(QWidget):
         energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[energy_low:energy_up + 1]
 
         sd_params = params.get("second_derivative_params") or {}
-        sigma = float(sd_params.get("sigma", 1.5))
         threshold = float(sd_params.get("threshold", 0.0))
-        cross_axis_sigma = float(sd_params.get("cross_axis_sigma", 0.8))
 
         derivative = self._compute_energy_second_derivative(
             derivative_source,
             energy_axis=energy_axis,
-            sigma=sigma,
             threshold=threshold,
         )
 
-        if cross_axis_sigma > 0 and derivative.ndim == 2:
-            derivative = gaussian_filter1d(
-                derivative,
-                sigma=cross_axis_sigma,
-                axis=0,
-            )
         if compact_source_data is not None and compact_plot_bounds is not None:
             embedded = np.zeros_like(source_data, dtype=np.asarray(derivative).dtype)
             x_offset = int(compact_plot_bounds["x_low"]) - int(plot_bounds["x_low"])
@@ -5756,6 +5726,7 @@ class My3DAnalyzer(QWidget):
             self.core.raw_data is None
             or self._syncing_controls
             or self._syncing_axis_value_boxes
+            or bool(getattr(self.__dict__.get("page_data"), "_is_updating", False))
         ):
             return
 
@@ -5773,20 +5744,20 @@ class My3DAnalyzer(QWidget):
             self._persist_second_derivative_page_state(current_spec)
         else:
             self._persist_axis_integral_page_state(current_spec)
-        self.request_refresh(RefreshCause.ANALYSIS, interactive=True)
+        self.request_refresh(
+            RefreshCause.ANALYSIS,
+            interactive=True,
+            preview_interval_ms=8,
+        )
 
     def flush_axis_refresh(self):
         if self.core.raw_data is None:
             return
-        if self.axis_refresh_timer.isActive():
-            self.axis_refresh_timer.stop()
         self.auto_refresh_integral(exact=True)
 
     def on_axis_bound_released(self):
         if self.core.raw_data is None:
             return
-        if self.axis_refresh_timer.isActive():
-            self.axis_refresh_timer.stop()
         self.auto_refresh_integral(exact=True)
 
     def on_apply_axis_integral(self):
@@ -5923,6 +5894,32 @@ class My3DAnalyzer(QWidget):
             and getattr(selector, "_eventpress", None) is not None
         )
 
+    def _active_2d_blit_artists(self):
+        artists = []
+        overlay = self.axis_crop_overlay
+        if overlay is not None:
+            artists.append(overlay)
+
+        selector = self.axis_crop_selector
+        if selector is not None:
+            for artist in getattr(selector, "artists", ()):
+                artists.append(artist)
+
+        annotation = getattr(self.plot_coordinate_tooltip, "annotation", None)
+        if annotation is not None:
+            artists.append(annotation)
+        return artists
+
+    def _sync_active_2d_blit_background(self):
+        background = getattr(self.ax_2d, "_arpes_preview_background", None)
+        if background is None:
+            return
+
+        self.plot_coordinate_tooltip._background = background
+        selector = self.axis_crop_selector
+        if selector is not None:
+            selector.background = background
+
     def _current_axis_crop_rect(self, spec, context):
         if spec is None or context is None:
             return None
@@ -6033,9 +6030,16 @@ class My3DAnalyzer(QWidget):
         if spec is None:
             return
 
-        self.plot_coordinate_tooltip.hide(redraw=False)
-        self.current_render_context = None
-        self._clear_axis_crop_interaction(redraw=False)
+        preserve_2d_interaction = bool(
+            quality == RenderQuality.PREVIEW
+            and isinstance(self.current_render_context, dict)
+            and self.current_render_context.get("view") == "2d"
+            and self.left_display_stack.currentIndex() == 1
+        )
+        if not preserve_2d_interaction:
+            self.plot_coordinate_tooltip.hide(redraw=False)
+            self.current_render_context = None
+            self._clear_axis_crop_interaction(redraw=False)
 
         if spec.page_kind == "control_panel":
             self.left_display_stack.setCurrentIndex(2)
@@ -6063,6 +6067,10 @@ class My3DAnalyzer(QWidget):
 
         self.current_render_context = context
         render_context = self._render_context_for_visual_flip(context)
+        if preserve_2d_interaction and render_context.get("view") != "2d":
+            preserve_2d_interaction = False
+            self.plot_coordinate_tooltip.hide(redraw=False)
+            self._clear_axis_crop_interaction(redraw=False)
         levels = self._get_display_levels()
         mapping_mode = self.page_render.combo_map.currentText()
         current_cmap = self.page_render.get_selected_cmap()
@@ -6116,7 +6124,7 @@ class My3DAnalyzer(QWidget):
         elif render_context["view"] == "2d":
             self.left_display_stack.setCurrentIndex(1)
             self._clear_interactive_box()
-            VisualEngine.render_2d_slice(
+            preview_blitted = VisualEngine.render_2d_slice(
                 self.ax_2d,
                 self.canvas_2d,
                 render_context["data"],
@@ -6124,7 +6132,11 @@ class My3DAnalyzer(QWidget):
                 levels,
                 render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
+                quality=quality,
+                overlay_artists=self._active_2d_blit_artists(),
             )
+            if quality == RenderQuality.PREVIEW and preview_blitted:
+                self._sync_active_2d_blit_background()
         else:
             self.left_display_stack.setCurrentIndex(1)
             self._clear_interactive_box()
@@ -6145,7 +6157,8 @@ class My3DAnalyzer(QWidget):
             self._restore_volume_opacity_if_dimmed()
             self._clear_interactive_box()
 
-        self._refresh_axis_crop_interaction(spec, context)
+        if not (preserve_2d_interaction and render_context["view"] == "2d"):
+            self._refresh_axis_crop_interaction(spec, context)
 
     def on_result_page_closed(self, page_id):
         self.refresh_coordinator.cancel_page(page_id)

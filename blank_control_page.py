@@ -37,9 +37,7 @@ class BlankControlPage(QWidget):
     THRESHOLD_MODE_OPTIONS = ["soft", "hard"]
 
     DEFAULT_SECOND_DERIVATIVE_PARAMS = {
-        "sigma": 1.5,
         "threshold": 0.0,
-        "cross_axis_sigma": 0.8,
     }
 
     def __init__(self, parent=None):
@@ -232,14 +230,6 @@ class BlankControlPage(QWidget):
         card.footer().hide()
         card.body().layout().setSpacing(12)
 
-        self.sd_sigma_box = self._create_double_spin_box(
-            parent=card,
-            title="能量轴平滑 σ",
-            value=self.DEFAULT_SECOND_DERIVATIVE_PARAMS["sigma"],
-            minimum=0.0,
-            maximum=10.0,
-            single_step=0.1,
-        )
         self.sd_threshold_box = self._create_double_spin_box(
             parent=card,
             title="曲率裁剪阈值",
@@ -248,22 +238,10 @@ class BlankControlPage(QWidget):
             maximum=1.0,
             single_step=0.01,
         )
-        self.sd_cross_sigma_box = self._create_double_spin_box(
-            parent=card,
-            title="动量方向平滑 σ",
-            value=self.DEFAULT_SECOND_DERIVATIVE_PARAMS["cross_axis_sigma"],
-            minimum=0.0,
-            maximum=5.0,
-            single_step=0.1,
-        )
 
-        self.sd_sigma_box.editingFinished.connect(self._sync_second_derivative_constraints)
         self.sd_threshold_box.editingFinished.connect(self._sync_second_derivative_constraints)
-        self.sd_cross_sigma_box.editingFinished.connect(self._sync_second_derivative_constraints)
 
-        card.body().addWidget(self.sd_sigma_box)
         card.body().addWidget(self.sd_threshold_box)
-        card.body().addWidget(self.sd_cross_sigma_box)
         card.adjustSize()
 
         group.addWidget(card)
@@ -271,13 +249,6 @@ class BlankControlPage(QWidget):
         return group
 
     def _sync_second_derivative_constraints(self):
-        sigma = self._commit_double_spinbox_value(
-            self.sd_sigma_box,
-            self.DEFAULT_SECOND_DERIVATIVE_PARAMS["sigma"],
-        )
-        sigma = max(0.0, min(float(sigma), 10.0))
-        self.sd_sigma_box.setValue(sigma)
-
         threshold = self._commit_double_spinbox_value(
             self.sd_threshold_box,
             self.DEFAULT_SECOND_DERIVATIVE_PARAMS["threshold"],
@@ -285,19 +256,10 @@ class BlankControlPage(QWidget):
         threshold = max(0.0, min(float(threshold), 1.0))
         self.sd_threshold_box.setValue(threshold)
 
-        cross_sigma = self._commit_double_spinbox_value(
-            self.sd_cross_sigma_box,
-            self.DEFAULT_SECOND_DERIVATIVE_PARAMS["cross_axis_sigma"],
-        )
-        cross_sigma = max(0.0, min(float(cross_sigma), 5.0))
-        self.sd_cross_sigma_box.setValue(cross_sigma)
-
     def get_second_derivative_params(self):
         self._sync_second_derivative_constraints()
         return {
-            "sigma": float(self.sd_sigma_box.value()),
             "threshold": float(self.sd_threshold_box.value()),
-            "cross_axis_sigma": float(self.sd_cross_sigma_box.value()),
         }
 
     def _create_spin_box(self, *, parent, title, value, minimum, maximum, single_step):
@@ -541,9 +503,7 @@ class BlankControlPage(QWidget):
                 "custom": bool(self._waterfall_step_custom),
             },
             "second_derivative": {
-                "sigma": float(self.sd_sigma_box.value()),
                 "threshold": float(self.sd_threshold_box.value()),
-                "cross_axis_sigma": float(self.sd_cross_sigma_box.value()),
             },
         }
 
@@ -559,9 +519,7 @@ class BlankControlPage(QWidget):
             self.wavelet_threshold_mode_combo,
             self.wavelet_strength_box,
             self.waterfall_step_box,
-            self.sd_sigma_box,
             self.sd_threshold_box,
-            self.sd_cross_sigma_box,
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
 
@@ -609,12 +567,8 @@ class BlankControlPage(QWidget):
             self._waterfall_step_custom = bool(waterfall_state.get("custom", False))
 
             sd_state = state.get("second_derivative") or {}
-            if "sigma" in sd_state:
-                self.sd_sigma_box.setValue(float(sd_state["sigma"]))
             if "threshold" in sd_state:
                 self.sd_threshold_box.setValue(float(sd_state["threshold"]))
-            if "cross_axis_sigma" in sd_state:
-                self.sd_cross_sigma_box.setValue(float(sd_state["cross_axis_sigma"]))
             self._sync_second_derivative_constraints()
         finally:
             del blockers

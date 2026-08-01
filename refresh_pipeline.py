@@ -131,14 +131,25 @@ class RefreshCoordinator(QObject):
         self._latest_generation[request.page_id] = request.generation
         return request
 
-    def schedule_interactive(self, preview_request, exact_request):
+    def schedule_interactive(
+        self,
+        preview_request,
+        exact_request,
+        *,
+        preview_interval_ms=None,
+    ):
         if preview_request.generation != exact_request.generation:
             raise ValueError("Interactive preview and exact requests must share a generation.")
         self._latest_generation[preview_request.page_id] = preview_request.generation
         self._pending_preview = preview_request
         self._pending_exact = exact_request
         if not self._preview_timer.isActive():
-            self._preview_timer.start(self.preview_interval_ms)
+            interval = (
+                self.preview_interval_ms
+                if preview_interval_ms is None
+                else int(preview_interval_ms)
+            )
+            self._preview_timer.start(interval)
         self._exact_timer.start(self.exact_idle_ms)
         self.status_changed.emit("preview", "")
 

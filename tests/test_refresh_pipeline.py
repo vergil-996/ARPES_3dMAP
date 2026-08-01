@@ -32,6 +32,20 @@ class RefreshCoordinatorTests(unittest.TestCase):
         self.assertEqual(dispatched, [RenderQuality.PREVIEW, RenderQuality.EXACT])
         coordinator.shutdown()
 
+    def test_one_interaction_can_use_a_faster_preview_interval(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=66, exact_idle_ms=180)
+        preview, exact = coordinator.make_quality_pair("home", RefreshCause.ANALYSIS)
+
+        coordinator.schedule_interactive(
+            preview,
+            exact,
+            preview_interval_ms=33,
+        )
+
+        self.assertEqual(coordinator._preview_timer.interval(), 33)
+        self.assertEqual(coordinator.preview_interval_ms, 66)
+        coordinator.shutdown()
+
     def test_latest_preview_wins_during_66ms_coalescing(self):
         coordinator = RefreshCoordinator(preview_interval_ms=20, exact_idle_ms=50)
         dispatched = []

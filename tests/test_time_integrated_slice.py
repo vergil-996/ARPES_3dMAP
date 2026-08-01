@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -39,6 +40,32 @@ class TimeIntegratedSliceNumericsTests(unittest.TestCase):
         actual = AnalyzerCore.range_sum_from_axis_prefix(prefix, 0, 99, -10)
         expected = np.sum(self.time_integrated, axis=0)
         np.testing.assert_allclose(actual, expected)
+
+    def test_prefix_query_avoids_the_slow_scalar_take_path(self):
+        for axis_index in range(3):
+            with self.subTest(axis=axis_index):
+                prefix = AnalyzerCore.build_axis_prefix_sum(
+                    self.time_integrated,
+                    axis_index,
+                )
+                with patch(
+                    "analyzer_core.np.take",
+                    side_effect=AssertionError("np.take used"),
+                ):
+                    actual = AnalyzerCore.range_sum_from_axis_prefix(
+                        prefix,
+                        axis_index,
+                        1,
+                        3,
+                    )
+
+                selectors = [slice(None)] * self.time_integrated.ndim
+                selectors[axis_index] = slice(1, 4)
+                expected = np.sum(
+                    self.time_integrated[tuple(selectors)],
+                    axis=axis_index,
+                )
+                np.testing.assert_allclose(actual, expected)
 
 
 if __name__ == "__main__":

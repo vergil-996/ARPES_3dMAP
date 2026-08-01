@@ -74,6 +74,17 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "refresh")
         self.assertTrue(calls[1][2]["interactive"])
 
+    def test_linked_slider_signal_does_not_schedule_a_duplicate_refresh(self):
+        spec = SimpleNamespace(page_kind="axis_integral", params={})
+        analyzer = self._analyzer_with_page(spec)
+        analyzer.page_data = SimpleNamespace(_is_updating=True)
+        calls = []
+        analyzer.request_refresh = lambda *args, **kwargs: calls.append((args, kwargs))
+
+        analyzer.schedule_axis_refresh()
+
+        self.assertEqual(calls, [])
+
     def test_interactive_box_prefers_live_bounds_over_saved_clip(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.core = SimpleNamespace(

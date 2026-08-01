@@ -3,6 +3,7 @@ import vtk
 import pyvista as pv
 from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
+from PIL import Image
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
@@ -11,7 +12,6 @@ class VisualEngine:
     """渲染与绘图引擎，负责所有 3D 和 2D 的视觉呈现"""
 
     COLORBAR_TITLE = "Intensity"
-
     @staticmethod
     def _level_info(data, levels_params, include_zero=False):
         black, gamma, white = levels_params
@@ -180,6 +180,8 @@ class VisualEngine:
     def clear_2d_colorbar(ax):
         ax._arpes_image = None
         ax._arpes_render_signature = None
+        ax._arpes_preview_background = None
+        ax._arpes_preview_background_signature = None
         colorbar = getattr(ax, "_arpes_colorbar", None)
         if colorbar is not None:
             try:
@@ -271,6 +273,207 @@ class VisualEngine:
             VisualEngine._configure_2d_colorbar(colorbar, level_info)
         except Exception:
             VisualEngine._add_2d_colorbar(ax, image, level_info)
+
+    @staticmethod
+    def _supports_2d_blit(canvas):
+        return bool(
+            getattr(canvas, "supports_blit", False)
+            and hasattr(canvas, "copy_from_bbox")
+            and hasattr(canvas, "restore_region")
+            and hasattr(canvas, "blit")
+        )
+
+    @staticmethod
+    def _ensure_2d_preview_cache(ax, canvas):
+        """Keep an axes background for image-only PREVIEW redraws."""
+        if getattr(ax, "_arpes_preview_canvas", None) is canvas:
+            return
+
+        ax._arpes_preview_canvas = canvas
+        ax._arpes_preview_background = None
+        ax._arpes_preview_background_signature = None
+
+        def cache_background(_event):
+            if not VisualEngine._supports_2d_blit(canvas):
+                ax._arpes_preview_background = None
+                ax._arpes_preview_background_signature = None
+                return
+            try:
+                ax._arpes_preview_background = canvas.copy_from_bbox(ax.bbox)
+                ax._arpes_preview_background_signature = getattr(
+                    ax, "_arpes_render_signature", None
+                )
+            except (AttributeError, RuntimeError):
+                ax._arpes_preview_background = None
+                ax._arpes_preview_background_signature = None
+
+        def invalidate_background(_event):
+            ax._arpes_preview_background = None
+            ax._arpes_preview_background_signature = None
+
+        try:
+            ax._arpes_preview_draw_cid = canvas.mpl_connect("draw_event", cache_background)
+            ax._arpes_preview_resize_cid = canvas.mpl_connect(
+                "resize_event", invalidate_background
+            )
+        except (AttributeError, RuntimeError):
+            ax._arpes_preview_canvas = None
+
+    @staticmethod
+    def _preview_2d_rgba(preview_img, display_cmap, level_info):
+        low = float(level_info["black_value"])
+        high = float(level_info["white_value"])
+        span = max(high - low, 1e-12)
+        normalized = (np.asarray(preview_img) - low) / span
+        return np.asarray(display_cmap(normalized, bytes=True), dtype=np.uint8)
+
+    @staticmethod
+    def _write_2d_preview_rgba(ax, canvas, preview_rgba):
+        """Write a preview directly into the Agg buffer, bypassing imshow."""
+        try:
+            frame = np.asarray(canvas.buffer_rgba())
+            if frame.ndim != 3 or frame.shape[2] != 4 or not frame.flags.writeable:
+                return False
+
+            height, width = frame.shape[:2]
+            x0 = max(0, int(np.ceil(ax.bbox.x0)))
+            x1 = min(width, int(np.floor(ax.bbox.x1)))
+            y0 = max(0, height - int(np.floor(ax.bbox.y1)))
+            y1 = min(height, height - int(np.ceil(ax.bbox.y0)))
+            target_height = y1 - y0
+            target_width = x1 - x0
+            if target_height <= 0 or target_width <= 0:
+                return False
+
+            source = np.asarray(preview_rgba, dtype=np.uint8)
+            if source.ndim != 3 or source.shape[2] != 4 or source.size == 0:
+                return False
+
+            # imshow(origin="lower") displays row zero at the bottom, while
+            # the Agg frame buffer starts at the top.
+            scaled = np.asarray(
+                Image.fromarray(source[::-1]).resize(
+                    (target_width, target_height),
+                    resample=Image.Resampling.NEAREST,
+                )
+            )
+            destination = frame[y0:y1, x0:x1]
+            alpha = scaled[..., 3]
+            if np.all(alpha == 255):
+                destination[...] = scaled
+            elif np.all((alpha == 0) | (alpha == 255)):
+                opaque = alpha == 255
+                destination[opaque] = scaled[opaque]
+            else:
+                opacity = alpha[..., None].astype(np.float32) / 255.0
+                destination[..., :3] = (
+                    scaled[..., :3] * opacity
+                    + destination[..., :3] * (1.0 - opacity)
+                ).astype(np.uint8)
+                destination[..., 3] = 255
+            return True
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _configure_2d_preview_artist(
+        image,
+        preview_img,
+        display_cmap,
+        level_info,
+        extent,
+    ):
+        image.set_data(preview_img)
+        image.set_cmap(display_cmap)
+        image.set_clim(level_info["black_value"], level_info["white_value"])
+        image.set_extent(extent)
+        image.set_interpolation("nearest")
+        image.set_resample(False)
+
+    @staticmethod
+    def _blit_2d_preview(
+        ax,
+        canvas,
+        image,
+        render_signature,
+        preview_img,
+        preview_rgba,
+        display_cmap,
+        level_info,
+        extent,
+        overlay_artists=(),
+    ):
+        background = getattr(ax, "_arpes_preview_background", None)
+        if (
+            not VisualEngine._supports_2d_blit(canvas)
+            or background is None
+            or getattr(ax, "_arpes_preview_background_signature", None)
+            != render_signature
+        ):
+            VisualEngine._configure_2d_preview_artist(
+                image,
+                preview_img,
+                display_cmap,
+                level_info,
+                extent,
+            )
+            canvas.draw_idle()
+            return False
+
+        try:
+            canvas.restore_region(background)
+            used_direct_raster = VisualEngine._write_2d_preview_rgba(
+                ax,
+                canvas,
+                preview_rgba,
+            )
+            if not used_direct_raster:
+                VisualEngine._configure_2d_preview_artist(
+                    image,
+                    preview_img,
+                    display_cmap,
+                    level_info,
+                    extent,
+                )
+                ax.draw_artist(image)
+
+            for spine in ax.spines.values():
+                ax.draw_artist(spine)
+            seen = {id(image)}
+            animated_artists = []
+            for artist in overlay_artists or ():
+                if artist is None or id(artist) in seen:
+                    continue
+                seen.add(id(artist))
+                if (
+                    getattr(artist, "axes", None) is ax
+                    and artist.get_visible()
+                ):
+                    if artist.get_animated():
+                        animated_artists.append(artist)
+                    else:
+                        ax.draw_artist(artist)
+
+            # The tooltip and RectangleSelector maintain their own blit
+            # backgrounds.  Cache the newly rendered preview before animated
+            # overlays are painted so all three paths can share it safely.
+            ax._arpes_preview_background = canvas.copy_from_bbox(ax.bbox)
+            for artist in animated_artists:
+                ax.draw_artist(artist)
+            canvas.blit(ax.bbox)
+            return True
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            ax._arpes_preview_background = None
+            ax._arpes_preview_background_signature = None
+            VisualEngine._configure_2d_preview_artist(
+                image,
+                preview_img,
+                display_cmap,
+                level_info,
+                extent,
+            )
+            canvas.draw_idle()
+            return False
 
     @staticmethod
     def render_3d(plotter, data, levels_params, opac_mode, clip_ranges=None, show_axes=True, core_coords=None,
@@ -390,8 +593,20 @@ class VisualEngine:
             print(f"Axes Error: {e}")
 
     @staticmethod
-    def render_2d_slice(ax, canvas, data, slice_info, levels_params, coords, cmap="magma"):
+    def render_2d_slice(
+        ax,
+        canvas,
+        data,
+        slice_info,
+        levels_params,
+        coords,
+        cmap="magma",
+        *,
+        quality="exact",
+        overlay_artists=(),
+    ):
         try:
+            VisualEngine._ensure_2d_preview_cache(ax, canvas)
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
@@ -439,7 +654,13 @@ class VisualEngine:
                 img = np.flip(img, axis=0)
 
             level_info = VisualEngine._level_info(img, (b, g, w))
-            display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
+            cmap_name = getattr(cmap, "name", str(cmap))
+            transfer_signature = (
+                str(cmap_name),
+                float(b),
+                float(g),
+                float(w),
+            )
             title = slice_info.get("title_override", title)
             ext = slice_info.get("extent_override", ext)
 
@@ -462,11 +683,50 @@ class VisualEngine:
                 and getattr(image, "axes", None) is ax
                 and image in ax.images
             )
+            is_preview = str(getattr(quality, "value", quality)).lower() == "preview"
+            same_extent = bool(
+                can_update
+                and np.allclose(
+                    np.asarray(image.get_extent(), dtype=np.float64),
+                    np.asarray(ext, dtype=np.float64),
+                    rtol=0.0,
+                    atol=1e-12,
+                )
+            )
+            if is_preview and can_update and same_extent:
+                preview_img = img
+                if getattr(image, "_arpes_transfer_signature", None) == transfer_signature:
+                    display_cmap = image.get_cmap()
+                else:
+                    display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
+                preview_rgba = VisualEngine._preview_2d_rgba(
+                    preview_img,
+                    display_cmap,
+                    level_info,
+                )
+                return VisualEngine._blit_2d_preview(
+                    ax,
+                    canvas,
+                    image,
+                    render_signature,
+                    preview_img,
+                    preview_rgba,
+                    display_cmap,
+                    level_info,
+                    ext,
+                    overlay_artists=overlay_artists,
+                )
+
+            ax._arpes_preview_background = None
+            ax._arpes_preview_background_signature = None
+            display_cmap = VisualEngine._leveled_cmap(cmap, level_info)
             if can_update:
                 image.set_data(img)
                 image.set_cmap(display_cmap)
                 image.set_clim(level_info["black_value"], level_info["white_value"])
                 image.set_extent(ext)
+                image.set_interpolation("spline16")
+                image.set_resample(True)
                 VisualEngine._update_2d_colorbar(ax, image, level_info)
             else:
                 VisualEngine.clear_2d_colorbar(ax)
@@ -485,6 +745,7 @@ class VisualEngine:
 
             ax._arpes_image = image
             ax._arpes_render_signature = render_signature
+            image._arpes_transfer_signature = transfer_signature
             ax.set_xlim(ext[0], ext[1])
             ax.set_ylim(ext[2], ext[3])
 

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, rotate as ndimage_rotate
+from scipy.ndimage import rotate as ndimage_rotate
 
 from refresh_pipeline import ComputeJob, ComputeResult
 
@@ -154,7 +154,6 @@ class CpuComputeBackend(ComputeBackend):
         elif operation == "prepare_second_derivative":
             axis = int(payload.pop("axis"))
             coordinates = payload.pop("coordinates", None)
-            sigma = payload.pop("sigma", 1.5)
             threshold = payload.pop("threshold", 0.0)
             volume = self.prepare_volume(**payload)
             value = {
@@ -163,7 +162,6 @@ class CpuComputeBackend(ComputeBackend):
                     volume,
                     axis=axis,
                     coordinates=coordinates,
-                    sigma=sigma,
                     threshold=threshold,
                 ),
             }
@@ -285,15 +283,14 @@ class CpuComputeBackend(ComputeBackend):
         return np.sum(source[tuple(slices)], axis=axis, dtype=np.float32)
 
     @staticmethod
-    def second_derivative(data, axis, coordinates=None, sigma=1.5, threshold=0.0):
+    def second_derivative(data, axis, coordinates=None, threshold=0.0):
         source = np.asarray(data, dtype=np.float32)
         axis = int(axis)
-        smoothed = gaussian_filter1d(source, sigma=max(float(sigma), 0.0), axis=axis)
         if coordinates is None:
             coordinates = np.arange(source.shape[axis], dtype=np.float64)
         else:
             coordinates = np.asarray(coordinates, dtype=np.float64)
-        first = np.gradient(smoothed, coordinates, axis=axis, edge_order=2)
+        first = np.gradient(source, coordinates, axis=axis, edge_order=2)
         result = -np.gradient(first, coordinates, axis=axis, edge_order=2)
         result[result < float(threshold)] = 0
         return np.asarray(result, dtype=np.float32, order="F")
@@ -371,7 +368,6 @@ class CupyComputeBackend(ComputeBackend):
         elif operation == "prepare_second_derivative":
             axis = int(payload.pop("axis"))
             coordinates = payload.pop("coordinates", None)
-            sigma = payload.pop("sigma", 1.5)
             threshold = payload.pop("threshold", 0.0)
             volume = self.prepare_volume(**payload)
             value = {
@@ -380,7 +376,6 @@ class CupyComputeBackend(ComputeBackend):
                     volume,
                     axis=axis,
                     coordinates=coordinates,
-                    sigma=sigma,
                     threshold=threshold,
                 ),
             }
@@ -545,13 +540,12 @@ class CupyComputeBackend(ComputeBackend):
         slices[axis] = slice(low, up + 1)
         return self._to_host_fortran(cp.sum(source[tuple(slices)], axis=axis, dtype=cp.float32))
 
-    def second_derivative(self, data, axis, coordinates=None, sigma=1.5, threshold=0.0):
+    def second_derivative(self, data, axis, coordinates=None, threshold=0.0):
         cp = self._cp
         source = cp.asarray(data, dtype=cp.float32)
         axis = int(axis)
-        smoothed = self._ndimage.gaussian_filter1d(source, sigma=max(float(sigma), 0.0), axis=axis)
         coords = cp.arange(source.shape[axis], dtype=cp.float64) if coordinates is None else cp.asarray(coordinates, dtype=cp.float64)
-        first = cp.gradient(smoothed, coords, axis=axis, edge_order=2)
+        first = cp.gradient(source, coords, axis=axis, edge_order=2)
         result = -cp.gradient(first, coords, axis=axis, edge_order=2)
         result = cp.where(result < float(threshold), cp.float32(0), result)
         return self._to_host_fortran(result.astype(cp.float32, copy=False))

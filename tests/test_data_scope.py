@@ -119,9 +119,7 @@ class DataScopeNumericsTests(unittest.TestCase):
                 "slice_index": 2,
                 "source_t_index": 0,
                 "second_derivative_params": {
-                    "sigma": 1.0,
                     "threshold": 0.0,
-                    "cross_axis_sigma": 0.0,
                 },
             },
         )
