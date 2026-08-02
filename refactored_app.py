@@ -56,7 +56,7 @@ from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoo
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
 from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
-from app_metadata import APP_NAME, APP_VERSION, display_version
+from app_metadata import APP_NAME, APP_VERSION
 from update_controller import UpdateController
 
 
@@ -194,7 +194,6 @@ class My3DAnalyzer(QWidget):
         self.update_controller = UpdateController(
             self,
             self.settings,
-            version_button=self.btn_check_update,
         )
         QTimer.singleShot(5000, self.update_controller.check_automatically)
 
@@ -527,19 +526,11 @@ class My3DAnalyzer(QWidget):
         self.btn_page3.setText("处理分析")
         self.btn_page3.setCheckable(True)
 
-        self.btn_check_update = SiCapsuleButton(self)
-        self.btn_check_update.setText(f"v{APP_VERSION}")
-        self.btn_check_update.setFixedWidth(82)
-        self.btn_check_update.setToolTip(f"{display_version()} · 点击检查更新")
-
         self.button_group = QButtonGroup(self)
         for btn in [self.btn_page1, self.btn_page2, self.btn_page3]:
             self.button_group.addButton(btn)
             nav_layout.addWidget(btn)
         self.button_group.setExclusive(True)
-
-        nav_layout.addSpacing(6)
-        nav_layout.addWidget(self.btn_check_update)
 
         nav_layout.addStretch()
         right_vbox.addWidget(nav_group)
@@ -1175,9 +1166,6 @@ class My3DAnalyzer(QWidget):
         self.btn_page1.clicked.connect(lambda: self._select_control_page(0))
         self.btn_page2.clicked.connect(lambda: self._select_control_page(1))
         self.btn_page3.clicked.connect(lambda: self._select_control_page(2))
-        self.btn_check_update.clicked.connect(
-            lambda: self.update_controller.check_for_updates(manual=True)
-        )
 
         self.page_image.btn_load.clicked.connect(self.on_load)
         self.page_image.btn_cut.clicked.connect(self.on_cut)
@@ -2760,6 +2748,11 @@ class My3DAnalyzer(QWidget):
             action.triggered.connect(
                 lambda _checked=False, target=popup: target.show_at(global_pos)
             )
+        menu.addSeparator()
+        update_action = menu.addAction(f"检查更新（当前 v{APP_VERSION}）")
+        update_action.triggered.connect(
+            lambda: self.update_controller.check_for_updates(manual=True)
+        )
         return menu, global_pos
 
     def _show_curve_context_menu(self, pos):
