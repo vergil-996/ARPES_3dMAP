@@ -50,7 +50,6 @@ VersionInfoCompany=vergil-996
 VersionInfoDescription=BandScope multidimensional ARPES visualization and analysis workbench
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
