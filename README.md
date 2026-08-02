@@ -1,6 +1,6 @@
 # BandScope
 
-BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出等能力。当前版本为 **v1.1.1**。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出等能力。当前版本为 **v1.1.2**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
@@ -104,7 +104,7 @@ python start.py
 
 ```powershell
 pyinstaller ARPES_3dMAP.spec
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.1 /DBuildFlavor=CPU installer\BandScope.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.2 /DBuildFlavor=CPU installer\BandScope.iss
 ```
 
 NVIDIA 版使用 `ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。生成的安装包位于 `release` 目录。
@@ -115,15 +115,15 @@ NVIDIA 版使用 `ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。生成的�
 
 ```powershell
 # 1. 先在 app_metadata.py 中更新 APP_VERSION，然后提交并推送代码
-python scripts\check_release_version.py v1.1.1
+python scripts\check_release_version.py v1.1.2
 python -m unittest discover -s tests -v
 
 # 2. 为已经提交的版本创建并推送同号标签
-git tag v1.1.1
-git push origin v1.1.1
+git tag v1.1.2
+git push origin v1.1.2
 ```
 
-标签中的版本必须与 `app_metadata.APP_VERSION` 完全一致，否则工作流会停止。已经公开的版本号及其 Release 资源不应被覆盖；后续修复应发布新的补丁版本，例如 `v1.1.2`。
+标签中的版本必须与 `app_metadata.APP_VERSION` 完全一致，否则工作流会停止。已经公开的版本号及其 Release 资源不应被覆盖；后续修复应发布新的补丁版本，例如 `v1.1.3`。
 
 如需在 Actions 中签名安装器，请配置仓库 Secrets `WINDOWS_SIGNING_PFX_BASE64`（PFX 文件的 Base64 内容）和 `WINDOWS_SIGNING_PFX_PASSWORD`。可选变量 `WINDOWS_TIMESTAMP_URL` 用于覆盖默认时间戳服务。签名证书确定后，还应把证书的 SHA-256 指纹写入 `app_metadata.TRUSTED_SIGNER_CERT_SHA256`，使客户端不仅验证文件摘要和签名状态，还会固定校验发布者证书。
 
