@@ -10,6 +10,8 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
   QT_QPA_PLATFORM: offscreen
 
 jobs:
