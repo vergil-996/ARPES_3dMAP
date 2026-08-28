@@ -80,6 +80,7 @@ class QuickCloseMessageBox(QMessageBox):
 class My3DAnalyzer(QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
+    LOG_1D_PAGE_KIND = "log_curve"
     GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
     FULL_SCOPE_ID = "full"
@@ -417,11 +418,7 @@ class My3DAnalyzer(QWidget):
         self._select_control_page(target_index)
 
     def _ordered_left_workspace_page_ids(self):
-        return [
-            page_id
-            for page_id in self.left_workspace.page_buttons.keys()
-            if page_id in self.left_workspace.page_specs
-        ]
+        return self.left_workspace.rail_page_ids()
 
     def _select_left_workspace_page_by_index(self, index):
         page_ids = self._ordered_left_workspace_page_ids()
@@ -2736,6 +2733,87 @@ class My3DAnalyzer(QWidget):
         self.left_workspace.add_page(spec)
         return True
 
+    @staticmethod
+    def _log10_curve_y(y_data):
+        values = np.asarray(y_data, dtype=np.float64)
+        result = np.full(values.shape, np.nan, dtype=np.float64)
+        positive = np.isfinite(values) & (values > 0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result[positive] = np.log10(values[positive])
+        return result
+
+    def _apply_log_to_current_curves(self, *, show_message=True):
+        spec = self.left_workspace.current_spec()
+        context = self.current_render_context
+        if context is None or context.get("view") not in {"1d", "1d_comparison"}:
+            context = self._compute_render_context(spec)
+        if spec is None or context is None or context.get("view") not in {"1d", "1d_comparison"}:
+            if show_message:
+                self._show_message("无法取对数", "当前页没有可用的 1D 曲线。", QMessageBox.Information)
+            return False
+
+        if context.get("view") == "1d_comparison":
+            source_curves = []
+            for curve in context.get("curves", []):
+                normalized = self._normalize_curve_snapshot(curve)
+                if normalized is not None:
+                    source_curves.append(normalized)
+        else:
+            curve_kind = self._curve_kind_for_spec(spec)
+            snapshot = self._normalize_curve_snapshot(
+                {
+                    "curve_kind": curve_kind,
+                    "title": context.get("title") or spec.title,
+                    "source_title": spec.title,
+                    "label": spec.title,
+                    "xlabel": context.get("xlabel") or "",
+                    "x_data": context.get("x_data"),
+                    "y_data": context.get("y_data"),
+                }
+            )
+            if snapshot is None:
+                if show_message:
+                    self._show_message("无法取对数", "当前页没有可用的 1D 曲线。", QMessageBox.Information)
+                return False
+            if curve_kind is not None:
+                snapshot["curve_kind"] = curve_kind
+            source_curves = [snapshot]
+
+        if not source_curves:
+            if show_message:
+                self._show_message("无法取对数", "当前页没有可用的 1D 曲线。", QMessageBox.Information)
+            return False
+
+        log_curves = []
+        for curve in source_curves:
+            log_y = self._log10_curve_y(curve["y_data"])
+            if not np.any(np.isfinite(log_y)):
+                if show_message:
+                    self._show_message("无法取对数", "曲线没有正值数据，无法取对数。", QMessageBox.Warning)
+                return False
+            logged = copy.deepcopy(curve)
+            logged["y_data"] = log_y.astype(float).tolist()
+            log_curves.append(logged)
+
+        base_curve = log_curves[0]
+        base_title = base_curve.get("source_title") or base_curve.get("title") or "1D 曲线"
+        new_spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._make_unique_page_title(f"log10 - {base_title}"),
+            page_kind=self.LOG_1D_PAGE_KIND,
+            source_module="data_process",
+            source_page_id=spec.page_id,
+            params={
+                "log_base": "log10",
+                "comparison_kind": self._curve_kind_for_spec(spec),
+                "base_curve": copy.deepcopy(base_curve),
+                "overlay_curves": [copy.deepcopy(curve) for curve in log_curves[1:]],
+            },
+        )
+        self._seed_control_state_for_spec(new_spec)
+        self.left_workspace.add_page(new_spec)
+        return True
+
     def _create_settings_context_menu(self, owner, pos):
         global_pos = owner.mapToGlobal(pos)
         menu = QMenu(owner)
@@ -2767,7 +2845,7 @@ class My3DAnalyzer(QWidget):
 
         menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
 
-        if can_copy or can_paste:
+        if can_copy or can_paste or show_curve_actions:
             menu.addSeparator()
         if can_copy:
             copy_action = menu.addAction("复制")
@@ -2775,6 +2853,9 @@ class My3DAnalyzer(QWidget):
         if can_paste:
             paste_action = menu.addAction("粘贴")
             paste_action.triggered.connect(lambda: self._paste_curve_to_comparison_page(show_message=True))
+        if show_curve_actions:
+            log_action = menu.addAction("取对数 (log10)")
+            log_action.triggered.connect(lambda: self._apply_log_to_current_curves(show_message=True))
         menu.exec_(global_pos)
 
     def _show_main_context_menu(self, pos):
@@ -3911,6 +3992,41 @@ class My3DAnalyzer(QWidget):
             "curves": curves,
         }
 
+    def _get_log_curve_context(self, spec):
+        base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        if base_curve is None:
+            return None
+        base_curve["curve_kind"] = self.LOG_1D_PAGE_KIND
+
+        curves = [base_curve]
+        for curve in spec.params.get("overlay_curves", []):
+            normalized = self._normalize_curve_snapshot(curve)
+            if normalized is None:
+                continue
+            if not self._curve_x_data_matches(base_curve, normalized):
+                continue
+            normalized["curve_kind"] = self.LOG_1D_PAGE_KIND
+            curves.append(normalized)
+
+        if len(curves) == 1:
+            curve = curves[0]
+            return {
+                "view": "1d",
+                "x_data": curve["x_data"],
+                "y_data": curve["y_data"],
+                "title": spec.title,
+                "xlabel": curve.get("xlabel") or "",
+                "ylabel": "log10(Intensity) (a.u.)",
+            }
+        return {
+            "view": "1d_comparison",
+            "title": spec.title,
+            "xlabel": base_curve.get("xlabel") or "",
+            "ylabel": "log10(Intensity) (a.u.)",
+            "comparison_kind": self.LOG_1D_PAGE_KIND,
+            "curves": curves,
+        }
+
     @staticmethod
     def _compute_axis_second_derivative(
         data,
@@ -4440,6 +4556,8 @@ class My3DAnalyzer(QWidget):
             return {"view": "config"}
         if spec.page_kind == self.COMPARISON_PAGE_KIND:
             return self._get_curve_comparison_context(spec)
+        if spec.page_kind == self.LOG_1D_PAGE_KIND:
+            return self._get_log_curve_context(spec)
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
@@ -4526,7 +4644,7 @@ class My3DAnalyzer(QWidget):
             self.ax_2d.clear()
             line, = self.ax_2d.plot(x_data, y_data, color="#FF69B4", linewidth=2)
         self.ax_2d._arpes_line = line
-        display_title = self._style_1d_axes(context, ylabel="Intensity (a.u.)")
+        display_title = self._style_1d_axes(context, ylabel=context.get("ylabel", "Intensity (a.u.)"))
         self.ax_2d.margins(x=0.02, y=0.08)
         self._apply_1d_plot_layout(
             compact_title=display_title != str(context["title"])
@@ -5135,6 +5253,7 @@ class My3DAnalyzer(QWidget):
             page_kind="time_integral",
             source_module="data_process",
             params={"t_low": low, "t_up": up},
+            source_page_id="home",
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -5291,12 +5410,19 @@ class My3DAnalyzer(QWidget):
         params = self._build_axis_request_params(source_mode=source_mode)
         title = f"{params['axis_name']}积分_{self._integral_length(params['low'], params['up'])}"
 
+        current_spec = self.left_workspace.current_spec()
+        if params.get("source_page_kind") == "time_integral":
+            source_page_id = current_spec.page_id if current_spec is not None and current_spec.page_kind == "time_integral" else "home"
+        else:
+            source_page_id = "home"
+
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=title,
             page_kind="axis_integral",
             source_module="data_process",
             params=params,
+            source_page_id=source_page_id,
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -5366,6 +5492,7 @@ class My3DAnalyzer(QWidget):
             page_kind="slice_dos",
             source_module="data_process",
             params={"clip_ranges": list(self.clip_ranges)},
+            source_page_id="home",
         )
         self._seed_control_state_for_spec(spec)
         return spec
