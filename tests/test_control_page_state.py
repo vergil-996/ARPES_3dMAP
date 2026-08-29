@@ -71,6 +71,22 @@ class ControlPageStateTests(unittest.TestCase):
         data_page.restore_state(data_state)
         self.assertEqual(data_page.export_state(), data_state)
 
+    def test_image_switch_restore_moves_painted_thumb(self):
+        image_page = ImageControlPage()
+        # Simulate a user-toggle switch: logical state and painted thumb agree.
+        image_page.switch_axes.setChecked(True)
+        image_page.switch_axes.progress = 1.0
+        state = image_page.export_state()
+
+        # Revert the switch; SiSwitchRefactor's setChecked only changes the
+        # logical state, leaving the painted thumb out of sync.
+        image_page.switch_axes.setChecked(False)
+        image_page.switch_axes.progress = 0.0
+
+        image_page.restore_state(state)
+        self.assertTrue(image_page.switch_axes.isChecked())
+        self.assertEqual(image_page.switch_axes.progress, 1.0)
+
     def test_waterfall_popup_forwards_one_edit_to_the_shared_control(self):
         blank = BlankControlPage()
         popup = WaterfallSettingsPopup(blank)

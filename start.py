@@ -31,6 +31,35 @@ QMessageBox QPushButton {
 QMessageBox QPushButton:hover {
     background-color: #F33A4A;
 }
+QProgressDialog {
+    background-color: #2A2A3A;
+}
+QProgressDialog QLabel {
+    color: #FFFFFF;
+    font-family: "Segoe UI";
+    font-size: 14px;
+}
+QProgressDialog QPushButton {
+    background-color: #E81123;
+    color: #FFFFFF;
+    border-radius: 4px;
+    padding: 5px 15px;
+    min-width: 72px;
+}
+QProgressDialog QPushButton:hover {
+    background-color: #F33A4A;
+}
+QProgressDialog QProgressBar {
+    background-color: #1A1A2E;
+    border: 1px solid #5A5A70;
+    border-radius: 4px;
+    text-align: center;
+    color: #FFFFFF;
+}
+QProgressDialog QProgressBar::chunk {
+    background-color: #5B8DEF;
+    border-radius: 3px;
+}
 QToolTip {
     color: #FFFFFF;
     background-color: #2A2A3A;

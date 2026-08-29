@@ -1418,6 +1418,13 @@ class My3DAnalyzer(QWidget):
         target_spec = self.left_workspace.page_by_id(target_page_id)
         return target_spec or self.left_workspace.home_spec()
 
+    def _current_home_source_spec(self):
+        """Home-type page (home or a crop page) that is the current 3D data source."""
+        current = self.left_workspace.current_spec()
+        if current is not None and current.page_kind == "home":
+            return current
+        return self.left_workspace.home_spec()
+
     def _control_state_owner(self, spec=None):
         candidate = spec or self.active_page_spec or self.left_workspace.current_spec()
         if candidate is not None and candidate.page_kind != "control_panel":
@@ -1530,7 +1537,8 @@ class My3DAnalyzer(QWidget):
         elif spec.page_kind == "waterfall_edc":
             self._persist_waterfall_page_state(spec)
         elif spec.page_kind == "energy_dos":
-            spec.params["t_index"] = int(self.page_image.slider_time.value())
+            if spec.params.get("source_page_kind") != "time_integral":
+                spec.params["t_index"] = int(self.page_image.slider_time.value())
 
     def _persist_page_ui_state(self, spec=None):
         owner_spec = self._control_state_owner(spec)
@@ -1850,6 +1858,27 @@ class My3DAnalyzer(QWidget):
             }
             if self.__dict__.get("_pending_roi_scope_id") == scope_id:
                 self._pending_roi_scope_id = None
+
+    def _discard_unreferenced_roi_scopes(self):
+        """Release ROI scopes that no live page references (e.g. closed crop pages)."""
+        data_scopes = self.__dict__.get("data_scopes", {})
+        if not data_scopes:
+            return
+        workspace = getattr(self, "left_workspace", None)
+        referenced = set()
+        if workspace is not None:
+            for spec in getattr(workspace, "page_specs", {}).values():
+                referenced.add(str(getattr(spec, "data_scope_id", self.FULL_SCOPE_ID)))
+        for scope_id in list(data_scopes.keys()):
+            if scope_id == self.FULL_SCOPE_ID:
+                continue
+            if scope_id not in referenced:
+                self._discard_roi_scope(
+                    scope_id,
+                    cancel_task=True,
+                    clear_cache=True,
+                    clear_pending=True,
+                )
 
     def _store_scope_denoise_result(self, scope_id, raw_data, signature):
         descriptor = self._scope_for_id(scope_id)
@@ -2961,6 +2990,11 @@ class My3DAnalyzer(QWidget):
             return False
         if self._is_time_integral_axis_page(spec):
             return True
+        if (
+            spec.page_kind == "energy_dos"
+            and spec.params.get("source_page_kind") == "time_integral"
+        ):
+            return True
         return (
             spec.page_kind in {"waterfall_edc", "edc_curve", "second_derivative"}
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
@@ -3828,6 +3862,31 @@ class My3DAnalyzer(QWidget):
                 "xlabel": "Energy (eV)",
                 "plot_axes": plot_axes,
                 "plot_logical_bounds": plot_bounds,
+            }
+
+        if source_kind == "time_integral":
+            t_low = int(spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
+            t_up = int(spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
+            t_low, t_up = sorted((t_low, t_up))
+            data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
+            energy_axis = np.asarray(coords["E"], dtype=np.float64)
+            descriptor = scoped_descriptor_from_array(data_3d)
+            if descriptor is not None and not descriptor.is_full:
+                compact_intensity = np.sum(
+                    np.asarray(data_3d),
+                    axis=(0, 1),
+                    dtype=np.float32,
+                )
+                intensity = np.zeros(descriptor.full_shape[2], dtype=np.float32)
+                intensity[descriptor.spatial_slices[2]] = compact_intensity
+            else:
+                intensity = np.sum(data_3d, axis=(0, 1))
+            return {
+                "view": "1d",
+                "x_data": energy_axis,
+                "y_data": intensity,
+                "title": f"Energy DOS (Time-integrated {self._current_delay_text(t_low)}~{self._current_delay_text(t_up)})",
+                "xlabel": "Energy (eV)",
             }
 
         if self._is_current_page(spec):
@@ -5189,38 +5248,39 @@ class My3DAnalyzer(QWidget):
 
         current_spec = self.left_workspace.current_spec()
         home_spec = self.left_workspace.home_spec()
-        if current_spec is not None and current_spec.page_kind != "home":
-            if home_spec is not None:
+
+        # On any derived page (crop page or analysis result), "back" returns to
+        # its source parent instead of mutating the page in place.
+        if (
+            current_spec is not None
+            and home_spec is not None
+            and current_spec.page_id != home_spec.page_id
+        ):
+            parent_id = current_spec.source_page_id
+            if (
+                parent_id
+                and parent_id != current_spec.page_id
+                and parent_id in self.left_workspace.page_specs
+            ):
+                self.left_workspace.activate_page(parent_id)
+            else:
                 self.left_workspace.activate_page(home_spec.page_id)
             return
 
         if self.core.raw_data is None or home_spec is None:
             return
 
-        descriptor = self._scope_for_spec(home_spec)
+        # On the root home page, "back" undoes the transient one-layer 2D slice
+        # and resets the interactive selection box (home is always full scope).
         if self.home_slice_info is not None:
             self.home_slice_info = None
-            self.clip_ranges = (
-                list(descriptor.spatial_bounds)
-                if descriptor is not None and not descriptor.is_full
-                else None
-            )
-            self._sync_slice_edits_from_logical_bounds(
-                self.clip_ranges or self._get_full_logical_bounds()
-            )
+            self.clip_ranges = None
+            self._sync_slice_edits_from_logical_bounds(self._get_full_logical_bounds())
             self._persist_home_page_state(home_spec)
             self.global_refresh()
             return
 
-        if descriptor is not None and not descriptor.is_full:
-            home_spec.data_scope_id = self.FULL_SCOPE_ID
-            home_spec.params["data_scope_label"] = "完整数据"
-            self._refresh_scope_hint(home_spec)
-            self.clip_ranges = None
-            self._invalidate_scope_render_state()
-        else:
-            self.clip_ranges = None
-
+        self.clip_ranges = None
         self._sync_slice_edits_from_logical_bounds(self._get_full_logical_bounds())
         self._persist_home_page_state(home_spec)
         self.global_refresh()
@@ -5247,13 +5307,14 @@ class My3DAnalyzer(QWidget):
         low = self.page_data.s_t_low.value()
         up = self.page_data.s_t_up.value()
         title = f"时间积分_{self._integral_length(low, up)}"
+        source_spec = self._current_home_source_spec()
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=title,
             page_kind="time_integral",
             source_module="data_process",
             params={"t_low": low, "t_up": up},
-            source_page_id="home",
+            source_page_id=source_spec.page_id if source_spec is not None else "home",
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -5414,7 +5475,8 @@ class My3DAnalyzer(QWidget):
         if params.get("source_page_kind") == "time_integral":
             source_page_id = current_spec.page_id if current_spec is not None and current_spec.page_kind == "time_integral" else "home"
         else:
-            source_page_id = "home"
+            source_spec = self._current_home_source_spec()
+            source_page_id = source_spec.page_id if source_spec is not None else "home"
 
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
@@ -5486,13 +5548,14 @@ class My3DAnalyzer(QWidget):
 
         _, index_bounds = clip_info
         x1, x2, y1, y2, z1, z2 = index_bounds
+        source_spec = self._current_home_source_spec()
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=f"切片内强度积分 [{x1}:{x2}, {y1}:{y2}, {z1}:{z2}]",
             page_kind="slice_dos",
             source_module="data_process",
             params={"clip_ranges": list(self.clip_ranges)},
-            source_page_id="home",
+            source_page_id=source_spec.page_id if source_spec is not None else "home",
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -5545,6 +5608,17 @@ class My3DAnalyzer(QWidget):
                     }
                 )
             title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._waterfall_crop_suffix(spec_params)}]"
+        elif current_spec.page_kind == "time_integral":
+            t_low = int(current_spec.params.get("t_low", int(self.page_data.s_t_low.value())))
+            t_up = int(current_spec.params.get("t_up", int(self.page_data.s_t_up.value())))
+            t_low, t_up = sorted((t_low, t_up))
+            spec_params = {
+                "source_page_id": current_spec.page_id,
+                "source_page_kind": "time_integral",
+                "source_t_low": t_low,
+                "source_t_up": t_up,
+            }
+            title = f"Energy-DOS [Time-integrated {self._current_delay_text(t_low)}~{self._current_delay_text(t_up)}]"
         elif (
             current_spec.page_kind == "home"
             and self.clip_ranges is not None
@@ -6394,6 +6468,8 @@ class My3DAnalyzer(QWidget):
             else:
                 self.last_visual_page_id = self.left_workspace.home_page_id
 
+        self._discard_unreferenced_roi_scopes()
+
     def closeEvent(self, event):
         update_controller = getattr(self, "update_controller", None)
         if update_controller is not None:
@@ -6507,17 +6583,28 @@ class My3DAnalyzer(QWidget):
             return
 
         descriptor = self._register_roi_scope(index_bounds)
-        if self._submit_roi_scope_commit(descriptor):
-            return
-        current_spec.data_scope_id = descriptor.scope_id
-        current_spec.params["data_scope_label"] = descriptor.label
-        self._refresh_scope_hint(current_spec)
+        crop_spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=f"原始视图{self._scope_title_suffix(descriptor)}",
+            page_kind="home",
+            source_module="system",
+            source_page_id="home",
+            data_scope_id=descriptor.scope_id,
+            params={"data_scope_label": descriptor.label},
+        )
+        crop_spec.title = self._make_unique_page_title(crop_spec.title)
+
+        self.left_workspace.add_page(crop_spec)
+
         self.clip_ranges = list(index_bounds)
         self.home_slice_info = None
-        self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
-        self._persist_home_page_state(current_spec)
+        self._sync_slice_edits_from_logical_bounds(list(index_bounds))
+        control_state = self._capture_control_state()
+        control_state["axis_source_mode"] = self._page_axis_source_mode(crop_spec)
+        self._store_control_state(crop_spec, control_state)
+        self._persist_home_page_state(crop_spec)
         self._invalidate_scope_render_state()
-        self._request_scope_denoise_if_needed(current_spec)
+        self._request_scope_denoise_if_needed(crop_spec)
         self.global_refresh()
 
     def _build_home_export_payload(self, raw_data, coords):
@@ -6825,6 +6912,14 @@ class My3DAnalyzer(QWidget):
                 export_data["time"] = np.asarray(
                     [coords["delay"][t_index]], dtype=np.float32
                 )
+        elif source_kind == "time_integral":
+            export_data["time_range"] = np.asarray(
+                [
+                    coords["delay"][int(spec.params["source_t_low"])],
+                    coords["delay"][int(spec.params["source_t_up"])],
+                ],
+                dtype=np.float32,
+            )
         else:
             if self._is_current_page(spec):
                 t_index = int(self.page_image.slider_time.value())

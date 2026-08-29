@@ -89,3 +89,32 @@ def sync_slider_visual(slider):
             pass
 
     slider.update()
+
+
+def sync_switch_visual(switch):
+    """Sync a SiSwitchRefactor's painted thumb to its checked state.
+
+    SiSwitchRefactor drives its visual on/off position from the ``progress``
+    property (0.0 = off, 1.0 = on) which is only animated when the user clicks
+    the widget.  Programmatic ``setChecked()`` calls change the logical state
+    but leave the painted thumb untouched, so restoring a page would show a
+    stale switch.  This helper mirrors ``sync_slider_visual`` and snaps the
+    thumb (and its animation) to the current checked state without animating.
+    """
+    progress = 1.0 if bool(switch.isChecked()) else 0.0
+
+    try:
+        switch.setProperty(switch.Property.Progress, progress)
+    except Exception:
+        pass
+
+    progress_ani = getattr(switch, "progress_ani", None)
+    if progress_ani is not None:
+        try:
+            progress_ani.fromProperty()
+            progress_ani.setCurrentValue(progress)
+            progress_ani.setEndValue(progress)
+        except Exception:
+            pass
+
+    switch.update()

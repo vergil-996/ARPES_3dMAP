@@ -14,6 +14,7 @@ from control_layout_utils import (
     bounded_width,
     scroll_content_width,
     sync_slider_visual,
+    sync_switch_visual,
 )
 
 
@@ -353,8 +354,10 @@ class ImageControlPage(QWidget):
 
             if "switch_axes" in state:
                 self.switch_axes.setChecked(bool(state["switch_axes"]))
+                sync_switch_visual(self.switch_axes)
             if "switch_coord" in state:
                 self.switch_coord.setChecked(bool(state["switch_coord"]))
+                sync_switch_visual(self.switch_coord)
             rotation_angle = state.get("rotation_angle")
             if rotation_angle is not None:
                 self.set_rotation_angle(str(rotation_angle))
@@ -363,6 +366,7 @@ class ImageControlPage(QWidget):
 
             if "switch_flip" in state:
                 self.switch_flip.setChecked(bool(state["switch_flip"]))
+                sync_switch_visual(self.switch_flip)
         finally:
             del blockers
 

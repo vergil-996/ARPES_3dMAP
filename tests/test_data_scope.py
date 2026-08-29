@@ -245,7 +245,7 @@ class DataScopeLineageTests(unittest.TestCase):
 
         self.assertIsNone(analyzer._scope_for_id("roi-missing"))
 
-    def test_roi_commit_changes_only_the_home_page_scope(self):
+    def test_cut_creates_a_derived_crop_page_and_keeps_home_full(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         source = np.zeros((6, 7, 8, 2), dtype=np.float32)
         analyzer.original_raw_data = source
@@ -261,10 +261,12 @@ class DataScopeLineageTests(unittest.TestCase):
         analyzer.home_slice_info = None
 
         home = AnalysisPageSpec("home", "Home", "home", "test")
-        old_page = AnalysisPageSpec("old", "Old", "axis_integral", "test")
+        created = []
         analyzer.left_workspace = SimpleNamespace(
             current_spec=lambda: home,
+            page_specs={"home": home},
             page_buttons={},
+            add_page=lambda spec: created.append(spec),
         )
         analyzer.page_image = SimpleNamespace(get_slice_values=lambda: {})
         cut_result = {
@@ -281,17 +283,26 @@ class DataScopeLineageTests(unittest.TestCase):
         )
         analyzer._sync_slice_edits_from_logical_bounds = lambda _bounds: None
         analyzer._persist_home_page_state = lambda _spec: None
-        analyzer._invalidate_denoise_dependents = lambda: None
-        analyzer._submit_roi_scope_commit = lambda _descriptor: False
-        analyzer._refresh_scope_hint = lambda _spec: None
+        analyzer._invalidate_scope_render_state = lambda: None
+        analyzer._request_scope_denoise_if_needed = lambda _spec: False
+        analyzer._capture_control_state = lambda: {}
+        analyzer._store_control_state = lambda _spec, _state: None
         analyzer.global_refresh = lambda: None
 
         analyzer.on_cut()
 
-        self.assertEqual(home.data_scope_id, "roi-1")
-        self.assertEqual(old_page.data_scope_id, "full")
-        self.assertEqual(analyzer.clip_ranges, [1, 3, 2, 5, 3, 6])
+        # The home page is never mutated by a crop.
+        self.assertEqual(home.data_scope_id, "full")
+
+        # A new derived crop page is created as a direct child of home.
+        self.assertEqual(len(created), 1)
+        crop = created[0]
+        self.assertEqual(crop.page_kind, "home")
+        self.assertEqual(crop.source_page_id, "home")
+        self.assertEqual(crop.data_scope_id, "roi-1")
+        self.assertIn("ROI #1", crop.title)
         self.assertEqual(analyzer.data_scopes["roi-1"].compact_shape, (3, 4, 4, 2))
+        self.assertEqual(analyzer.clip_ranges, [1, 3, 2, 5, 3, 6])
 
         original_pointer = int(source.__array_interface__["data"][0])
         cut_result["value"] = {
@@ -301,7 +312,11 @@ class DataScopeLineageTests(unittest.TestCase):
         }
         analyzer.on_cut()
 
-        self.assertEqual(home.data_scope_id, "roi-2")
+        # A second crop is also a direct child of home (not of the first crop).
+        self.assertEqual(home.data_scope_id, "full")
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[1].data_scope_id, "roi-2")
+        self.assertEqual(created[1].source_page_id, "home")
         second_scope = analyzer.data_scopes["roi-2"]
         np.testing.assert_array_equal(
             second_scope.extract(source),
@@ -353,23 +368,17 @@ class DataScopeLineageTests(unittest.TestCase):
         self.assertLessEqual(analyzer._scope_data_cache.current_bytes, source.nbytes)
         self.assertIsNone(analyzer.shared_denoised_raw_data)
 
-    def test_back_navigation_unwinds_page_slice_then_roi(self):
+    def test_back_switches_to_parent_then_unwinds_home_slice(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         source = np.zeros((6, 7, 8, 2), dtype=np.float32)
-        roi = DataScopeDescriptor("roi-1", source.shape, (1, 3, 2, 5, 3, 6), 1)
-        home = AnalysisPageSpec(
-            "home",
-            "Home",
-            "home",
-            "test",
-            data_scope_id="roi-1",
-        )
+        home = AnalysisPageSpec("home", "Home", "home", "test", data_scope_id="full")
         derived = AnalysisPageSpec(
             "derived",
             "Derived",
             "axis_integral",
             "test",
             data_scope_id="full",
+            source_page_id="home",
         )
         state = {"current": derived}
         activations = []
@@ -379,22 +388,18 @@ class DataScopeLineageTests(unittest.TestCase):
             state["current"] = home
 
         analyzer.original_raw_data = source
-        analyzer.data_scopes = {
-            "full": DataScopeDescriptor.full(source.shape),
-            "roi-1": roi,
-        }
+        analyzer.data_scopes = {"full": DataScopeDescriptor.full(source.shape)}
         analyzer.left_workspace = SimpleNamespace(
             current_spec=lambda: state["current"],
             home_spec=lambda: home,
+            page_specs={"home": home, "derived": derived},
             activate_page=activate,
         )
         analyzer.core = SimpleNamespace(raw_data=source)
-        analyzer.clip_ranges = list(roi.spatial_bounds)
-        analyzer.home_slice_info = {"axis": 0, "index": 2}
+        analyzer.clip_ranges = None
+        analyzer.home_slice_info = None
         analyzer._sync_slice_edits_from_logical_bounds = lambda _bounds: None
         analyzer._persist_home_page_state = lambda _spec: None
-        analyzer._invalidate_denoise_dependents = lambda: None
-        analyzer._refresh_scope_hint = lambda _spec: None
         analyzer._get_full_logical_bounds = lambda: [0, 5, 0, 6, 0, 7]
         analyzer.global_refresh = lambda: None
         analyzer.plotter = SimpleNamespace(
@@ -403,18 +408,20 @@ class DataScopeLineageTests(unittest.TestCase):
         )
         analyzer._capture_3d_camera_position = lambda: None
 
+        # From a derived page, back switches to its parent instead of mutating it.
         analyzer.on_back()
         self.assertEqual(activations, ["home"])
-        self.assertEqual(home.data_scope_id, "roi-1")
-        self.assertIsNotNone(analyzer.home_slice_info)
+        self.assertEqual(home.data_scope_id, "full")
 
+        # From the home page, back first clears the transient one-layer slice.
+        analyzer.home_slice_info = {"axis": 0, "index": 2}
         analyzer.on_back()
         self.assertIsNone(analyzer.home_slice_info)
-        self.assertEqual(home.data_scope_id, "roi-1")
-        self.assertEqual(analyzer.clip_ranges, list(roi.spatial_bounds))
+        self.assertIsNone(analyzer.clip_ranges)
 
+        # With no slice and no crop, back just resets the selection box.
+        analyzer.clip_ranges = [1, 3, 2, 5, 3, 6]
         analyzer.on_back()
-        self.assertEqual(home.data_scope_id, "full")
         self.assertIsNone(analyzer.clip_ranges)
 
 

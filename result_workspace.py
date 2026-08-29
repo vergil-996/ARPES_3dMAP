@@ -1,8 +1,9 @@
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QCursor, QFont
+from PyQt5.QtCore import QByteArray, QMimeData, QPoint, QRect, QSettings, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QCursor, QDrag, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
@@ -18,6 +19,9 @@ from PyQt5.QtWidgets import (
 
 from siui.core import SiColor, SiGlobal
 from siui.templates.application.components.page_view.page_view import PageButton
+
+RESULT_PAGE_MIME = "application/x-bandscope-page-id"
+
 
 
 @dataclass
@@ -39,6 +43,11 @@ class ResultPageButton(PageButton):
     clicked_with_id = pyqtSignal(str)
     hovered_with_id = pyqtSignal(str)
     unhovered_with_id = pyqtSignal(str)
+    drop_received = pyqtSignal(str, str)
+    drop_hovered = pyqtSignal(str)
+    drop_left = pyqtSignal()
+    drag_started = pyqtSignal(str)
+    drag_ended = pyqtSignal()
 
     ICON_MAP = {
         "home": "ic_fluent_home_filled",
@@ -58,6 +67,9 @@ class ResultPageButton(PageButton):
     def __init__(self, spec: AnalysisPageSpec, parent=None):
         super().__init__(parent)
         self.spec = spec
+        self.draggable = False
+        self._drag_start_pos = None
+        self.setAcceptDrops(False)
         self.resize(40, 40)
         self.refresh_hint()
         self.attachment().setSvgSize(20, 20)
@@ -69,6 +81,100 @@ class ResultPageButton(PageButton):
 
     def _emit_page_activated(self):
         self.activated_with_id.emit(self.spec.page_id)
+
+    def set_draggable(self, draggable: bool):
+        self.draggable = bool(draggable)
+        self.setAcceptDrops(self.draggable)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & Qt.LeftButton) and self._drag_start_pos is not None:
+            if (event.pos() - self._drag_start_pos).manhattanLength() >= 12:
+                self._start_drag()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _make_drag_pixmap(self):
+        base = self.grab()
+        font = QFont()
+        font.setPointSize(9)
+        font.setBold(True)
+        metrics = QFontMetrics(font)
+        title = str(self.spec.title)
+        text_width = min(metrics.horizontalAdvance(title), 180)
+        width = 44 + text_width + 20
+        height = 44
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor("#2E2E48"))
+        painter.setPen(QPen(QColor("#5B8DEF"), 1))
+        painter.drawRoundedRect(0, 0, width - 1, height - 1, 10, 10)
+        painter.drawPixmap(QRect(10, 10, 24, 24), base, base.rect())
+        painter.setFont(font)
+        painter.setPen(QColor("#FFFFFF"))
+        painter.drawText(
+            42,
+            0,
+            width - 52,
+            height,
+            Qt.AlignVCenter | Qt.AlignLeft,
+            metrics.elidedText(title, Qt.ElideRight, text_width),
+        )
+        painter.end()
+        return pixmap
+
+    def _start_drag(self):
+        if not self.draggable:
+            return
+        page_id = self.spec.page_id
+        self.drag_started.emit(page_id)
+        mime = QMimeData()
+        mime.setData(RESULT_PAGE_MIME, QByteArray(page_id.encode("utf-8")))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pixmap = self._make_drag_pixmap()
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(16, 16))
+        drag.exec_(Qt.MoveAction)
+        self._drag_start_pos = None
+        self.drag_ended.emit()
+
+    def dragEnterEvent(self, event):
+        if self.draggable and event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            event.acceptProposedAction()
+            self.drop_hovered.emit(self.spec.page_id)
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self.draggable and event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            event.acceptProposedAction()
+            self.drop_hovered.emit(self.spec.page_id)
+        else:
+            super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self.drop_left.emit()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if self.draggable and event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            data = bytes(event.mimeData().data(RESULT_PAGE_MIME)).decode("utf-8")
+            if data and data != self.spec.page_id:
+                self.drop_received.emit(data, self.spec.page_id)
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
     def _on_clicked(self):
         super()._on_clicked()
@@ -91,8 +197,44 @@ class ResultPageButton(PageButton):
         self.setHint(title if scope_label in title else f"{title} · {scope_label}")
 
     def set_active(self, active: bool):
-        self.setChecked(active)
-        self.active_indicator.setOpacityTo(1 if active else 0)
+        self.setActive(active)
+
+
+class RailContainer(QWidget):
+    drop_to_end = pyqtSignal(str)
+    drop_hovered_end = pyqtSignal()
+    drop_left = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            event.acceptProposedAction()
+            self.drop_hovered_end.emit()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            event.acceptProposedAction()
+            self.drop_hovered_end.emit()
+        else:
+            super().dragMoveEvent(event)
+
+    def dragLeaveEvent(self, event):
+        self.drop_left.emit()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat(RESULT_PAGE_MIME):
+            data = bytes(event.mimeData().data(RESULT_PAGE_MIME)).decode("utf-8")
+            if data:
+                self.drop_to_end.emit(data)
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
 
 class ResultTreePopup(QFrame):
@@ -311,6 +453,8 @@ class ResultTreePopup(QFrame):
             self.title_label.setText("结果页导航")
 
     def set_current_page(self, page_id):
+        matched = []
+
         def walk(item):
             item_page_id = item.data(0, Qt.UserRole)
             if item_page_id == page_id:
@@ -318,6 +462,7 @@ class ResultTreePopup(QFrame):
                 font.setBold(True)
                 item.setFont(0, font)
                 item.setForeground(0, QBrush(QColor("#FFFFFF")))
+                matched.append(item)
             else:
                 font = QFont()
                 font.setBold(False)
@@ -328,6 +473,12 @@ class ResultTreePopup(QFrame):
 
         for i in range(self.tree.topLevelItemCount()):
             walk(self.tree.topLevelItem(i))
+
+        if matched:
+            self.tree.setCurrentItem(matched[0])
+            self.tree.scrollToItem(matched[0])
+        else:
+            self.tree.setCurrentItem(None)
 
     def enterEvent(self, event):
         self.mouse_entered.emit()
@@ -354,6 +505,14 @@ class ResultWorkspace(QWidget):
         self.children_by_parent: Dict[Optional[str], list] = {}
         self.hover_page_id: Optional[str] = None
         self.popup_page_id: Optional[str] = None
+        self._dragging_page_id: Optional[str] = None
+
+        self.settings = QSettings("ARPES", "ARPES_3dMAP")
+        raw_order = self.settings.value("result_workspace/tab_order", "", type=str)
+        try:
+            self._tab_order = json.loads(raw_order) if raw_order else []
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self._tab_order = []
 
         self.setObjectName("result_workspace")
 
@@ -373,13 +532,21 @@ class ResultWorkspace(QWidget):
         self.nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.nav_scroll.setFrameShape(QFrame.NoFrame)
 
-        self.nav_buttons = QWidget(self.nav_scroll)
+        self.nav_buttons = RailContainer(self.nav_scroll)
+        self.nav_buttons.drop_to_end.connect(self._on_rail_drop_to_end)
+        self.nav_buttons.drop_hovered_end.connect(self._on_rail_drop_hovered_end)
+        self.nav_buttons.drop_left.connect(self._hide_drop_indicator)
         self.nav_buttons_layout = QVBoxLayout(self.nav_buttons)
         self.nav_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.nav_buttons_layout.setSpacing(8)
         self.nav_buttons_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         self.nav_scroll.setWidget(self.nav_buttons)
 
+        self.drop_indicator = QWidget(self.sidebar)
+        self.drop_indicator.setObjectName("result_drop_indicator")
+        self.drop_indicator.setFixedHeight(2)
+        self.drop_indicator.setAttribute(Qt.WA_StyledBackground, True)
+        self.drop_indicator.hide()
 
         sidebar_layout.addWidget(self.nav_scroll)
 
@@ -454,6 +621,10 @@ class ResultWorkspace(QWidget):
             QToolButton#popup_pin_button:checked {
                 background-color: #4A4A70;
                 color: #FFFFFF;
+            }
+            QWidget#result_drop_indicator {
+                background-color: #5B8DEF;
+                border-radius: 1px;
             }
             QScrollArea {
                 background: transparent;
@@ -576,28 +747,170 @@ class ResultWorkspace(QWidget):
         chain.reverse()
         return chain
 
+    def _ordered_top_level_ids(self):
+        ordered = []
+        for page_id in self._tab_order:
+            if page_id == self.home_page_id:
+                continue
+            if page_id in self.page_specs and self._is_top_level_page(page_id):
+                if page_id not in ordered:
+                    ordered.append(page_id)
+
+        for page_id, spec in self.page_specs.items():
+            if page_id == self.home_page_id:
+                continue
+            if not self._is_top_level_page(page_id):
+                continue
+            if page_id not in ordered:
+                ordered.append(page_id)
+        return ordered
+
     def _rail_page_ids(self):
         ids = []
         if self.home_page_id and self.home_page_id in self.page_specs:
             ids.append(self.home_page_id)
 
         current = self.current_page_id
+        current_chain = []
         if current and current in self.page_specs and current != self.home_page_id:
-            for page_id in self._ancestor_path(current):
-                if page_id not in ids:
-                    ids.append(page_id)
-            if current not in ids:
-                ids.append(current)
+            current_chain = self._ancestor_path(current)
 
-        for page_id, spec in self.page_specs.items():
-            if page_id in ids:
-                continue
-            if self._is_top_level_page(page_id):
-                ids.append(page_id)
+        for page_id in self._ordered_top_level_ids():
+            ids.append(page_id)
+            if current_chain and current_chain[0] == page_id:
+                for ancestor_id in current_chain[1:]:
+                    if ancestor_id not in ids:
+                        ids.append(ancestor_id)
+                if current not in ids:
+                    ids.append(current)
         return ids
 
     def rail_page_ids(self):
         return self._rail_page_ids()
+
+    def _save_tab_order(self):
+        try:
+            self.settings.setValue(
+                "result_workspace/tab_order",
+                json.dumps(self._tab_order, ensure_ascii=False),
+            )
+        except Exception:
+            pass
+
+    def _add_to_tab_order(self, page_id):
+        if page_id == self.home_page_id:
+            return
+        if page_id not in self._tab_order:
+            self._tab_order.append(page_id)
+            self._save_tab_order()
+
+    def _remove_from_tab_order(self, page_id):
+        if page_id in self._tab_order:
+            self._tab_order = [pid for pid in self._tab_order if pid != page_id]
+            self._save_tab_order()
+
+    def _set_top_level_order(self, ordered_ids):
+        deep_tail = [
+            pid
+            for pid in self._tab_order
+            if pid in self.page_specs
+            and pid != self.home_page_id
+            and not self._is_top_level_page(pid)
+        ]
+        self._tab_order = ordered_ids + deep_tail
+        self._save_tab_order()
+
+    def _top_level_button_positions(self):
+        """[(page_id, button, top_y, mid_y)] for draggable top-level pages, top to bottom.
+
+        The page currently being dragged is excluded so the insertion gap is
+        measured against the remaining pages, matching how the reorder removes
+        the dragged page before re-inserting it.
+        """
+        dragging_id = self._dragging_page_id
+        positions = []
+        for page_id in self._ordered_top_level_ids():
+            if page_id == dragging_id:
+                continue
+            button = self.page_buttons.get(page_id)
+            if button is None:
+                continue
+            top = button.mapTo(self.sidebar, QPoint(0, 0)).y()
+            mid = top + button.height() / 2.0
+            positions.append((page_id, button, top, mid))
+        return positions
+
+    def _drop_cursor_y(self):
+        return self.sidebar.mapFromGlobal(QCursor.pos()).y()
+
+    def _drop_insertion_index(self, cursor_y):
+        index = 0
+        for _page_id, _button, _top, mid in self._top_level_button_positions():
+            if cursor_y < mid:
+                break
+            index += 1
+        return index
+
+    def _move_rail_page_to_index(self, dragged_id, index):
+        if dragged_id == self.home_page_id:
+            return
+        if dragged_id not in self.page_specs or not self._is_top_level_page(dragged_id):
+            return
+        ordered = self._ordered_top_level_ids()
+        if dragged_id not in ordered:
+            return
+        ordered = [pid for pid in ordered if pid != dragged_id]
+        index = max(0, min(int(index), len(ordered)))
+        ordered.insert(index, dragged_id)
+        self._set_top_level_order(ordered)
+        self._hide_drop_indicator()
+        self._refresh_navigation_layout()
+        self._refresh_active_buttons()
+
+    def _on_drag_started(self, page_id):
+        self._dragging_page_id = page_id
+
+    def _on_drag_ended(self):
+        self._dragging_page_id = None
+
+    def _drop_at_cursor(self, dragged_id):
+        self._move_rail_page_to_index(
+            dragged_id,
+            self._drop_insertion_index(self._drop_cursor_y()),
+        )
+        self._dragging_page_id = None
+
+    def _on_button_drop_received(self, dragged_id, _target_id):
+        self._drop_at_cursor(dragged_id)
+
+    def _on_rail_drop_to_end(self, dragged_id):
+        self._drop_at_cursor(dragged_id)
+
+    def _sync_drop_indicator_from_cursor(self):
+        positions = self._top_level_button_positions()
+        if not positions:
+            return
+        index = self._drop_insertion_index(self._drop_cursor_y())
+        if index < len(positions):
+            y = positions[index][2]
+        else:
+            _page_id, last_button, _top, _mid = positions[-1]
+            y = last_button.mapTo(self.sidebar, QPoint(0, last_button.height())).y()
+        self._show_drop_indicator_at(y)
+
+    def _on_button_drop_hovered(self, _page_id):
+        self._sync_drop_indicator_from_cursor()
+
+    def _on_rail_drop_hovered_end(self):
+        self._sync_drop_indicator_from_cursor()
+
+    def _show_drop_indicator_at(self, y):
+        self.drop_indicator.move(6, max(0, y))
+        self.drop_indicator.show()
+        self.drop_indicator.raise_()
+
+    def _hide_drop_indicator(self):
+        self.drop_indicator.hide()
 
     def _sync_rail_buttons(self, rail_ids):
         for page_id in list(self.page_buttons.keys()):
@@ -614,11 +927,19 @@ class ResultWorkspace(QWidget):
                 button.clicked_with_id.connect(self._on_nav_button_clicked)
                 button.hovered_with_id.connect(self._on_nav_button_hover_begin)
                 button.unhovered_with_id.connect(self._on_nav_button_hover_end)
+                button.drop_received.connect(self._on_button_drop_received)
+                button.drop_hovered.connect(self._on_button_drop_hovered)
+                button.drop_left.connect(self._hide_drop_indicator)
+                button.drag_started.connect(self._on_drag_started)
+                button.drag_ended.connect(self._on_drag_ended)
                 self.page_buttons[page_id] = button
             else:
                 button = self.page_buttons[page_id]
                 button.spec = self.page_specs[page_id]
                 button.refresh_hint()
+            button.set_draggable(
+                page_id != self.home_page_id and self._is_top_level_page(page_id)
+            )
 
         while self.nav_buttons_layout.count():
             item = self.nav_buttons_layout.takeAt(0)
@@ -627,6 +948,22 @@ class ResultWorkspace(QWidget):
             button = self.page_buttons[page_id]
             self.nav_buttons_layout.addWidget(button, 0, Qt.AlignHCenter)
             button.show()
+
+        self._refresh_active_buttons()
+
+    def _refresh_active_buttons(self):
+        current_id = self.current_page_id
+        for page_id, button in self.page_buttons.items():
+            button.set_active(page_id == current_id)
+
+    def _scroll_active_button_into_view(self):
+        button = self.page_buttons.get(self.current_page_id)
+        if button is None:
+            return
+        y = button.mapTo(self.nav_buttons, QPoint(0, 0)).y()
+        bar = self.nav_scroll.verticalScrollBar()
+        if bar.maximum() > 0:
+            bar.setValue(max(0, min(bar.maximum(), y - 8)))
 
     def _on_nav_button_clicked(self, page_id):
         if page_id in self.page_specs:
@@ -755,6 +1092,7 @@ class ResultWorkspace(QWidget):
     def _add_page(self, spec: AnalysisPageSpec):
         self.page_specs[spec.page_id] = spec
         self._ensure_source_title(spec)
+        self._add_to_tab_order(spec.page_id)
         self._rebuild_title_index()
         self._refresh_navigation_layout()
 
@@ -779,8 +1117,8 @@ class ResultWorkspace(QWidget):
         self.activation_history.append(page_id)
 
         self._refresh_navigation_layout()
-        for current_id, button in self.page_buttons.items():
-            button.set_active(current_id == page_id)
+        self._refresh_active_buttons()
+        self._scroll_active_button_into_view()
 
         if self.tree_popup.isVisible():
             self.tree_popup.set_current_page(page_id)
@@ -792,26 +1130,85 @@ class ResultWorkspace(QWidget):
         if self.current_page_id is not None:
             self.close_page(self.current_page_id)
 
+    @staticmethod
+    def _is_derived_scope_page(spec):
+        # Crop pages are home-type pages bound to a non-full (ROI) data scope.
+        # Closing one must cascade-close its derived pages and release its scope.
+        return (
+            spec is not None
+            and spec.page_kind == "home"
+            and bool(spec.data_scope_id)
+            and str(spec.data_scope_id) != "full"
+        )
+
+    def _close_single_page(self, page_id: str) -> bool:
+        spec = self.page_specs.get(page_id)
+        if spec is None or not spec.closeable:
+            return False
+
+        self.activation_history = [pid for pid in self.activation_history if pid != page_id]
+        self.page_specs.pop(page_id, None)
+        self._remove_from_tab_order(page_id)
+        self._rebuild_title_index()
+        self._refresh_navigation_layout()
+
+        self.page_closed.emit(page_id)
+        return True
+
+    def _descendant_page_ids(self, page_id: str):
+        self._rebuild_children_map()
+        result = []
+        visited = set()
+        stack = list(self.children_by_parent.get(page_id, []))
+        while stack:
+            child_id = stack.pop()
+            if child_id in visited:
+                continue
+            visited.add(child_id)
+            result.append(child_id)
+            stack.extend(self.children_by_parent.get(child_id, []))
+        return result
+
     def close_page(self, page_id: str):
         spec = self.page_specs.get(page_id)
         if spec is None or not spec.closeable:
             return
 
+        if self._is_derived_scope_page(spec):
+            self.close_page_and_descendants(page_id)
+            return
+
         was_current = page_id == self.current_page_id
 
-        self.activation_history = [pid for pid in self.activation_history if pid != page_id]
-        self.page_specs.pop(page_id, None)
-        self._rebuild_title_index()
         self._hide_tree_popup()
-        self._refresh_navigation_layout()
-
-        self.page_closed.emit(page_id)
+        self._close_single_page(page_id)
 
         if not was_current:
             return
 
         fallback_id = self.activation_history[-1] if self.activation_history else self.home_page_id
-        if fallback_id is not None:
+        if fallback_id is not None and fallback_id in self.page_specs:
+            self.activate_page(fallback_id)
+        else:
+            self._refresh_header()
+
+    def close_page_and_descendants(self, page_id: str):
+        spec = self.page_specs.get(page_id)
+        if spec is None or not spec.closeable:
+            return
+
+        was_current = page_id == self.current_page_id
+        fallback_id = self._parent_page_id_for_id(page_id) or self.home_page_id
+
+        self._hide_tree_popup()
+        for descendant_id in self._descendant_page_ids(page_id):
+            self._close_single_page(descendant_id)
+        self._close_single_page(page_id)
+
+        if not was_current:
+            return
+
+        if fallback_id is not None and fallback_id in self.page_specs:
             self.activate_page(fallback_id)
         else:
             self._refresh_header()
