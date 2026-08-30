@@ -2933,20 +2933,33 @@ class My3DAnalyzer(QWidget):
     @staticmethod
     def _sanitize_save_path(path, selected_filter=""):
         root, ext = os.path.splitext(path)
-        if ext.lower() not in {".mat", ".npz", ".png"}:
-            if "npz" in selected_filter.lower():
-                return path + ".npz"
-            if "png" in selected_filter.lower():
-                return path + ".png"
-            return path + ".mat"
-        return path
+        ext = ext.lower()
+        filter_lower = (selected_filter or "").lower()
+
+        if "txt" in filter_lower:
+            desired = ".txt"
+        elif "csv" in filter_lower:
+            desired = ".csv"
+        elif "npz" in filter_lower:
+            desired = ".npz"
+        elif "png" in filter_lower:
+            desired = ".png"
+        else:
+            desired = ".mat"
+
+        if ext == desired:
+            return path
+        return root + desired
 
     def _choose_export_path(self, title, default_name):
+        filters = "MATLAB Files (*.mat);;NumPy Files (*.npz)"
+        if getattr(self, "_export_allow_tabular", True):
+            filters += ";;Text Files (*.txt);;CSV Files (*.csv)"
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             title,
             default_name,
-            "MATLAB Files (*.mat);;NumPy Files (*.npz)",
+            filters,
         )
         if not path:
             return ""
@@ -2954,16 +2967,184 @@ class My3DAnalyzer(QWidget):
 
     @staticmethod
     def _save_dict_to_path(path, data_dict):
+        lower = path.lower()
+        if lower.endswith(".npz"):
+            serializable = {
+                key: np.asarray(value)
+                for key, value in data_dict.items()
+                if value is not None
+            }
+            np.savez(path, **serializable)
+            return
+        if lower.endswith((".txt", ".csv")):
+            My3DAnalyzer._save_tabular_to_path(path, data_dict)
+            return
+
         serializable = {}
         for key, value in data_dict.items():
             if value is None:
                 continue
             serializable[key] = np.asarray(value)
+        savemat(path, serializable)
 
-        if path.lower().endswith(".npz"):
-            np.savez(path, **serializable)
+    @staticmethod
+    def _format_cell(value):
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if np.isnan(number):
+            return ""
+        if np.isinf(number):
+            return "inf" if number > 0 else "-inf"
+        return f"{number:.8g}"
+
+    @staticmethod
+    def _format_comment_value(value):
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return My3DAnalyzer._format_cell(arr.item())
+        flat = arr.reshape(-1)
+        if flat.size <= 6:
+            return "[" + ", ".join(My3DAnalyzer._format_cell(v) for v in flat) + "]"
+        return f"[{flat.size} values]"
+
+    @staticmethod
+    def _match_1d_axis(export_data, length, prefer, exclude=()):
+        for key in prefer:
+            if key in exclude:
+                continue
+            value = export_data.get(key)
+            if value is None:
+                continue
+            arr = np.asarray(value)
+            if arr.ndim == 1 and arr.shape[0] == length:
+                return key, arr
+        for key, value in export_data.items():
+            if key in exclude:
+                continue
+            arr = np.asarray(value)
+            if arr.ndim == 1 and arr.shape[0] == length:
+                return key, arr
+        return None, None
+
+    @staticmethod
+    def _find_tabular_primary(export_data):
+        matrix = None
+        curve = None
+        for key in ("sample", "intensity"):
+            value = export_data.get(key)
+            if value is None:
+                continue
+            arr = np.asarray(value)
+            if arr.ndim == 2 and matrix is None:
+                matrix = arr
+            elif arr.ndim == 1 and curve is None:
+                curve = arr
+        if matrix is not None:
+            return "matrix", matrix
+        if curve is not None:
+            return "curve", curve
+        return None, None
+
+    @staticmethod
+    def _write_curve(path, export_data, curve, x_key, x_arr):
+        is_csv = path.lower().endswith(".csv")
+        length = curve.shape[0]
+        sep = "," if is_csv else "\t"
+        lines = []
+
+        if not is_csv:
+            for key, value in export_data.items():
+                if key in (x_key, "intensity", "sample"):
+                    continue
+                arr = np.asarray(value)
+                if arr.ndim == 0 or (arr.ndim == 1 and arr.size <= 6):
+                    lines.append(
+                        f"# {key} = {My3DAnalyzer._format_comment_value(value)}"
+                    )
+            lines.append(f"# {x_key or 'index'}{sep}intensity")
         else:
-            savemat(path, serializable)
+            lines.append(f"{x_key or 'index'},intensity")
+
+        for i in range(length):
+            x_cell = (
+                My3DAnalyzer._format_cell(x_arr[i]) if x_arr is not None else str(i)
+            )
+            y_cell = My3DAnalyzer._format_cell(curve[i])
+            lines.append(f"{x_cell}{sep}{y_cell}")
+
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    @staticmethod
+    def _write_matrix(path, export_data, matrix, row_key, row_arr, col_key, col_arr):
+        is_csv = path.lower().endswith(".csv")
+        n_rows, n_cols = matrix.shape
+        sep = "," if is_csv else "\t"
+        lines = []
+
+        if not is_csv:
+            lines.append(
+                f"# rows = {row_key or 'index'} ({n_rows}), "
+                f"columns = {col_key or 'index'} ({n_cols})"
+            )
+            for key, value in export_data.items():
+                if key in (row_key, col_key, "sample", "intensity"):
+                    continue
+                arr = np.asarray(value)
+                if arr.ndim == 0 or (arr.ndim == 1 and arr.size <= 6):
+                    lines.append(
+                        f"# {key} = {My3DAnalyzer._format_comment_value(value)}"
+                    )
+
+        col_cells = [
+            My3DAnalyzer._format_cell(c)
+            for c in (col_arr if col_arr is not None else range(n_cols))
+        ]
+        corner = f"{row_key or 'index'} / {col_key or 'index'}"
+        lines.append(sep.join([corner] + col_cells))
+
+        for r in range(n_rows):
+            row_cell = (
+                My3DAnalyzer._format_cell(row_arr[r])
+                if row_arr is not None
+                else str(r)
+            )
+            cells = [row_cell] + [
+                My3DAnalyzer._format_cell(matrix[r, c]) for c in range(n_cols)
+            ]
+            lines.append(sep.join(cells))
+
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("\n".join(lines) + "\n")
+
+    @staticmethod
+    def _save_tabular_to_path(path, export_data):
+        kind, primary = My3DAnalyzer._find_tabular_primary(export_data)
+        if kind == "curve":
+            x_key, x_arr = My3DAnalyzer._match_1d_axis(
+                export_data, primary.shape[0], ("time", "E", "k", "kx", "ky")
+            )
+            My3DAnalyzer._write_curve(path, export_data, primary, x_key, x_arr)
+            return
+        if kind == "matrix":
+            row_key, row_arr = My3DAnalyzer._match_1d_axis(
+                export_data, primary.shape[0], ("k", "kx", "ky", "E", "time")
+            )
+            col_key, col_arr = My3DAnalyzer._match_1d_axis(
+                export_data,
+                primary.shape[1],
+                ("E", "ky", "kx", "k", "time"),
+                exclude=(row_key,),
+            )
+            My3DAnalyzer._write_matrix(
+                path, export_data, primary, row_key, row_arr, col_key, col_arr
+            )
+            return
+        raise ValueError("导出数据中不包含可写为文本/表格的一维曲线或二维矩阵。")
 
     def _scope_export_metadata(self, descriptor, coords):
         if descriptor is None or descriptor.is_full:
@@ -6978,6 +7159,9 @@ class My3DAnalyzer(QWidget):
         title, default_name, export_data = payload
         export_data.update(
             self._scope_export_metadata(self._scope_for_spec(spec), coords)
+        )
+        self._export_allow_tabular = (
+            My3DAnalyzer._find_tabular_primary(export_data)[0] is not None
         )
 
         path = self._choose_export_path(title, default_name)
