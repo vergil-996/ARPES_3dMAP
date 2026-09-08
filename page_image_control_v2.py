@@ -1,24 +1,14 @@
 from PyQt5.QtCore import Qt, QSignalBlocker
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpinBox
-from PyQt5.QtGui import QColor
-from siui.components.widgets import SiScrollArea, SiLabel, SiPushButton
-from siui.components.titled_widget_group import SiTitledWidgetGroup
-from siui.components.slider_ import SiSlider
-from siui.components.editbox import SiDoubleSpinBox, SiLabeledLineEdit
-from siui.components.button import SiSwitchRefactor
-from siui.core import SiColor
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSizePolicy, QSpinBox, QLabel, QLineEdit
+from siui.components.widgets import SiLabel
 
-from control_layout_utils import (
-    align_scroll_content,
-    apply_label_color,
-    bounded_width,
-    scroll_content_width,
-    sync_slider_visual,
-    sync_switch_visual,
-)
+import theme
+from control_layout_utils import bounded_width
+from control_page_base import ControlPageBase
+from ui_controls import SyncedSlider, SyncedSwitch, RotationSpinBox
 
 
-class ContinuousFrameSlider(SiSlider):
+class ContinuousFrameSlider(SyncedSlider):
     """A discrete frame slider whose thumb still follows the mouse smoothly."""
 
     def _onValueChanged(self, value):
@@ -46,11 +36,10 @@ class ContinuousFrameSlider(SiSlider):
             progress = min(1.0, max(1.0 - (pos.y() - thumb_width / 2) / available, 0.0))
 
         region = self.maximum() - self.minimum()
+        # SyncedSlider.setValue 会把滑块吸附到整数帧进度；随后立即用精确的
+        # 鼠标进度覆盖，保证 2~3 帧的数据集也能在整个轨道上拖动。
         self.setValue(int(self.minimum() + region * progress + 0.5))
 
-        # SiSlider normally derives the thumb position from the integer value.
-        # Keep the exact mouse progress while dragging so a 2- or 3-frame data
-        # set still has a thumb that can be moved across the complete track.
         self.progress_ani.stop()
         self.setProperty(self.Property.TrackProgress, progress)
         self.progress_ani.setCurrentValue(progress)
@@ -58,37 +47,29 @@ class ContinuousFrameSlider(SiSlider):
         self.update()
 
 
-class ImageControlPage(QWidget):
-    PAGE_MARGIN = 13
-    SECTION_MARGIN = 10
-    SECTION_SPACING = 20
+class ImageControlPage(ControlPageBase):
+    SECTION_SPACING = 12
     GROUP_MARGINS = (15, 55, 15, 20)
     GROUP_SPACING = 12
-    GROUP_WIDTH = 360
-    TIME_VALUE_BOX_WIDTH = 72
-    TIME_VALUE_BOX_SPACING = 8
-    SLICE_EDIT_WIDTH = 155
-    BUTTON_WIDTH = 64
     MIN_GROUP_WIDTH = 344
     MAX_GROUP_WIDTH = 470
-    MIN_CONTENT_WIDTH = MIN_GROUP_WIDTH + SECTION_MARGIN * 2
-    MAX_CONTENT_WIDTH = MAX_GROUP_WIDTH + SECTION_MARGIN * 2
+    TIME_VALUE_BOX_WIDTH = 72
+    TIME_VALUE_BOX_SPACING = 8
+    SLICE_EDIT_WIDTH = 140
+    BUTTON_WIDTH = 64
+    MAX_EDIT_WIDTH = 220
 
     def __init__(self, parent=None):
-        super().__init__(parent)
         self.edits = {}
-        self._adaptive_groups = []
         self._slice_edits = []
-        self.init_ui()
+        super().__init__(parent)
         self.bind_events()
 
     def _create_slider(self):
         slider = ContinuousFrameSlider(self)
         slider.setFixedHeight(32)
         slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        slider.style_data.main_color = QColor("#FF69B4")
-        slider.style_data.background_color = QColor(255, 105, 180, 64)
-        slider.style_data.handle_color = QColor("#FFFFFF")
+        theme.style_accent_slider(slider)
         return slider
 
     def _create_time_value_box(self):
@@ -100,122 +81,79 @@ class ImageControlPage(QWidget):
         spin_box.setAlignment(Qt.AlignCenter)
         spin_box.setFocusPolicy(Qt.StrongFocus)
         spin_box.setToolTip("当前帧")
-        spin_box.setStyleSheet(
-            "QSpinBox {"
-            "background-color: rgba(255, 255, 255, 24);"
-            "color: white;"
-            "border: 1px solid rgba(255, 255, 255, 54);"
-            "border-radius: 6px;"
-            "padding-left: 4px;"
-            "padding-right: 4px;"
-            "}"
-            "QSpinBox::up-button, QSpinBox::down-button {"
-            "width: 0px;"
-            "border: none;"
-            "}"
-        )
+        spin_box.setStyleSheet(theme.value_input_qss())
         return spin_box
 
-    def _create_red_btn(self, text):
-        btn = SiPushButton(self)
-        btn.setFixedHeight(32)
-        btn.setFixedWidth(self.BUTTON_WIDTH)
-        btn.attachment().setText(text)
-        btn.colorGroup().assign(SiColor.BUTTON_PANEL, "#E81123")
-        btn.colorGroup().assign(SiColor.TEXT_B, "#FFFFFF")
-        btn.reloadStyleSheet()
-        return btn
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN, self.PAGE_MARGIN)
-        layout.setSpacing(0)
-        self.scroll = SiScrollArea(self)
-        self.container = QWidget()
-        self.container.setFixedWidth(self.GROUP_WIDTH + self.SECTION_MARGIN * 2)
-        self.vbox = QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(
-            self.SECTION_MARGIN,
-            self.SECTION_MARGIN,
-            self.SECTION_MARGIN,
-            self.SECTION_MARGIN,
-        )
-        self.vbox.setSpacing(self.SECTION_SPACING)
-
-        grp_time = SiTitledWidgetGroup(self)
-        grp_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        grp_time.setFixedWidth(self.GROUP_WIDTH)
-        self._adaptive_groups.append(grp_time)
-        grp_time.addTitle("时间轴控制")
+    def build_body(self):
+        grp_time, v_time = self._create_group("时间轴")
+        self.time_hint = QLabel("当前帧 · ← → 逐帧切换", self)
+        self.time_hint.setStyleSheet(theme.field_label_qss())
+        v_time.addWidget(self.time_hint)
         self.slider_time = self._create_slider()
         self.input_time = self._create_time_value_box()
-        v_time = QVBoxLayout(grp_time)
-        v_time.setContentsMargins(*self.GROUP_MARGINS)
-        v_time.setSpacing(self.GROUP_SPACING)
         time_row = QHBoxLayout()
         time_row.setContentsMargins(0, 0, 0, 0)
         time_row.setSpacing(self.TIME_VALUE_BOX_SPACING)
         time_row.addWidget(self.slider_time)
         time_row.addWidget(self.input_time)
         v_time.addLayout(time_row)
-        apply_label_color(grp_time, "#FF69B4", suppress_errors=False)
         self.vbox.addWidget(grp_time)
 
-        grp_slice = SiTitledWidgetGroup(self)
-        grp_slice.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        grp_slice.setFixedWidth(self.GROUP_WIDTH)
-        self._adaptive_groups.append(grp_slice)
-        grp_slice.addTitle("切片立方体设置")
-        v_slice = QVBoxLayout(grp_slice)
-        v_slice.setContentsMargins(*self.GROUP_MARGINS)
-        v_slice.setSpacing(self.GROUP_SPACING)
+        grp_slice, v_slice = self._create_group("切片范围")
 
         axes_cfg = [("X轴下限", "X轴上限"), ("Y轴下限", "Y轴上限"), ("Z轴下限", "Z轴上限")]
         for min_label, max_label in axes_cfg:
             h_row = QHBoxLayout()
-            e_min = SiLabeledLineEdit(self)
-            e_min.setTitle(min_label)
-            e_min.setFixedHeight(45)
-            e_min.setFixedWidth(self.SLICE_EDIT_WIDTH)
-            e_max = SiLabeledLineEdit(self)
-            e_max.setTitle(max_label)
-            e_max.setFixedHeight(45)
-            e_max.setFixedWidth(self.SLICE_EDIT_WIDTH)
-            self._slice_edits.extend([e_min, e_max])
-            h_row.addWidget(e_min)
-            h_row.addWidget(e_max)
+            h_row.setSpacing(10)
+            for text in (min_label, max_label):
+                field = QVBoxLayout()
+                field.setSpacing(5)
+                label = QLabel(text.replace("轴", "  "), self)
+                label.setStyleSheet(theme.field_label_qss())
+                edit = QLineEdit(self)
+                edit.setAccessibleName(text)
+                edit.setFixedHeight(32)
+                edit.setStyleSheet(theme.value_input_qss())
+                self._slice_edits.append(edit)
+                self.edits[text] = edit
+                label.setBuddy(edit)
+                field.addWidget(label)
+                field.addWidget(edit)
+                h_row.addLayout(field)
             v_slice.addLayout(h_row)
-            self.edits[min_label], self.edits[max_label] = e_min, e_max
 
         # Z轴旋转角度
         h_rot = QHBoxLayout()
-        self.edit_rotation = SiDoubleSpinBox(self)
-        self.edit_rotation.setTitle("Z轴旋转角度(°)")
+        rotation_label = QLabel("Z 轴旋转 / °", self)
+        rotation_label.setStyleSheet(theme.field_label_qss())
+        h_rot.addWidget(rotation_label)
+        h_rot.addStretch()
+        self.edit_rotation = RotationSpinBox(self)
+        self.edit_rotation.setAccessibleName("Z轴旋转角度")
         self.edit_rotation.setMinimum(-360.0)
         self.edit_rotation.setMaximum(360.0)
         self.edit_rotation.setSingleStep(1.0)
         self.edit_rotation.setValue(0.0)
-        self.edit_rotation.resize(self.SLICE_EDIT_WIDTH, 58)
+        self.edit_rotation.setFixedSize(108, 32)
         self.edit_rotation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         h_rot.addWidget(self.edit_rotation)
-        h_rot.addStretch()
         v_slice.addLayout(h_rot)
 
-        apply_label_color(grp_slice, "#FF69B4", suppress_errors=False)
         self.vbox.addWidget(grp_slice)
 
+        grp_disp, v_disp = self._create_group("显示选项")
         h_sw = QHBoxLayout()
-        self.switch_axes = SiSwitchRefactor(self)
+        self.switch_axes = SyncedSwitch(self)
         lbl_axes = SiLabel("显示坐标")
-        lbl_axes.setStyleSheet("color: white; font-weight: bold;")
-        self.switch_coord = SiSwitchRefactor(self)
+        lbl_axes.setStyleSheet(theme.field_label_qss())
+        self.switch_coord = SyncedSwitch(self)
         lbl_coord = SiLabel("切片交互")
-        lbl_coord.setStyleSheet("color: white; font-weight: bold;")
-        self.switch_flip = SiSwitchRefactor(self)
+        lbl_coord.setStyleSheet(theme.field_label_qss())
+        self.switch_flip = SyncedSwitch(self)
         lbl_flip = SiLabel("E轴翻转")
-        lbl_flip.setStyleSheet("color: white; font-weight: bold;")
+        lbl_flip.setStyleSheet(theme.field_label_qss())
 
-        h_sw.setSpacing(4)
+        h_sw.setSpacing(6)
         for switch in (self.switch_axes, self.switch_coord, self.switch_flip):
             switch.setFixedSize(40, 20)
 
@@ -227,49 +165,35 @@ class ImageControlPage(QWidget):
         h_sw.addStretch()
         h_sw.addWidget(lbl_flip)
         h_sw.addWidget(self.switch_flip)
-        self.vbox.addLayout(h_sw)
+        v_disp.addLayout(h_sw)
+        self.vbox.addWidget(grp_disp)
 
+        grp_actions, v_actions = self._create_group("切片操作")
         h_btns = QHBoxLayout()
-        h_btns.setSpacing(6)
-        self.btn_load = self._create_red_btn("加载")
-        self.btn_cut = self._create_red_btn("截取")
-        self.btn_export = self._create_red_btn("保存")
-        self.btn_save = self._create_red_btn("截图")
-        self.btn_back = self._create_red_btn("返回")
+        h_btns.setSpacing(10)
+        self.btn_load = self._create_btn("加载", "primary", height=32)
+        self.btn_cut = self._create_btn("应用切片", "primary", height=36)
+        self.btn_export = self._create_btn("保存", "secondary", height=32)
+        self.btn_save = self._create_btn("截图", "secondary", height=32)
+        self.btn_back = self._create_btn("返回原始", "secondary", height=36)
         for btn in [self.btn_load, self.btn_cut, self.btn_export, self.btn_save, self.btn_back]:
-            h_btns.addWidget(btn)
-        self.vbox.addLayout(h_btns)
+            self._adaptive_buttons.remove(btn)
+        for btn in (self.btn_load, self.btn_export, self.btn_save):
+            btn.hide()  # Global actions live in the toolbar; keep existing signal wiring.
+        self.btn_cut.setMinimumWidth(0)
+        self.btn_cut.setMaximumWidth(16777215)
+        self.btn_cut.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_back.setFixedWidth(100)
+        self.btn_back.setToolTip("返回原始数据视图")
+        h_btns.addWidget(self.btn_cut, 1)
+        h_btns.addWidget(self.btn_back)
+        v_actions.addLayout(h_btns)
+        self.vbox.addWidget(grp_actions)
 
-        self.vbox.addStretch()
-        self.container.adjustSize()
-        self.scroll.setAttachment(self.container)
-        layout.addWidget(self.scroll)
-        self._apply_adaptive_layout()
-
-    def _apply_adaptive_layout(self):
-        if not hasattr(self, "scroll"):
-            return
-
-        content_width = scroll_content_width(
-            self.scroll,
-            self.MIN_CONTENT_WIDTH,
-            self.MAX_CONTENT_WIDTH,
-        )
-        group_width = max(self.MIN_GROUP_WIDTH, content_width - self.SECTION_MARGIN * 2)
-        edit_width = bounded_width((group_width - 10) // 2, self.SLICE_EDIT_WIDTH, 220)
-
-        self.container.setFixedWidth(content_width)
-        for group in self._adaptive_groups:
-            group.setFixedWidth(group_width)
+    def _apply_extra_widths(self, group_width, widths):
+        edit_width = bounded_width((group_width - 40) // 2, self.SLICE_EDIT_WIDTH, self.MAX_EDIT_WIDTH)
         for edit in self._slice_edits:
             edit.setFixedWidth(edit_width)
-
-        self.container.adjustSize()
-        align_scroll_content(self.scroll, self.container)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._apply_adaptive_layout()
 
     def bind_events(self):
         self.slider_time.valueChanged.connect(self.input_time.setValue)
@@ -294,9 +218,8 @@ class ImageControlPage(QWidget):
             pass
 
     def get_rotation_angle(self):
-        # SiDoubleSpinBox keeps a separate internal value which is committed on
-        # editingFinished.  Reading the visible text keeps wheel, typing and the
-        # delayed exact refresh on the same angle snapshot.
+        # Read the visible text so live typing and delayed exact refresh share
+        # the same angle snapshot, including before editingFinished.
         text = self.edit_rotation.text().strip()
         try:
             return float(text)
@@ -344,7 +267,6 @@ class ImageControlPage(QWidget):
                 value = max(int(self.slider_time.minimum()), min(int(self.slider_time.maximum()), value))
                 self.slider_time.setValue(value)
                 self.input_time.setValue(value)
-            sync_slider_visual(self.slider_time)
 
             slice_values = state.get("slice_values") or {}
             for key, value in slice_values.items():
@@ -354,10 +276,8 @@ class ImageControlPage(QWidget):
 
             if "switch_axes" in state:
                 self.switch_axes.setChecked(bool(state["switch_axes"]))
-                sync_switch_visual(self.switch_axes)
             if "switch_coord" in state:
                 self.switch_coord.setChecked(bool(state["switch_coord"]))
-                sync_switch_visual(self.switch_coord)
             rotation_angle = state.get("rotation_angle")
             if rotation_angle is not None:
                 self.set_rotation_angle(str(rotation_angle))
@@ -366,7 +286,5 @@ class ImageControlPage(QWidget):
 
             if "switch_flip" in state:
                 self.switch_flip.setChecked(bool(state["switch_flip"]))
-                sync_switch_visual(self.switch_flip)
         finally:
             del blockers
-

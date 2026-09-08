@@ -7,6 +7,7 @@ from siui.components.editbox import SiDoubleSpinBox, SiSpinBox
 from siui.components.titled_widget_group import SiTitledWidgetGroup
 
 from control_layout_utils import apply_label_color, combo_index_for_text
+import theme
 from denoise_config import (
     DEFAULT_SG_PARAMS,
     DEFAULT_WAVELET_PARAMS,
@@ -100,7 +101,7 @@ def finish_parameter_group(group, card, controls):
         card.body().addWidget(control)
     card.adjustSize()
     group.addWidget(card)
-    apply_label_color(group, "#FFFFFF")
+    apply_label_color(group, theme.TEXT_1)
     return group
 
 

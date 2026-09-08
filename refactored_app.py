@@ -11,7 +11,7 @@ configure_qt_plugin_path()
 import numpy as np
 import vtk
 from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QTimer, Qt
-from PyQt5.QtGui import QCursor
+from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -22,7 +22,10 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QPushButton,
+    QShortcut,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -34,10 +37,11 @@ from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
 from scipy.io import savemat
-from siui.components.button import SiCapsuleButton
 from siui.components.tooltip import ToolTipWindow
 from siui.core import SiGlobal
 
+import theme
+from ui_controls import ActionButton
 from analyzer_core import AnalyzerCore
 from blank_control_page import BlankControlPage
 from data_trans import convert as convert_mat_to_npz
@@ -56,6 +60,7 @@ from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoo
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
 from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from toast import ToastManager
 from app_metadata import APP_NAME, APP_VERSION
 from update_controller import UpdateController
 
@@ -87,12 +92,14 @@ class My3DAnalyzer(QWidget):
     ROTATION_CACHE_LIMIT = 4
     RENDER_STATUS_WIDTH = 330
     CONTEXT_MENU_STYLE = (
-        "QMenu { color: white; background-color: #2A2A3A; } "
-        "QMenu::item:selected { background-color: #3A3A5A; }"
+        f"QMenu {{ color: {theme.TEXT_1}; background-color: {theme.BG_2}; }} "
+        f"QMenu::item:selected {{ background-color: {theme.BG_4}; }}"
     )
 
     def __init__(self):
         super().__init__()
+        theme.apply_app_font()
+        theme.apply_siui_palette()  # 必须先于任何 SiUI 控件创建
         self.setWindowOpacity(0)
 
         self.core = AnalyzerCore()
@@ -169,9 +176,14 @@ class My3DAnalyzer(QWidget):
 
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.resize(1550, 950)
-        self.setStyleSheet("background-color: #151525;")
+        self.setObjectName("MainWindow")
+        self.setStyleSheet(
+            f"QWidget#MainWindow {{ background-color: {theme.BG_0}; }}"
+            f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
+        )
 
         self.init_ui()
+        self.toast_manager = ToastManager(self)
         self.volume_session = VolumeRenderSession(self.plotter)
         try:
             self._camera_observer_id = self.plotter.iren.add_observer(
@@ -183,7 +195,6 @@ class My3DAnalyzer(QWidget):
         self.page_render.set_nvidia_backend_available(self.backend_manager.gpu_available)
         self.page_render.set_backend_mode(self.backend_manager.mode)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
-        self._install_data_process_save_controls()
         self.bind_all_events()
         self._initialize_result_workspace()
         self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
@@ -195,6 +206,10 @@ class My3DAnalyzer(QWidget):
         self.update_controller = UpdateController(
             self,
             self.settings,
+            version_button=self.btn_tb_version,
+        )
+        self.btn_tb_version.clicked.connect(
+            lambda: self.update_controller.check_for_updates(manual=True)
         )
         QTimer.singleShot(5000, self.update_controller.check_automatically)
 
@@ -203,8 +218,8 @@ class My3DAnalyzer(QWidget):
         if tooltip_window is None:
             return
 
-        tooltip_window.bg_label.setColor("#2A2A3A")
-        tooltip_window.text_label.setStyleSheet("color: #FFFFFF; padding: 8px;")
+        tooltip_window.bg_label.setColor(theme.BG_2)
+        tooltip_window.text_label.setStyleSheet(f"color: {theme.TEXT_1}; padding: 8px;")
         tooltip_window.highlight_mask.setFixedStyleSheet("border-radius: 6px")
 
     def showEvent(self, event):
@@ -230,6 +245,62 @@ class My3DAnalyzer(QWidget):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+        self._install_global_shortcuts()
+
+    def _install_global_shortcuts(self):
+        """Ctrl 系全局快捷键（窗口级，文本框焦点下 Ctrl+字母不冲突）。"""
+        def _bind(key, handler):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(handler)
+            return shortcut
+
+        self._global_shortcuts = [
+            _bind("Ctrl+O", self.on_load),
+            _bind("Ctrl+S", self.on_screenshot),
+            _bind("Ctrl+1", lambda: self._select_control_page(0)),
+            _bind("Ctrl+2", lambda: self._select_control_page(1)),
+            _bind("Ctrl+3", lambda: self._select_control_page(2)),
+            _bind("Ctrl+W", self.left_workspace.close_current_page),
+        ]
+
+    def _focus_blocks_frame_step(self):
+        """文本编辑、其它滑条、下拉框持有焦点时，方向键不用于逐帧。"""
+        if self._focus_accepts_number_input():
+            return True
+        focus_widget = QApplication.focusWidget()
+        if focus_widget is None or focus_widget is self.page_image.slider_time:
+            return False
+        class_names = []
+        current_class = focus_widget.__class__
+        while current_class is not object:
+            class_names.append(current_class.__name__)
+            current_class = current_class.__base__
+        return any(
+            marker in class_name
+            for class_name in class_names
+            for marker in ("Slider", "Combo")
+        )
+
+    def _handle_frame_step_shortcut(self, event):
+        """←/→ 逐帧移动时间轴，Shift+←/→ 步进 10 帧（允许按住连发）。"""
+        if event.modifiers() not in (Qt.NoModifier, Qt.KeypadModifier, Qt.ShiftModifier):
+            return False
+        if event.key() not in (Qt.Key_Left, Qt.Key_Right):
+            return False
+        if self._focus_blocks_frame_step():
+            return False
+
+        slider = self.page_image.slider_time
+        if slider.maximum() <= slider.minimum():
+            return False
+        step = 10 if event.modifiers() & Qt.ShiftModifier else 1
+        delta = step if event.key() == Qt.Key_Right else -step
+        value = max(slider.minimum(), min(slider.maximum(), slider.value() + delta))
+        if value == slider.value():
+            return True
+        slider.setValue(value)
+        return True
 
     def eventFilter(self, watched, event):
         if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
@@ -241,6 +312,8 @@ class My3DAnalyzer(QWidget):
             if self._handle_curve_clipboard_shortcut(event):
                 return True
             if self._handle_number_page_shortcut(event):
+                return True
+            if self._handle_frame_step_shortcut(event):
                 return True
             return self._handle_page_shortcut_key_press(event)
         if event.type() == QEvent.KeyRelease:
@@ -449,18 +522,22 @@ class My3DAnalyzer(QWidget):
         self._activate_left_workspace_page_from_shortcut(page_ids[target_index])
 
     def init_ui(self):
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(20)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(12, 12, 12, 8)
+        outer_layout.setSpacing(10)
+
+        self._build_toolbar()
+        outer_layout.addWidget(self.toolbar)
 
         self.left_display_stack = QStackedWidget()
-        self.left_display_stack.setStyleSheet("background-color: #1A1A2E; border-radius: 12px;")
+        self.left_display_stack.setObjectName("display_stack")
+        self.left_display_stack.setStyleSheet(f"QStackedWidget#display_stack {{ background-color: {theme.BG_1}; border-radius: 12px; }}")
 
         self.plotter = QtInteractor(self.left_display_stack)
-        self.plotter.set_background("#1A1A2E")
+        self.plotter.set_background(theme.BG_1)
         self.left_display_stack.addWidget(self.plotter)
 
-        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor="#1A1A2E")
+        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor=theme.BG_1)
         self.canvas_2d = FigureCanvas(self.fig)
         self.canvas_2d.setMinimumSize(0, 0)
         self.canvas_2d.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -489,47 +566,47 @@ class My3DAnalyzer(QWidget):
         self.render_status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.render_status_label.setAttribute(Qt.WA_StyledBackground)
         self.render_status_label.setStyleSheet(
-            "QLabel { color: white; background-color: #12121E; "
-            "border: 1px solid rgba(255, 255, 255, 45); border-radius: 8px; padding: 2px 8px; }"
+            f"QLabel {{ color: {theme.TEXT_1}; background-color: {theme.BG_0}; "
+            f"border: 1px solid {theme.BORDER_STRONG}; border-radius: 8px; padding: 2px 8px; }}"
         )
         self.left_display_stack.installEventFilter(self)
         self._position_render_status()
 
         self.left_workspace = ResultWorkspace(self.left_display_stack, self)
-        main_layout.addWidget(self.left_workspace, stretch=7)
 
         self.right_panel = QFrame()
-        self.right_panel.setMinimumWidth(430)
-        self.right_panel.setStyleSheet("background-color: #2A2A3A; border-radius: 12px;")
+        self.right_panel.setObjectName("control_panel")
+        self.right_panel.setMinimumWidth(388)
+        self.right_panel.setStyleSheet(f"QFrame#control_panel {{ background-color: {theme.BG_2}; border: 1px solid {theme.BORDER}; border-radius: 10px; }}")
         right_vbox = QVBoxLayout(self.right_panel)
-        right_vbox.setContentsMargins(15, 10, 15, 15)
-        right_vbox.setSpacing(10)
+        right_vbox.setContentsMargins(4, 12, 4, 8)
+        right_vbox.setSpacing(4)
 
         nav_group = QFrame()
-        nav_group.setFixedHeight(60)
+        nav_group.setFixedHeight(40)
         nav_layout = QHBoxLayout(nav_group)
-        nav_layout.addStretch()
+        nav_layout.setContentsMargins(12, 0, 12, 4)
+        nav_layout.setSpacing(6)
 
-        self.btn_page1 = SiCapsuleButton(self)
-        self.btn_page1.setText("图像控制")
+        self.btn_page1 = QPushButton("图像控制", self)
         self.btn_page1.setCheckable(True)
         self.btn_page1.setChecked(True)
 
-        self.btn_page2 = SiCapsuleButton(self)
-        self.btn_page2.setText("渲染控制")
+        self.btn_page2 = QPushButton("渲染控制", self)
         self.btn_page2.setCheckable(True)
 
-        self.btn_page3 = SiCapsuleButton(self)
-        self.btn_page3.setText("处理分析")
+        self.btn_page3 = QPushButton("处理分析", self)
         self.btn_page3.setCheckable(True)
 
         self.button_group = QButtonGroup(self)
         for btn in [self.btn_page1, self.btn_page2, self.btn_page3]:
             self.button_group.addButton(btn)
-            nav_layout.addWidget(btn)
+            btn.setFixedHeight(32)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(theme.nav_tab_qss())
+            nav_layout.addWidget(btn, 1)
         self.button_group.setExclusive(True)
 
-        nav_layout.addStretch()
         right_vbox.addWidget(nav_group)
 
         self.page_container = QStackedWidget()
@@ -542,7 +619,166 @@ class My3DAnalyzer(QWidget):
         self.page_container.addWidget(self.page_data)
 
         right_vbox.addWidget(self.page_container)
-        main_layout.addWidget(self.right_panel, stretch=4)
+
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(self.left_workspace)
+        self.main_splitter.addWidget(self.right_panel)
+        self.main_splitter.setHandleWidth(8)
+        self.main_splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {theme.BG_0}; }}"
+            f"QSplitter::handle:hover {{ background: {theme.BORDER_HEX}; }}"
+        )
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setSizes([1100, 420])
+        saved_sizes = self.settings.value("main_splitter_sizes")
+        if saved_sizes:
+            try:
+                sizes = [max(200, int(x)) for x in saved_sizes]
+                if len(sizes) == 2:
+                    panel_width = min(480, max(388, sizes[1]))
+                    self.main_splitter.setSizes([sum(sizes) - panel_width, panel_width])
+            except (TypeError, ValueError):
+                pass
+        self.main_splitter.splitterMoved.connect(self._save_splitter_sizes)
+        outer_layout.addWidget(self.main_splitter, 1)
+
+        self._build_statusbar()
+        outer_layout.addWidget(self.statusbar)
+
+    def _save_splitter_sizes(self, *_args):
+        sizes = getattr(self, "main_splitter", None)
+        if sizes is not None:
+            self.settings.setValue("main_splitter_sizes", self.main_splitter.sizes())
+
+    def _build_toolbar(self):
+        """顶部工具栏：全局动作（加载/截图/导出）+ 后端状态 + 版本更新。"""
+        self.toolbar = QFrame(self)
+        self.toolbar.setObjectName("top_toolbar")
+        self.toolbar.setFixedHeight(52)
+        self.toolbar.setStyleSheet(
+            f"QFrame#top_toolbar {{ background-color: {theme.BG_2}; border-radius: {theme.R_M}px; }}"
+        )
+        row = QHBoxLayout(self.toolbar)
+        row.setContentsMargins(16, 8, 16, 8)
+        row.setSpacing(8)
+
+        badge = QLabel("B", self.toolbar)
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFixedSize(28, 28)
+        badge.setStyleSheet(f"background: {theme.ACCENT}; color: {theme.ACCENT_ON}; border-radius: 8px; font-size: 17px; font-weight: 700;")
+        row.addWidget(badge)
+        title = QLabel(APP_NAME, self.toolbar)
+        title.setStyleSheet(f"color: {theme.TEXT_1}; background: transparent; font-size: 15px; font-weight: 600; padding-right: 16px;")
+        row.addWidget(title)
+
+        def _make_tb_btn(text, kind, width=92):
+            btn = ActionButton(self.toolbar)
+            btn.setFixedHeight(32)
+            btn.setFixedWidth(width)
+            btn.attachment().setText(text)
+            theme.style_push_button(btn, kind)
+            return btn
+
+        self.btn_tb_load = _make_tb_btn("加载数据", "primary")
+        self.btn_tb_shot = _make_tb_btn("截图", "secondary", 72)
+        self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
+        self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
+        self.btn_tb_shot.setToolTip("截图 (Ctrl+S)")
+        row.addWidget(self.btn_tb_load)
+        row.addWidget(self.btn_tb_shot)
+        row.addWidget(self.btn_tb_export)
+
+        row.addStretch(1)
+
+        self.backend_chip = QLabel("", self.toolbar)
+        self.backend_chip.setFixedHeight(26)
+        self.backend_chip.setStyleSheet(
+            f"QLabel {{ color: {theme.TEXT_2}; background-color: {theme.BG_3}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 6px; padding: 2px 12px; font-size: 11px; }}"
+        )
+        row.addWidget(self.backend_chip)
+        row.addSpacing(8)
+
+        self.btn_tb_version = ActionButton(self.toolbar)
+        self.btn_tb_version.setFixedHeight(32)
+        self.btn_tb_version.setFixedWidth(96)
+        self.btn_tb_version.attachment().setText(f"v{APP_VERSION}")
+        theme.style_push_button(self.btn_tb_version, "secondary")
+        self.btn_tb_version.setToolTip("点击检查更新")
+        row.addWidget(self.btn_tb_version)
+
+        self.btn_tb_load.clicked.connect(self.on_load)
+        self.btn_tb_shot.clicked.connect(self.on_screenshot)
+        self.btn_tb_export.clicked.connect(self.export_current_result)
+
+    def _build_statusbar(self):
+        """底部状态栏：运行状态 / 当前页 / 光标坐标 / 数据与后端信息。"""
+        self.statusbar = QFrame(self)
+        self.statusbar.setObjectName("status_bar")
+        self.statusbar.setFixedHeight(30)
+        self.statusbar.setStyleSheet(
+            f"QFrame#status_bar {{ background-color: {theme.BG_2}; border-radius: {theme.R_S}px; }}"
+        )
+        row = QHBoxLayout(self.statusbar)
+        row.setContentsMargins(14, 0, 14, 0)
+        row.setSpacing(20)
+
+        base_qss = f"color: {theme.TEXT_2}; font-size: 11px; background: transparent;"
+
+        self.status_state = QLabel("● 就绪", self.statusbar)
+        self.status_state.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px; background: transparent;")
+        self.status_page = QLabel("未加载数据", self.statusbar)
+        self.status_page.setStyleSheet(base_qss)
+        self.status_cursor = QLabel("", self.statusbar)
+        self.status_cursor.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
+        self.status_info = QLabel("", self.statusbar)
+        self.status_info.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
+
+        row.addWidget(self.status_state)
+        row.addWidget(self.status_page)
+        row.addWidget(self.status_cursor)
+        row.addStretch(1)
+        row.addWidget(self.status_info)
+
+        self._last_cursor_status_ts = 0.0
+        self.canvas_2d.mpl_connect("motion_notify_event", self._on_status_cursor_motion)
+
+    def _on_status_cursor_motion(self, event):
+        """2D 画布光标坐标上报（100ms 节流，仅 2D 页可见时）。"""
+        import time as _time
+
+        now = _time.monotonic()
+        if now - self._last_cursor_status_ts < 0.1:
+            return
+        self._last_cursor_status_ts = now
+        if self.left_display_stack.currentWidget() is not self.canvas_2d:
+            return
+        if event.xdata is None or event.ydata is None:
+            self.status_cursor.setText("")
+            return
+        self.status_cursor.setText(f"光标: x={event.xdata:.3f}, y={event.ydata:.3f}")
+
+    def _update_statusbar(self):
+        """同步状态栏：运行状态、当前页、数据形状与计算后端。"""
+        state_label = getattr(self, "status_state", None)
+        if state_label is None:
+            return
+
+        spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
+        if spec is not None:
+            self.status_page.setText(str(spec.title))
+        elif self.core.raw_data is None:
+            self.status_page.setText("未加载数据")
+
+        parts = []
+        if self.core.raw_data is not None:
+            parts.append("×".join(str(d) for d in self.core.raw_data.shape))
+        backend = getattr(self, "_last_compute_backend", "") or ""
+        if backend:
+            parts.append(f"{backend}计算")
+        self.status_info.setText(" · ".join(parts))
 
     def _position_render_status(self):
         label = getattr(self, "render_status_label", None)
@@ -662,6 +898,24 @@ class My3DAnalyzer(QWidget):
         label.show()
         self._position_render_status()
         label.repaint()
+
+        state_label = self.__dict__.get("status_state")
+        if state_label is not None:
+            state_map = {
+                "preview": ("● 预览", theme.WARNING),
+                "computing": ("● 计算中", theme.WARNING),
+                "complete": ("● 就绪", theme.SUCCESS),
+                "failed": ("● 计算失败", theme.DANGER),
+            }
+            text, color = state_map.get(str(phase), (f"● {phase_text}", theme.TEXT_3))
+            state_label.setText(text)
+            state_label.setStyleSheet(f"color: {color}; font-size: 11px; background: transparent;")
+
+        backend_chip = self.__dict__.get("backend_chip")
+        if backend_chip is not None:
+            backend_chip.setText(f"● {compute_name}计算 · {self._render_device_label()}")
+
+        self._update_statusbar()
 
     def _on_refresh_status_changed(self, phase, backend):
         if backend:
@@ -1132,33 +1386,6 @@ class My3DAnalyzer(QWidget):
             str(self.page_render.get_selected_cmap()),
         )
 
-    def _install_data_process_save_controls(self):
-        if hasattr(self.page_data, "btn_left_view_save") and hasattr(self.page_data, "btn_view_data_save"):
-            return
-
-        legacy_save_btn = getattr(self.page_data, "btn_other_save", None)
-        if legacy_save_btn is not None:
-            legacy_layout = legacy_save_btn.parentWidget().layout() if legacy_save_btn.parentWidget() is not None else None
-            if legacy_layout is not None:
-                legacy_layout.removeWidget(legacy_save_btn)
-            legacy_save_btn.hide()
-            legacy_save_btn.setParent(None)
-
-        self.page_data.btn_left_view_save = self.page_data._create_red_btn("左侧视图保存")
-        self.page_data.btn_view_data_save = self.page_data._create_red_btn("视图数据保存")
-        self.page_data.btn_left_view_save.setFixedWidth(130)
-        self.page_data.btn_view_data_save.setFixedWidth(130)
-
-        save_row = QHBoxLayout()
-        save_row.addStretch()
-        save_row.addWidget(self.page_data.btn_left_view_save)
-        save_row.addSpacing(12)
-        save_row.addWidget(self.page_data.btn_view_data_save)
-        save_row.addStretch()
-
-        insert_index = max(self.page_data.vbox.count() - 1, 0)
-        self.page_data.vbox.insertLayout(insert_index, save_row)
-
     def bind_all_events(self):
         self.btn_page1.clicked.connect(lambda: self._select_control_page(0))
         self.btn_page2.clicked.connect(lambda: self._select_control_page(1))
@@ -1233,8 +1460,6 @@ class My3DAnalyzer(QWidget):
         self.page_data.s_ax_mid.sliderReleased.connect(self.flush_axis_refresh)
         self.page_data.btn_ax_apply.clicked.connect(self.on_apply_axis_integral)
         self.page_data.btn_other_apply.clicked.connect(self.on_apply_other_integral)
-        self.page_data.btn_left_view_save.clicked.connect(self.on_screenshot)
-        self.page_data.btn_view_data_save.clicked.connect(self.export_current_result)
         self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
 
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
@@ -2403,7 +2628,7 @@ class My3DAnalyzer(QWidget):
             callback=lambda poly: self._sync_slice_edits_from_render_bounds(poly.bounds),
             bounds=box_bounds,
             factor=1.0,
-            color="#FF69B4",
+            color=theme.ACCENT,
             rotation_enabled=False,
         )
         box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
@@ -2927,6 +3152,12 @@ class My3DAnalyzer(QWidget):
         return msg
 
     def _show_message(self, title, text, icon=QMessageBox.Information):
+        """轻提示走非模态 Toast；Critical 仍保留模态对话框。"""
+        manager = self.__dict__.get("toast_manager")
+        if icon != QMessageBox.Critical and manager is not None:
+            level = "warning" if icon == QMessageBox.Warning else "info"
+            manager.show(text, level=level, title=title)
+            return
         msg = self._create_message_box(title, text, icon, buttons=QMessageBox.Ok, default_button=QMessageBox.Ok, escape_button=QMessageBox.Ok)
         msg.exec_()
 
@@ -3187,6 +3418,9 @@ class My3DAnalyzer(QWidget):
         is_enabled = has_time_axis and not self._is_time_locked_page(active_spec)
         self.page_image.slider_time.setEnabled(is_enabled)
         self.page_image.input_time.setEnabled(is_enabled)
+        if hasattr(self.page_image, "time_hint"):
+            hint = "当前帧 · ← → 逐帧切换" if is_enabled else ("当前结果已固定时间范围" if has_time_axis else "静态数据 · 无时间维度")
+            self.page_image.time_hint.setText(hint)
 
     def _configure_time_controls(self):
         has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
@@ -3206,8 +3440,8 @@ class My3DAnalyzer(QWidget):
             and active_spec.page_kind not in {"control_panel", self.COMPARISON_PAGE_KIND}
         )
         self.page_image.btn_export.setEnabled(can_export)
-        self.page_data.btn_left_view_save.setEnabled(can_capture)
-        self.page_data.btn_view_data_save.setEnabled(can_export)
+        self.btn_tb_export.setEnabled(can_export)
+        self.btn_tb_shot.setEnabled(can_capture)
 
     @staticmethod
     def _format_filename_number(value):
@@ -4384,38 +4618,44 @@ class My3DAnalyzer(QWidget):
         dialog.setStyleSheet(
             """
             QInputDialog {
-                color: #FFFFFF;
-                background-color: #20202C;
+                color: %(T1)s;
+                background-color: %(BG3)s;
             }
             QInputDialog QLabel {
-                color: #FFFFFF;
+                color: %(T1)s;
                 background-color: transparent;
             }
             QInputDialog QComboBox {
-                color: #FFFFFF;
-                background-color: #2A2A3A;
-                border: 1px solid #5A5A70;
+                color: %(T1)s;
+                background-color: %(BG2)s;
+                border: 1px solid %(BORD)s;
                 border-radius: 4px;
                 padding: 4px 8px;
             }
             QInputDialog QComboBox QAbstractItemView {
-                color: #FFFFFF;
-                background-color: #2A2A3A;
-                selection-color: #FFFFFF;
-                selection-background-color: #50506A;
+                color: %(T1)s;
+                background-color: %(BG2)s;
+                selection-color: %(T1)s;
+                selection-background-color: %(BG4)s;
             }
             QInputDialog QPushButton {
-                color: #FFFFFF;
-                background-color: #3A3A50;
-                border: 1px solid #62627A;
+                color: %(T1)s;
+                background-color: %(BG4)s;
+                border: 1px solid %(BORD)s;
                 border-radius: 4px;
                 min-width: 64px;
                 padding: 4px 10px;
             }
             QInputDialog QPushButton:hover {
-                background-color: #50506A;
+                background-color: %(BG3)s;
             }
-            """
+            """ % {
+                "T1": theme.TEXT_1,
+                "BG2": theme.BG_2,
+                "BG3": theme.BG_3,
+                "BG4": theme.BG_4,
+                "BORD": theme.BORDER_HEX,
+            }
         )
         if dialog.exec_() != QInputDialog.Accepted:
             return None
@@ -4882,7 +5122,7 @@ class My3DAnalyzer(QWidget):
             self.ax_2d.autoscale_view()
         else:
             self.ax_2d.clear()
-            line, = self.ax_2d.plot(x_data, y_data, color="#FF69B4", linewidth=2)
+            line, = self.ax_2d.plot(x_data, y_data, color=theme.ACCENT, linewidth=2)
         self.ax_2d._arpes_line = line
         display_title = self._style_1d_axes(context, ylabel=context.get("ylabel", "Intensity (a.u.)"))
         self.ax_2d.margins(x=0.02, y=0.08)
@@ -4896,7 +5136,7 @@ class My3DAnalyzer(QWidget):
         self.ax_2d.clear()
         self.ax_2d._arpes_line = None
 
-        colors = ["#FF69B4", "#4CC9F0", "#F9C74F", "#90BE6D", "#F3722C", "#B388FF", "#43AA8B"]
+        colors = theme.CURVE_PALETTE
         linestyles = ["-", "--", "-.", ":"]
         for idx, curve in enumerate(context.get("curves", [])):
             x_data, y_data = self._ascending_curve_data(
@@ -4919,7 +5159,7 @@ class My3DAnalyzer(QWidget):
             context,
             ylabel=context.get("ylabel", "Intensity (a.u.)"),
         )
-        legend = self.ax_2d.legend(facecolor="#2A2A3A", edgecolor="#FFFFFF", fontsize=8)
+        legend = self.ax_2d.legend(facecolor=theme.BG_3, edgecolor=theme.BORDER_HEX, fontsize=8)
         if legend is not None:
             for text in legend.get_texts():
                 text.set_color("white")
@@ -5300,6 +5540,7 @@ class My3DAnalyzer(QWidget):
         self._refresh_core_display_state()
         self._configure_loaded_time_controls(info)
         self._reset_workspace_after_load()
+        self._update_statusbar()
 
     def update_ax_slider_range(self):
         if self.core.raw_data is None:
@@ -5470,6 +5711,12 @@ class My3DAnalyzer(QWidget):
         self._capture_3d_camera_position()
 
 
+    def _toast_success(self, title, text):
+        """成功提示：窗口装配完成前（或测试中无管理器时）静默跳过。"""
+        manager = self.__dict__.get("toast_manager")
+        if manager is not None:
+            manager.show(text, level="success", title=title)
+
     def on_screenshot(self):
         path, _ = QFileDialog.getSaveFileName(self, "保存截图", "capture.png", "PNG (*.png)")
         if not path:
@@ -5483,6 +5730,7 @@ class My3DAnalyzer(QWidget):
             self.left_display_stack.currentWidget().grab().save(save_path)
         else:
             self.plotter.screenshot(save_path)
+        self._toast_success("截图已保存", os.path.basename(save_path))
 
     def _build_time_integral_spec(self):
         low = self.page_data.s_t_low.value()
@@ -6427,7 +6675,7 @@ class My3DAnalyzer(QWidget):
             max(x1 - x0, 1e-12),
             max(y1 - y0, 1e-12),
             fill=False,
-            edgecolor="#FF69B4",
+            edgecolor=theme.ACCENT,
             linewidth=1.4,
             linestyle="--",
             alpha=0.9,
@@ -6457,8 +6705,8 @@ class My3DAnalyzer(QWidget):
             spancoords="data",
             interactive=False,
             props={
-                "facecolor": "#FF69B4",
-                "edgecolor": "#FF69B4",
+                "facecolor": theme.ACCENT,
+                "edgecolor": theme.ACCENT,
                 "alpha": 0.12,
                 "fill": True,
             },
@@ -6652,6 +6900,10 @@ class My3DAnalyzer(QWidget):
         self._discard_unreferenced_roi_scopes()
 
     def closeEvent(self, event):
+        self._save_splitter_sizes()
+        toast_manager = self.__dict__.get("toast_manager")
+        if toast_manager is not None:
+            toast_manager.clear()
         update_controller = getattr(self, "update_controller", None)
         if update_controller is not None:
             update_controller.shutdown(wait_ms=2000)
@@ -7167,3 +7419,4 @@ class My3DAnalyzer(QWidget):
         path = self._choose_export_path(title, default_name)
         if path:
             self._save_dict_to_path(path, export_data)
+            self._toast_success("数据已导出", os.path.basename(path))

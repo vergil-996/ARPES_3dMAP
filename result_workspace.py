@@ -18,6 +18,8 @@ from PyQt5.QtWidgets import (
 )
 
 from siui.core import SiColor, SiGlobal
+
+import theme
 from siui.templates.application.components.page_view.page_view import PageButton
 
 RESULT_PAGE_MIME = "application/x-bandscope-page-id"
@@ -74,8 +76,8 @@ class ResultPageButton(PageButton):
         self.refresh_hint()
         self.attachment().setSvgSize(20, 20)
         self.attachment().load(SiGlobal.siui.iconpack.get(self.ICON_MAP.get(spec.page_kind, "ic_fluent_document_data_filled")))
-        self.colorGroup().assign(SiColor.BUTTON_OFF, "#00FFFFFF")
-        self.colorGroup().assign(SiColor.BUTTON_ON, "#12FFFFFF")
+        self.colorGroup().assign(SiColor.BUTTON_OFF, theme.TINT_CLEAR)
+        self.colorGroup().assign(SiColor.BUTTON_ON, theme.TINT_HOVER)
         self.reloadStyleSheet()
         self.activated.connect(self._emit_page_activated)
 
@@ -116,12 +118,12 @@ class ResultPageButton(PageButton):
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QColor("#2E2E48"))
-        painter.setPen(QPen(QColor("#5B8DEF"), 1))
+        painter.setBrush(QColor(theme.BG_3))
+        painter.setPen(QPen(QColor(theme.ACCENT), 1))
         painter.drawRoundedRect(0, 0, width - 1, height - 1, 10, 10)
         painter.drawPixmap(QRect(10, 10, 24, 24), base, base.rect())
         painter.setFont(font)
-        painter.setPen(QColor("#FFFFFF"))
+        painter.setPen(QColor(theme.TEXT_1))
         painter.drawText(
             42,
             0,
@@ -312,26 +314,26 @@ class ResultTreePopup(QFrame):
         self.setStyleSheet(
             """
             QFrame#result_tree_popup {
-                background-color: #232336;
-                border: 1px solid #3A3A58;
+                background-color: %(BG3)s;
+                border: 1px solid %(BORD)s;
                 border-radius: 12px;
             }
             QLabel#popup_accent {
-                background-color: #5B8DEF;
+                background-color: %(ACCENT)s;
                 border-radius: 2px;
             }
             QLabel#popup_title {
-                color: #F0F0F8;
+                color: %(T1)s;
                 font-weight: 700;
                 font-size: 13px;
             }
             QLabel#popup_hint {
-                color: #6E6E8E;
+                color: %(T3)s;
                 font-size: 10px;
             }
             QTreeWidget#popup_tree {
                 background-color: transparent;
-                color: #D8D8E8;
+                color: %(T2)s;
                 border: none;
                 outline: none;
                 font-size: 12px;
@@ -343,11 +345,11 @@ class ResultTreePopup(QFrame):
                 border-radius: 6px;
             }
             QTreeWidget#popup_tree::item:hover {
-                background-color: #2E2E48;
+                background-color: %(BG4)s;
             }
             QTreeWidget#popup_tree::item:selected {
-                background-color: #3B3B62;
-                color: #FFFFFF;
+                background-color: %(ACC_SOFT)s;
+                color: %(T1)s;
             }
             QTreeWidget#popup_tree QScrollBar:vertical {
                 width: 8px;
@@ -355,12 +357,12 @@ class ResultTreePopup(QFrame):
                 margin: 0;
             }
             QTreeWidget#popup_tree QScrollBar::handle:vertical {
-                background-color: #3A3A55;
+                background-color: %(BG4)s;
                 border-radius: 4px;
                 min-height: 24px;
             }
             QTreeWidget#popup_tree QScrollBar::handle:vertical:hover {
-                background-color: #4A4A70;
+                background-color: %(BORD)s;
             }
             QTreeWidget#popup_tree QScrollBar::add-line:vertical,
             QTreeWidget#popup_tree QScrollBar::sub-line:vertical {
@@ -371,34 +373,34 @@ class ResultTreePopup(QFrame):
                 background: transparent;
             }
             QToolButton#popup_pin_button {
-                background-color: #2B2B45;
-                color: #D0D0E0;
-                border: 1px solid #3A3A55;
+                background-color: %(BG4)s;
+                color: %(T2)s;
+                border: 1px solid %(BORD)s;
                 border-radius: 7px;
                 font-size: 11px;
                 padding: 0 8px;
             }
             QToolButton#popup_pin_button:hover {
-                background-color: #353558;
+                border-color: %(ACC_DIM)s;
             }
             QToolButton#popup_pin_button:checked {
-                background-color: #4A4A75;
-                color: #FFFFFF;
-                border-color: #5B5B8A;
+                background-color: %(ACC_SOFT)s;
+                color: %(T1)s;
+                border-color: %(ACC_DIM)s;
             }
             QToolButton#popup_close_button {
                 background-color: transparent;
-                color: #A0A0C0;
+                color: %(T2)s;
                 border: none;
                 border-radius: 7px;
                 font-size: 12px;
                 font-weight: 700;
             }
             QToolButton#popup_close_button:hover {
-                background-color: #3A3A55;
-                color: #FFFFFF;
+                background-color: %(BG4)s;
+                color: %(T1)s;
             }
-            """
+            """ % theme.QSS_TOKENS
         )
 
     def is_pinned(self):
@@ -461,13 +463,13 @@ class ResultTreePopup(QFrame):
                 font = QFont()
                 font.setBold(True)
                 item.setFont(0, font)
-                item.setForeground(0, QBrush(QColor("#FFFFFF")))
+                item.setForeground(0, QBrush(QColor(theme.TEXT_1)))
                 matched.append(item)
             else:
                 font = QFont()
                 font.setBold(False)
                 item.setFont(0, font)
-                item.setForeground(0, QBrush(QColor("#D0D0E0")))
+                item.setForeground(0, QBrush(QColor(theme.TEXT_2)))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
@@ -533,6 +535,8 @@ class ResultWorkspace(QWidget):
         self.nav_scroll.setFrameShape(QFrame.NoFrame)
 
         self.nav_buttons = RailContainer(self.nav_scroll)
+        self.nav_buttons.setObjectName("result_rail")
+        self.nav_buttons.setAttribute(Qt.WA_StyledBackground, True)
         self.nav_buttons.drop_to_end.connect(self._on_rail_drop_to_end)
         self.nav_buttons.drop_hovered_end.connect(self._on_rail_drop_hovered_end)
         self.nav_buttons.drop_left.connect(self._hide_drop_indicator)
@@ -560,12 +564,25 @@ class ResultWorkspace(QWidget):
         self.header.setObjectName("result_header")
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(0)
+        header_layout.setSpacing(10)
+        self.header.setFixedHeight(30)
 
-        header_layout.addStretch(1)
+        self.page_title = QLabel("分析工作区", self.header)
+        self.page_title.setMinimumWidth(0)
+        self.page_title.setStyleSheet(theme.card_title_qss())
+        header_layout.addWidget(self.page_title, 1)
+
+        self.scope_label = QLabel(self.header)
+        self.scope_label.setStyleSheet(
+            f"color: {theme.TEXT_2}; background: {theme.BG_3};"
+            f"border-radius: 5px; padding: 3px 8px; font-size: 11px;"
+        )
+        header_layout.addWidget(self.scope_label)
+
 
         self.close_button = QToolButton(self.header)
-        self.close_button.setText("X")
+        self.close_button.setText("×")
+        self.close_button.setToolTip("关闭当前结果页 (Ctrl+W)")
         self.close_button.setCursor(Qt.PointingHandCursor)
         self.close_button.setFixedSize(28, 28)
         self.close_button.clicked.connect(self.close_current_page)
@@ -580,17 +597,17 @@ class ResultWorkspace(QWidget):
         self.setStyleSheet(
             """
             QWidget#result_workspace {
-                background-color: #1A1A2E;
+                background-color: %(BG1)s;
                 border-radius: 12px;
             }
             QFrame#result_sidebar {
-                background-color: #171728;
+                background-color: %(BG2)s;
                 border-top-left-radius: 12px;
                 border-bottom-left-radius: 12px;
-                border-right: 1px solid #2A2A3A;
+                border-right: 1px solid %(BORD)s;
             }
             QFrame#result_content_frame {
-                background-color: #1A1A2E;
+                background-color: %(BG1)s;
                 border-top-right-radius: 12px;
                 border-bottom-right-radius: 12px;
             }
@@ -599,37 +616,41 @@ class ResultWorkspace(QWidget):
                 border: none;
             }
             QToolButton {
-                background-color: #E81123;
-                color: #FFFFFF;
+                background-color: %(BG3)s;
+                color: %(T2)s;
                 border: none;
                 border-radius: 6px;
                 font-weight: 700;
             }
             QToolButton:hover {
-                background-color: #F33A4A;
+                background-color: %(DANGER_SOFT)s;
+                color: %(DANGER)s;
             }
             QToolButton#popup_pin_button {
-                background-color: #2B2B45;
-                color: #D0D0E0;
-                border: 1px solid #3A3A55;
+                background-color: %(BG4)s;
+                color: %(T2)s;
+                border: 1px solid %(BORD)s;
                 border-radius: 6px;
                 font-size: 11px;
             }
             QToolButton#popup_pin_button:hover {
-                background-color: #3A3A55;
+                border-color: %(ACC_DIM)s;
             }
             QToolButton#popup_pin_button:checked {
-                background-color: #4A4A70;
-                color: #FFFFFF;
+                background-color: %(ACC_SOFT)s;
+                color: %(T1)s;
             }
             QWidget#result_drop_indicator {
-                background-color: #5B8DEF;
+                background-color: %(ACCENT)s;
                 border-radius: 1px;
             }
             QScrollArea {
                 background: transparent;
             }
-            """
+            QWidget#result_rail {
+                background-color: %(BG2)s;
+            }
+            """ % theme.QSS_TOKENS
         )
 
         self.hover_timer = QTimer(self)
@@ -1099,8 +1120,16 @@ class ResultWorkspace(QWidget):
     def _refresh_header(self):
         spec = self.current_spec()
         if spec is None:
+            self.page_title.setText("分析工作区")
+            self.scope_label.hide()
             self.close_button.hide()
             return
+        title = str(spec.title)
+        self.page_title.setText(title)
+        self.page_title.setToolTip(title)
+        scope = str(spec.params.get("data_scope_label") or "")
+        self.scope_label.setText(scope)
+        self.scope_label.setVisible(bool(scope))
         self.close_button.setVisible(spec.closeable)
 
     def activate_page(self, page_id: str):

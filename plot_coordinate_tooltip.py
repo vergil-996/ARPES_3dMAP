@@ -1,5 +1,7 @@
 import math
 
+import theme
+
 
 class PlotCoordinateTooltip:
     """Show data coordinates in a floating annotation above a Matplotlib plot."""
@@ -78,20 +80,20 @@ class PlotCoordinateTooltip:
             xy=(0.0, 0.0),
             xytext=(14, 14),
             textcoords="offset points",
-            color="#FFFFFF",
+            color=theme.TEXT_1,
             fontsize=10,
             ha="left",
             va="bottom",
             bbox={
                 "boxstyle": "round,pad=0.45",
-                "facecolor": "#2A2A3A",
-                "edgecolor": "#FFFFFF",
+                "facecolor": theme.BG_3,
+                "edgecolor": theme.BORDER_HEX,
                 "linewidth": 0.8,
                 "alpha": 0.96,
             },
             arrowprops={
                 "arrowstyle": "->",
-                "color": "#FFFFFF",
+                "color": theme.TEXT_1,
                 "linewidth": 0.8,
             },
             annotation_clip=False,

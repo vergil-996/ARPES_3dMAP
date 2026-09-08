@@ -7,6 +7,8 @@ from PIL import Image
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
+import theme
+
 
 class VisualEngine:
     """渲染与绘图引擎，负责所有 3D 和 2D 的视觉呈现"""
@@ -231,13 +233,13 @@ class VisualEngine:
         ticks = VisualEngine._level_ticks(level_info)
         colorbar.set_ticks(ticks)
         colorbar.set_ticklabels([VisualEngine._format_level_tick(tick) for tick in ticks])
-        colorbar.set_label(VisualEngine.COLORBAR_TITLE, color="white")
-        colorbar.ax.tick_params(colors="white")
-        colorbar.ax.yaxis.label.set_color("white")
+        colorbar.set_label(VisualEngine.COLORBAR_TITLE, color=theme.TEXT_1)
+        colorbar.ax.tick_params(colors=theme.TEXT_2)
+        colorbar.ax.yaxis.label.set_color(theme.TEXT_1)
         for tick_label in colorbar.ax.get_yticklabels():
-            tick_label.set_color("white")
+            tick_label.set_color(theme.TEXT_2)
         try:
-            colorbar.outline.set_edgecolor("#CCCCCC")
+            colorbar.outline.set_edgecolor(theme.BORDER_HEX)
         except Exception:
             pass
 
@@ -468,7 +470,7 @@ class VisualEngine:
             if (bg[0] > 0.9 and bg[1] > 0.9 and bg[2] > 0.9):
                 ax_color = 'black'
             else:
-                ax_color = '#A0A0B0'  # 浅淡紫灰，匹配深色主题
+                ax_color = theme.TEXT_2  # 深底上的坐标轴文字
 
             actor = plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
                 axes_ranges=[float(np.min(xp)), float(np.max(xp)), float(np.min(yp)), float(np.max(yp)),

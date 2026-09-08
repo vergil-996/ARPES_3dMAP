@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BandScope · UI 重构设计稿</title>
+<style>
+  /* ===================== 设计令牌（即拟落地的 theme.py 内容） ===================== */
+  :root {
+    /* 背景层级：由深到浅 5 级，替代现在十几个近似深蓝灰 */
+    --bg-0: #0D0D13;   /* 窗口底色 */
+    --bg-1: #12121A;   /* 画布 / 绘图区 */
+    --bg-2: #181822;   /* 面板 */
+    --bg-3: #20202C;   /* 卡片 / 抬升面 */
+    --bg-4: #2A2A38;   /* 悬停 / 按下 */
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.14);
+
+    /* 文本三级 */
+    --text-1: #F2F2F7;
+    --text-2: #A3A3B5;
+    --text-3: #66667A;
+
+    /* 唯一主强调色：保留品牌粉，但柔化 */
+    --accent: #FF7EB6;
+    --accent-soft: rgba(255, 126, 182, 0.16);
+    --accent-dim: rgba(255, 126, 182, 0.45);
+
+    /* 语义色：各司其职 */
+    --info: #5B8DEF;
+    --success: #34D399;
+    --warning: #FBBF24;
+    --danger: #F0506E;
+
+    /* 间距尺度（4pt 基准）与圆角 */
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+    --r-s: 6px; --r-m: 10px; --r-l: 14px;
+
+    --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #08080C;
+    color: var(--text-1);
+    font-family: var(--font);
+    font-size: 14px;
+    padding: 40px 24px 80px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 48px;
+  }
+  .doc-title { text-align: center; }
+  .doc-title h1 { font-size: 26px; font-weight: 700; letter-spacing: 1px; }
+  .doc-title p { color: var(--text-2); margin-top: 8px; font-size: 14px; }
+  .section-label {
+    align-self: flex-start; max-width: 1560px; width: 100%;
+    font-size: 13px; color: var(--text-3); letter-spacing: 2px; text-transform: uppercase;
+    border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-bottom: -24px;
+  }
+
+  /* ===================== 主窗口高保真稿 ===================== */
+  .window {
+    width: min(1560px, 100%);
+    background: var(--bg-0);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-l);
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* 顶部工具栏（新增）：全局动作上移，不再埋在控制页里 */
+  .toolbar {
+    height: 52px;
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 0 var(--sp-4);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+  }
+  .app-badge {
+    display: flex; align-items: center; gap: var(--sp-2);
+    font-weight: 700; font-size: 15px; margin-right: var(--sp-4);
+  }
+  .app-badge .logo {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), #B85CFF);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: #fff;
+  }
+  .app-badge .ver { font-size: 11px; color: var(--text-3); font-weight: 400; margin-left: 2px; }
+  .tb-btn {
+    height: 34px; padding: 0 14px; border-radius: var(--r-s);
+    background: var(--bg-3); border: 1px solid var(--border);
+    color: var(--text-1); font-size: 13px;
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    transition: background .15s;
+  }
+  .tb-btn:hover { background: var(--bg-4); }
+  .tb-btn.primary {
+    background: var(--accent); border-color: transparent; color: #1A0B14; font-weight: 600;
+  }
+  .tb-btn.primary:hover { filter: brightness(1.08); }
+  .tb-spacer { flex: 1; }
+  .backend-chip {
+    height: 26px; padding: 0 10px; border-radius: 13px; font-size: 11px;
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid var(--accent-dim);
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+
+  .body { display: flex; min-height: 800px; }
+
+  /* 左侧：页面导轨 */
+  .rail {
+    width: 64px; background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; align-items: center;
+    padding: var(--sp-3) 0; gap: var(--sp-2);
+  }
+  .rail-btn {
+    width: 44px; height: 44px; border-radius: var(--r-m);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text-3); font-size: 18px; cursor: pointer; gap: 2px;
+    transition: all .15s;
+  }
+  .rail-btn span { font-size: 9px; }
+  .rail-btn:hover { background: var(--bg-3); color: var(--text-1); }
+  .rail-btn.active {
+    background: var(--accent-soft); color: var(--accent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .rail-btn .badge {
+    font-size: 8px; background: var(--danger); color: #fff;
+    border-radius: 6px; padding: 0 4px; line-height: 12px;
+  }
+
+  /* 中部：画布 */
+  .canvas-wrap {
+    flex: 1; background: var(--bg-1); position: relative;
+    display: flex; flex-direction: column;
+  }
+  .canvas-head {
+    height: 40px; display: flex; align-items: center; gap: var(--sp-3);
+    padding: 0 var(--sp-4); color: var(--text-2); font-size: 13px;
+  }
+  .canvas-head .page-title { color: var(--text-1); font-weight: 600; font-size: 14px; }
+  .canvas-head .scope-tag {
+    font-size: 11px; color: var(--info); background: rgba(91, 141, 239, 0.12);
+    border: 1px solid rgba(91, 141, 239, 0.35); border-radius: 10px; padding: 1px 8px;
+  }
+  .viewport {
+    flex: 1; margin: 0 var(--sp-4); position: relative; border-radius: var(--r-m);
+    background:
+      radial-gradient(ellipse 55% 45% at 42% 45%, rgba(255, 126, 182, 0.20), transparent 60%),
+      radial-gradient(ellipse 40% 35% at 60% 60%, rgba(184, 92, 255, 0.16), transparent 60%),
+      radial-gradient(ellipse 30% 25% at 35% 62%, rgba(255, 200, 80, 0.13), transparent 65%),
+      repeating-linear-gradient(0deg, transparent 0 39px, rgba(255,255,255,0.035) 39px 40px),
+      repeating-linear-gradient(90deg, transparent 0 39px, rgba(255,255,255,0.035) 39px 40px),
+      #0A0A10;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .viewport .axis-note {
+    position: absolute; left: 14px; bottom: 12px; color: var(--text-3); font-size: 11px;
+    font-family: "Consolas", monospace;
+  }
+  .viewport .colorbar {
+    position: absolute; right: 16px; top: 16px; bottom: 16px; width: 10px; border-radius: 5px;
+    background: linear-gradient(to top, #000005, #3B0F4F, #B83289, #F7715B, #FCD676, #FCFDBF);
+    border: 1px solid var(--border-strong);
+  }
+  .render-chip {
+    position: absolute; top: 12px; right: 40px;
+    font-size: 11px; color: var(--text-2);
+    background: rgba(13, 13, 19, 0.85); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 10px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .render-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+
+  /* 底部状态栏（新增） */
+  .statusbar {
+    height: 30px; display: flex; align-items: center; gap: var(--sp-5);
+    padding: 0 var(--sp-4); font-size: 11px; color: var(--text-3);
+    background: var(--bg-2); border-top: 1px solid var(--border);
+    font-family: "Consolas", monospace;
+  }
+  .statusbar .ok { color: var(--success); }
+
+  /* 右侧：控制面板 */
+  .panel {
+    width: 400px; background: var(--bg-2);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+  }
+  .panel-tabs {
+    display: flex; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4);
+    border-bottom: 1px solid var(--border);
+  }
+  .ptab {
+    flex: 1; height: 34px; border-radius: 17px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: var(--text-2); cursor: pointer;
+    background: var(--bg-3); border: 1px solid transparent;
+    transition: all .15s;
+  }
+  .ptab:hover { color: var(--text-1); }
+  .ptab.active {
+    background: var(--accent-soft); color: var(--accent);
+    border-color: var(--accent-dim); font-weight: 600;
+  }
+  .panel-scroll { flex: 1; overflow-y: auto; padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-4); }
+
+  /* 卡片式分组（替代 SiTitledWidgetGroup 的飘浮标题） */
+  .card {
+    background: var(--bg-3); border: 1px solid var(--border);
+    border-radius: var(--r-m); overflow: hidden;
+  }
+  .card-head {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: 12px var(--sp-4) 0;
+  }
+  .card-head .tick { width: 3px; height: 14px; border-radius: 2px; background: var(--accent); }
+  .card-head h3 { font-size: 13px; font-weight: 600; }
+  .card-head .hint { margin-left: auto; font-size: 11px; color: var(--text-3); }
+  .card-body { padding: var(--sp-3) var(--sp-4) var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-4); }
+
+  /* 滑条组：标签 + 数值同行 */
+  .slider-row { display: flex; flex-direction: column; gap: 6px; }
+  .slider-row .sr-head { display: flex; align-items: baseline; }
+  .slider-row .sr-head label { font-size: 12px; color: var(--text-2); }
+  .slider-row .sr-head .val {
+    margin-left: auto; font-size: 12px; color: var(--accent);
+    font-family: "Consolas", monospace; background: var(--accent-soft);
+    border-radius: 4px; padding: 1px 8px;
+  }
+  .slider-track { height: 6px; border-radius: 3px; background: var(--bg-4); position: relative; cursor: pointer; }
+  .slider-track .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: linear-gradient(90deg, var(--accent-dim), var(--accent)); }
+  .slider-track .thumb {
+    position: absolute; top: 50%; transform: translate(-50%, -50%);
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 3px solid var(--accent);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+  }
+
+  /* 输入框 */
+  .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2) var(--sp-3); }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 11px; color: var(--text-3); }
+  .field input {
+    height: 32px; border-radius: var(--r-s); padding: 0 10px;
+    background: var(--bg-1); border: 1px solid var(--border);
+    color: var(--text-1); font-size: 13px; font-family: "Consolas", monospace;
+    outline: none; transition: border .15s;
+  }
+  .field input:focus { border-color: var(--accent); }
+
+  /* 开关行 */
+  .switch-row { display: flex; align-items: center; justify-content: space-between; }
+  .switch-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-2); }
+  .switch {
+    width: 36px; height: 20px; border-radius: 10px; background: var(--bg-4);
+    position: relative; cursor: pointer; transition: background .2s;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .2s;
+  }
+  .switch.on { background: var(--accent); }
+  .switch.on::after { left: 18px; }
+
+  /* 按钮层级：primary / secondary / danger 各司其职 */
+  .btn-row { display: flex; gap: var(--sp-2); }
+  .btn {
+    height: 34px; border-radius: var(--r-s); font-size: 13px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 0 16px; transition: all .15s; border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--accent); color: #1A0B14; font-weight: 600; flex: 1; }
+  .btn.primary:hover { filter: brightness(1.1); }
+  .btn.secondary { background: var(--bg-4); color: var(--text-1); border-color: var(--border); }
+  .btn.secondary:hover { border-color: var(--border-strong); background: #32323F; }
+  .btn.danger { background: transparent; color: var(--danger); border-color: rgba(240, 80, 110, 0.4); }
+  .btn.danger:hover { background: rgba(240, 80, 110, 0.12); }
+
+  .kbd {
+    font-size: 10px; font-family: "Consolas", monospace; color: var(--text-3);
+    border: 1px solid var(--border-strong); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 5px; line-height: 16px; background: var(--bg-1);
+  }
+
+  /* ===================== 令牌速查表 ===================== */
+  .tokens {
+    width: min(1560px, 100%);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--sp-5);
+  }
+  .token-card {
+    background: var(--bg-2); border: 1px solid var(--border);
+    border-radius: var(--r-m); padding: var(--sp-4);
+  }
+  .token-card h4 { font-size: 13px; color: var(--text-2); margin-bottom: var(--sp-3); font-weight: 600; }
+  .swatch { display: flex; align-items: center; gap: var(--sp-3); padding: 5px 0; font-size: 12px; }
+  .swatch .box { width: 34px; height: 22px; border-radius: 5px; border: 1px solid var(--border-strong); flex-shrink: 0; }
+  .swatch .name { color: var(--text-1); width: 110px; font-family: "Consolas", monospace; }
+  .swatch .hex { color: var(--text-3); font-family: "Consolas", monospace; }
+  .swatch .use { margin-left: auto; color: var(--text-3); font-size: 11px; }
+  .btn-spec { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .btn-spec .row { display: flex; align-items: center; gap: var(--sp-3); }
+  .btn-spec .desc { font-size: 11px; color: var(--text-3); }
+
+  /* 现状 vs 目标对照 */
+  .compare { width: min(1560px, 100%); background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-m); overflow: hidden; }
+  .compare table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .compare th, .compare td { text-align: left; padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .compare th { color: var(--text-2); font-size: 12px; background: var(--bg-3); }
+  .compare td.bad { color: #F0A0B0; }
+  .compare td.good { color: #9BE8C8; }
+  .compare tr:last-child td { border-bottom: none; }
+
+  /* Toast 示意 */
+  .toast-demo { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .toast {
+    display: flex; align-items: center; gap: var(--sp-2);
+    background: var(--bg-3); border: 1px solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: var(--r-s); padding: 10px 14px; font-size: 13px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .toast.warn { border-left-color: var(--warning); }
+  .toast.ok { border-left-color: var(--success); }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--bg-4); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="doc-title">
+  <h1>BandScope · 界面重构设计稿</h1>
+  <p>深色实验室风格 · 单一强调色 · 语义化色彩 · 卡片式分组 · v2.0 目标形态</p>
+</div>
+
+<div class="section-label">01 · 主窗口（目标形态）</div>
+
+<!-- ==================== 主窗口 ==================== -->
+<div class="window">
+  <!-- 顶部工具栏 -->
+  <div class="toolbar">
+    <div class="app-badge">
+      <div class="logo">B</div>
+      BandScope <span class="ver">v2.0</span>
+    </div>
+    <button class="tb-btn primary">＋ 加载数据</button>
+    <button class="tb-btn">📷 截图 <span class="kbd">Ctrl+S</span></button>
+    <button class="tb-btn">💾 导出结果</button>
+    <div class="tb-spacer"></div>
+    <div class="backend-chip">● NVIDIA GPU · CuPy</div>
+    <button class="tb-btn">⚙ 设置</button>
+  </div>
+
+  <div class="body">
+    <!-- 页面导轨 -->
+    <div class="rail">
+      <div class="rail-btn active">🧊<span>主视图</span></div>
+      <div class="rail-btn">📈<span>轴积分</span></div>
+      <div class="rail-btn">📊<span>DOS</span></div>
+      <div class="rail-btn">🌊<span>EDC</span></div>
+      <div class="rail-btn">➕<span>新建</span></div>
+    </div>
+
+    <!-- 画布 -->
+    <div class="canvas-wrap">
+      <div class="canvas-head">
+        <span class="page-title">3D 体渲染 · NiHITP_calibrated_2</span>
+        <span class="scope-tag">数据域：E ∈ [-1.20, 0.50] eV</span>
+        <span style="margin-left:auto" class="hint">500 × 200 × 200 · float32</span>
+      </div>
+      <div class="viewport">
+        <div class="render-chip"><span class="dot"></span> NVIDIA GPU 渲染 · 60 FPS</div>
+        <div class="colorbar"></div>
+        <div class="axis-note">kx (1/Å) → &nbsp;&nbsp; ky ↑ &nbsp;&nbsp; E (eV) ↗</div>
+      </div>
+      <div style="height:16px"></div>
+    </div>
+
+    <!-- 右侧控制面板 -->
+    <div class="panel">
+      <div class="panel-tabs">
+        <div class="ptab active">图像控制</div>
+        <div class="ptab">渲染控制</div>
+        <div class="ptab">处理分析</div>
+      </div>
+      <div class="panel-scroll">
+
+        <div class="card">
+          <div class="card-head"><span class="tick"></span><h3>时间轴</h3><span class="hint">← → 逐帧</span></div>
+          <div class="card-body">
+            <div class="slider-row">
+              <div class="sr-head"><label>当前帧</label><span class="val">132 / 500</span></div>
+              <div class="slider-track"><div class="fill" style="width:26%"></div><div class="thumb" style="left:26%"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="tick"></span><h3>切片范围</h3><span class="hint">物理坐标</span></div>
+          <div class="card-body">
+            <div class="field-grid">
+              <div class="field"><label>X 下限</label><input value="-1.20"></div>
+              <div class="field"><label>X 上限</label><input value="0.50"></div>
+              <div class="field"><label>Y 下限</label><input value="-0.85"></div>
+              <div class="field"><label>Y 上限</label><input value="0.85"></div>
+              <div class="field"><label>Z 下限</label><input value="-0.40"></div>
+              <div class="field"><label>Z 上限</label><input value="0.40"></div>
+            </div>
+            <div class="slider-row">
+              <div class="sr-head"><label>Z 轴旋转</label><span class="val">15.0°</span></div>
+              <div class="slider-track"><div class="fill" style="width:54%"></div><div class="thumb" style="left:54%"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="tick"></span><h3>显示选项</h3></div>
+          <div class="card-body">
+            <div class="switch-row">
+              <div class="switch-item"><div class="switch on"></div>坐标轴</div>
+              <div class="switch-item"><div class="switch on"></div>切片交互</div>
+              <div class="switch-item"><div class="switch"></div>E 轴翻转</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="tick"></span><h3>操作</h3></div>
+          <div class="card-body">
+            <div class="btn-row">
+              <button class="btn primary">应用切片</button>
+              <button class="btn secondary">重置</button>
+            </div>
+            <div class="btn-row">
+              <button class="btn danger" style="flex:1">删除当前结果页</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部状态栏 -->
+  <div class="statusbar">
+    <span class="ok">● 就绪</span>
+    <span>光标: kx = 0.132, ky = -0.408</span>
+    <span>强度: 1.42e4</span>
+    <span style="margin-left:auto">缓存 2.1 GB · 后端 CuPy 13 · <span class="ok">已自动保存</span></span>
+  </div>
+</div>
+
+<div class="section-label">02 · 设计令牌（theme.py 落地内容）</div>
+
+<!-- ==================== 令牌表 ==================== -->
+<div class="tokens">
+  <div class="token-card">
+    <h4>背景层级（5 级替代现在 10+ 个近似值）</h4>
+    <div class="swatch"><div class="box" style="background:#0D0D13"></div><span class="name">BG_0</span><span class="hex">#0D0D13</span><span class="use">窗口底色</span></div>
+    <div class="swatch"><div class="box" style="background:#12121A"></div><span class="name">BG_1</span><span class="hex">#12121A</span><span class="use">绘图区 / 输入框底</span></div>
+    <div class="swatch"><div class="box" style="background:#181822"></div><span class="name">BG_2</span><span class="hex">#181822</span><span class="use">面板 / 工具栏</span></div>
+    <div class="swatch"><div class="box" style="background:#20202C"></div><span class="name">BG_3</span><span class="hex">#20202C</span><span class="use">卡片</span></div>
+    <div class="swatch"><div class="box" style="background:#2A2A38"></div><span class="name">BG_4</span><span class="hex">#2A2A38</span><span class="use">悬停 / 滑条轨</span></div>
+  </div>
+
+  <div class="token-card">
+    <h4>强调色与语义色</h4>
+    <div class="swatch"><div class="box" style="background:#FF7EB6"></div><span class="name">ACCENT</span><span class="hex">#FF7EB6</span><span class="use">唯一主色：主按钮、滑条、选中</span></div>
+    <div class="swatch"><div class="box" style="background:#5B8DEF"></div><span class="name">INFO</span><span class="hex">#5B8DEF</span><span class="use">标签、链接、信息提示</span></div>
+    <div class="swatch"><div class="box" style="background:#34D399"></div><span class="name">SUCCESS</span><span class="hex">#34D399</span><span class="use">就绪 / 完成</span></div>
+    <div class="swatch"><div class="box" style="background:#FBBF24"></div><span class="name">WARNING</span><span class="hex">#FBBF24</span><span class="use">警告提示</span></div>
+    <div class="swatch"><div class="box" style="background:#F0506E"></div><span class="name">DANGER</span><span class="hex">#F0506E</span><span class="use">仅删除 / 不可逆操作</span></div>
+  </div>
+
+  <div class="token-card">
+    <h4>按钮层级（替代"全红按钮"）</h4>
+    <div class="btn-spec">
+      <div class="row"><button class="btn primary" style="flex:none">主按钮 Primary</button><span class="desc">每组最多一个：应用 / 确定</span></div>
+      <div class="row"><button class="btn secondary" style="flex:none">次按钮 Secondary</button><span class="desc">常规操作：重置 / 保存 / 返回</span></div>
+      <div class="row"><button class="btn danger" style="flex:none">危险按钮 Danger</button><span class="desc">仅删除、清空等不可逆操作</span></div>
+      <div class="row"><button class="tb-btn" style="flex:none">工具栏按钮 Ghost</button><span class="desc">顶部栏 / 低频次全局操作</span></div>
+    </div>
+  </div>
+
+  <div class="token-card">
+    <h4>非模态反馈（替代 39 处 QMessageBox 中的轻提示）</h4>
+    <div class="toast-demo">
+      <div class="toast ok">✓ 切片已应用，耗时 0.8 s</div>
+      <div class="toast">ℹ 已复制当前曲线，可在比较页粘贴</div>
+      <div class="toast warn">⚠ 曲线横轴不匹配，无法粘贴比较</div>
+    </div>
+    <p style="font-size:11px;color:var(--text-3);margin-top:10px">左缘色条承载语义 · 3 秒自动消失 · 仅"确认删除 / 覆盖"保留模态对话框</p>
+  </div>
+
+  <div class="token-card">
+    <h4>间距 · 圆角 · 字体</h4>
+    <div class="swatch"><span class="name">间距</span><span class="hex">4 / 8 / 12 / 16 / 24 / 32</span><span class="use">4pt 网格</span></div>
+    <div class="swatch"><span class="name">圆角</span><span class="hex">6 / 10 / 14</span><span class="use">控件 / 卡片 / 窗口</span></div>
+    <div class="swatch"><span class="name">正文</span><span class="hex">13–14px</span><span class="use">Segoe UI + 雅黑</span></div>
+    <div class="swatch"><span class="name">数值</span><span class="hex">Consolas 等宽</span><span class="use">坐标、帧号、能量</span></div>
+    <div class="swatch"><span class="name">标题</span><span class="hex">13px 600</span><span class="use">卡片头，左侧 3px 强调色条</span></div>
+  </div>
+
+  <div class="token-card">
+    <h4>快捷键（新增）</h4>
+    <div class="swatch"><span class="name"><span class="kbd">←</span> <span class="kbd">→</span></span><span class="use">时间轴逐帧（Shift = 10 帧）</span></div>
+    <div class="swatch"><span class="name"><span class="kbd">Ctrl</span>+<span class="kbd">S</span></span><span class="use">截图</span></div>
+    <div class="swatch"><span class="name"><span class="kbd">Ctrl</span>+<span class="kbd">O</span></span><span class="use">加载数据</span></div>
+    <div class="swatch"><span class="name"><span class="kbd">Ctrl</span>+<span class="kbd">1/2/3</span></span><span class="use">切换右侧标签页</span></div>
+    <div class="swatch"><span class="name"><span class="kbd">Ctrl</span>+<span class="kbd">W</span></span><span class="use">关闭当前结果页</span></div>
+    <div class="swatch"><span class="name"><span class="kbd">Ctrl</span>+<span class="kbd">C/V</span></span><span class="use">复制 / 粘贴曲线（已有逻辑，补快捷键）</span></div>
+  </div>
+</div>
+
+<div class="section-label">03 · 现状 → 目标 对照</div>
+
+<div class="compare">
+  <table>
+    <tr><th style="width:22%">维度</th><th style="width:39%">现状</th><th>目标</th></tr>
+    <tr>
+      <td>色彩系统</td>
+      <td class="bad">7 个文件散落 30+ 个硬编码颜色，仅深蓝灰就有十余个近似值（#2A2A3A / #2B2B45 / #2E2E48…）</td>
+      <td class="good">theme.py 单一来源：5 级背景 + 3 级文本 + 1 主色 + 4 语义色，全部命名引用</td>
+    </tr>
+    <tr>
+      <td>按钮语义</td>
+      <td class="bad">所有按钮统一 #E81123 红色，"加载/确定"与"删除"无法区分</td>
+      <td class="good">Primary（粉）/ Secondary（灰）/ Danger（红描边）三级，红色只给不可逆操作</td>
+    </tr>
+    <tr>
+      <td>布局弹性</td>
+      <td class="bad">左右 7:4 写死、窗口 1550×950 写死、右栏最小 430px；小屏放不下</td>
+      <td class="good">QSplitter 自由拖拽 + QSettings 记忆分栏；面板可折叠为 40px 窄条</td>
+    </tr>
+    <tr>
+      <td>自适应实现</td>
+      <td class="bad">每页手写 _apply_adaptive_layout + 6 个 _adaptive_* 列表 + 十余个 MIN/MAX 常量</td>
+      <td class="good">居中容器 + setMaximumWidth + QSizePolicy.Expanding，Qt 布局引擎原生完成</td>
+    </tr>
+    <tr>
+      <td>用户反馈</td>
+      <td class="bad">39 处模态 QMessageBox，"无法粘贴曲线"也要点确定</td>
+      <td class="good">轻提示走 Toast（左缘语义色条、3 秒自消）；仅删除/覆盖保留模态确认</td>
+    </tr>
+    <tr>
+      <td>全局操作</td>
+      <td class="bad">加载 / 截图 / 保存 / 返回埋在"图像控制"页底部一排红按钮里</td>
+      <td class="good">上移至顶部工具栏；控制页只保留与当前标签页上下文相关的操作</td>
+    </tr>
+    <tr>
+      <td>状态可见性</td>
+      <td class="bad">渲染设备只有一个右上角浮层；无光标坐标、无数据信息</td>
+      <td class="good">底部状态栏：光标物理坐标 / 强度 / 缓存占用 / 计算后端 / 自动保存状态</td>
+    </tr>
+    <tr>
+      <td>键盘操作</td>
+      <td class="bad">无快捷键，逐帧只能拖滑条</td>
+      <td class="good">方向键逐帧、Ctrl+S/O/1-3/W/C/V 全套快捷键</td>
+    </tr>
+    <tr>
+      <td>控件补丁</td>
+      <td class="bad">sync_slider_visual / sync_switch_visual 补丁散在各页 restore_state 里，靠人肉记得调用</td>
+      <td class="good">封装 SyncedSlider / SyncedSwitch 子类，视觉同步收进控件内部</td>
+    </tr>
+    <tr>
+      <td>代码结构</td>
+      <td class="bad">refactored_app.py 7169 行 God Class，UI / 事件 / 分析逻辑混合</td>
+      <td class="good">拆分为 ui/ 包：theme、widgets、pages、controllers；主窗口只负责装配</td>
+    </tr>
+  </table>
+</div>
+
+</body>
+</html>

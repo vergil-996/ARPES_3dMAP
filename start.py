@@ -11,61 +11,65 @@ from PyQt5.QtWidgets import QApplication
 
 from app_metadata import APP_NAME, APP_PUBLISHER, APP_VERSION
 
+import theme
+
 
 APP_FEEDBACK_STYLE = """
 QMessageBox {
-    background-color: #2A2A3A;
+    background-color: %(BG2)s;
 }
 QMessageBox QLabel {
-    color: #FFFFFF;
-    font-family: "Segoe UI";
+    color: %(T1)s;
+    font-family: %(FONT)s;
     font-size: 14px;
 }
 QMessageBox QPushButton {
-    background-color: #E81123;
-    color: #FFFFFF;
+    background-color: %(ACCENT)s;
+    color: %(ACC_ON)s;
+    font-weight: 600;
     border-radius: 4px;
     padding: 5px 15px;
     min-width: 72px;
 }
 QMessageBox QPushButton:hover {
-    background-color: #F33A4A;
+    background-color: %(ACCENT_H)s;
 }
 QProgressDialog {
-    background-color: #2A2A3A;
+    background-color: %(BG2)s;
 }
 QProgressDialog QLabel {
-    color: #FFFFFF;
-    font-family: "Segoe UI";
+    color: %(T1)s;
+    font-family: %(FONT)s;
     font-size: 14px;
 }
 QProgressDialog QPushButton {
-    background-color: #E81123;
-    color: #FFFFFF;
+    background-color: %(ACCENT)s;
+    color: %(ACC_ON)s;
+    font-weight: 600;
     border-radius: 4px;
     padding: 5px 15px;
     min-width: 72px;
 }
 QProgressDialog QPushButton:hover {
-    background-color: #F33A4A;
+    background-color: %(ACCENT_H)s;
 }
 QProgressDialog QProgressBar {
-    background-color: #1A1A2E;
-    border: 1px solid #5A5A70;
+    background-color: %(BG1)s;
+    border: 1px solid %(BORD)s;
     border-radius: 4px;
     text-align: center;
-    color: #FFFFFF;
+    color: %(T1)s;
 }
 QProgressDialog QProgressBar::chunk {
-    background-color: #5B8DEF;
+    background-color: %(ACCENT)s;
     border-radius: 3px;
 }
 QToolTip {
-    color: #FFFFFF;
-    background-color: #2A2A3A;
-    border: 1px solid #FF69B4;
+    color: %(T1)s;
+    background-color: %(BG2)s;
+    border: 1px solid %(ACC_DIM)s;
 }
-"""
+""" % theme.QSS_TOKENS
 
 
 def resource_path(relative_path):
