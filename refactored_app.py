@@ -258,7 +258,7 @@ class My3DAnalyzer(QWidget):
 
         self._global_shortcuts = [
             _bind("Ctrl+O", self.on_load),
-            _bind("Ctrl+S", self.on_screenshot),
+            _bind("Ctrl+S", self.open_publication_dialog),
             _bind("Ctrl+1", lambda: self._select_control_page(0)),
             _bind("Ctrl+2", lambda: self._select_control_page(1)),
             _bind("Ctrl+3", lambda: self._select_control_page(2)),
@@ -701,12 +701,13 @@ class My3DAnalyzer(QWidget):
             return btn
 
         self.btn_tb_load = _make_tb_btn("加载数据", "primary")
-        self.btn_tb_shot = _make_tb_btn("截图", "secondary", 72)
+        self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
+        self.btn_tb_shot.setToolTip("选择截图样式并预览导出（仅影响截图，不改变左侧视图）")
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
         self.btn_tb_lock = _make_tb_btn("锁定色带", "secondary", 104)
         self.btn_tb_lock.setCheckable(True)
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
-        self.btn_tb_shot.setToolTip("截图 (Ctrl+S)")
+        self._update_screenshot_tooltip()
         self.btn_tb_lock.setToolTip(
             "锁定当前色带：开启后，拖动时间轴或生成新结果页时\n"
             "都按锁定时刻的强度范围分配颜色，便于逐帧对比；\n"
@@ -737,7 +738,7 @@ class My3DAnalyzer(QWidget):
         row.addWidget(self.btn_tb_version)
 
         self.btn_tb_load.clicked.connect(self.on_load)
-        self.btn_tb_shot.clicked.connect(self.on_screenshot)
+        self.btn_tb_shot.clicked.connect(self.open_publication_dialog)
         self.btn_tb_export.clicked.connect(self.export_current_result)
         self.btn_tb_lock.toggled.connect(self.on_toggle_color_lock)
 
@@ -1423,7 +1424,7 @@ class My3DAnalyzer(QWidget):
         self.page_image.btn_load.clicked.connect(self.on_load)
         self.page_image.btn_cut.clicked.connect(self.on_cut)
         self.page_image.btn_export.clicked.connect(self.export_current_result)
-        self.page_image.btn_save.clicked.connect(self.on_screenshot)
+        self.page_image.btn_save.clicked.connect(self.open_publication_dialog)
         self.page_image.btn_back.clicked.connect(self.on_back)
         self.page_image.slider_time.valueChanged.connect(self.on_time_slider_changed)
         self.page_image.slider_time.sliderReleased.connect(self.flush_time_slider_refresh)
@@ -5322,6 +5323,7 @@ class My3DAnalyzer(QWidget):
         self._update_time_slider_state()
         self._request_scope_denoise_if_needed(spec)
         self.global_refresh()
+        self._update_screenshot_tooltip()
 
     def _sync_controls_from_page(self, spec):
         self._restore_page_ui_state(spec)
@@ -5924,20 +5926,54 @@ class My3DAnalyzer(QWidget):
         if manager is not None:
             manager.show(text, level="success", title=title)
 
-    def on_screenshot(self):
-        path, _ = QFileDialog.getSaveFileName(self, "保存截图", "capture.png", "PNG (*.png)")
-        if not path:
-            return
+    # ------------------------------------------------------------------
+    # 图片导出（截图样式）
+    # ------------------------------------------------------------------
 
-        save_path = self._sanitize_save_path(path, "PNG")
-        current_index = self.left_display_stack.currentIndex()
-        if current_index == 1:
-            self.fig.savefig(save_path)
-        elif current_index == 2:
-            self.left_display_stack.currentWidget().grab().save(save_path)
-        else:
-            self.plotter.screenshot(save_path)
-        self._toast_success("截图已保存", os.path.basename(save_path))
+    def _update_screenshot_tooltip(self):
+        """按钮提示中显示当前视图族的样式名，例如“截图样式：3D · 极简”。"""
+        btn = getattr(self, "btn_tb_shot", None)
+        if btn is None:
+            return
+        style_name = ""
+        try:
+            from publication_export import committed_style_for
+
+            spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
+            family = None
+            if spec is not None and spec.page_kind != "control_panel" and self.core.raw_data is not None:
+                context = getattr(self, "current_render_context", None)
+                if isinstance(context, dict):
+                    from publication_models import view_family_for
+
+                    family = view_family_for(context.get("view"))
+            if family is None:
+                family = "3d"
+            style, _ = committed_style_for(self.settings, family)
+            style_name = f"：{style.full_name}"
+        except Exception:
+            style_name = ""
+        btn.setToolTip(f"截图样式{style_name} (Ctrl+S)：选择样式并预览导出")
+
+    def open_publication_dialog(self):
+        """打开唯一的截图样式面板（按当前视图冻结快照）。"""
+        # PyQt5 中未捕获的槽函数异常会 qFatal 终止进程：此处兜底一切异常。
+        try:
+            dialog = self.__dict__.get("_publication_dialog")
+            if dialog is None:
+                from publication_dialog import PublicationExportDialog
+
+                dialog = PublicationExportDialog(self)
+                self._publication_dialog = dialog
+            if dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            dialog.open_for_current_view()
+        except Exception as exc:  # noqa: BLE001 - 槽函数绝不允许异常逃逸
+            self._show_message(
+                "无法打开截图样式面板", f"{type(exc).__name__}: {exc}", QMessageBox.Warning
+            )
 
     def _build_time_integral_spec(self):
         low = self.page_data.s_t_low.value()

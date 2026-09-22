@@ -30,6 +30,11 @@ class AnalyzerCore(QObject):
         self.raw_data = None
         self.coords = {'X': None, 'Y': None, 'E': None, 'delay': None}
         self.has_time_axis = True
+        # 坐标来源与单位可信度（科研导出用）：
+        # coord_sources[axis] = 'file'（文件提供坐标数组）/ 'index'（索引回退）；
+        # coord_units[axis] = 显式单位元数据（如 'eV'、'Å⁻¹'），没有则为 None。
+        self.coord_sources = {}
+        self.coord_units = {}
 
     def load_npz(self, path):
         try:
@@ -100,6 +105,8 @@ class AnalyzerCore(QObject):
 
             # 4. 坐标映射与单位同步
             self.coords = {}
+            self.coord_sources = {}
+            self.coord_units = {}
 
             # 助手函数：安全提取坐标
             def get_coord(role_key, fallback_shape_idx):
@@ -108,12 +115,34 @@ class AnalyzerCore(QObject):
                     loaded_arr = safe_get_array(actual_key)
                     if loaded_arr is not None:
                         arr = loaded_arr.flatten()
+                        self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'file'
                     else:
                         arr = np.arange(self.raw_data.shape[fallback_shape_idx])
+                        self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'index'
                 else:
                     # 如果没找到坐标，按像素索引生成
                     arr = np.arange(self.raw_data.shape[fallback_shape_idx])#根据此轴长度生成相应的等差数列（默认步长为1）
+                    self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'index'
                 return arr
+
+            # 显式单位元数据（可选）：kx_unit / ky_unit / E_unit / time_unit
+            def get_unit(unit_key):
+                unit_arr = safe_get_array(unit_key)
+                if unit_arr is None:
+                    return None
+                try:
+                    value = np.asarray(unit_arr).flatten()[0]
+                    text = str(value).strip()
+                except (IndexError, TypeError, ValueError):
+                    return None
+                return text or None
+
+            self.coord_units = {
+                'X': get_unit('kx_unit'),
+                'Y': get_unit('ky_unit'),
+                'E': get_unit('E_unit'),
+                'delay': get_unit('time_unit'),
+            }
 
             # 获取各轴坐标
             self.coords['X'] = get_coord('X', 0)
@@ -123,6 +152,7 @@ class AnalyzerCore(QObject):
                 self.coords['delay'] = get_coord('T', 3)
             else:
                 self.coords['delay'] = np.array([0.0], dtype=np.float32)
+                self.coord_sources['delay'] = 'index'
 
             return True, self.raw_data.shape
 
