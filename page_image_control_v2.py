@@ -85,19 +85,13 @@ class ImageControlPage(ControlPageBase):
         return spin_box
 
     def build_body(self):
-        grp_time, v_time = self._create_group("时间轴")
+        # 时间轴控件移到了画布正下方的时间轴横条（timeline_bar.TimelineBar）。
+        # 这里仍负责创建，属性名不变，主窗口所有信号/快捷键引用无需改动；
+        # 横条通过 attach_controls 把它们收进自己的布局。
         self.time_hint = QLabel("当前帧 · ← → 逐帧切换", self)
         self.time_hint.setStyleSheet(theme.field_label_qss())
-        v_time.addWidget(self.time_hint)
         self.slider_time = self._create_slider()
         self.input_time = self._create_time_value_box()
-        time_row = QHBoxLayout()
-        time_row.setContentsMargins(0, 0, 0, 0)
-        time_row.setSpacing(self.TIME_VALUE_BOX_SPACING)
-        time_row.addWidget(self.slider_time)
-        time_row.addWidget(self.input_time)
-        v_time.addLayout(time_row)
-        self.vbox.addWidget(grp_time)
 
         grp_slice, v_slice = self._create_group("切片范围")
 

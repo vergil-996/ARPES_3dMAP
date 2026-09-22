@@ -2,16 +2,33 @@ from PyQt5.QtCore import QSignalBlocker
 from siui.components.combobox_ import SiCapsuleComboBox
 
 import theme
-from control_layout_utils import centered_widget_row, combo_index_for_text
+from control_layout_utils import (
+    animate_widget_visibility,
+    centered_widget_row,
+    combo_index_for_text,
+    set_widget_visibility_instant,
+)
 from control_page_base import ControlPageBase
 
 
 class DataProcessPage(ControlPageBase):
     COMBO_TEXT_ALIASES = {"切片态密度": "切片内强度积分"}
 
+    # “其他积分”下拉的完整选项；其中时间相关项只在数据含时间轴时保留。
+    OTHER_INTEGRAL_ITEMS = [
+        "切片内强度积分",
+        "能级态密度",
+        "EDC瀑布图",
+        "单条 EDC 曲线",
+        "二阶导",
+    ]
+    TIME_DEPENDENT_OTHER_ITEMS = ("切片内强度积分",)
+
     def __init__(self, parent=None):
         self.locked_half_width = 0
         self._is_updating = False
+        self._time_axis_available = True
+        self._filtered_out_other_selection = None
         super().__init__(parent)
 
     def _create_combo(self, title, items, registry):
@@ -27,16 +44,20 @@ class DataProcessPage(ControlPageBase):
 
     def build_body(self):
         grp_t, v_t = self._create_group("对时间轴积分")
+        self.grp_t = grp_t
 
-        self.s_t_up = self._create_accent_slider()
-        self.s_t_low = self._create_accent_slider()
+        self.s_t_up = self._create_accent_slider(axis=True)
+        self.input_t_up = self._create_axis_value_box()
+
+        self.s_t_low = self._create_accent_slider(axis=True)
+        self.input_t_low = self._create_axis_value_box()
 
         self.s_t_low.valueChanged.connect(self._on_t_low_changed)
         self.s_t_up.valueChanged.connect(self._on_t_up_changed)
 
         self.btn_t_apply = self._create_btn("应用", "primary")
-        self._add_centered_slider_block(v_t, "积分上限", self.s_t_up)
-        self._add_centered_slider_block(v_t, "积分下限", self.s_t_low)
+        self._add_centered_slider_block(v_t, "积分上限", self.s_t_up, self.input_t_up)
+        self._add_centered_slider_block(v_t, "积分下限", self.s_t_low, self.input_t_low)
         v_t.addLayout(centered_widget_row(self.btn_t_apply, self.BUTTON_WIDTH))
         self.vbox.addLayout(centered_widget_row(grp_t, self.MIN_GROUP_WIDTH))
 
@@ -68,19 +89,70 @@ class DataProcessPage(ControlPageBase):
 
         grp_other, v_other = self._create_group("其他积分")
 
-        self.combo_other = self._create_combo("积分类型", [
-            "切片内强度积分",
-            "能级态密度",
-            "EDC瀑布图",
-            "单条 EDC 曲线",
-            "二阶导",
-        ], self._adaptive_row_controls)
+        self.combo_other = self._create_combo("积分类型", list(self.OTHER_INTEGRAL_ITEMS), self._adaptive_row_controls)
         self.btn_other_apply = self._create_btn("应用", "primary")
 
         v_other.addLayout(centered_widget_row(self.combo_other, self.MIN_COMBO_WIDTH))
         v_other.addLayout(centered_widget_row(self.btn_other_apply, self.BUTTON_WIDTH))
 
         self.vbox.addLayout(centered_widget_row(grp_other, self.MIN_GROUP_WIDTH))
+
+    # ------------------------------------------------------------------
+    # 时间轴相关控件的显隐
+    # ------------------------------------------------------------------
+    def set_time_axis_available(self, available, *, animate=True):
+        """按数据是否含时间轴，平滑显隐“对时间轴积分”卡片并过滤时间相关积分项。"""
+        available = bool(available)
+        if self._time_axis_available == available:
+            return
+        self._time_axis_available = available
+
+        self._filter_time_dependent_other_items(available)
+        if animate:
+            animate_widget_visibility(
+                self.grp_t,
+                available,
+                on_update=self.relayout_scroll_content,
+                on_settled=self.relayout_scroll_content,
+            )
+        else:
+            set_widget_visibility_instant(self.grp_t, available)
+            self.relayout_scroll_content()
+
+    def _filter_time_dependent_other_items(self, available):
+        """无时间轴时从“其他积分”下拉移除时间相关项，恢复时插回原始位置。"""
+        combo = self.combo_other
+        blocker = QSignalBlocker(combo)
+        try:
+            current_text = combo.currentText()
+            if available:
+                for index, text in enumerate(self.OTHER_INTEGRAL_ITEMS):
+                    if (
+                        text in self.TIME_DEPENDENT_OTHER_ITEMS
+                        and combo_index_for_text(combo, text) < 0
+                    ):
+                        combo.insertItem(index, text)
+                # 上次过滤时被移除的选中项，恢复后优先选回。
+                if self._filtered_out_other_selection is not None:
+                    current_text = self._filtered_out_other_selection
+                    self._filtered_out_other_selection = None
+            else:
+                if current_text in self.TIME_DEPENDENT_OTHER_ITEMS:
+                    self._filtered_out_other_selection = current_text
+                for text in self.TIME_DEPENDENT_OTHER_ITEMS:
+                    index = combo_index_for_text(combo, text)
+                    if index >= 0:
+                        combo.removeItem(index)
+
+            # 过滤后按文本恢复选中；选中的项被移除时回退到就近项。
+            restore_index = combo_index_for_text(
+                combo, current_text, aliases=self.COMBO_TEXT_ALIASES
+            )
+            if restore_index < 0:
+                restore_index = min(max(combo.currentIndex(), 0), combo.count() - 1)
+            combo.setCurrentIndex(restore_index)
+        finally:
+            del blocker
 
     def _on_t_low_changed(self, value):
         if value > self.s_t_up.value():
@@ -182,6 +254,16 @@ class DataProcessPage(ControlPageBase):
                 "maximum": int(self.s_t_up.maximum()),
                 "value": int(self.s_t_up.value()),
             },
+            "input_t_low": {
+                "minimum": float(self.input_t_low.minimum()),
+                "maximum": float(self.input_t_low.maximum()),
+                "value": float(self.input_t_low.value()),
+            },
+            "input_t_up": {
+                "minimum": float(self.input_t_up.minimum()),
+                "maximum": float(self.input_t_up.maximum()),
+                "value": float(self.input_t_up.value()),
+            },
             "combo_ax": {
                 "index": int(self.combo_ax.currentIndex()),
                 "text": self.combo_ax.currentText(),
@@ -228,6 +310,8 @@ class DataProcessPage(ControlPageBase):
         widgets = [
             self.s_t_low,
             self.s_t_up,
+            self.input_t_low,
+            self.input_t_up,
             self.combo_ax,
             self.s_ax_low,
             self.s_ax_up,
@@ -242,8 +326,13 @@ class DataProcessPage(ControlPageBase):
         self._is_updating = True
 
         try:
-            for slider_name, slider in (("s_t_low", self.s_t_low), ("s_t_up", self.s_t_up)):
+            time_controls = (
+                ("s_t_low", "input_t_low", self.s_t_low, self.input_t_low),
+                ("s_t_up", "input_t_up", self.s_t_up, self.input_t_up),
+            )
+            for slider_name, input_name, slider, value_box in time_controls:
                 slider_state = state.get(slider_name) or {}
+                input_state = state.get(input_name) or {}
                 minimum = slider_state.get("minimum")
                 maximum = slider_state.get("maximum")
                 if minimum is not None and maximum is not None:
@@ -252,6 +341,12 @@ class DataProcessPage(ControlPageBase):
                     value = int(slider_state["value"])
                     value = max(int(slider.minimum()), min(int(slider.maximum()), value))
                     slider.setValue(value)
+                if "value" in input_state:
+                    box_value = float(input_state["value"])
+                    box_value = max(float(value_box.minimum()), min(float(value_box.maximum()), box_value))
+                    value_box.setValue(box_value)
+                elif "value" in slider_state:
+                    value_box.setValue(float(slider.value()))
 
             combo_ax_state = state.get("combo_ax") or {}
             combo_ax_index = combo_ax_state.get("index")
@@ -290,13 +385,18 @@ class DataProcessPage(ControlPageBase):
                     value_box.setValue(float(slider.value()))
 
             combo_other_state = state.get("combo_other") or {}
-            combo_other_index = combo_other_state.get("index")
-            if combo_other_index is None and "text" in combo_other_state:
+            # 下拉项会随时间轴有无动态过滤，文本比下标更可靠，优先按文本恢复。
+            combo_other_index = None
+            if "text" in combo_other_state:
                 combo_other_index = combo_index_for_text(
                     self.combo_other,
                     combo_other_state["text"],
                     aliases=self.COMBO_TEXT_ALIASES,
                 )
+                if combo_other_index is not None and combo_other_index < 0:
+                    combo_other_index = None
+            if combo_other_index is None:
+                combo_other_index = combo_other_state.get("index")
             if combo_other_index is not None and 0 <= int(combo_other_index) < self.combo_other.count():
                 self.combo_other.setCurrentIndex(int(combo_other_index))
 

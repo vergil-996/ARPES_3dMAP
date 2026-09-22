@@ -23,6 +23,8 @@ coverage.xml
 # Local test sources and validation scripts
 /tests/
 /scripts/smoke_test.py
+/scripts/verify_color_lock.py
+/scripts/probe_frame_ranges.py
 /scripts/check_release_version.py
 
 # IDE

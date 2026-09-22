@@ -60,6 +60,7 @@ from refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoo
 from render_core import VisualEngine, VolumeRenderSession
 from result_workspace import AnalysisPageSpec, ResultWorkspace
 from settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from timeline_bar import TimelineBar
 from toast import ToastManager
 from app_metadata import APP_NAME, APP_VERSION
 from update_controller import UpdateController
@@ -620,6 +621,24 @@ class My3DAnalyzer(QWidget):
 
         right_vbox.addWidget(self.page_container)
 
+        # 画布正下方的时间轴横条：托管 page_image 创建的时间轴控件，
+        # 所有信号/快捷键仍引用 page_image.slider_time 等属性，无需改动。
+        self.timeline_bar = TimelineBar(self.left_workspace)
+        self.timeline_bar.attach_controls(
+            self.page_image.slider_time,
+            self.page_image.input_time,
+            self.page_image.time_hint,
+        )
+        self.left_workspace.set_footer_widget(self.timeline_bar)
+        # 加载数据前横条处于待机能态。
+        self.page_image.slider_time.setEnabled(False)
+        self.page_image.input_time.setEnabled(False)
+        self.page_image.time_hint.setText("加载数据后可浏览时间轴")
+        # 启动时还没有数据：时间轴相关 UI（横条、“对时间轴积分”卡片、
+        # “其他积分”里的时间相关项）默认隐藏，加载含时间轴的数据后再平滑展开。
+        self.timeline_bar.set_bar_visible(False, animate=False)
+        self.page_data.set_time_axis_available(False, animate=False)
+
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.addWidget(self.left_workspace)
@@ -684,11 +703,19 @@ class My3DAnalyzer(QWidget):
         self.btn_tb_load = _make_tb_btn("加载数据", "primary")
         self.btn_tb_shot = _make_tb_btn("截图", "secondary", 72)
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
+        self.btn_tb_lock = _make_tb_btn("锁定色带", "secondary", 104)
+        self.btn_tb_lock.setCheckable(True)
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
         self.btn_tb_shot.setToolTip("截图 (Ctrl+S)")
+        self.btn_tb_lock.setToolTip(
+            "锁定当前色带：开启后，拖动时间轴或生成新结果页时\n"
+            "都按锁定时刻的强度范围分配颜色，便于逐帧对比；\n"
+            "再次点击恢复按每帧数据自动分配。"
+        )
         row.addWidget(self.btn_tb_load)
         row.addWidget(self.btn_tb_shot)
         row.addWidget(self.btn_tb_export)
+        row.addWidget(self.btn_tb_lock)
 
         row.addStretch(1)
 
@@ -712,6 +739,7 @@ class My3DAnalyzer(QWidget):
         self.btn_tb_load.clicked.connect(self.on_load)
         self.btn_tb_shot.clicked.connect(self.on_screenshot)
         self.btn_tb_export.clicked.connect(self.export_current_result)
+        self.btn_tb_lock.toggled.connect(self.on_toggle_color_lock)
 
     def _build_statusbar(self):
         """底部状态栏：运行状态 / 当前页 / 光标坐标 / 数据与后端信息。"""
@@ -1384,6 +1412,7 @@ class My3DAnalyzer(QWidget):
             tuple(self._get_display_levels()),
             str(self.page_render.combo_map.currentText()),
             str(self.page_render.get_selected_cmap()),
+            VisualEngine.locked_data_range(),
         )
 
     def bind_all_events(self):
@@ -1434,6 +1463,7 @@ class My3DAnalyzer(QWidget):
         self.page_data.s_t_up.valueChanged.connect(self.on_time_integral_controls_changed)
         self.page_data.s_t_low.sliderReleased.connect(self.flush_axis_refresh)
         self.page_data.s_t_up.sliderReleased.connect(self.flush_axis_refresh)
+        self._connect_time_value_box_signals()
         self.page_data.s_ax_low.valueChanged.connect(
             lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_low, value)
         )
@@ -1823,6 +1853,7 @@ class My3DAnalyzer(QWidget):
                     block_signals=True,
                 )
                 self.sync_axis_value_boxes_from_sliders()
+                self.sync_time_value_boxes_from_sliders()
 
             if self._preserve_control_tab_on_next_page_sync:
                 tab_index = int(self.page_container.currentIndex())
@@ -1978,6 +2009,45 @@ class My3DAnalyzer(QWidget):
         if self._syncing_controls or self.core.raw_data is None:
             return
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
+
+    def on_toggle_color_lock(self, checked):
+        """顶部栏「锁定色带」开关：冻结/恢复色带的数据范围归一化。"""
+        if self._syncing_controls:
+            return
+        if checked:
+            if not VisualEngine.lock_data_range():
+                # 还没有任何渲染结果可捕获，还原开关状态。
+                self.btn_tb_lock.blockSignals(True)
+                self.btn_tb_lock.setChecked(False)
+                self.btn_tb_lock.blockSignals(False)
+                self._update_color_lock_button_style()
+                self._show_message(
+                    "无法锁定色带",
+                    "请先加载数据并完成一次渲染，再锁定当前色带。",
+                    QMessageBox.Information,
+                )
+                return
+        else:
+            VisualEngine.unlock_data_range()
+        self._update_color_lock_button_style()
+        if self.core.raw_data is not None:
+            self.request_refresh(
+                RefreshCause.TRANSFER_FUNCTION,
+                RenderQuality.EXACT,
+                immediate=True,
+            )
+
+    def _update_color_lock_button_style(self):
+        """按锁定状态切换顶部栏色带锁按钮的文案与配色。"""
+        btn = getattr(self, "btn_tb_lock", None)
+        if btn is None:
+            return
+        if btn.isChecked():
+            btn.attachment().setText("色带已锁定")
+            theme.style_push_button(btn, "primary")
+        else:
+            btn.attachment().setText("锁定色带")
+            theme.style_push_button(btn, "secondary")
 
     def flush_time_slider_refresh(self):
         if self._syncing_controls or self.core.raw_data is None:
@@ -3412,22 +3482,51 @@ class My3DAnalyzer(QWidget):
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
         )
 
+    def _has_time_axis(self):
+        return (
+            bool(self.core.has_time_axis)
+            and self.core.raw_data is not None
+            and int(self.core.raw_data.shape[3]) > 1
+        )
+
+    def _set_time_axis_ui_visible(self, visible, *, animate=True):
+        """时间轴相关 UI（时间轴横条、“对时间轴积分”卡片、“其他积分”里的
+        时间相关项）只在数据含时间轴时出现，切换时带高度/淡入淡出动画。"""
+        # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
+        # RuntimeError；实例 __dict__ 查询则安全。
+        timeline_bar = self.__dict__.get("timeline_bar")
+        if timeline_bar is not None:
+            timeline_bar.set_bar_visible(visible, animate=animate)
+        page_data = self.__dict__.get("page_data")
+        if page_data is not None:
+            page_data.set_time_axis_available(visible, animate=animate)
+
     def _update_time_slider_state(self):
-        has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
+        has_time_axis = self._has_time_axis()
         active_spec = self._control_state_owner(self.left_workspace.current_spec())
         is_enabled = has_time_axis and not self._is_time_locked_page(active_spec)
         self.page_image.slider_time.setEnabled(is_enabled)
         self.page_image.input_time.setEnabled(is_enabled)
         if hasattr(self.page_image, "time_hint"):
-            hint = "当前帧 · ← → 逐帧切换" if is_enabled else ("当前结果已固定时间范围" if has_time_axis else "静态数据 · 无时间维度")
+            if is_enabled:
+                hint = "当前帧 · ← → 逐帧切换"
+            elif self.core.raw_data is None:
+                hint = "加载数据后可浏览时间轴"
+            elif has_time_axis:
+                hint = "当前结果已固定时间范围"
+            else:
+                hint = "静态数据 · 无时间维度"
             self.page_image.time_hint.setText(hint)
 
     def _configure_time_controls(self):
-        has_time_axis = self.core.has_time_axis and self.core.raw_data is not None and self.core.raw_data.shape[3] > 1
+        has_time_axis = self._has_time_axis()
         self._update_time_slider_state()
         self.page_data.s_t_low.setEnabled(has_time_axis)
         self.page_data.s_t_up.setEnabled(has_time_axis)
+        self.page_data.input_t_low.setEnabled(has_time_axis)
+        self.page_data.input_t_up.setEnabled(has_time_axis)
         self.page_data.btn_t_apply.setEnabled(has_time_axis)
+        self._set_time_axis_ui_visible(has_time_axis, animate=True)
 
     def _update_export_button_states(self):
         has_data = self.base_raw_data is not None
@@ -5500,12 +5599,29 @@ class My3DAnalyzer(QWidget):
         self.page_image.slider_time.setValue(0)
         self.page_image.slider_time.setToolTipConvertionFunc(time_func)
 
+        # 注意不能用 getattr(self, ...)：部分测试用 __new__ 绕过 QWidget 构造，
+        # sip 属性查找会抛 RuntimeError；实例 __dict__ 查询则安全。
+        timeline_bar = self.__dict__.get("timeline_bar")
+        if timeline_bar is not None:
+            timeline_bar.set_total_frames(info[3])
+
         self.page_data.s_t_low.setRange(0, slider_max)
         self.page_data.s_t_up.setRange(0, slider_max)
         self.page_data.s_t_low.setValue(0)
         self.page_data.s_t_up.setValue(0 if t_max == 0 else t_max)
         self.page_data.s_t_low.setToolTipConvertionFunc(time_func)
         self.page_data.s_t_up.setToolTipConvertionFunc(time_func)
+
+        physical_min, physical_max, physical_step, decimals = self._time_physical_range()
+        self._syncing_axis_value_boxes = True
+        try:
+            for slider, value_box in self._time_slider_box_pairs():
+                value_box.setDecimals(decimals)
+                value_box.setRange(physical_min, physical_max)
+                value_box.setSingleStep(physical_step)
+                value_box.setValue(self.core.logical_to_physical("delay", int(slider.value())))
+        finally:
+            self._syncing_axis_value_boxes = False
 
     def _reset_workspace_after_load(self):
         self.update_ax_slider_range()
@@ -5657,6 +5773,97 @@ class My3DAnalyzer(QWidget):
         slider.setValue(logical_value)
         self._set_axis_value_box_from_slider(value_box, logical_value)
 
+    # ------------------------------------------------------------------
+    # 时间积分：滑条 ↔ 物理值输入框联动（与坐标轴积分同一套机制）
+    # ------------------------------------------------------------------
+    def _connect_time_value_box_signals(self):
+        self.page_data.s_t_low.valueChanged.connect(
+            lambda value: self.on_time_slider_value_changed(self.page_data.input_t_low, value)
+        )
+        self.page_data.s_t_up.valueChanged.connect(
+            lambda value: self.on_time_slider_value_changed(self.page_data.input_t_up, value)
+        )
+        self.page_data.input_t_low.valueChanged.connect(
+            lambda _value: self.on_time_physical_value_changed(self.page_data.input_t_low, self.page_data.s_t_low)
+        )
+        self.page_data.input_t_up.valueChanged.connect(
+            lambda _value: self.on_time_physical_value_changed(self.page_data.input_t_up, self.page_data.s_t_up)
+        )
+
+    def _time_slider_box_pairs(self):
+        return (
+            (self.page_data.s_t_low, self.page_data.input_t_low),
+            (self.page_data.s_t_up, self.page_data.input_t_up),
+        )
+
+    def _time_physical_range(self):
+        coords = self.core.coords.get("delay")
+        coords = np.asarray(coords, dtype=np.float64).flatten() if coords is not None else np.array([], dtype=np.float64)
+        finite = coords[np.isfinite(coords)]
+        if finite.size == 0:
+            return 0.0, 0.0, 0.01, 2
+
+        physical_min = float(np.min(finite))
+        physical_max = float(np.max(finite))
+        if np.isclose(physical_min, physical_max):
+            physical_max = physical_min + 0.01
+
+        step = max(float(self._compute_axis_spacing(finite, 0.01)), 1e-4)
+        decimals = min(6, max(2, int(np.ceil(-np.log10(step)))))
+        return physical_min, physical_max, step, decimals
+
+    def _time_physical_to_logical_index(self, physical_value):
+        coords = self.core.coords.get("delay")
+        coords_size = int(np.asarray(coords).size) if coords is not None else 0
+        if coords_size == 0:
+            return 0
+
+        max_val = max(coords_size - 1, 0)
+        logical_value = self.core.physical_to_logical("delay", float(physical_value))
+        return int(np.clip(round(logical_value), 0, max_val))
+
+    def _set_time_value_box_from_slider(self, value_box, logical_value):
+        if self.core.raw_data is None:
+            return
+
+        physical_value = self.core.logical_to_physical("delay", int(logical_value))
+        if physical_value < value_box.minimum():
+            value_box.setMinimum(float(physical_value))
+        elif physical_value > value_box.maximum():
+            value_box.setMaximum(float(physical_value))
+        blocker = QSignalBlocker(value_box)
+        try:
+            value_box.setValue(float(physical_value))
+        finally:
+            del blocker
+
+    def sync_time_value_boxes_from_sliders(self):
+        for slider, value_box in self._time_slider_box_pairs():
+            self._set_time_value_box_from_slider(value_box, int(slider.value()))
+
+    def on_time_slider_value_changed(self, value_box, logical_value):
+        if self.core.raw_data is None:
+            return
+        if self._syncing_controls or self._syncing_axis_value_boxes:
+            return
+
+        self._set_time_value_box_from_slider(value_box, int(logical_value))
+
+    def on_time_physical_value_changed(self, value_box, slider):
+        if self.core.raw_data is None:
+            return
+        if self._syncing_controls or self._syncing_axis_value_boxes:
+            return
+
+        logical_value = self._time_physical_to_logical_index(float(value_box.value()))
+        if int(slider.value()) == logical_value:
+            self._set_time_value_box_from_slider(value_box, logical_value)
+            self.on_time_integral_controls_changed(logical_value)
+            return
+
+        slider.setValue(logical_value)
+        self._set_time_value_box_from_slider(value_box, logical_value)
+
 
     def on_back(self):
         pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
@@ -5755,12 +5962,25 @@ class My3DAnalyzer(QWidget):
         container[name] = widget_state
 
     def _seed_time_integrated_slice_control_state(self, spec):
-        params = spec.params
-        axis_index = int(params["axis_index"])
-        slice_index = int(params["mid"])
+        slice_index = int(spec.params["mid"])
+        self._seed_time_integrated_axis_control_state(
+            spec,
+            axis_index=int(spec.params["axis_index"]),
+            low=slice_index,
+            up=slice_index,
+            mid=slice_index,
+        )
+
+    def _seed_time_integrated_axis_control_state(self, spec, *, axis_index, low, up, mid):
+        """时间积分结果页的轴向控件状态：区间同时决定切片位置与积分厚度。"""
+        axis_index = int(axis_index)
         axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
+        low = int(np.clip(int(low), 0, axis_max))
+        up = int(np.clip(int(up), 0, axis_max))
+        if low > up:
+            low, up = up, low
+        mid = int(np.clip(int(mid), low, up))
         physical_min, physical_max, _ = self._axis_physical_range(axis_index)
-        physical_value = float(self.core.logical_to_physical(axis_index, slice_index))
 
         control_state = spec.params.get("control_state") or self._capture_control_state()
         control_state["axis_source_mode"] = "time_integral"
@@ -5769,26 +5989,35 @@ class My3DAnalyzer(QWidget):
             "index": axis_index,
             "text": ["X轴", "Y轴", "Z轴"][axis_index],
         }
-        for slider_name in ("s_ax_low", "s_ax_up", "s_ax_mid"):
+        for slider_name, value in (("s_ax_low", low), ("s_ax_up", up), ("s_ax_mid", mid)):
             self._update_saved_widget_state(
                 data_state,
                 slider_name,
                 minimum=0,
                 maximum=axis_max,
-                value=slice_index,
+                value=value,
             )
-        for input_name in ("input_ax_low", "input_ax_up", "input_ax_mid"):
+        for input_name, value in (("input_ax_low", low), ("input_ax_up", up), ("input_ax_mid", mid)):
             self._update_saved_widget_state(
                 data_state,
                 input_name,
                 minimum=physical_min,
                 maximum=physical_max,
-                value=physical_value,
+                value=float(self.core.logical_to_physical(axis_index, value)),
             )
 
-        self._update_saved_widget_state(data_state, "s_t_low", value=int(params["source_t_low"]))
-        self._update_saved_widget_state(data_state, "s_t_up", value=int(params["source_t_up"]))
-        data_state["locked_half_width"] = 0
+        self._update_saved_widget_state(data_state, "s_t_low", value=int(spec.params["source_t_low"]))
+        self._update_saved_widget_state(data_state, "s_t_up", value=int(spec.params["source_t_up"]))
+        t_physical_min, t_physical_max, _, _ = self._time_physical_range()
+        for input_name, slider_name in (("input_t_low", "source_t_low"), ("input_t_up", "source_t_up")):
+            self._update_saved_widget_state(
+                data_state,
+                input_name,
+                minimum=t_physical_min,
+                maximum=t_physical_max,
+                value=float(self.core.logical_to_physical("delay", int(spec.params[slider_name]))),
+            )
+        data_state["locked_half_width"] = max(min(mid - low, up - mid), 0)
         control_state["data_process"] = data_state
         self._store_control_state(spec, control_state)
 
@@ -5894,6 +6123,70 @@ class My3DAnalyzer(QWidget):
         )
         self._seed_control_state_for_spec(spec)
         self._seed_time_integrated_slice_control_state(spec)
+        return spec
+
+    def _build_time_integrated_axis_spec(self, source_spec):
+        """2D 坐标轴积分页的时间积分版本：保留轴向与积分区间，数据源换成时间积分体。"""
+        if self._is_current_page(source_spec) and source_spec.page_kind == "axis_integral":
+            self._persist_axis_integral_page_state(source_spec)
+
+        params = self._resolved_axis_integral_params(source_spec)
+        if params is None:
+            return None
+
+        axis_index = int(params["axis_index"])
+        axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
+        low = int(params["low"])
+        up = int(params["up"])
+        mid = int(params["mid"])
+        t_low, t_up = sorted(
+            (int(self.page_data.s_t_low.value()), int(self.page_data.s_t_up.value()))
+        )
+        crop_rect = self._axis_crop_rect_from_params(source_spec.params)
+
+        spec_params = {
+            "axis_index": axis_index,
+            "axis_name": axis_name,
+            "low": low,
+            "up": up,
+            "mid": mid,
+            "source_mode": "time_integral",
+            "source_page_kind": "time_integral",
+            "source_t_index": int(self.page_image.slider_time.value()),
+            "source_t_low": t_low,
+            "source_t_up": t_up,
+        }
+
+        page_kind = "axis_integral"
+        title_label = f"{axis_name}积分"
+        if crop_rect is not None:
+            page_kind = "axis_integral_crop"
+            title_label = f"{axis_name}积分裁剪"
+            spec_params.update(
+                {
+                    "crop_k_low": int(crop_rect["x_low"]),
+                    "crop_k_up": int(crop_rect["x_up"]),
+                    "crop_e_low": int(crop_rect["y_low"]),
+                    "crop_e_up": int(crop_rect["y_up"]),
+                }
+            )
+
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=f"时间积分_{title_label}_{self._integral_length(t_low, t_up)}",
+            page_kind=page_kind,
+            source_module="data_process",
+            source_page_id=source_spec.page_id,
+            params=spec_params,
+        )
+        self._seed_control_state_for_spec(spec)
+        self._seed_time_integrated_axis_control_state(
+            spec,
+            axis_index=axis_index,
+            low=low,
+            up=up,
+            mid=mid,
+        )
         return spec
 
     def _build_axis_integral_spec(self, source_mode=None):
@@ -6365,8 +6658,17 @@ class My3DAnalyzer(QWidget):
             and self.home_slice_info is not None
         ):
             candidate_spec = self._build_time_integrated_slice_spec(current_spec)
+        elif current_spec is not None and current_spec.page_kind in {
+            "axis_integral",
+            "axis_integral_crop",
+        }:
+            # A 2D analysis view stays 2D: the derived page shows the same
+            # plane taken from the time-integrated volume.
+            candidate_spec = self._build_time_integrated_axis_spec(current_spec)
         else:
             candidate_spec = self._build_time_integral_spec()
+        if candidate_spec is None:
+            return
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
         self.left_workspace.add_page(candidate_spec)
 
@@ -6512,8 +6814,9 @@ class My3DAnalyzer(QWidget):
         if self.core.raw_data is None:
             return
 
-        current_index = int(self.page_data.combo_other.currentIndex())
-        if current_index == 0:
+        # 下拉项会随时间轴有无动态过滤，必须按文本分派而非固定下标。
+        selected_text = self.page_data.combo_other.currentText()
+        if selected_text == "切片内强度积分":
             if not self.core.has_time_axis:
                 self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
                 return
@@ -6521,11 +6824,11 @@ class My3DAnalyzer(QWidget):
                 self._show_message("未进行切片设置", "请先在“图像控制”页设置切片范围。", QMessageBox.Warning)
                 return
             spec = self._build_slice_dos_spec()
-        elif current_index == 1:
+        elif selected_text == "能级态密度":
             spec = self._build_energy_dos_spec()
-        elif current_index == 2:
+        elif selected_text == "EDC瀑布图":
             spec = self._build_waterfall_edc_spec()
-        elif current_index == 3:
+        elif selected_text == "单条 EDC 曲线":
             spec = self._build_edc_curve_spec()
         else:
             spec = self._build_second_derivative_spec()
@@ -6791,7 +7094,12 @@ class My3DAnalyzer(QWidget):
         levels = self._get_display_levels()
         mapping_mode = self.page_render.combo_map.currentText()
         current_cmap = self.page_render.get_selected_cmap()
-        self._last_ui_transfer_signature = (tuple(levels), str(mapping_mode), str(current_cmap))
+        self._last_ui_transfer_signature = (
+            tuple(levels),
+            str(mapping_mode),
+            str(current_cmap),
+            VisualEngine.locked_data_range(),
+        )
 
         if render_context["view"] == "3d":
             self.left_display_stack.setCurrentIndex(0)

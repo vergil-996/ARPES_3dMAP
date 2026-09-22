@@ -556,9 +556,9 @@ class ResultWorkspace(QWidget):
 
         self.content_frame = QFrame(self)
         self.content_frame.setObjectName("result_content_frame")
-        content_layout = QVBoxLayout(self.content_frame)
-        content_layout.setContentsMargins(14, 14, 14, 14)
-        content_layout.setSpacing(12)
+        self.content_layout = QVBoxLayout(self.content_frame)
+        self.content_layout.setContentsMargins(14, 14, 14, 14)
+        self.content_layout.setSpacing(12)
 
         self.header = QFrame(self.content_frame)
         self.header.setObjectName("result_header")
@@ -588,8 +588,8 @@ class ResultWorkspace(QWidget):
         self.close_button.clicked.connect(self.close_current_page)
         header_layout.addWidget(self.close_button)
 
-        content_layout.addWidget(self.header)
-        content_layout.addWidget(self.display_widget, stretch=1)
+        self.content_layout.addWidget(self.header)
+        self.content_layout.addWidget(self.display_widget, stretch=1)
 
         root.addWidget(self.sidebar)
         root.addWidget(self.content_frame, stretch=1)
@@ -672,6 +672,11 @@ class ResultWorkspace(QWidget):
         self.tree_popup.hide()
 
         self.nav_scroll.verticalScrollBar().valueChanged.connect(self._on_nav_scrolled)
+
+    def set_footer_widget(self, widget: QWidget):
+        """在画布正下方挂一个常驻底部条（如时间轴横条），随所有显示页共现。"""
+        self.footer_widget = widget
+        self.content_layout.addWidget(widget)
 
     def set_home_page(self, spec: AnalysisPageSpec):
         spec.closeable = False

@@ -242,6 +242,13 @@ class ControlPageBase(QWidget):
     def _apply_extra_widths(self, group_width, widths):
         """子类钩子：处理不在通用列表里的控件（如成对输入框）。"""
 
+    def relayout_scroll_content(self):
+        """卡片显隐动画期间/落定后同步滚动容器高度，避免挤压相邻卡片。"""
+        if not hasattr(self, "scroll"):
+            return
+        self.container.adjustSize()
+        align_scroll_content(self.scroll, self.container)
+
     def _apply_adaptive_layout(self):
         if not hasattr(self, "scroll"):
             return

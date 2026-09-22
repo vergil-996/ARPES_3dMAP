@@ -14,26 +14,59 @@ class VisualEngine:
     """渲染与绘图引擎，负责所有 3D 和 2D 的视觉呈现"""
 
     COLORBAR_TITLE = "Intensity"
+
+    # 色带锁定状态。_last_data_range 记录最近一次渲染实际使用的数据范围
+    # (data_min, data_max)；_locked_data_range 非空时，_level_info 不再按
+    # 当前帧数据重新归一化，而是沿用锁定时刻捕获的范围分配颜色。
+    _last_data_range = None
+    _locked_data_range = None
+
+    @classmethod
+    def lock_data_range(cls):
+        """按当前色带冻结数据范围；返回是否捕获到已渲染数据的范围。"""
+        if cls._last_data_range is None:
+            return False
+        cls._locked_data_range = (
+            float(cls._last_data_range[0]),
+            float(cls._last_data_range[1]),
+        )
+        return True
+
+    @classmethod
+    def unlock_data_range(cls):
+        """解除色带锁定，恢复按每帧数据自动归一化。"""
+        cls._locked_data_range = None
+
+    @classmethod
+    def locked_data_range(cls):
+        """当前锁定的数据范围；未锁定时为 None。"""
+        return cls._locked_data_range
+
     @staticmethod
     def _level_info(data, levels_params, include_zero=False):
         black, gamma, white = levels_params
-        source = np.asarray(data)
-        if source.size == 0:
-            d_min, d_max = 0.0, 1.0
+        locked = VisualEngine._locked_data_range
+        if locked is not None:
+            d_min, d_max = float(locked[0]), float(locked[1])
         else:
-            try:
-                d_min, d_max = float(np.nanmin(source)), float(np.nanmax(source))
-            except (TypeError, ValueError):
+            source = np.asarray(data)
+            if source.size == 0:
                 d_min, d_max = 0.0, 1.0
-            if not np.isfinite(d_min) or not np.isfinite(d_max):
-                finite = source[np.isfinite(source)]
-                if finite.size == 0:
+            else:
+                try:
+                    d_min, d_max = float(np.nanmin(source)), float(np.nanmax(source))
+                except (TypeError, ValueError):
                     d_min, d_max = 0.0, 1.0
-                else:
-                    d_min, d_max = float(np.min(finite)), float(np.max(finite))
-        if include_zero:
-            d_min = min(d_min, 0.0)
-            d_max = max(d_max, 0.0)
+                if not np.isfinite(d_min) or not np.isfinite(d_max):
+                    finite = source[np.isfinite(source)]
+                    if finite.size == 0:
+                        d_min, d_max = 0.0, 1.0
+                    else:
+                        d_min, d_max = float(np.min(finite)), float(np.max(finite))
+            if include_zero:
+                d_min = min(d_min, 0.0)
+                d_max = max(d_max, 0.0)
+            VisualEngine._last_data_range = (d_min, d_max)
 
         span = d_max - d_min
         if span <= 0:
@@ -532,6 +565,7 @@ class VisualEngine:
                 float(b),
                 float(g),
                 float(w),
+                VisualEngine._locked_data_range,
             )
             title = slice_info.get("title_override", title)
             ext = slice_info.get("extent_override", ext)
@@ -877,6 +911,7 @@ class VolumeRenderSession:
             str(cmap),
             self.data_token,
             bool(include_zero),
+            VisualEngine._locked_data_range,
         )
         if signature == self._style_signature:
             return
