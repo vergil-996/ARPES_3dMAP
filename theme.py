@@ -306,7 +306,7 @@ def section_label_qss() -> str:
 
 
 def nav_tab_qss() -> str:
-    """右栏页签（图像控制 / 渲染控制 / 处理分析）的胶囊式 QSS。
+    """右栏页签（渲染控制 / 处理分析）的胶囊式 QSS。
 
     替代 SiCapsuleButton：设计稿要求 inactive=抬升面灰、active=主色
     柔光底 + 主色字，无任何徽章动画。

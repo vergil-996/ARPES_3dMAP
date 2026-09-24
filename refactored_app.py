@@ -32,9 +32,6 @@ from PyQt5.QtWidgets import (
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from matplotlib.backend_bases import MouseButton
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import RectangleSelector
 from pyvistaqt import QtInteractor
 from scipy.io import savemat
 from siui.components.tooltip import ToolTipWindow
@@ -42,11 +39,13 @@ from siui.core import SiGlobal
 
 import theme
 from ui_controls import ActionButton
+from crop_controls import CropController
+from crop_integration import CropInteractionMixin
+from crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from analyzer_core import AnalyzerCore
 from blank_control_page import BlankControlPage
 from data_trans import convert as convert_mat_to_npz
 from page_data_process_v2 import DataProcessPage
-from page_image_control_v2 import ImageControlPage
 from page_render_control import RenderControlPage
 from plot_coordinate_tooltip import PlotCoordinateTooltip
 from compute_backends import ArrayLRUCache, BackendManager
@@ -83,7 +82,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(QWidget):
+class My3DAnalyzer(CropInteractionMixin, QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
@@ -166,7 +165,6 @@ class My3DAnalyzer(QWidget):
         self.current_render_context = None
         self.axis_crop_selector = None
         self.axis_crop_overlay = None
-        self.axis_crop_candidates = {}
         self.axis_crop_canvas_cid = None
 
         if "TOOL_TIP" not in SiGlobal.siui.windows:
@@ -184,6 +182,7 @@ class My3DAnalyzer(QWidget):
         )
 
         self.init_ui()
+        self.crop_controller = CropController(self)
         self.toast_manager = ToastManager(self)
         self.volume_session = VolumeRenderSession(self.plotter)
         try:
@@ -233,10 +232,9 @@ class My3DAnalyzer(QWidget):
         self.showMaximized()
         self.page_container.setCurrentIndex(1)
         self.showNormal()
-        self.page_container.setCurrentIndex(2)
         self.showMaximized()
         self.page_container.setCurrentIndex(0)
-        self.btn_page1.setChecked(True)
+        self.btn_page2.setChecked(True)
         self.updateGeometry()
         self.setWindowOpacity(1)
         self.activateWindow()
@@ -261,7 +259,6 @@ class My3DAnalyzer(QWidget):
             _bind("Ctrl+S", self.open_publication_dialog),
             _bind("Ctrl+1", lambda: self._select_control_page(0)),
             _bind("Ctrl+2", lambda: self._select_control_page(1)),
-            _bind("Ctrl+3", lambda: self._select_control_page(2)),
             _bind("Ctrl+W", self.left_workspace.close_current_page),
         ]
 
@@ -270,7 +267,7 @@ class My3DAnalyzer(QWidget):
         if self._focus_accepts_number_input():
             return True
         focus_widget = QApplication.focusWidget()
-        if focus_widget is None or focus_widget is self.page_image.slider_time:
+        if focus_widget is None or focus_widget is self.timeline_bar.slider_time:
             return False
         class_names = []
         current_class = focus_widget.__class__
@@ -292,7 +289,7 @@ class My3DAnalyzer(QWidget):
         if self._focus_blocks_frame_step():
             return False
 
-        slider = self.page_image.slider_time
+        slider = self.timeline_bar.slider_time
         if slider.maximum() <= slider.minimum():
             return False
         step = 10 if event.modifiers() & Qt.ShiftModifier else 1
@@ -304,6 +301,8 @@ class My3DAnalyzer(QWidget):
         return True
 
     def eventFilter(self, watched, event):
+        if self._crop_event_filter(watched, event):
+            return True
         if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
             self._position_render_status()
         if event.type() == QEvent.KeyPress:
@@ -589,18 +588,15 @@ class My3DAnalyzer(QWidget):
         nav_layout.setContentsMargins(12, 0, 12, 4)
         nav_layout.setSpacing(6)
 
-        self.btn_page1 = QPushButton("图像控制", self)
-        self.btn_page1.setCheckable(True)
-        self.btn_page1.setChecked(True)
-
         self.btn_page2 = QPushButton("渲染控制", self)
         self.btn_page2.setCheckable(True)
+        self.btn_page2.setChecked(True)
 
         self.btn_page3 = QPushButton("处理分析", self)
         self.btn_page3.setCheckable(True)
 
         self.button_group = QButtonGroup(self)
-        for btn in [self.btn_page1, self.btn_page2, self.btn_page3]:
+        for btn in [self.btn_page2, self.btn_page3]:
             self.button_group.addButton(btn)
             btn.setFixedHeight(32)
             btn.setCursor(Qt.PointingHandCursor)
@@ -611,32 +607,27 @@ class My3DAnalyzer(QWidget):
         right_vbox.addWidget(nav_group)
 
         self.page_container = QStackedWidget()
-        self.page_image = ImageControlPage()
         self.page_render = RenderControlPage()
         self.page_data = DataProcessPage()
 
-        self.page_container.addWidget(self.page_image)
         self.page_container.addWidget(self.page_render)
         self.page_container.addWidget(self.page_data)
 
         right_vbox.addWidget(self.page_container)
 
-        # 画布正下方的时间轴横条：托管 page_image 创建的时间轴控件，
-        # 所有信号/快捷键仍引用 page_image.slider_time 等属性，无需改动。
+        # 画布正下方的底条：自己创建并持有时间轴控件与画布视图控件
+        # （显示坐标 / E轴翻转 / Z轴旋转，右对齐），主窗口的信号/快捷键/控件
+        # 状态都指向 timeline_bar 上的同名属性。底条本身常驻可见。
         self.timeline_bar = TimelineBar(self.left_workspace)
-        self.timeline_bar.attach_controls(
-            self.page_image.slider_time,
-            self.page_image.input_time,
-            self.page_image.time_hint,
-        )
         self.left_workspace.set_footer_widget(self.timeline_bar)
-        # 加载数据前横条处于待机能态。
-        self.page_image.slider_time.setEnabled(False)
-        self.page_image.input_time.setEnabled(False)
-        self.page_image.time_hint.setText("加载数据后可浏览时间轴")
-        # 启动时还没有数据：时间轴相关 UI（横条、“对时间轴积分”卡片、
-        # “其他积分”里的时间相关项）默认隐藏，加载含时间轴的数据后再平滑展开。
-        self.timeline_bar.set_bar_visible(False, animate=False)
+        # 加载数据前时间轴部分处于待机能态。
+        self.timeline_bar.slider_time.setEnabled(False)
+        self.timeline_bar.input_time.setEnabled(False)
+        self.timeline_bar.time_hint.setText("加载数据后可浏览时间轴")
+        # 启动时还没有数据：时间轴相关 UI（底条里的时间轴分组、“对时间轴积分”
+        # 卡片、“其他积分”里的时间相关项）默认隐藏，加载含时间轴的数据后再平滑
+        # 展开；底条上的视图控件与时间轴无关，始终保留。
+        self.timeline_bar.set_timeline_visible(False, animate=False)
         self.page_data.set_time_axis_available(False, animate=False)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
@@ -704,6 +695,11 @@ class My3DAnalyzer(QWidget):
         self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
         self.btn_tb_shot.setToolTip("选择截图样式并预览导出（仅影响截图，不改变左侧视图）")
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
+        self.btn_tb_crop = _make_tb_btn("裁剪", "secondary", 80)
+        self.btn_tb_crop.setCheckable(True)
+        self.btn_tb_crop.setStyleSheet(self.btn_tb_crop.styleSheet() +
+            f"QPushButton:checked {{ background: {theme.ACCENT}; color: {theme.ACCENT_ON}; border-color: {theme.ACCENT}; }}")
+        self.btn_tb_crop.setToolTip("开启裁剪：拖动选区，右键编辑范围并裁剪；Esc 退出")
         self.btn_tb_lock = _make_tb_btn("锁定色带", "secondary", 104)
         self.btn_tb_lock.setCheckable(True)
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
@@ -716,6 +712,7 @@ class My3DAnalyzer(QWidget):
         row.addWidget(self.btn_tb_load)
         row.addWidget(self.btn_tb_shot)
         row.addWidget(self.btn_tb_export)
+        row.addWidget(self.btn_tb_crop)
         row.addWidget(self.btn_tb_lock)
 
         row.addStretch(1)
@@ -885,7 +882,7 @@ class My3DAnalyzer(QWidget):
             pass
 
     def _apply_pending_e_flip_camera(self):
-        desired = bool(self.page_image.switch_flip.isChecked())
+        desired = bool(self.timeline_bar.switch_flip.isChecked())
         applied = bool(getattr(self, "_camera_e_flip_applied", False))
         if desired == applied:
             return
@@ -1036,7 +1033,7 @@ class My3DAnalyzer(QWidget):
 
         params = spec.params
         source_mode = "frame"
-        frame_index = int(params.get("source_t_index", params.get("t_index", self.page_image.slider_time.value())))
+        frame_index = int(params.get("source_t_index", params.get("t_index", self.timeline_bar.slider_time.value())))
         t_low = int(params.get("source_t_low", params.get("t_low", self.page_data.s_t_low.value())))
         t_up = int(params.get("source_t_up", params.get("t_up", self.page_data.s_t_up.value())))
 
@@ -1417,25 +1414,21 @@ class My3DAnalyzer(QWidget):
         )
 
     def bind_all_events(self):
-        self.btn_page1.clicked.connect(lambda: self._select_control_page(0))
-        self.btn_page2.clicked.connect(lambda: self._select_control_page(1))
-        self.btn_page3.clicked.connect(lambda: self._select_control_page(2))
+        self.btn_page2.clicked.connect(lambda: self._select_control_page(0))
+        self.btn_page3.clicked.connect(lambda: self._select_control_page(1))
 
-        self.page_image.btn_load.clicked.connect(self.on_load)
-        self.page_image.btn_cut.clicked.connect(self.on_cut)
-        self.page_image.btn_export.clicked.connect(self.export_current_result)
-        self.page_image.btn_save.clicked.connect(self.open_publication_dialog)
-        self.page_image.btn_back.clicked.connect(self.on_back)
-        self.page_image.slider_time.valueChanged.connect(self.on_time_slider_changed)
-        self.page_image.slider_time.sliderReleased.connect(self.flush_time_slider_refresh)
-        self.page_image.input_time.editingFinished.connect(self.flush_time_slider_refresh)
-        self.page_image.switch_axes.toggled.connect(
+        self.crop_controller.apply_requested.connect(self.on_cut)
+        self.crop_controller.selection_changed.connect(self._on_crop_selection_changed)
+        self.timeline_bar.slider_time.valueChanged.connect(self.on_time_slider_changed)
+        self.timeline_bar.slider_time.sliderReleased.connect(self.flush_time_slider_refresh)
+        self.timeline_bar.input_time.editingFinished.connect(self.flush_time_slider_refresh)
+        self.timeline_bar.switch_axes.toggled.connect(
             lambda _checked: self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
         )
-        self.page_image.switch_coord.toggled.connect(self.on_toggle_interactive_box)
-        self.page_image.switch_flip.toggled.connect(self.on_toggle_e_flip)
-        self.page_image.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
-        self.page_image.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
+        self.btn_tb_crop.toggled.connect(self.on_toggle_interactive_box)
+        self.timeline_bar.switch_flip.toggled.connect(self.on_toggle_e_flip)
+        self.timeline_bar.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
+        self.timeline_bar.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
 
         self.page_render.btn_apply_cmap.clicked.connect(
             lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
@@ -1510,9 +1503,14 @@ class My3DAnalyzer(QWidget):
         self.last_visual_page_id = home_spec.page_id
         home_spec.params["control_state"] = self._capture_control_state()
 
+    def _control_page_buttons(self):
+        return [self.btn_page2, self.btn_page3]
+
     def _select_control_page(self, index):
+        # 夹紧下标：旧设置或脚本可能仍传来三标签页时代的编号。
+        index = max(0, min(int(index), self.page_container.count() - 1))
         self.page_container.setCurrentIndex(index)
-        [self.btn_page1, self.btn_page2, self.btn_page3][index].setChecked(True)
+        self._control_page_buttons()[index].setChecked(True)
         if not self._syncing_controls:
             self._persist_page_ui_state()
 
@@ -1692,7 +1690,7 @@ class My3DAnalyzer(QWidget):
         return {
             "active_control_tab": int(self.page_container.currentIndex()),
             "axis_source_mode": self.axis_source_mode,
-            "image": self.page_image.export_state(),
+            "image": self.timeline_bar.export_state(),
             "render": self.page_render.export_state(),
             "denoise_detail": self.page_control_blank.export_state(),
             "data_process": self.page_data.export_state(),
@@ -1794,7 +1792,7 @@ class My3DAnalyzer(QWidget):
             self._persist_waterfall_page_state(spec)
         elif spec.page_kind == "energy_dos":
             if spec.params.get("source_page_kind") != "time_integral":
-                spec.params["t_index"] = int(self.page_image.slider_time.value())
+                spec.params["t_index"] = int(self.timeline_bar.slider_time.value())
 
     def _persist_page_ui_state(self, spec=None):
         owner_spec = self._control_state_owner(spec)
@@ -1821,8 +1819,8 @@ class My3DAnalyzer(QWidget):
                 self._restore_home_page_state(owner_spec)
 
             self.axis_source_mode = control_state.get("axis_source_mode", self._page_axis_source_mode(owner_spec))
-            self.page_image.restore_state(control_state.get("image"), block_signals=True)
-            self.rotation_angle = self.page_image.get_rotation_angle()
+            self.timeline_bar.restore_state(control_state.get("image"), block_signals=True)
+            self.rotation_angle = self.timeline_bar.get_rotation_angle()
             self.page_render.restore_state(
                 self._render_state_with_global_denoise(
                     control_state.get("render"),
@@ -2635,53 +2633,6 @@ class My3DAnalyzer(QWidget):
         labels = ["X轴下限", "X轴上限", "Y轴下限", "Y轴上限", "Z轴下限", "Z轴上限"]
         return {label: str(logical_bounds[idx]) for idx, label in enumerate(labels)}
 
-    def _sync_slice_edits_from_logical_bounds(self, logical_bounds=None):
-        if self.core.raw_data is None:
-            return
-
-        bounds = logical_bounds if logical_bounds is not None else self._get_full_logical_bounds()
-        if bounds is None:
-            return
-
-        self.precise_logical_bounds = list(bounds)
-        physical_bounds = self.core.logical_bounds_to_physical_bounds(bounds)
-        self.page_image.set_slice_values(physical_bounds)
-        self.last_synced_slice_texts = self.page_image.get_slice_values()
-
-    def _sync_slice_edits_from_render_bounds(self, render_bounds):
-        shape = self._full_domain_spatial_shape()
-        if shape is None:
-            return
-
-        logical_bounds = self.core.render_to_logical_bounds(render_bounds, shape)
-        self._sync_slice_edits_from_logical_bounds(logical_bounds)
-
-    def _get_render_bounds_for_box(self, logical_bounds=None):
-        shape = self._full_domain_spatial_shape()
-        if shape is None:
-            return None
-
-        if logical_bounds is not None:
-            bounds = logical_bounds
-        elif self.precise_logical_bounds is not None:
-            bounds = self.precise_logical_bounds
-        else:
-            bounds = self.clip_ranges
-        if bounds is None:
-            bounds = self._get_full_logical_bounds()
-
-        return self.core.logical_to_render_bounds(bounds, shape)
-
-    def _can_show_interactive_box(self):
-        active_spec = self.left_workspace.current_spec()
-        return (
-            active_spec is not None
-            and active_spec.page_kind == "home"
-            and self.page_image.switch_coord.isChecked()
-            and self.core.raw_data is not None
-            and self.left_display_stack.currentIndex() == 0
-        )
-
     def _rebuild_interactive_box(self, logical_bounds=None):
         if not self._can_show_interactive_box():
             return
@@ -2766,7 +2717,7 @@ class My3DAnalyzer(QWidget):
         return bounds
 
     def _render_context_for_visual_flip(self, context):
-        if not self.page_image.switch_flip.isChecked() or context is None:
+        if not self.timeline_bar.switch_flip.isChecked() or context is None:
             return context
 
         view = context.get("view")
@@ -2969,12 +2920,14 @@ class My3DAnalyzer(QWidget):
             return None
 
         if spec.page_kind == self.COMPARISON_PAGE_KIND:
-            base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+            context = self._compute_render_context(spec)
+            curves = context.get("curves", []) if context else []
+            base_curve = self._normalize_curve_snapshot(curves[0] if curves else None)
             if base_curve is None:
                 return None
             base_curve["curve_kind"] = kind
             overlay_curves = []
-            for curve in spec.params.get("overlay_curves", []):
+            for curve in curves[1:]:
                 normalized = self._normalize_curve_snapshot(curve)
                 if normalized is None:
                     continue
@@ -3159,6 +3112,9 @@ class My3DAnalyzer(QWidget):
         return menu, global_pos
 
     def _show_curve_context_menu(self, pos):
+        if self._crop_enabled():
+            self._show_crop_popup(self.canvas_2d.mapToGlobal(pos))
+            return
         context = self.current_render_context
         show_curve_actions = (
             context is not None
@@ -3184,6 +3140,9 @@ class My3DAnalyzer(QWidget):
         menu.exec_(global_pos)
 
     def _show_main_context_menu(self, pos):
+        if self._crop_enabled():
+            self._show_crop_popup(self.plotter.mapToGlobal(pos))
+            return
         menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
         menu.exec_(global_pos)
 
@@ -3491,13 +3450,15 @@ class My3DAnalyzer(QWidget):
         )
 
     def _set_time_axis_ui_visible(self, visible, *, animate=True):
-        """时间轴相关 UI（时间轴横条、“对时间轴积分”卡片、“其他积分”里的
-        时间相关项）只在数据含时间轴时出现，切换时带高度/淡入淡出动画。"""
+        """时间轴相关 UI（底条里的时间轴分组、“对时间轴积分”卡片、“其他积分”
+        里的时间相关项）只在数据含时间轴时出现，切换时带高度/淡入淡出动画。
+
+        底条本身常驻：右侧的显示坐标 / E轴翻转 / Z轴旋转与时间轴无关。"""
         # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
         # RuntimeError；实例 __dict__ 查询则安全。
         timeline_bar = self.__dict__.get("timeline_bar")
         if timeline_bar is not None:
-            timeline_bar.set_bar_visible(visible, animate=animate)
+            timeline_bar.set_timeline_visible(visible, animate=animate)
         page_data = self.__dict__.get("page_data")
         if page_data is not None:
             page_data.set_time_axis_available(visible, animate=animate)
@@ -3506,9 +3467,14 @@ class My3DAnalyzer(QWidget):
         has_time_axis = self._has_time_axis()
         active_spec = self._control_state_owner(self.left_workspace.current_spec())
         is_enabled = has_time_axis and not self._is_time_locked_page(active_spec)
-        self.page_image.slider_time.setEnabled(is_enabled)
-        self.page_image.input_time.setEnabled(is_enabled)
-        if hasattr(self.page_image, "time_hint"):
+        # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
+        # RuntimeError；实例 __dict__ 查询则安全。
+        bar = self.__dict__.get("timeline_bar")
+        if bar is None:
+            return
+        bar.slider_time.setEnabled(is_enabled)
+        bar.input_time.setEnabled(is_enabled)
+        if hasattr(bar, "time_hint"):
             if is_enabled:
                 hint = "当前帧 · ← → 逐帧切换"
             elif self.core.raw_data is None:
@@ -3517,7 +3483,7 @@ class My3DAnalyzer(QWidget):
                 hint = "当前结果已固定时间范围"
             else:
                 hint = "静态数据 · 无时间维度"
-            self.page_image.time_hint.setText(hint)
+            bar.time_hint.setText(hint)
 
     def _configure_time_controls(self):
         has_time_axis = self._has_time_axis()
@@ -3539,9 +3505,11 @@ class My3DAnalyzer(QWidget):
             and active_spec is not None
             and active_spec.page_kind not in {"control_panel", self.COMPARISON_PAGE_KIND}
         )
-        self.page_image.btn_export.setEnabled(can_export)
         self.btn_tb_export.setEnabled(can_export)
         self.btn_tb_shot.setEnabled(can_capture)
+        crop_button = self.__dict__.get("btn_tb_crop")
+        if crop_button is not None:
+            crop_button.setEnabled(has_data and active_spec is not None and active_spec.page_kind != "control_panel")
 
     @staticmethod
     def _format_filename_number(value):
@@ -3621,17 +3589,6 @@ class My3DAnalyzer(QWidget):
             "y_low": int(rect["y_low"]),
             "y_up": int(rect["y_up"]),
         }
-
-    @staticmethod
-    def _rect_matches_plot_bounds(rect, plot_bounds):
-        if rect is None or plot_bounds is None:
-            return False
-        return (
-            int(rect["x_low"]) == int(plot_bounds["x_low"])
-            and int(rect["x_up"]) == int(plot_bounds["x_up"])
-            and int(rect["y_low"]) == int(plot_bounds["y_low"])
-            and int(rect["y_up"]) == int(plot_bounds["y_up"])
-        )
 
     @staticmethod
     def _intersect_plot_rects(rect_a, rect_b):
@@ -3719,8 +3676,6 @@ class My3DAnalyzer(QWidget):
         crop_rect = None
         if spec.page_kind == "axis_integral_crop":
             crop_rect = self._axis_crop_rect_from_params(spec.params)
-        else:
-            crop_rect = self._copy_plot_rect(self.axis_crop_candidates.get(spec.page_id))
 
         slice_info = {
             "axis": axis_index,
@@ -3840,27 +3795,6 @@ class My3DAnalyzer(QWidget):
                 )
                 updated["compact_plot_logical_bounds"] = compact_crop
         return updated
-
-    def _axis_crop_title(self, params, crop_rect):
-        axis_index = int(params["axis_index"])
-        axis_info = self._axis_plot_info(axis_index)
-        crop_rect = self._normalize_plot_rect(crop_rect)
-        k_low = self._format_filename_number(
-            self.core.logical_to_physical(axis_info["x_key"], int(crop_rect["x_low"]))
-        )
-        k_up = self._format_filename_number(
-            self.core.logical_to_physical(axis_info["x_key"], int(crop_rect["x_up"]))
-        )
-        e_low = self._format_filename_number(
-            self.core.logical_to_physical(axis_info["y_key"], int(crop_rect["y_low"]))
-        )
-        e_up = self._format_filename_number(
-            self.core.logical_to_physical(axis_info["y_key"], int(crop_rect["y_up"]))
-        )
-        return (
-            f"{axis_info['integrated_axis_label']}-Integral Crop "
-            f"[{axis_info['x_label']} {k_low}~{k_up}, {axis_info['y_label']} {e_low}~{e_up}]"
-        )
 
     def _get_axis_integral_export_context(self, spec, raw_data, coords):
         if raw_data is None:
@@ -4163,7 +4097,7 @@ class My3DAnalyzer(QWidget):
         if raw_data is None:
             return None
 
-        t_idx = int(self.page_image.slider_time.value())
+        t_idx = int(self.timeline_bar.slider_time.value())
         data_3d = self._get_rotated_frame(raw_data, t_idx)
 
         if self.home_slice_info is not None:
@@ -4204,7 +4138,7 @@ class My3DAnalyzer(QWidget):
         params = params or {}
         return {
             "source_t_index": int(
-                params.get("source_t_index", int(self.page_image.slider_time.value()))
+                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
             ),
             "source_t_low": int(
                 params.get("source_t_low", int(self.page_data.s_t_low.value()))
@@ -4255,7 +4189,7 @@ class My3DAnalyzer(QWidget):
                     context["data_scope"] = descriptor
                 return context
 
-        t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+        t_index = int(params.get("source_t_index", int(self.timeline_bar.slider_time.value())))
         context = {"view": "3d", "data": self._get_rotated_frame(raw_data, t_index)}
         descriptor = scoped_descriptor_from_array(context["data"])
         if descriptor is not None:
@@ -4405,7 +4339,7 @@ class My3DAnalyzer(QWidget):
             }
 
         if self._is_current_page(spec):
-            t_index = int(self.page_image.slider_time.value())
+            t_index = int(self.timeline_bar.slider_time.value())
         else:
             t_index = int(spec.params["t_index"])
         data_3d = self._get_rotated_frame(raw_data, t_index)
@@ -4527,7 +4461,7 @@ class My3DAnalyzer(QWidget):
             )
             context["source_t_indices"] = (t_low, t_up)
         else:
-            t_index = int(params.get("source_t_index", int(self.page_image.slider_time.value())))
+            t_index = int(params.get("source_t_index", int(self.timeline_bar.slider_time.value())))
             context["source_t_index"] = t_index
             context["source_t_value"] = float(coords["delay"][t_index])
         return context
@@ -4830,7 +4764,7 @@ class My3DAnalyzer(QWidget):
             }
         else:
             t_index = int(
-                params.get("source_t_index", int(self.page_image.slider_time.value()))
+                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
             )
             data_3d = self._get_rotated_frame(raw_data, t_index)
             source_signature = ("frame", t_index)
@@ -4876,7 +4810,7 @@ class My3DAnalyzer(QWidget):
         compact_plot_bounds = None
         if source_kind == "home":
             t_index = int(
-                params.get("source_t_index", int(self.page_image.slider_time.value()))
+                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
             )
             data_3d = self._get_rotated_frame(raw_data, t_index)
             slice_axis = int(params.get("slice_axis", -1))
@@ -5020,7 +4954,9 @@ class My3DAnalyzer(QWidget):
         context = self._build_axis_integral_base_context(spec, raw_data, coords)
         if context is None:
             return None
-        return self._apply_axis_crop_to_context(context, self._axis_crop_rect_from_params(spec.params))
+        rect = (spec.params.get("crop_base_rect") if spec.params.get("crop_regions")
+                else self._axis_crop_rect_from_params(spec.params))
+        return self._apply_axis_crop_to_context(context, rect)
 
     def _waterfall_crop_suffix(self, params):
         crop_rect = self._axis_crop_rect_from_params(params)
@@ -5132,6 +5068,12 @@ class My3DAnalyzer(QWidget):
         }
 
     def _compute_render_context(self, spec):
+        context = self._compute_base_render_context(spec)
+        if context is None:
+            return None
+        return apply_crop_regions(context, spec.params.get("crop_regions", ()))
+
+    def _compute_base_render_context(self, spec):
         if spec.page_kind == "control_panel":
             return {"view": "config"}
         if spec.page_kind == self.COMPARISON_PAGE_KIND:
@@ -5199,7 +5141,8 @@ class My3DAnalyzer(QWidget):
 
     def _style_1d_axes(self, context, *, ylabel):
         display_title = self._display_title_for_1d_plot(context["title"])
-        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12)
+        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12,
+                             fontfamily=["DejaVu Sans", "Microsoft YaHei"])
         self.ax_2d.set_xlabel(context["xlabel"], color="white")
         self.ax_2d.set_ylabel(ylabel, color="white")
         self.ax_2d.tick_params(colors="white", labelsize=9)
@@ -5281,8 +5224,11 @@ class My3DAnalyzer(QWidget):
         offset_step = float(context.get("offset_step", 1.2))
         xaxis_transform = self.ax_2d.get_xaxis_transform()
 
+        offsets = waterfall_offsets(context)
         for idx, curve in enumerate(curves):
-            offset = idx * offset_step
+            offset = float(offsets[idx])
+            if not np.any(np.isfinite(curve)):
+                continue
             self.ax_2d.plot(curve + offset, energy_axis, color="black", linewidth=1.5)
             self.ax_2d.text(
                 offset + 0.5,
@@ -5301,13 +5247,16 @@ class My3DAnalyzer(QWidget):
         self.ax_2d.set_ylabel(context["ylabel"], color="white")
         self.ax_2d.tick_params(colors="white")
         self.ax_2d.set_xlim(-0.1, max(1.25, (len(curves) - 1) * offset_step + 1.1))
-        self.fig.tight_layout(rect=[0, 0, 1, 0.95])
+        self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
     def global_refresh(self):
         self.request_refresh(RefreshCause.PAGE_ACTIVATION, RenderQuality.EXACT, immediate=True)
 
     def on_result_page_activated(self, page_id):
+        self.crop_controller.popup.hide()
+        self._clear_axis_crop_interaction(redraw=False)
+        self._clear_interactive_box()
         previous_page_id = self.active_page_spec.page_id if self.active_page_spec is not None else None
         if previous_page_id is not None and previous_page_id != page_id:
             self.refresh_coordinator.cancel_page(previous_page_id)
@@ -5317,6 +5266,7 @@ class My3DAnalyzer(QWidget):
             return
 
         self.active_page_spec = spec
+        self._activate_crop_context(spec, None)
         if spec.page_kind != "control_panel":
             self.last_visual_page_id = spec.page_id
         self._sync_controls_from_page(spec)
@@ -5334,12 +5284,12 @@ class My3DAnalyzer(QWidget):
 
         self._refresh_core_display_state()
         self.update_ax_slider_range()
-        self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
+        self._sync_slice_edits_from_logical_bounds(self.precise_logical_bounds or self.clip_ranges)
         self.global_refresh()
 
     def on_rotation_angle_changed(self):
         """Handle edit finished in the Z-axis rotation angle spin box."""
-        angle = self.page_image.get_rotation_angle()
+        angle = self.timeline_bar.get_rotation_angle()
         self.rotation_angle = round(angle, 2)
         self._clear_axis_prefix_cache()
 
@@ -5355,7 +5305,7 @@ class My3DAnalyzer(QWidget):
         if self._syncing_controls:
             return
         try:
-            angle = self.page_image.get_rotation_angle()
+            angle = self.timeline_bar.get_rotation_angle()
         except (TypeError, ValueError):
             return
         self.rotation_angle = round(float(angle), 2)
@@ -5584,7 +5534,7 @@ class My3DAnalyzer(QWidget):
     def _restore_initial_controls_after_load(self):
         self._syncing_controls = True
         try:
-            self.page_image.restore_state(self.initial_control_state.get("image"), block_signals=True)
+            self.timeline_bar.restore_state(self.initial_control_state.get("image"), block_signals=True)
             self.page_render.restore_state(self.initial_control_state.get("render"), block_signals=True)
             self.page_control_blank.restore_state(self.initial_control_state.get("denoise_detail"), block_signals=True)
             self.page_data.restore_state(self.initial_control_state.get("data_process"), block_signals=True)
@@ -5597,9 +5547,9 @@ class My3DAnalyzer(QWidget):
         slider_max = max(t_max, 1)
         time_func = lambda value: f"Delay: {self.core.coords['delay'][min(int(value), len(self.core.coords['delay']) - 1)]:.4f} fs"
 
-        self.page_image.slider_time.setRange(0, slider_max)
-        self.page_image.slider_time.setValue(0)
-        self.page_image.slider_time.setToolTipConvertionFunc(time_func)
+        self.timeline_bar.slider_time.setRange(0, slider_max)
+        self.timeline_bar.slider_time.setValue(0)
+        self.timeline_bar.slider_time.setToolTipConvertionFunc(time_func)
 
         # 注意不能用 getattr(self, ...)：部分测试用 __new__ 绕过 QWidget 构造，
         # sip 属性查找会抛 RuntimeError；实例 __dict__ 查询则安全。
@@ -5626,6 +5576,8 @@ class My3DAnalyzer(QWidget):
             self._syncing_axis_value_boxes = False
 
     def _reset_workspace_after_load(self):
+        self.crop_controller.clear()
+        self.btn_tb_crop.setChecked(False)
         self.update_ax_slider_range()
         self._sync_slice_edits_from_logical_bounds()
         self._configure_time_controls()
@@ -5867,59 +5819,6 @@ class My3DAnalyzer(QWidget):
         self._set_time_value_box_from_slider(value_box, logical_value)
 
 
-    def on_back(self):
-        pending_roi_scope_id = self.__dict__.get("_pending_roi_scope_id")
-        if pending_roi_scope_id:
-            self._discard_roi_scope(
-                pending_roi_scope_id,
-                cancel_task=True,
-                clear_cache=False,
-                clear_pending=True,
-            )
-
-        current_spec = self.left_workspace.current_spec()
-        home_spec = self.left_workspace.home_spec()
-
-        # On any derived page (crop page or analysis result), "back" returns to
-        # its source parent instead of mutating the page in place.
-        if (
-            current_spec is not None
-            and home_spec is not None
-            and current_spec.page_id != home_spec.page_id
-        ):
-            parent_id = current_spec.source_page_id
-            if (
-                parent_id
-                and parent_id != current_spec.page_id
-                and parent_id in self.left_workspace.page_specs
-            ):
-                self.left_workspace.activate_page(parent_id)
-            else:
-                self.left_workspace.activate_page(home_spec.page_id)
-            return
-
-        if self.core.raw_data is None or home_spec is None:
-            return
-
-        # On the root home page, "back" undoes the transient one-layer 2D slice
-        # and resets the interactive selection box (home is always full scope).
-        if self.home_slice_info is not None:
-            self.home_slice_info = None
-            self.clip_ranges = None
-            self._sync_slice_edits_from_logical_bounds(self._get_full_logical_bounds())
-            self._persist_home_page_state(home_spec)
-            self.global_refresh()
-            return
-
-        self.clip_ranges = None
-        self._sync_slice_edits_from_logical_bounds(self._get_full_logical_bounds())
-        self._persist_home_page_state(home_spec)
-        self.global_refresh()
-        self.plotter.reset_camera()
-        self.plotter.render()
-        self._capture_3d_camera_position()
-
-
     def _toast_success(self, title, text):
         """成功提示：窗口装配完成前（或测试中无管理器时）静默跳过。"""
         manager = self.__dict__.get("toast_manager")
@@ -6150,7 +6049,7 @@ class My3DAnalyzer(QWidget):
                 "mid": slice_index,
                 "source_mode": "time_integral",
                 "source_page_kind": "time_integral",
-                "source_t_index": int(self.page_image.slider_time.value()),
+                "source_t_index": int(self.timeline_bar.slider_time.value()),
                 "source_t_low": t_low,
                 "source_t_up": t_up,
                 "source_slice_axis": axis_index,
@@ -6188,7 +6087,7 @@ class My3DAnalyzer(QWidget):
             "mid": mid,
             "source_mode": "time_integral",
             "source_page_kind": "time_integral",
-            "source_t_index": int(self.page_image.slider_time.value()),
+            "source_t_index": int(self.timeline_bar.slider_time.value()),
             "source_t_low": t_low,
             "source_t_up": t_up,
         }
@@ -6247,58 +6146,6 @@ class My3DAnalyzer(QWidget):
         self._seed_control_state_for_spec(spec)
         return spec
 
-    def _supports_axis_crop_spec(self, spec):
-        if spec is None or spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
-            return False
-
-        params = self._resolved_axis_integral_params(spec)
-        if params is None:
-            return False
-        return int(params["axis_index"]) in (0, 1, 2)
-
-    def _build_axis_integral_crop_spec(self, current_spec, crop_rect):
-        if current_spec is None or current_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
-            return None
-
-        params = self._resolved_axis_integral_params(current_spec)
-        if params is None or int(params["axis_index"]) not in (0, 1, 2):
-            return None
-
-        current_context = self.current_render_context if self._is_current_page(current_spec) else None
-        plot_bounds = None if current_context is None else current_context.get("plot_logical_bounds")
-        normalized_rect = self._intersect_plot_rects(self._normalize_plot_rect(crop_rect), plot_bounds)
-        if normalized_rect is None:
-            return None
-
-        spec_params = {
-            "axis_index": int(params["axis_index"]),
-            "axis_name": params.get("axis_name"),
-            "low": int(params["low"]),
-            "up": int(params["up"]),
-            "mid": int(params["mid"]),
-            "source_mode": params.get("source_mode", "frame"),
-            "source_t_index": int(params["source_t_index"]),
-            "source_t_low": int(params["source_t_low"]),
-            "source_t_up": int(params["source_t_up"]),
-            "source_page_id": current_spec.page_id,
-            "source_page_kind": "axis_integral",
-            "crop_k_low": int(normalized_rect["x_low"]),
-            "crop_k_up": int(normalized_rect["x_up"]),
-            "crop_e_low": int(normalized_rect["y_low"]),
-            "crop_e_up": int(normalized_rect["y_up"]),
-        }
-
-        spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=self._axis_crop_title(spec_params, normalized_rect),
-            page_kind="axis_integral_crop",
-            source_module="data_process",
-            source_page_id=current_spec.page_id,
-            params=spec_params,
-        )
-        self._seed_control_state_for_spec(spec)
-        return spec
-
     def _build_slice_dos_spec(self):
         clip_info = self._get_clip_slices(self.clip_ranges)
         if clip_info is None:
@@ -6325,7 +6172,7 @@ class My3DAnalyzer(QWidget):
         if current_spec is None:
             return None
 
-        t_index = int(self.page_image.slider_time.value())
+        t_index = int(self.timeline_bar.slider_time.value())
         delay_text = self._current_delay_text(t_index)
         spec_params = {
             "t_index": t_index,
@@ -6535,14 +6382,41 @@ class My3DAnalyzer(QWidget):
         self._seed_control_state_for_spec(spec)
         return spec
 
+    def _crop_regions_for_derivative(self, current_spec):
+        """Recover slice geometry and the 2D crop tail of a cropped home page.
+
+        A cropped home page is a persistent result: either a collapsed 2D
+        single layer (first region flattens one 3D axis) or a cropped
+        transient slice.  The derivative must reproduce exactly what the page
+        displays, so read the effective slice from the live render context
+        and keep the remaining 2D crop chain for the derivative page.
+        """
+        regions = current_spec.params.get("crop_regions") or []
+        if not regions or not self._is_current_page(current_spec):
+            return None, []
+        context = self.current_render_context
+        if context is None or context.get("crop_empty") or context.get("view") != "2d":
+            return None, []
+        slice_info = context.get("slice_info") or {}
+        if "axis" not in slice_info or "index" not in slice_info:
+            return None, []
+        recovered = {"axis": int(slice_info["axis"]), "index": int(slice_info["index"])}
+        if regions[0].get("view") == "3d":
+            trailing = copy.deepcopy(list(regions[1:]))
+        else:
+            trailing = copy.deepcopy(list(regions))
+        return recovered, trailing
+
     def _build_second_derivative_spec(self):
         current_spec = self.left_workspace.current_spec()
         if current_spec is None:
             return None
 
         if current_spec.page_kind == "home":
-            source_t_index = int(self.page_image.slider_time.value())
-            if self.home_slice_info is None:
+            source_t_index = int(self.timeline_bar.slider_time.value())
+            crop_slice_info, crop_tail = self._crop_regions_for_derivative(current_spec)
+            slice_info = self.home_slice_info or crop_slice_info
+            if slice_info is None:
                 derivative_axis = self._ask_second_derivative_axis()
                 if derivative_axis is None:
                     return None
@@ -6556,7 +6430,7 @@ class My3DAnalyzer(QWidget):
                     "clip_ranges": self._copy_state(self.clip_ranges),
                 }
             else:
-                slice_axis = int(self.home_slice_info.get("axis", -1))
+                slice_axis = int(slice_info.get("axis", -1))
                 if slice_axis not in (0, 1):
                     self._show_message("无法生成二阶导", "当前切面不包含能量轴，暂不支持沿能量轴做二阶导。", QMessageBox.Warning)
                     return None
@@ -6565,11 +6439,13 @@ class My3DAnalyzer(QWidget):
                     "source_page_kind": "home",
                     "source_view": "2d",
                     "slice_axis": slice_axis,
-                    "slice_index": int(self.home_slice_info["index"]),
+                    "slice_index": int(slice_info["index"]),
                     "derivative_axis": 2,
                     "source_mode": "frame",
                     "source_t_index": source_t_index,
                 }
+                if crop_tail:
+                    spec_params["crop_regions"] = crop_tail
 
             source_label = self._second_derivative_source_label(spec_params)
             spec = AnalysisPageSpec(
@@ -6597,6 +6473,11 @@ class My3DAnalyzer(QWidget):
                 "source_t_low": t_low,
                 "source_t_up": t_up,
             }
+            # The derivative keeps the source page's display crop chain: the
+            # 3D chain applies to the derivative volume unchanged, including
+            # a possible single-layer collapse.
+            if current_spec.params.get("crop_regions"):
+                spec_params["crop_regions"] = copy.deepcopy(list(current_spec.params["crop_regions"]))
             source_label = self._second_derivative_source_label(spec_params)
             spec = AnalysisPageSpec(
                 page_id=self._make_page_id(),
@@ -6824,7 +6705,7 @@ class My3DAnalyzer(QWidget):
         self.left_workspace.add_page(candidate_spec)
 
     def auto_refresh_integral(self, exact=False):
-        if self.page_image.switch_coord.isChecked():
+        if self._crop_enabled():
             self.sync_ax_sliders_to_box()
 
         current_spec = self.left_workspace.current_spec()
@@ -6857,7 +6738,7 @@ class My3DAnalyzer(QWidget):
                 self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
                 return
             if self.clip_ranges is None:
-                self._show_message("未进行切片设置", "请先在“图像控制”页设置切片范围。", QMessageBox.Warning)
+                self._show_message("未进行切片设置", "请使用顶部“裁剪”按钮设置范围并裁剪。", QMessageBox.Warning)
                 return
             spec = self._build_slice_dos_spec()
         elif selected_text == "能级态密度":
@@ -6897,6 +6778,7 @@ class My3DAnalyzer(QWidget):
         try:
             self.axis_crop_selector.set_active(False)
             self.axis_crop_selector.set_visible(False)
+            self.axis_crop_selector.disconnect_events()
         except Exception:
             pass
         self.axis_crop_selector = None
@@ -6914,31 +6796,6 @@ class My3DAnalyzer(QWidget):
     def _clear_axis_crop_interaction(self, redraw=False):
         self._clear_axis_crop_selector()
         self._clear_axis_crop_overlay(redraw=redraw)
-
-    def _on_axis_crop_canvas_click(self, event):
-        if event is None or event.button != MouseButton.RIGHT:
-            return
-        if self.left_display_stack.currentIndex() != 1:
-            return
-
-        spec = self.left_workspace.current_spec()
-        context = self.current_render_context
-        if not self._supports_axis_crop_context(spec, context):
-            return
-
-        removed = self.axis_crop_candidates.pop(spec.page_id, None)
-        if removed is None:
-            return
-        self._refresh_axis_crop_interaction(spec, context)
-
-    def _supports_axis_crop_context(self, spec, context=None):
-        if spec is None or spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
-            return False
-        if context is None:
-            context = self.current_render_context
-        if context is None or context.get("view") != "2d":
-            return False
-        return int(context.get("slice_info", {}).get("axis", -1)) in (0, 1, 2)
 
     def _axis_crop_selector_will_blit(self, event):
         selector = self.axis_crop_selector
@@ -6976,111 +6833,6 @@ class My3DAnalyzer(QWidget):
         if selector is not None:
             selector.background = background
 
-    def _current_axis_crop_rect(self, spec, context):
-        if spec is None or context is None:
-            return None
-
-        candidate = self.axis_crop_candidates.get(spec.page_id)
-        if candidate is not None:
-            return self._copy_plot_rect(candidate)
-
-        crop_rect = context.get("crop_rect")
-        if crop_rect is None:
-            return None
-        if self._rect_matches_plot_bounds(crop_rect, context.get("plot_logical_bounds")):
-            return None
-        return self._copy_plot_rect(crop_rect)
-
-    def _plot_rect_extents(self, context, rect):
-        plot_axes = context["plot_axes"]
-        coords = context["coords"]
-        x_values = np.asarray(coords[plot_axes["x_key"]], dtype=np.float64)
-        y_values = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)
-        x0 = float(x_values[int(rect["x_low"])])
-        x1 = float(x_values[int(rect["x_up"])])
-        y0 = float(y_values[int(rect["y_low"])])
-        y1 = float(y_values[int(rect["y_up"])])
-        return min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
-
-    def _draw_axis_crop_overlay(self, spec, context):
-        self._clear_axis_crop_overlay(redraw=False)
-        rect = self._current_axis_crop_rect(spec, context)
-        if rect is None:
-            return
-
-        x0, x1, y0, y1 = self._plot_rect_extents(context, rect)
-        self.axis_crop_overlay = Rectangle(
-            (x0, y0),
-            max(x1 - x0, 1e-12),
-            max(y1 - y0, 1e-12),
-            fill=False,
-            edgecolor=theme.ACCENT,
-            linewidth=1.4,
-            linestyle="--",
-            alpha=0.9,
-        )
-        self.ax_2d.add_patch(self.axis_crop_overlay)
-
-    def _refresh_axis_crop_interaction(self, spec, context):
-        self._clear_axis_crop_selector()
-        self._clear_axis_crop_overlay(redraw=False)
-
-        if not self.page_image.switch_coord.isChecked():
-            if self.left_display_stack.currentIndex() == 1:
-                self.canvas_2d.draw_idle()
-            return
-
-        if not self._supports_axis_crop_context(spec, context):
-            return
-
-        self._draw_axis_crop_overlay(spec, context)
-        self.axis_crop_selector = RectangleSelector(
-            self.ax_2d,
-            self._on_axis_crop_selected,
-            useblit=True,
-            button=[1],
-            minspanx=1e-12,
-            minspany=1e-12,
-            spancoords="data",
-            interactive=False,
-            props={
-                "facecolor": theme.ACCENT,
-                "edgecolor": theme.ACCENT,
-                "alpha": 0.12,
-                "fill": True,
-            },
-        )
-        self.canvas_2d.draw_idle()
-
-    def _on_axis_crop_selected(self, eclick, erelease):
-        spec = self.left_workspace.current_spec()
-        context = self.current_render_context
-        if not self._supports_axis_crop_context(spec, context):
-            return
-        if eclick.xdata is None or eclick.ydata is None or erelease.xdata is None or erelease.ydata is None:
-            return
-
-        plot_axes = context["plot_axes"]
-        plot_bounds = context["plot_logical_bounds"]
-        x0 = self.core.physical_to_logical(plot_axes["x_key"], float(eclick.xdata))
-        x1 = self.core.physical_to_logical(plot_axes["x_key"], float(erelease.xdata))
-        y0 = self.core.physical_to_logical(plot_axes["y_key"], float(eclick.ydata))
-        y1 = self.core.physical_to_logical(plot_axes["y_key"], float(erelease.ydata))
-        rect = self._intersect_plot_rects(
-            {
-                "x_low": int(np.floor(min(x0, x1))),
-                "x_up": int(np.ceil(max(x0, x1))),
-                "y_low": int(np.floor(min(y0, y1))),
-                "y_up": int(np.ceil(max(y0, y1))),
-            },
-            plot_bounds,
-        )
-        if rect is None:
-            return
-
-        self.axis_crop_candidates[spec.page_id] = rect
-        self._refresh_axis_crop_interaction(spec, context)
-
     def _render_active_page(self, quality=RenderQuality.EXACT, cause=None):
         spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
         if spec is None:
@@ -7098,12 +6850,14 @@ class My3DAnalyzer(QWidget):
             self._clear_axis_crop_interaction(redraw=False)
 
         if spec.page_kind == "control_panel":
+            self._activate_crop_context(spec, None)
             self.left_display_stack.setCurrentIndex(2)
             self._clear_interactive_box()
             self.plotter.render()
             return
 
         if self.core.raw_data is None:
+            self._activate_crop_context(spec, None)
             self.left_display_stack.setCurrentIndex(0)
             self.volume_session.clear(render=False)
             self._clear_interactive_box()
@@ -7122,7 +6876,12 @@ class My3DAnalyzer(QWidget):
             return
 
         self.current_render_context = context
+        self._activate_crop_context(spec, context)
+        if context.get("crop_empty"):
+            self._render_empty_crop()
+            return
         render_context = self._render_context_for_visual_flip(context)
+        self.ax_2d.set_axis_on()
         if preserve_2d_interaction and render_context.get("view") != "2d":
             preserve_2d_interaction = False
             self.plot_coordinate_tooltip.hide(redraw=False)
@@ -7169,7 +6928,7 @@ class My3DAnalyzer(QWidget):
                 levels,
                 opac_mode=mapping_mode,
                 clip_ranges=render_clip,
-                show_axes=self.page_image.switch_axes.isChecked(),
+                show_axes=self.timeline_bar.switch_axes.isChecked(),
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
                 quality=quality.value,
@@ -7222,12 +6981,12 @@ class My3DAnalyzer(QWidget):
             self._refresh_axis_crop_interaction(spec, context)
 
     def on_result_page_closed(self, page_id):
+        self.crop_controller.remove_page(page_id)
         self.refresh_coordinator.cancel_page(page_id)
         self._clear_axis_prefix_cache(page_id)
         self._rotation_cache.clear()
         self._computed_volume_cache.clear()
         self._second_derivative_volume_cache = None
-        self.axis_crop_candidates.pop(page_id, None)
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
             self.current_render_context = None
             self._clear_axis_crop_interaction(redraw=False)
@@ -7257,132 +7016,6 @@ class My3DAnalyzer(QWidget):
         if hasattr(self, "volume_session"):
             self.volume_session.clear(render=False)
         super().closeEvent(event)
-
-    def on_toggle_interactive_box(self, checked):
-        if checked and self._can_show_interactive_box():
-            self._rebuild_interactive_box()
-            self._sync_slice_edits_from_logical_bounds(self.clip_ranges)
-        else:
-            self._restore_volume_opacity_if_dimmed()
-            self._clear_interactive_box()
-
-        if checked:
-            self._refresh_axis_crop_interaction(self.left_workspace.current_spec(), self.current_render_context)
-        else:
-            self._clear_axis_crop_interaction(redraw=self.left_display_stack.currentIndex() == 1)
-        self.plotter.render()
-
-    def on_cut(self):
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            if not self._supports_axis_crop_spec(current_spec):
-                self._show_message(
-                    "2D crop unavailable",
-                    "Rectangular 2D crop is only supported for axis-integral result pages.",
-                    QMessageBox.Warning,
-                )
-                return
-
-            crop_rect = self.axis_crop_candidates.get(current_spec.page_id)
-            if crop_rect is None:
-                self._show_message(
-                    "No crop selected",
-                    "Enable crop interaction and drag a rectangle on the 2D axis-integral plot first.",
-                    QMessageBox.Information,
-                )
-                return
-
-            spec = self._build_axis_integral_crop_spec(current_spec, crop_rect)
-            if spec is None:
-                self._show_message("Crop failed", "Unable to build a cropped axis-integral page from the current selection.", QMessageBox.Warning)
-                return
-
-            spec.title = self._make_unique_page_title(spec.title)
-            self.left_workspace.add_page(spec)
-            return
-
-        if current_spec is None or current_spec.page_kind != "home":
-            self._show_message(
-                "无法提交 ROI",
-                "全局 ROI 只能在原始视图主页中提交。",
-                QMessageBox.Information,
-            )
-            return
-
-        texts = self.page_image.get_slice_values()
-        if self.precise_logical_bounds is not None and texts == self.last_synced_slice_texts:
-            logical_texts = self._logical_bounds_to_texts(self.precise_logical_bounds)
-        else:
-            logical_texts = self.core.physical_texts_to_logical_texts(texts)
-
-        result = self.core.process_cut_logic(logical_texts)
-        if not result:
-            return
-
-        proposed_clip = result.get("clip_ranges")
-        proposed_slice = result.get("slice_info")
-        if proposed_clip is None:
-            # A one-layer selection remains a temporary 2D view and never
-            # changes the page's committed data scope.
-            self.clip_ranges = None
-            self.home_slice_info = proposed_slice
-            self._sync_slice_edits_from_logical_bounds(result.get("logical_bounds"))
-            self._persist_home_page_state(current_spec)
-            self.global_refresh()
-            return
-
-        if abs(float(self.rotation_angle)) >= 1e-6:
-            self._show_message(
-                "无法提交 ROI",
-                "请先将 Z 轴旋转角恢复为 0°，再提交全局 ROI。",
-                QMessageBox.Warning,
-            )
-            return
-
-        clip_info = self._get_clip_slices(proposed_clip)
-        if clip_info is None:
-            return
-        _slices, index_bounds = clip_info
-        candidate = DataScopeDescriptor(
-            scope_id=f"roi-{self._scope_generation + 1}",
-            full_shape=tuple(int(size) for size in self.original_raw_data.shape),
-            bounds=tuple(index_bounds),
-            generation=self._scope_generation + 1,
-        )
-        try:
-            self._validate_denoise_for_descriptor(self.global_denoise_methods, candidate)
-        except ValueError as exc:
-            self._show_message(
-                "ROI 与去噪参数不兼容",
-                str(exc),
-                QMessageBox.Warning,
-            )
-            return
-
-        descriptor = self._register_roi_scope(index_bounds)
-        crop_spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=f"原始视图{self._scope_title_suffix(descriptor)}",
-            page_kind="home",
-            source_module="system",
-            source_page_id="home",
-            data_scope_id=descriptor.scope_id,
-            params={"data_scope_label": descriptor.label},
-        )
-        crop_spec.title = self._make_unique_page_title(crop_spec.title)
-
-        self.left_workspace.add_page(crop_spec)
-
-        self.clip_ranges = list(index_bounds)
-        self.home_slice_info = None
-        self._sync_slice_edits_from_logical_bounds(list(index_bounds))
-        control_state = self._capture_control_state()
-        control_state["axis_source_mode"] = self._page_axis_source_mode(crop_spec)
-        self._store_control_state(crop_spec, control_state)
-        self._persist_home_page_state(crop_spec)
-        self._invalidate_scope_render_state()
-        self._request_scope_denoise_if_needed(crop_spec)
-        self.global_refresh()
 
     def _build_home_export_payload(self, raw_data, coords):
         if isinstance(raw_data, ScopedDataVolume):
@@ -7683,7 +7316,7 @@ class My3DAnalyzer(QWidget):
             else:
                 t_index = int(
                     spec.params.get(
-                        "source_t_index", int(self.page_image.slider_time.value())
+                        "source_t_index", int(self.timeline_bar.slider_time.value())
                     )
                 )
                 export_data["time"] = np.asarray(
@@ -7699,11 +7332,11 @@ class My3DAnalyzer(QWidget):
             )
         else:
             if self._is_current_page(spec):
-                t_index = int(self.page_image.slider_time.value())
+                t_index = int(self.timeline_bar.slider_time.value())
             else:
                 t_index = int(
                     spec.params.get(
-                        "t_index", int(self.page_image.slider_time.value())
+                        "t_index", int(self.timeline_bar.slider_time.value())
                     )
                 )
             export_data["time"] = np.asarray(
@@ -7715,7 +7348,74 @@ class My3DAnalyzer(QWidget):
             )
         return "Save Energy-DOS result", "energy_dos.mat", export_data
 
+    def _crop_export_metadata(self, spec, context, coords):
+        """Small scientific metadata for cropped exports; arrays stay cropped."""
+        params = spec.params
+        metadata = {}
+
+        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            resolved = context.get("integral_params") or {}
+            axis_index = int(resolved.get("axis_index", params.get("axis_index", 0)))
+            axis_info = self._axis_plot_info(axis_index)
+            axis_key = {0: "X", 1: "Y", 2: "E"}.get(axis_index, "X")
+            low, up = sorted((int(resolved.get("low", 0)), int(resolved.get("up", 0))))
+            mid = int(resolved.get("mid", round((low + up) / 2)))
+            metadata["integrated_axis"] = np.asarray([axis_info["integrated_axis_label"]])
+            metadata["integrated_range"] = np.asarray(
+                [
+                    self.core.logical_to_physical(axis_key, low),
+                    self.core.logical_to_physical(axis_key, up),
+                ],
+                dtype=np.float32,
+            )
+            metadata["integrated_center"] = np.asarray(
+                [self.core.logical_to_physical(axis_key, mid)], dtype=np.float32
+            )
+        if context.get("integrated_axis_label") is not None:
+            metadata["integrated_axis"] = np.asarray([str(context["integrated_axis_label"])])
+        if context.get("integrated_range") is not None:
+            metadata["integrated_range"] = np.asarray(context["integrated_range"], dtype=np.float32)
+        if "derivative_axis" in context:
+            metadata["derivative_axis"] = np.asarray(
+                [self._second_derivative_axis_label(context["derivative_axis"])]
+            )
+        for range_key in ("kx_range", "ky_range"):
+            if context.get(range_key) is not None:
+                metadata[range_key] = np.asarray(context[range_key], dtype=np.float32)
+
+        delay = coords.get("delay")
+        source_mode = context.get("source_mode", params.get("source_mode"))
+        if source_mode is not None:
+            metadata["source_mode"] = np.asarray([str(source_mode)])
+        has_time_axis = delay is not None and len(delay) > 0
+        if self._normalize_axis_source_mode(source_mode) == "time_integral":
+            if has_time_axis and "source_t_low" in params and "source_t_up" in params:
+                metadata.update(self._time_integral_export_metadata(params, coords))
+        elif has_time_axis:
+            # A 1D time series (e.g. slice DOS) exports the delay axis as its
+            # x data; a scalar frame-time would collide with that array.
+            is_time_series = context.get("view") == "1d" and "energy" not in str(
+                context.get("xlabel", "")
+            ).lower()
+            t_index = None if is_time_series else params.get("source_t_index", params.get("t_index"))
+            if t_index is None and not is_time_series and self._is_current_page(spec):
+                t_index = int(self.timeline_bar.slider_time.value())
+            if t_index is not None:
+                t_index = int(np.clip(int(t_index), 0, len(delay) - 1))
+                metadata["source_t_index"] = np.asarray([t_index], dtype=np.int32)
+                metadata["time"] = np.asarray([delay[t_index]], dtype=np.float32)
+        return metadata
+
     def _build_export_payload(self, spec, raw_data, coords):
+        if spec.params.get("crop_regions"):
+            context = self._compute_render_context(spec)
+            if context is None or context.get("crop_empty"):
+                self._show_message("无法导出", "当前裁剪范围内没有有效数据。", QMessageBox.Information)
+                return None
+            payload = export_cropped_context(context, e_flip=self.timeline_bar.switch_flip.isChecked())
+            for key, value in self._crop_export_metadata(spec, context, coords).items():
+                payload.setdefault(key, value)
+            return "导出裁剪结果", self._sanitize_filename_component(spec.title) + ".mat", payload
         if spec.page_kind == "home":
             return self._build_home_export_payload(raw_data, coords)
         elif spec.page_kind == "time_integral":

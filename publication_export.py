@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+from crop_model import waterfall_offsets
 
 from publication_models import (
     DEFAULT_STYLE_ID,
@@ -121,6 +122,8 @@ def capture_snapshot(window) -> PublicationSnapshot:
     context = window._compute_render_context(spec)
     if context is None:
         raise ExportError("当前页没有可导出的完整结果。")
+    if context.get("crop_empty"):
+        raise ExportError("当前裁剪范围内没有有效数据。")
     render_context = window._render_context_for_visual_flip(context)
     if render_context is None:
         raise ExportError("当前页没有可导出的完整结果。")
@@ -164,7 +167,7 @@ def capture_snapshot(window) -> PublicationSnapshot:
     )
     if spec.page_kind == "home" and window.core.has_time_axis:
         try:
-            snapshot.home_frame_index = int(window.page_image.slider_time.value())
+            snapshot.home_frame_index = int(window.timeline_bar.slider_time.value())
         except Exception:
             snapshot.home_frame_index = None
 
@@ -188,7 +191,7 @@ def _build_source_desc(window, spec, render_context) -> str:
     parts = [str(spec.title)]
     view = render_context.get("view")
     if spec.page_kind == "home" and window.core.has_time_axis:
-        t_idx = int(window.page_image.slider_time.value())
+        t_idx = int(window.timeline_bar.slider_time.value())
         delay_coords = window.core.coords.get("delay")
         if delay_coords is None:
             delay_coords = []
@@ -249,7 +252,7 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         "clip_render_bounds": clip_render,
         "include_zero": include_zero,
         "opacity_mode": str(window.page_render.combo_map.currentText()),
-        "show_axes": bool(window.page_image.switch_axes.isChecked()),
+        "show_axes": bool(window.timeline_bar.switch_axes.isChecked()),
         "viewport_aspect": float(viewport_aspect),
         "level_info": level_info,
         "intensity_label": intensity_label_for(snapshot.page_kind),
@@ -416,6 +419,7 @@ def _freeze_waterfall(window, snapshot: PublicationSnapshot, render_context) -> 
         "curves": curves,
         "k_values": k_values,
         "offset_step": float(render_context.get("offset_step", 1.2)),
+        "curve_offsets": waterfall_offsets(render_context).copy(),
         "title": str(render_context.get("title") or snapshot.source_page_title),
         "xlabel": str(render_context.get("xlabel") or "Intensity (normalized, arb. u.)"),
         "ylabel": ylabel,

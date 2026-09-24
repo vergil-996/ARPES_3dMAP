@@ -733,8 +733,11 @@ def _render_1d_axes_content(ax, snapshot, params):
         k_values = np.asarray(snapshot.payload["k_values"], dtype=np.float64)
         offset_step = float(snapshot.payload["offset_step"])
         ink = params.get("ink_color", "#000000")
+        offsets = np.asarray(snapshot.payload.get("curve_offsets", np.arange(len(curves)) * offset_step))
         for idx, curve in enumerate(curves):
-            offset = idx * offset_step
+            offset = float(offsets[idx])
+            if not np.any(np.isfinite(curve)):
+                continue
             ax.plot(curve + offset, energy, color=ink, linewidth=float(params.get("curve_linewidth", 0.8)))
             # 保留原有动量序列标签（横轴数据位置 + 轴上方）
             ax.annotate(

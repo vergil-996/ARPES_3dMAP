@@ -1133,7 +1133,7 @@ class PublicationExportDialog(QDialog):
         t_idx = None
         if window.core.raw_data is not None and window.core.has_time_axis:
             try:
-                t_idx = int(window.page_image.slider_time.value())
+                t_idx = int(window.timeline_bar.slider_time.value())
             except Exception:
                 t_idx = None
         return page_id, t_idx

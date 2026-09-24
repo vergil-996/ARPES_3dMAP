@@ -41,7 +41,7 @@ def main():
         window.load_data(os.path.join(ROOT, "smoke_data", "scan07_dynamic.npz"))
 
     def step_grab():
-        window._select_control_page(2)
+        window._select_control_page(1)
 
     def step_shot():
         grp = window.page_data.grp_t
