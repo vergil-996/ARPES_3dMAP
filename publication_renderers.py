@@ -32,7 +32,7 @@ from matplotlib.ticker import MaxNLocator, ScalarFormatter
 import numpy as np
 
 from render_core import VisualEngine, VolumeRenderSession
-from publication_models import PUB_CURVE_PALETTE, PUB_LINESTYLES
+from publication_models import PUB_CURVE_PALETTE, PUB_LINESTYLES, TITLE_GAP_DEFAULT_MM
 
 RENDER_LOCK = threading.RLock()
 
@@ -326,8 +326,13 @@ def _fit_layout(
     colorbar_layout: Optional[Mapping[str, Any]],
     pad_mm: float = 1.2,
     iterations: int = 2,
+    title_plan: Optional[Mapping[str, Any]] = None,
 ):
-    """两遍布局：先按样式边距排版，再按实测文字外接框只增不减地调整。"""
+    """两遍布局：先按样式边距排版，再按实测文字外接框只增不减地调整。
+
+    返回 (margins, overflow)：overflow 为最终布局下各侧注释超出内容区的
+    实测比例（figure 分数），供 place_title 把标题排在注释之外。
+    """
     axes_list = [ax] + ([cbar_ax] if cbar_ax is not None else [])
     # 边距增长上限：极端长文本不能无限侵占数据区（双侧各 40%，保证主区 ≥10mm）
     max_lr = width_mm * 0.40
@@ -343,6 +348,9 @@ def _fit_layout(
             # overflow 是 figure 分数；换算为 mm
             over_mm = overflow[side] * (width_mm if side in ("left", "right") else height_mm)
             need = over_mm + pad_mm
+            if title_plan is not None and side == title_plan["side"]:
+                # 标题排在注释之外，并在边上留出距离与标题带
+                need = max(need, title_margin_need_mm(title_plan, over_mm))
             # 夹在上限内：极端长文本宁可略微出血也不触发画布过小错误
             cap = max_lr if side in ("left", "right") else max_tb
             need = min(need, cap)
@@ -355,8 +363,9 @@ def _fit_layout(
     ax.set_position(_fraction_rect(main_rect, width_mm, height_mm))
     if cbar_ax is not None and cbar_rect is not None:
         cbar_ax.set_position(_fraction_rect(cbar_rect, width_mm, height_mm))
-    fig.canvas.draw()
-    return margins_mm
+    # 实测即绘制：_measure_overflow 内部会 draw 一次
+    overflow = _measure_overflow(fig, axes_list)
+    return margins_mm, overflow
 
 
 def _style_axes_frame(ax, style_params: Mapping[str, Any], overrides: Mapping[str, Any], family: str):
@@ -384,8 +393,7 @@ def _style_axes_frame(ax, style_params: Mapping[str, Any], overrides: Mapping[st
     ax.grid(False)
 
 
-def _style_axis_labels(ax, style_params, xlabel, ylabel, title=None, max_title_chars=48,
-                       title_pad_pt=4.0):
+def _style_axis_labels(ax, style_params, xlabel, ylabel):
     ink = style_params.get("ink_color", "#000000")
     family = style_params.get("font_family", "DejaVu Sans")
     ax.set_xlabel(
@@ -396,21 +404,6 @@ def _style_axis_labels(ax, style_params, xlabel, ylabel, title=None, max_title_c
         ylabel, fontsize=float(style_params.get("axis_label_size", 7.0)),
         color=ink, fontfamily=family, labelpad=2.0,
     )
-    if title:
-        # 长标题换行而不是裁掉或无限撑大边距；按画布宽度给字符预算，
-        # 无空格的极端串也强制断行（出血比断词更糟）
-        import textwrap
-
-        wrapped = "\n".join(
-            textwrap.wrap(
-                str(title), width=max(20, int(max_title_chars)),
-                break_long_words=True, break_on_hyphens=False,
-            )
-        ) or str(title)
-        ax.set_title(
-            wrapped, fontsize=float(style_params.get("title_size", 7.0)),
-            color=ink, fontfamily=family, pad=float(title_pad_pt),
-        )
 
 
 def _add_panel_label(ax, overrides, style_params):
@@ -425,6 +418,127 @@ def _add_panel_label(ax, overrides, style_params):
         color=style_params.get("ink_color", "#000000"),
         ha="left", va="bottom",
         clip_on=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 标题（画布级文字：自动命名 / 位置 / 对齐 / 距离）
+# ---------------------------------------------------------------------------
+
+# 标题带与画布边缘之间保留的最小空白（毫米）
+_TITLE_EDGE_INSET_MM = 0.6
+
+
+def _resolve_title(snapshot, overrides) -> Optional[str]:
+    """解析图片上要显示的标题。
+
+    - 关闭显示（show_title=False）→ 无标题；
+    - 显式给出 title_text（含空串）→ 用用户命名的文字，空串即不显示标题；
+    - 缺省 → 回退到快照自动标题（切片/积分/结果类型），没有则无标题。
+    """
+    if not overrides.get("show_title", True):
+        return None
+    if "title_text" in overrides:
+        return str(overrides.get("title_text") or "").strip() or None
+    return str(snapshot.payload.get("title") or "").strip() or None
+
+
+def _wrap_title(text: str, width_mm: float) -> str:
+    """长标题换行而不是裁掉或无限撑大边距；无空格的极端串也强制断行。"""
+    import textwrap
+
+    wrapped = "\n".join(
+        textwrap.wrap(
+            str(text), width=max(20, int(width_mm * 0.45)),
+            break_long_words=True, break_on_hyphens=False,
+        )
+    )
+    return wrapped or str(text)
+
+
+def _title_band_mm(wrapped: str, style_params) -> float:
+    """标题文字带高度估算（毫米）：行数 × 字号 × 行距。"""
+    lines = str(wrapped).count("\n") + 1
+    return lines * float(style_params.get("title_size", 7.0)) * 1.3 / 72.0 * MM_PER_INCH
+
+
+def _title_side(overrides) -> str:
+    return "bottom" if overrides.get("title_position", "top") == "bottom" else "top"
+
+
+def _title_gap_mm(overrides) -> float:
+    try:
+        return max(0.0, float(overrides.get("title_gap_mm", TITLE_GAP_DEFAULT_MM)))
+    except (TypeError, ValueError):
+        return TITLE_GAP_DEFAULT_MM
+
+
+def plan_title(snapshot, overrides, style_params, width_mm) -> Optional[Dict[str, Any]]:
+    """标题排版计划：字形与位置参数，供布局引擎预留边距、供绘制时定位。
+
+    标题是画布级文字，_measure_overflow 测不到它，所以边距必须由
+    _fit_layout / _fit_layout_3d 按本计划显式叠加在注释之外。
+    """
+    title = _resolve_title(snapshot, overrides)
+    if not title:
+        return None
+    wrapped = _wrap_title(title, width_mm)
+    return {
+        "text": wrapped,
+        "side": _title_side(overrides),
+        "gap_mm": _title_gap_mm(overrides),
+        "band_mm": _title_band_mm(wrapped, style_params),
+        "align": overrides.get("title_align", "center"),
+        "fontsize": float(style_params.get("title_size", 7.0)),
+        "color": style_params.get("ink_color", "#000000"),
+        "fontfamily": style_params.get("font_family", "DejaVu Sans"),
+    }
+
+
+def title_margin_need_mm(plan: Optional[Mapping[str, Any]], over_mm: float) -> float:
+    """标题所在边需要的边距：注释外接框 + 距离 + 标题带 + 贴边留白。"""
+    if plan is None:
+        return 0.0
+    return float(over_mm) + plan["gap_mm"] + plan["band_mm"] + _TITLE_EDGE_INSET_MM
+
+
+def place_title(fig, plan, width_mm, height_mm, margins, colorbar_layout,
+                overflow) -> None:
+    """排版后把标题画到画布上（位置/对齐/距离来自 plan）。
+
+    与坐标框在水平方向对齐（左/中/右）；垂直方向排在注释（刻度、轴名、
+    图例、顶/底色条）之外 gap 处——注释外接框由 _measure_overflow 实测，
+    所以标题不会压住轴名或色条。位置最后夹在画布内：即使标题带被上限
+    截断或色条被手动拖到画布边缘，标题也不会出血。
+    """
+    if plan is None:
+        return
+    main, _cbar = _compute_rects(width_mm, height_mm, margins, colorbar_layout)
+    side = plan["side"]
+    over_mm = float(overflow.get(side, 0.0)) * height_mm
+    band = float(plan["band_mm"])
+    gap = float(plan["gap_mm"])
+    if side == "top":
+        y_mm = (height_mm - margins["top"]) + over_mm + gap
+        y_mm = min(y_mm, height_mm - _TITLE_EDGE_INSET_MM - band)
+        va = "bottom"
+    else:
+        y_mm = margins["bottom"] - over_mm - gap
+        y_mm = max(y_mm, _TITLE_EDGE_INSET_MM + band)
+        va = "top"
+    align = plan["align"]
+    if align == "left":
+        x_mm, ha = main[0], "left"
+    elif align == "right":
+        x_mm, ha = main[2], "right"
+    else:
+        x_mm, ha = (main[0] + main[2]) / 2.0, "center"
+    fig.text(
+        x_mm / width_mm, y_mm / height_mm, plan["text"],
+        ha=ha, va=va,
+        fontsize=float(plan["fontsize"]),
+        color=plan["color"],
+        fontfamily=plan["fontfamily"],
     )
 
 
@@ -627,18 +741,10 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
     _apply_formatter(ax.yaxis, nice_ticks(ext[2], ext[3], max_ticks), ext[2], ext[3])
 
     _style_axes_frame(ax, params, overrides, family)
-    show_title = overrides.get("show_title", True)
-    title_text = snapshot.payload.get("title") if show_title else None
     cbar_layout = _colorbar_layout_for(params, overrides, family)
-    # 顶部色条与标题同处画布顶边：标题改为图级文字，避免与色条重叠
-    title_on_figure = bool(
-        title_text and cbar_layout is not None and cbar_layout["position"] == "top"
-    )
     _style_axis_labels(
         ax, params,
         snapshot.payload["xlabel"], snapshot.payload["ylabel"],
-        title=None if title_on_figure else title_text,
-        max_title_chars=max(20, int(width_mm * 0.45)),
     )
     _add_panel_label(ax, overrides, params)
 
@@ -660,28 +766,11 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
         )
 
     margins = _initial_margins(params)
-    if title_on_figure:
-        # 图级标题放在顶部色条之上，并为其预留顶边距
-        import textwrap
-
-        wrapped = "\n".join(
-            textwrap.wrap(
-                str(title_text), width=max(20, int(width_mm * 0.45)),
-                break_long_words=True, break_on_hyphens=False,
-            )
-        ) or str(title_text)
-        n_lines = wrapped.count("\n") + 1
-        title_size = float(params.get("title_size", 7.0))
-        band_mm = n_lines * title_size * 1.3 / 72.0 * 25.4 + 1.0
-        cx_mm = (margins["left"] + (width_mm - margins["right"])) / 2.0
-        fig.text(
-            cx_mm / width_mm, 1.0 - 0.6 / height_mm, wrapped,
-            ha="center", va="top", fontsize=title_size,
-            color=params.get("ink_color", "#000000"),
-            fontfamily=params.get("font_family", "DejaVu Sans"),
-        )
-        margins["top"] += band_mm
-    _fit_layout(fig, ax, cbar_ax, width_mm, height_mm, margins, cbar_layout)
+    title_plan = plan_title(snapshot, overrides, params, width_mm)
+    margins, overflow = _fit_layout(
+        fig, ax, cbar_ax, width_mm, height_mm, margins, cbar_layout, title_plan=title_plan
+    )
+    place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
     return fig
 
 
@@ -772,17 +861,9 @@ def render_1d(snapshot, style, overrides, options, dpi: int) -> Figure:
     _apply_formatter(ax.yaxis, nice_ticks(y0, y1, max_ticks), y0, y1)
 
     _style_axes_frame(ax, params, overrides, family)
-    show_title = overrides.get("show_title", True)
-    # 瀑布图动量标签带位于轴顶上方，标题额外抬高一个标签高度，避免互相压盖
-    title_pad = 4.0
-    if snapshot.view == "waterfall":
-        title_pad += float(params.get("tick_label_size", 6.0)) * 1.8
     _style_axis_labels(
         ax, params,
         snapshot.payload.get("xlabel", ""), snapshot.payload.get("ylabel", ""),
-        title=snapshot.payload.get("title") if show_title else None,
-        max_title_chars=max(20, int(width_mm * 0.45)),
-        title_pad_pt=title_pad,
     )
     _add_panel_label(ax, overrides, params)
 
@@ -807,7 +888,11 @@ def render_1d(snapshot, style, overrides, options, dpi: int) -> Figure:
                 text.set_fontfamily(params.get("font_family", "DejaVu Sans"))
 
     margins = _initial_margins(params)
-    _fit_layout(fig, ax, None, width_mm, height_mm, margins, None)
+    title_plan = plan_title(snapshot, overrides, params, width_mm)
+    margins, overflow = _fit_layout(
+        fig, ax, None, width_mm, height_mm, margins, None, title_plan=title_plan
+    )
+    place_title(fig, title_plan, width_mm, height_mm, margins, None, overflow)
     return fig
 
 
@@ -1101,6 +1186,7 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
 
     cbar_layout = _colorbar_layout_for(params, overrides, family)
     margins = _initial_margins(params)
+    title_plan = plan_title(snapshot, overrides, params, width_mm)
     # 先按初始边距得到内容区，决定离屏视口像素（保持主视图纵横比）
     main_rect, _ = _compute_rects(width_mm, height_mm, margins, cbar_layout)
     content_w_mm = main_rect[2] - main_rect[0]
@@ -1236,10 +1322,11 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         plotter.close()
 
     # 3D 注释叠加在图像坐标系（像素）；边距仍做一遍实测防裁切
-    _fit_layout_3d(
+    overflow = _fit_layout_3d(
         fig, ax_img, cbar_ax, width_mm, height_mm, margins, cbar_layout,
-        scale=body_factor,
+        scale=body_factor, title_plan=title_plan,
     )
+    place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
     return fig
 
 
@@ -1269,12 +1356,14 @@ def _apply_clipping_planes(plotter, clip_render_bounds) -> None:
 
 
 def _fit_layout_3d(fig, ax_img, cbar_ax, width_mm, height_mm, margins_mm, cbar_layout,
-                   scale: float = 1.0):
+                   scale: float = 1.0, title_plan: Optional[Mapping[str, Any]] = None):
     """3D 布局：主图位置由视口决定，仅根据色条/注释溢出微调位置。
 
     注释文字绘制在图像像素坐标系，向图外溢出时平移主图而不是缩放。
     scale 为数据体大小系数：放置尺寸 = 内容区适配 × scale，边距因注释
     溢出增大时按比例同步缩小，不会把 scale 重置回 1。
+
+    返回最终布局下各侧注释溢出（figure 分数），供 place_title 使用。
     """
     axes_list = [ax_img] + ([cbar_ax] if cbar_ax is not None else [])
     for _ in range(2):
@@ -1302,12 +1391,15 @@ def _fit_layout_3d(fig, ax_img, cbar_ax, width_mm, height_mm, margins_mm, cbar_l
         for side in ("left", "right", "bottom", "top"):
             over_mm = overflow[side] * (width_mm if side in ("left", "right") else height_mm)
             need = over_mm + 1.2
+            if title_plan is not None and side == title_plan["side"]:
+                need = max(need, title_margin_need_mm(title_plan, over_mm))
             if need > margins_mm[side] + 1e-6:
                 margins_mm[side] = need
                 changed = True
         if not changed:
             break
-    fig.canvas.draw()
+    # 实测即绘制：_measure_overflow 内部会 draw 一次
+    return _measure_overflow(fig, axes_list)
 
 
 # ---------------------------------------------------------------------------

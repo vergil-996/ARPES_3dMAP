@@ -314,9 +314,19 @@ _OVERRIDE_SCHEMA = {
     "show_grid": ("bool", None),
     "panel_label": ("str", 8),
     "show_title": ("bool", None),
+    # 标题文字：显式给出即为用户命名（空串 = 明确不要标题）；缺省用快照自动标题
+    "title_text": ("text", 120),
+    # 标题在画布上的边（顶部/底部）与水平对齐（左/居中/右）
+    "title_position": ("choice", ("top", "bottom")),
+    "title_align": ("choice", ("left", "center", "right")),
+    # 标题与相邻内容（坐标框、顶/底色条）之间的距离（毫米）
+    "title_gap_mm": ("float", (0.0, 20.0)),
     # 数据体在画面中的大小百分比（100 = 快照取景原样）；仅 3D 族有意义
     "body_size": ("int", (0, 250)),
 }
+
+# 标题与相邻内容之间的默认距离（毫米）；与 _OVERRIDE_SCHEMA 的缺省语义一致
+TITLE_GAP_DEFAULT_MM = 1.5
 
 # 色条相关微调只对有色条的视图族有意义
 _COLORBAR_OVERRIDE_KEYS = {
@@ -368,6 +378,12 @@ def validate_overrides(family: str, overrides: Optional[Mapping[str, Any]]) -> D
             text = str(value).strip()[: int(constraint)]
             if text:
                 clean[key] = text
+        elif kind == "text":
+            # 与 "str" 的区别：空串是合法且必须保留的取值——它表示用户
+            # 显式清空了标题（覆盖存在 = 不显示），不能与"未设置（用自动
+            # 标题）"混为一谈。标题是单行文字，换行折叠为空格。
+            text = str(value).replace("\r", " ").replace("\n", " ").strip()
+            clean[key] = text[: int(constraint)]
     return clean
 
 

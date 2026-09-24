@@ -27,9 +27,13 @@ from update_service import (
 )
 
 
-CHECK_INTERVAL = timedelta(days=1)
+CHECK_INTERVAL = timedelta(hours=12)
+FAILURE_SNOOZE_INTERVAL = timedelta(days=3)
+NEW_VERSION_SNOOZE_INTERVAL = timedelta(days=7)
 LAST_CHECK_SETTING = "updates/last_check_utc"
 SKIPPED_VERSION_SETTING = "updates/skipped_version"
+FAILURE_SNOOZE_SETTING = "updates/failure_snooze_until_utc"
+NEW_VERSION_SNOOZE_SETTING = "updates/new_version_snooze_until_utc"
 
 
 class ReleaseCheckThread(QThread):
@@ -106,15 +110,31 @@ class UpdateController(QObject):
             # Cache cleanup must never prevent the application from starting.
             pass
 
-    def automatic_check_due(self, now=None):
-        value = self.settings.value(LAST_CHECK_SETTING, "", type=str)
+    def _read_timestamp(self, key):
+        value = self.settings.value(key, "", type=str)
         if not value:
-            return True
+            return None
         try:
-            last_check = datetime.fromisoformat(value.replace("Z", "+00:00"))
-            if last_check.tzinfo is None:
-                last_check = last_check.replace(tzinfo=timezone.utc)
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except (TypeError, ValueError):
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment
+
+    def _snooze_active(self, key, now=None):
+        """Return whether the user asked not to be notified before this moment."""
+
+        deadline = self._read_timestamp(key)
+        return deadline is not None and (now or datetime.now(timezone.utc)) < deadline
+
+    def _start_snooze(self, key, interval, now=None):
+        deadline = (now or datetime.now(timezone.utc)) + interval
+        self.settings.setValue(key, deadline.isoformat().replace("+00:00", "Z"))
+
+    def automatic_check_due(self, now=None):
+        last_check = self._read_timestamp(LAST_CHECK_SETTING)
+        if last_check is None:
             return True
         return (now or datetime.now(timezone.utc)) - last_check >= CHECK_INTERVAL
 
@@ -156,6 +176,22 @@ class UpdateController(QObject):
         self._record_check_time()
         if self._manual_check:
             self._show_message("检查更新失败", message, QMessageBox.Warning)
+            return
+        if self._snooze_active(FAILURE_SNOOZE_SETTING):
+            return
+        # The background check runs without user intent, so it must explain what
+        # to do instead of failing silently when GitHub is unreachable.
+        snoozed = self._show_message(
+            "自动检查更新失败",
+            f"{message}\n\n"
+            "如果当前网络无法直接访问 GitHub，请先开启 VPN 或网络代理，"
+            f"再点击工具栏右侧的 v{APP_VERSION} 按钮手动检查更新。",
+            QMessageBox.Warning,
+            extra_button="三天内不再提示",
+        )
+        if snoozed:
+            # Mutes only this dialog; the 12-hour check keeps running.
+            self._start_snooze(FAILURE_SNOOZE_SETTING, FAILURE_SNOOZE_INTERVAL)
 
     def _on_check_completed(self, result):
         self._record_check_time()
@@ -174,6 +210,8 @@ class UpdateController(QObject):
 
         skipped = self.settings.value(SKIPPED_VERSION_SETTING, "", type=str)
         if not self._manual_check and skipped == str(result.release.version):
+            return
+        if not self._manual_check and self._snooze_active(NEW_VERSION_SNOOZE_SETTING):
             return
         self._active_release = result.release
         self._prompt_for_update(result)
@@ -198,11 +236,16 @@ class UpdateController(QObject):
             primary = box.addButton("打开 Release 页面", QMessageBox.AcceptRole)
         later = box.addButton("稍后", QMessageBox.RejectRole)
         skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
+        snooze = box.addButton("一周内不再提示", QMessageBox.ActionRole)
         box.setDefaultButton(primary)
         box.setEscapeButton(later)
         box.exec_()
 
         clicked = box.clickedButton()
+        if clicked is snooze:
+            # Mutes only the automatic prompt; the check itself keeps running.
+            self._start_snooze(NEW_VERSION_SNOOZE_SETTING, NEW_VERSION_SNOOZE_INTERVAL)
+            return
         if clicked is skip:
             self.settings.setValue(SKIPPED_VERSION_SETTING, str(release.version))
             return
@@ -328,13 +371,25 @@ class UpdateController(QObject):
         button.setEnabled(not checking)
         button.setText("检查中…" if checking else f"v{APP_VERSION}")
 
-    def _show_message(self, title, text, icon=QMessageBox.Information):
+    def _show_message(self, title, text, icon=QMessageBox.Information, extra_button=None):
+        """Show a modal box and report whether `extra_button` was the one clicked."""
+
+        if QApplication.closingDown():
+            # A failed background check can report back while the window is
+            # already going away; there is nobody left to read the message.
+            return False
         box = QMessageBox(self.window)
         box.setWindowTitle(title)
         box.setIcon(icon)
         box.setText(str(text))
         box.setStandardButtons(QMessageBox.Ok)
+        extra = box.addButton(extra_button, QMessageBox.ActionRole) if extra_button else None
+        if extra is not None:
+            # Keep Enter and Esc on plain "OK" so the snooze needs a real click.
+            box.setDefaultButton(box.button(QMessageBox.Ok))
+            box.setEscapeButton(box.button(QMessageBox.Ok))
         box.exec_()
+        return extra is not None and box.clickedButton() is extra
 
     def shutdown(self, wait_ms=2000):
         for thread in (self._check_thread, self._download_thread):

@@ -53,6 +53,7 @@ from publication_export import (
 from publication_models import (
     FAMILY_FORMATS,
     FAMILY_LABELS,
+    TITLE_GAP_DEFAULT_MM,
     OutputOptions,
     overrides_signature,
     styles_for_family,
@@ -377,8 +378,6 @@ class PublicationExportDialog(QDialog):
         self.combo_frame.addItems(["四边框线", "开放轴线"])
         self.chk_box = QCheckBox("完整包围盒")
         self.chk_grid = QCheckBox("背部网格")
-        self.chk_title = QCheckBox("显示标题")
-        self.chk_title.setChecked(True)
         self.frame_row.addWidget(QLabel("坐标边框"))
         self.frame_row.addWidget(self.combo_frame)
         self.frame_row.addWidget(self.chk_box)
@@ -397,7 +396,6 @@ class PublicationExportDialog(QDialog):
         self.frame_row.addWidget(self.label_body_size)
         self.frame_row.addWidget(self.spin_body_size)
         self.frame_row.addSpacing(12)
-        self.frame_row.addWidget(self.chk_title)
         self.frame_row.addWidget(QLabel("面板编号"))
         self.edit_panel_label = QLineEdit()
         self.edit_panel_label.setMaxLength(8)
@@ -406,6 +404,48 @@ class PublicationExportDialog(QDialog):
         self.frame_row.addWidget(self.edit_panel_label)
         self.frame_row.addStretch(1)
         tune_layout.addLayout(self.frame_row)
+
+        # 标题行：用户命名 + 位置/对齐/距离（四个视图族通用）
+        self.title_row = QHBoxLayout()
+        self.chk_title = QCheckBox("显示标题")
+        self.chk_title.setChecked(True)
+        self.edit_title = QLineEdit()
+        self.edit_title.setMaxLength(120)
+        self.edit_title.setMinimumWidth(240)
+        self.edit_title.setPlaceholderText("留空则不显示标题")
+        self.edit_title.setToolTip(
+            "图片上的标题文字：打开面板时带入当前自动标题，可直接改成自己的图题；\n"
+            "清空则不显示标题，「自动」按钮恢复为自动标题。"
+        )
+        self.btn_title_auto = QPushButton("自动")
+        self.btn_title_auto.setFixedHeight(24)
+        theme.style_push_button(self.btn_title_auto, "secondary")
+        self.btn_title_auto.setCursor(Qt.PointingHandCursor)
+        self.btn_title_auto.setToolTip("把标题恢复为当前结果自动标题")
+        self.combo_title_pos = QComboBox()
+        self.combo_title_pos.addItems(["顶部", "底部"])
+        self.combo_title_align = QComboBox()
+        self.combo_title_align.addItems(["左", "居中", "右"])
+        self.spin_title_gap = _WheelDoubleSpinBox()
+        self.spin_title_gap.setRange(0.0, 20.0)
+        self.spin_title_gap.setSingleStep(0.5)
+        self.spin_title_gap.setDecimals(1)
+        self.spin_title_gap.setValue(TITLE_GAP_DEFAULT_MM)
+        self.spin_title_gap.setSuffix(" mm")
+        self.spin_title_gap.setFixedWidth(84)
+        self.spin_title_gap.setToolTip(
+            "标题与坐标框之间的距离（含刻度、轴名、图例，或顶/底色条）；\n"
+            "可直接输入或用鼠标滚轮调节"
+        )
+        for widget in (
+            self.chk_title, self.edit_title, self.btn_title_auto,
+            QLabel("位置"), self.combo_title_pos,
+            QLabel("对齐"), self.combo_title_align,
+            QLabel("距离"), self.spin_title_gap,
+        ):
+            self.title_row.addWidget(widget)
+        self.title_row.addStretch(1)
+        tune_layout.addLayout(self.title_row)
 
         reset_row = QHBoxLayout()
         self.btn_reset_style = QPushButton("恢复该样式默认值")
@@ -493,6 +533,11 @@ class PublicationExportDialog(QDialog):
         self.chk_box.toggled.connect(self._on_tune_changed)
         self.chk_grid.toggled.connect(self._on_tune_changed)
         self.chk_title.toggled.connect(self._on_tune_changed)
+        self.edit_title.textChanged.connect(self._on_tune_changed)
+        self.btn_title_auto.clicked.connect(self._on_title_auto)
+        self.combo_title_pos.currentIndexChanged.connect(self._on_tune_changed)
+        self.combo_title_align.currentIndexChanged.connect(self._on_tune_changed)
+        self.spin_title_gap.valueChanged.connect(self._on_tune_changed)
         self.edit_panel_label.textChanged.connect(self._on_tune_changed)
         self.spin_body_size.valueChanged.connect(self._on_tune_changed)
 
@@ -598,7 +643,7 @@ class PublicationExportDialog(QDialog):
         self.chk_grid.setVisible(family == "3d")
         self.label_body_size.setVisible(family == "3d")
         self.spin_body_size.setVisible(family == "3d")
-        self.chk_title.setVisible(family in ("1d", "2d"))
+        # 标题行（命名/位置/对齐/距离）对四个视图族都可用，无可见性切换
 
     def _sync_tune_ui_from_draft(self):
         ov = self._draft_overrides
@@ -609,6 +654,8 @@ class PublicationExportDialog(QDialog):
             (self.spin_cbar_nticks,), (self.spin_cbar_len,), (self.chk_cbar_outline,),
             (self.combo_frame,),
             (self.chk_box,), (self.chk_grid,), (self.chk_title,), (self.edit_panel_label,),
+            (self.edit_title,), (self.combo_title_pos,), (self.combo_title_align,),
+            (self.spin_title_gap,),
             (self.spin_body_size,),
             (self.spin_cbar_thick,), (self.spin_cbar_cx,), (self.spin_cbar_cy,),
         ]
@@ -649,6 +696,21 @@ class PublicationExportDialog(QDialog):
             self.chk_box.setChecked(bool(ov.get("show_box", params.get("show_box", False))))
             self.chk_grid.setChecked(bool(ov.get("show_grid", params.get("show_grid", False))))
             self.chk_title.setChecked(bool(ov.get("show_title", True)))
+            # 有 title_text 覆盖就用它（可能是空串 = 明确不要标题）；否则带入自动标题
+            self.edit_title.setText(
+                str(ov["title_text"]) if "title_text" in ov else self._auto_title()
+            )
+            self.combo_title_pos.setCurrentIndex(
+                0 if ov.get("title_position", "top") == "top" else 1
+            )
+            self.combo_title_align.setCurrentIndex(
+                {"left": 0, "center": 1, "right": 2}.get(
+                    ov.get("title_align", "center"), 1
+                )
+            )
+            self.spin_title_gap.setValue(
+                float(ov.get("title_gap_mm", TITLE_GAP_DEFAULT_MM))
+            )
             self.edit_panel_label.setText(str(ov.get("panel_label", "")))
             self.spin_body_size.setValue(int(ov.get("body_size", 100)))
         finally:
@@ -703,12 +765,36 @@ class PublicationExportDialog(QDialog):
             body_size = int(self.spin_body_size.value())
             if body_size != 100:
                 ov["body_size"] = body_size
-        if family in ("1d", "2d") and not self.chk_title.isChecked():
+        # 标题：四个视图族通用；与自动标题一致时不写入覆盖，保持设置干净
+        if not self.chk_title.isChecked():
             ov["show_title"] = False
+        title = self.edit_title.text().strip()
+        if title != self._auto_title().strip():
+            ov["title_text"] = title          # 可能是空串 = 用户明确不要标题
+        if self.combo_title_pos.currentIndex() == 1:
+            ov["title_position"] = "bottom"
+        align = {0: "left", 1: "center", 2: "right"}[self.combo_title_align.currentIndex()]
+        if align != "center":
+            ov["title_align"] = align
+        gap = float(self.spin_title_gap.value())
+        if abs(gap - TITLE_GAP_DEFAULT_MM) > 1e-6:
+            ov["title_gap_mm"] = gap
         panel = self.edit_panel_label.text().strip()
         if panel:
             ov["panel_label"] = panel
         return validate_overrides(family, ov)
+
+    def _auto_title(self) -> str:
+        """当前快照的自动标题（切片/积分/结果类型）；没有则为空串。"""
+        snapshot = self.snapshot
+        if snapshot is None:
+            return ""
+        return str((getattr(snapshot, "payload", None) or {}).get("title") or "")
+
+    def _on_title_auto(self, *_args):
+        """「自动」按钮：把标题文本框恢复为当前自动标题（即撤销命名覆盖）。"""
+        self.edit_title.setText(self._auto_title())
+        self._on_tune_changed()
 
     def _current_style(self):
         from publication_models import resolve_style
