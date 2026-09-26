@@ -32,7 +32,12 @@ from matplotlib.ticker import MaxNLocator, ScalarFormatter
 import numpy as np
 
 from render_core import VisualEngine, VolumeRenderSession
-from publication_models import PUB_CURVE_PALETTE, PUB_LINESTYLES, TITLE_GAP_DEFAULT_MM
+from publication_models import (
+    PUB_CURVE_PALETTE,
+    PUB_LINESTYLES,
+    TITLE_GAP_DEFAULT_MM,
+    resolve_axis_labels,
+)
 
 RENDER_LOCK = threading.RLock()
 
@@ -197,11 +202,13 @@ def _mm(value: float) -> float:
     return float(value) / MM_PER_INCH
 
 
-def _new_figure(width_mm: float, height_mm: float, dpi: int) -> Figure:
+def _new_figure(
+    width_mm: float, height_mm: float, dpi: int, transparent: bool = False
+) -> Figure:
     fig = Figure(
         figsize=(_mm(width_mm), _mm(height_mm)),
         dpi=int(dpi),
-        facecolor="white",
+        facecolor="none" if transparent else "white",
     )
     FigureCanvasAgg(fig)
     return fig
@@ -720,7 +727,7 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
     cmap = build_display_cmap(snapshot.cmap_name, level_info)
     data_range = actual_data_range(img)
 
-    fig = _new_figure(width_mm, height_mm, dpi)
+    fig = _new_figure(width_mm, height_mm, dpi, bool(options.transparent))
     ax = fig.add_axes([0.15, 0.15, 0.7, 0.7])
 
     image = ax.imshow(
@@ -742,10 +749,8 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
 
     _style_axes_frame(ax, params, overrides, family)
     cbar_layout = _colorbar_layout_for(params, overrides, family)
-    _style_axis_labels(
-        ax, params,
-        snapshot.payload["xlabel"], snapshot.payload["ylabel"],
-    )
+    xlabel, ylabel = resolve_axis_labels(snapshot, overrides)
+    _style_axis_labels(ax, params, xlabel, ylabel)
     _add_panel_label(ax, overrides, params)
 
     cbar_ax = None
@@ -848,7 +853,7 @@ def render_1d(snapshot, style, overrides, options, dpi: int) -> Figure:
     width_mm = float(options.width_mm)
     height_mm = options.resolved_height_mm(family)
 
-    fig = _new_figure(width_mm, height_mm, dpi)
+    fig = _new_figure(width_mm, height_mm, dpi, bool(options.transparent))
     ax = fig.add_axes([0.18, 0.18, 0.68, 0.68])
 
     has_legend = _render_1d_axes_content(ax, snapshot, params)
@@ -861,10 +866,8 @@ def render_1d(snapshot, style, overrides, options, dpi: int) -> Figure:
     _apply_formatter(ax.yaxis, nice_ticks(y0, y1, max_ticks), y0, y1)
 
     _style_axes_frame(ax, params, overrides, family)
-    _style_axis_labels(
-        ax, params,
-        snapshot.payload.get("xlabel", ""), snapshot.payload.get("ylabel", ""),
-    )
+    xlabel, ylabel = resolve_axis_labels(snapshot, overrides)
+    _style_axis_labels(ax, params, xlabel, ylabel)
     _add_panel_label(ax, overrides, params)
 
     if has_legend:
@@ -1060,6 +1063,8 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
     corners, spacing = _box_geometry(snapshot)
     projected = _project_points(renderer, corners)
     center = projected.mean(axis=0)
+    # 轴名按绘制顺序 X / Y / E：用户覆盖优先，空串即不画该轴名
+    axis_titles = resolve_axis_labels(snapshot, overrides)
 
     show_box = bool(overrides.get("show_box", style_params.get("show_box", False)))
     axes_mode = style_params.get("axes_mode", "tripod")
@@ -1134,22 +1139,27 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
                         color=ink, fontfamily=family_font, ha=ha, va=va, zorder=5)
         name_pos = mid + outward * name_gap_px
         ax_img.text(
-            name_pos[0], name_pos[1], snapshot.payload["axis_titles"][axis],
+            name_pos[0], name_pos[1], axis_titles[axis],
             fontsize=label_size, color=ink, fontfamily=family_font,
             ha="center", va="center", rotation=angle, rotation_mode="anchor", zorder=5,
         )
 
 
 def _content_bbox(image, pad_px: int):
-    """截图中非白内容的外接框（向外扩 pad_px）。
+    """截图中非背景内容的外接框（向外扩 pad_px）。
 
-    返回数组行列索引 (r0, r1, c0, c1)（行自上而下）；全白时返回 None。
-    白边来自主视图取景留白，裁掉后数据体才能真正充满导出图内容区。
+    返回数组行列索引 (r0, r1, c0, c1)（行自上而下）；无内容时返回 None。
+    空白边来自主视图取景留白，裁掉后数据体才能真正充满导出图内容区。
+
+    有 alpha 通道时按 alpha>0 判定：透明模式下留白是 alpha=0 而不是白色，
+    用 alpha 判定比"近似白"阈值更准确（浅色数据体不会被误当留白裁掉）。
     """
     arr = np.asarray(image)
     if arr.ndim < 2:
         return None
-    if arr.ndim == 2:
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        mask = arr[..., 3] > 0
+    elif arr.ndim == 2:
         mask = arr < 252
     else:
         mask = np.any(arr[..., :3] < 252, axis=-1)
@@ -1180,7 +1190,7 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
     cmap = build_display_cmap(snapshot.cmap_name, level_info)
     data_range = actual_data_range(volume)
 
-    fig = _new_figure(width_mm, height_mm, dpi)
+    fig = _new_figure(width_mm, height_mm, dpi, bool(options.transparent))
     ax_img = fig.add_axes([0.12, 0.12, 0.7, 0.7])
     ax_img.set_axis_off()
 
@@ -1249,7 +1259,13 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         _apply_snapshot_camera(plotter, snapshot.camera)
         _apply_body_zoom(plotter, body_factor)
         plotter.render()
-        image = plotter.screenshot(None, return_img=True)
+        # 透明背景由成像阶段处理：背景像素得到 alpha=0，体裁剪边缘保留 alpha。
+        # 若后端不支持 alpha bit planes，pyvista 静默返回全不透明图，退化为白底
+        # （即不勾选时的行为），不会产生错误产物。
+        image = plotter.screenshot(
+            None, return_img=True,
+            transparent_background=bool(options.transparent),
+        )
         show_axes = bool(snapshot.payload.get("show_axes", True))
         if show_axes:
             axes_artists = lambda: _draw_3d_axes(ax_img, plotter.renderer, snapshot, params, overrides)
@@ -1432,6 +1448,18 @@ def render_snapshot(snapshot, style, overrides, options, dpi: Optional[int] = No
         return renderer(snapshot, style, overrides, options, int(dpi or options.dpi))
 
 
+def background_kwargs(options) -> Dict[str, Any]:
+    """画布底色的 savefig 参数，供正式导出与预览共用。
+
+    透明背景要两个条件同时成立：``transparent=True`` 让 axes 的 patch 透明，
+    ``facecolor="none"`` 让 figure 底板透明。二者缺一不可——显式传入的
+    facecolor 会盖掉 transparent 对 figure 底板的作用（实测 matplotlib 3.10）。
+    关掉该选项时 facecolor="white"，与引入透明背景前的行为逐位一致。
+    """
+    transparent = bool(getattr(options, "transparent", False))
+    return {"facecolor": "none" if transparent else "white", "transparent": transparent}
+
+
 def save_figure(fig: Figure, path: str, options) -> None:
     """原子保存：同目录临时文件 → 校验 → os.replace。失败保留旧文件。"""
     fmt = str(options.fmt).lower()
@@ -1439,6 +1467,7 @@ def save_figure(fig: Figure, path: str, options) -> None:
         raise RenderError(f"不支持的输出格式：{fmt}")
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
+    kwargs = background_kwargs(options)
     tmp_path = os.path.join(
         directory, f".{os.path.basename(path)}.{os.getpid()}.pubtmp"
     )
@@ -1447,11 +1476,9 @@ def save_figure(fig: Figure, path: str, options) -> None:
             if fmt == "pdf":
                 # TrueType 子集嵌入，文字保持可选中；rc_context 仅作用于本作用域
                 with matplotlib.rc_context({"pdf.fonttype": 42}):
-                    fig.savefig(tmp_path, format="pdf", facecolor="white")
+                    fig.savefig(tmp_path, format="pdf", **kwargs)
             else:
-                fig.savefig(
-                    tmp_path, format="png", dpi=int(options.dpi), facecolor="white"
-                )
+                fig.savefig(tmp_path, format="png", dpi=int(options.dpi), **kwargs)
         if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) <= 0:
             raise RenderError("写入产物为空。")
         # Windows 上目标文件可能被杀毒/索引/预览短暂占用：有限次重试替换

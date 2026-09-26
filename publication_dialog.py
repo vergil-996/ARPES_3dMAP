@@ -18,7 +18,7 @@ import io
 from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QCursor, QIcon, QPixmap
+from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -51,10 +51,12 @@ from publication_export import (
     render_and_save,
 )
 from publication_models import (
+    AXIS_LABEL_OVERRIDE_KEYS,
     FAMILY_FORMATS,
     FAMILY_LABELS,
     TITLE_GAP_DEFAULT_MM,
     OutputOptions,
+    auto_axis_labels,
     overrides_signature,
     styles_for_family,
     validate_overrides,
@@ -62,6 +64,7 @@ from publication_models import (
 from publication_renderers import (
     RENDER_LOCK,
     RenderError,
+    background_kwargs,
     default_colorbar_center,
     render_snapshot,
 )
@@ -69,6 +72,43 @@ from publication_renderers import (
 CARD_DPI = 80          # 卡片预览 dpi（完整数据、较低像素）
 LARGE_DPI = 150        # 大图预览 dpi（与正式文件同一排版）
 CACHE_LIMIT = 16
+
+CHECKER_TILE = 8               # 棋盘格边长（px）
+CHECKER_LIGHT = "#FFFFFF"      # 透明区域的显示底：白格
+CHECKER_DARK = "#DCDCDC"       # 与白格交替的浅灰格
+
+
+def _checkerboard_pixmap(width: int, height: int) -> QPixmap:
+    """生成棋盘格底图，用来在界面上标示导出图的透明区域。
+
+    只作用于预览显示——写出的 PNG/PDF 始终是真正的透明背景。
+    """
+    board = QPixmap(max(1, int(width)), max(1, int(height)))
+    board.fill(QColor(CHECKER_LIGHT))
+    painter = QPainter(board)
+    try:
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(CHECKER_DARK))
+        for y in range(0, board.height(), CHECKER_TILE):
+            for x in range(0, board.width(), CHECKER_TILE):
+                if ((x // CHECKER_TILE) + (y // CHECKER_TILE)) % 2:
+                    painter.drawRect(x, y, CHECKER_TILE, CHECKER_TILE)
+    finally:
+        painter.end()
+    return board
+
+
+def _composite_preview(pixmap: QPixmap, transparent: bool) -> QPixmap:
+    """透明预览合成到棋盘格上，否则原样返回。"""
+    if not transparent or not pixmap.hasAlphaChannel():
+        return pixmap
+    board = _checkerboard_pixmap(pixmap.width(), pixmap.height())
+    painter = QPainter(board)
+    try:
+        painter.drawPixmap(0, 0, pixmap)
+    finally:
+        painter.end()
+    return board
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +141,10 @@ class _PreviewTask(QRunnable):
             )
             try:
                 buffer = io.BytesIO()
-                fig.savefig(buffer, format="png", dpi=int(fig.get_dpi()), facecolor="white")
+                fig.savefig(
+                    buffer, format="png", dpi=int(fig.get_dpi()),
+                    **background_kwargs(self.options),
+                )
                 payload = buffer.getvalue()
             finally:
                 fig.clear()
@@ -405,6 +448,51 @@ class PublicationExportDialog(QDialog):
         self.frame_row.addStretch(1)
         tune_layout.addLayout(self.frame_row)
 
+        # 轴标签行：用户命名各轴名（四个视图族通用；2D/1D 横+纵两条，
+        # 3D 是 X / Y / E 三条，与快照 axis_titles 的绘制顺序一致）
+        self.axis_row = QHBoxLayout()
+        self.axis_row.addWidget(QLabel("轴标签"))
+        self.axis_prefixes = []
+        self.axis_edits = []
+        for hint in ("横轴", "纵轴", "E"):
+            prefix = QLabel(hint)
+            prefix.setMinimumWidth(32)
+            edit = QLineEdit()
+            edit.setMaxLength(40)
+            edit.setMinimumWidth(140)
+            edit.setPlaceholderText("留空则不显示")
+            edit.setToolTip(
+                "图片上的坐标轴名称：打开面板时带入当前自动标签，可直接改成自己的轴名；\n"
+                "清空则该轴不显示标签，「自动」按钮恢复全部自动标签。"
+            )
+            self.axis_prefixes.append(prefix)
+            self.axis_edits.append(edit)
+            self.axis_row.addWidget(prefix)
+            self.axis_row.addWidget(edit)
+        (
+            self.label_axis_x, self.label_axis_y, self.label_axis_z,
+        ) = self.axis_prefixes
+        (
+            self.edit_axis_x, self.edit_axis_y, self.edit_axis_z,
+        ) = self.axis_edits
+        self.btn_axis_auto = QPushButton("自动")
+        self.btn_axis_auto.setFixedHeight(24)
+        theme.style_push_button(self.btn_axis_auto, "secondary")
+        self.btn_axis_auto.setCursor(Qt.PointingHandCursor)
+        self.btn_axis_auto.setToolTip("把所有轴名恢复为当前结果的自动标签")
+        self.axis_row.addWidget(self.btn_axis_auto)
+        self.axis_row.addStretch(1)
+        tune_layout.addLayout(self.axis_row)
+        # 3D 轴名只在主视图「坐标轴」开关打开时才绘制（自动轴名也一样），
+        # 关掉时提前说清楚，免得用户改了半天轴名却在导出图里看不到
+        self.label_axis_hint = QLabel(
+            "主视图的「坐标轴」开关已关闭：导出图不绘制坐标轴，轴标签不会出现。"
+        )
+        self.label_axis_hint.setWordWrap(True)
+        self.label_axis_hint.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
+        self.label_axis_hint.setVisible(False)
+        tune_layout.addWidget(self.label_axis_hint)
+
         # 标题行：用户命名 + 位置/对齐/距离（四个视图族通用）
         self.title_row = QHBoxLayout()
         self.chk_title = QCheckBox("显示标题")
@@ -494,6 +582,12 @@ class PublicationExportDialog(QDialog):
         output_row.addWidget(QLabel("格式"))
         self.combo_format = QComboBox()
         output_row.addWidget(self.combo_format)
+        self.chk_transparent = QCheckBox("透明背景")
+        self.chk_transparent.setToolTip(
+            "导出时不填充白底：PNG 带 alpha 通道，PDF 页面底色留空。\n"
+            "预览以棋盘格标示透明区域，导出的文件本身不含棋盘格。"
+        )
+        output_row.addWidget(self.chk_transparent)
         output_row.addStretch(1)
         layout.addWidget(output_frame)
 
@@ -540,6 +634,9 @@ class PublicationExportDialog(QDialog):
         self.spin_title_gap.valueChanged.connect(self._on_tune_changed)
         self.edit_panel_label.textChanged.connect(self._on_tune_changed)
         self.spin_body_size.valueChanged.connect(self._on_tune_changed)
+        for edit in self.axis_edits:
+            edit.textChanged.connect(self._on_tune_changed)
+        self.btn_axis_auto.clicked.connect(self._on_axis_auto)
 
         # 输出信号
         self.combo_width.currentIndexChanged.connect(self._on_output_changed)
@@ -548,6 +645,7 @@ class PublicationExportDialog(QDialog):
         self.combo_dpi.currentIndexChanged.connect(self._on_output_changed)
         self.spin_dpi.valueChanged.connect(self._on_output_changed)
         self.combo_format.currentIndexChanged.connect(self._on_output_changed)
+        self.chk_transparent.toggled.connect(self._on_output_changed)
 
     # ------------------------------------------------------------- 打开/快照
 
@@ -643,6 +741,16 @@ class PublicationExportDialog(QDialog):
         self.chk_grid.setVisible(family == "3d")
         self.label_body_size.setVisible(family == "3d")
         self.spin_body_size.setVisible(family == "3d")
+        # 轴标签行：3D 是 X / Y / E 三条轴名，其余是横轴 / 纵轴两条
+        is_3d = family == "3d"
+        for prefix, hint in zip(
+            self.axis_prefixes, ("X", "Y", "E") if is_3d else ("横轴", "纵轴", "")
+        ):
+            prefix.setText(hint)
+        for widget in (self.label_axis_z, self.edit_axis_z):
+            widget.setVisible(is_3d)
+        show_axes = bool((self.snapshot.payload or {}).get("show_axes", True))
+        self.label_axis_hint.setVisible(is_3d and not show_axes)
         # 标题行（命名/位置/对齐/距离）对四个视图族都可用，无可见性切换
 
     def _sync_tune_ui_from_draft(self):
@@ -654,6 +762,7 @@ class PublicationExportDialog(QDialog):
             (self.spin_cbar_nticks,), (self.spin_cbar_len,), (self.chk_cbar_outline,),
             (self.combo_frame,),
             (self.chk_box,), (self.chk_grid,), (self.chk_title,), (self.edit_panel_label,),
+            (self.edit_axis_x,), (self.edit_axis_y,), (self.edit_axis_z,),
             (self.edit_title,), (self.combo_title_pos,), (self.combo_title_align,),
             (self.spin_title_gap,),
             (self.spin_body_size,),
@@ -712,6 +821,11 @@ class PublicationExportDialog(QDialog):
                 float(ov.get("title_gap_mm", TITLE_GAP_DEFAULT_MM))
             )
             self.edit_panel_label.setText(str(ov.get("panel_label", "")))
+            # 轴标签：有覆盖就用它（可能是空串 = 明确不要该轴标签）；否则带入自动标签
+            for edit, key, auto in zip(
+                self.axis_edits, AXIS_LABEL_OVERRIDE_KEYS, self._auto_axis_labels()
+            ):
+                edit.setText(str(ov[key]) if key in ov else auto)
             self.spin_body_size.setValue(int(ov.get("body_size", 100)))
         finally:
             for (w,) in blockers:
@@ -782,6 +896,13 @@ class PublicationExportDialog(QDialog):
         panel = self.edit_panel_label.text().strip()
         if panel:
             ov["panel_label"] = panel
+        # 轴标签：与自动标签一致时不写入覆盖，保持设置干净
+        for edit, key, auto in zip(
+            self.axis_edits, AXIS_LABEL_OVERRIDE_KEYS, self._auto_axis_labels()
+        ):
+            text = edit.text().strip()
+            if text != auto.strip():
+                ov[key] = text          # 可能是空串 = 用户明确不要该轴标签
         return validate_overrides(family, ov)
 
     def _auto_title(self) -> str:
@@ -794,6 +915,23 @@ class PublicationExportDialog(QDialog):
     def _on_title_auto(self, *_args):
         """「自动」按钮：把标题文本框恢复为当前自动标题（即撤销命名覆盖）。"""
         self.edit_title.setText(self._auto_title())
+        self._on_tune_changed()
+
+    def _auto_axis_labels(self) -> Tuple[str, str, str]:
+        """当前快照的自动轴标签，按 xlabel / ylabel / zlabel 顺序补齐到三条。
+
+        3D 的第三条是 E 轴（键名沿用 matplotlib 的 zlabel 习惯，与
+        快照 axis_titles 的绘制顺序 X / Y / E 一一对应）。
+        """
+        if self.snapshot is None:
+            return ("", "", "")
+        labels = auto_axis_labels(self.snapshot)
+        return tuple(labels) + ("",) * (3 - len(labels))
+
+    def _on_axis_auto(self, *_args):
+        """「自动」按钮：把三个轴名恢复为当前自动标签（撤销命名覆盖）。"""
+        for edit, auto in zip(self.axis_edits, self._auto_axis_labels()):
+            edit.setText(auto)
         self._on_tune_changed()
 
     def _current_style(self):
@@ -954,10 +1092,12 @@ class PublicationExportDialog(QDialog):
         widgets = [
             self.combo_width, self.spin_width, self.spin_height,
             self.combo_dpi, self.spin_dpi, self.combo_format,
+            self.chk_transparent,
         ]
         for w in widgets:
             w.blockSignals(True)
         try:
+            self.chk_transparent.setChecked(bool(options.transparent))
             width = float(options.width_mm)
             if abs(width - 89.0) < 1e-6:
                 self.combo_width.setCurrentIndex(0)
@@ -1010,6 +1150,7 @@ class PublicationExportDialog(QDialog):
             height_mm=float(self.spin_height.value()),
             dpi=int(dpi),
             fmt=fmt,
+            transparent=bool(self.chk_transparent.isChecked()),
         )
 
     def _on_output_changed(self, *_args):
@@ -1125,7 +1266,7 @@ class PublicationExportDialog(QDialog):
                             buffer = io.BytesIO()
                             fig.savefig(
                                 buffer, format="png",
-                                dpi=int(fig.get_dpi()), facecolor="white",
+                                dpi=int(fig.get_dpi()), **background_kwargs(options),
                             )
                             payload = buffer.getvalue()
                         finally:
@@ -1166,6 +1307,8 @@ class PublicationExportDialog(QDialog):
         pixmap.loadFromData(payload)
         if pixmap.isNull():
             return
+        # 透明预览无可见底色，合成到棋盘格后才能看出透明区域
+        pixmap = _composite_preview(pixmap, bool(self._collect_output_options().transparent))
         if dpi == CARD_DPI and style_id in self.cards:
             card_w = self.cards[style_id].width() - 20
             scaled = pixmap.scaledToWidth(card_w, Qt.SmoothTransformation)

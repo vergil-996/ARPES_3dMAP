@@ -64,6 +64,9 @@ class OutputOptions:
     height_mm: Optional[float] = None
     dpi: int = 600
     fmt: str = "png"
+    # 透明背景：导出时不填充白底。PNG 写入 alpha 通道，PDF 页面底色留空，
+    # 便于直接叠到深色幻灯片或后期排版里。
+    transparent: bool = False
 
     def resolved_height_mm(self, family: str) -> float:
         if self.height_mm is not None:
@@ -86,6 +89,7 @@ class OutputOptions:
             round(self.resolved_height_mm(family), 3),
             int(self.dpi),
             str(self.fmt),
+            bool(self.transparent),
         )
 
     def with_updates(self, **kwargs) -> "OutputOptions":
@@ -98,6 +102,7 @@ class OutputOptions:
                 "height_mm": self.height_mm,
                 "dpi": int(self.dpi),
                 "fmt": str(self.fmt),
+                "transparent": bool(self.transparent),
             }
         )
 
@@ -113,6 +118,7 @@ class OutputOptions:
         height = payload.get("height_mm")
         dpi = payload.get("dpi", 600)
         fmt = payload.get("fmt", "png")
+        transparent = bool(payload.get("transparent", False))
         try:
             width = float(width)
             height = None if height is None else float(height)
@@ -127,7 +133,10 @@ class OutputOptions:
             dpi = 600
         if fmt not in ("png", "pdf"):
             fmt = "png"
-        return OutputOptions(width_mm=width, height_mm=height, dpi=dpi, fmt=fmt)
+        return OutputOptions(
+            width_mm=width, height_mm=height, dpi=dpi, fmt=fmt,
+            transparent=transparent,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +332,12 @@ _OVERRIDE_SCHEMA = {
     "title_gap_mm": ("float", (0.0, 20.0)),
     # 数据体在画面中的大小百分比（100 = 快照取景原样）；仅 3D 族有意义
     "body_size": ("int", (0, 250)),
+    # 轴标签文字：显式给出即为用户命名（空串 = 明确不要该轴标签）；缺省用
+    # 快照自动标签。2D/1D 族用 xlabel/ylabel 两个键；3D 族按绘制顺序
+    # X / Y / E 对应 xlabel / ylabel / zlabel 三个键。
+    "xlabel_text": ("text", 40),
+    "ylabel_text": ("text", 40),
+    "zlabel_text": ("text", 40),   # 仅 3D 族
 }
 
 # 标题与相邻内容之间的默认距离（毫米）；与 _OVERRIDE_SCHEMA 的缺省语义一致
@@ -355,6 +370,8 @@ def validate_overrides(family: str, overrides: Optional[Mapping[str, Any]]) -> D
             continue
         if key == "body_size" and family != "3d":
             continue
+        if key == "zlabel_text" and family != "3d":
+            continue  # 第三条轴名只存在于 3D 视图
         if kind == "bool":
             clean[key] = bool(value)
         elif kind == "choice":
@@ -434,6 +451,46 @@ def intensity_label_for(page_kind: str, normalized: bool = False) -> str:
     if page_kind == "second_derivative":
         return "-d²I/dE² (a.u.)"
     return "Intensity (a.u.)"
+
+
+# 轴标签覆盖键，与 auto_axis_labels() 返回的顺序一一对应。
+# 3D 族的三项按绘制顺序是 X / Y / E，即 zlabel_text 是 E 轴的名字；
+# non-3d 族只用得到前两项（zlabel_text 在校验时被丢弃）。
+AXIS_LABEL_OVERRIDE_KEYS = ("xlabel_text", "ylabel_text", "zlabel_text")
+
+
+def auto_axis_labels(snapshot) -> Tuple[str, ...]:
+    """快照自带的轴标签，按绘制顺序。
+
+    3D 视图是三条轴名（X / Y / E，与 _draw_3d_axes 的绘制顺序一致），
+    其余视图族是横轴 / 纵轴两条。
+    """
+    payload = getattr(snapshot, "payload", None) or {}
+    if getattr(snapshot, "view_family", None) == "3d":
+        titles = [str(title or "") for title in (payload.get("axis_titles") or ())]
+        titles += [""] * (3 - len(titles))
+        return tuple(titles[:3])
+    return (str(payload.get("xlabel") or ""), str(payload.get("ylabel") or ""))
+
+
+def resolve_axis_labels(snapshot, overrides: Optional[Mapping[str, Any]]) -> Tuple[str, ...]:
+    """图片上实际要画的轴标签。
+
+    - 覆盖里显式给出（含空串）→ 用用户的文字，空串即不画该轴标签；
+    - 缺省 → 用快照自动标签。
+
+    与标题 _resolve_title 同一套语义：空串是合法覆盖，必须与"未设置"
+    区分开，否则用户没法把某个轴名腾空交给后期排版软件去加。
+    """
+    if not isinstance(overrides, Mapping):
+        overrides = {}
+    labels = []
+    for key, auto in zip(AXIS_LABEL_OVERRIDE_KEYS, auto_axis_labels(snapshot)):
+        if key in overrides:
+            labels.append(str(overrides.get(key) or "").strip())
+        else:
+            labels.append(auto)
+    return tuple(labels)
 
 
 # ---------------------------------------------------------------------------
