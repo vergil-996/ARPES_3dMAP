@@ -21,7 +21,7 @@ class CropInteractionMixin:
         self.left_display_stack.setCurrentIndex(1)
         VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
-        self.ax_2d.text(0.5, 0.5, "当前裁剪范围内没有有效数据", transform=self.ax_2d.transAxes,
+        self.ax_2d.text(0.5, 0.5, "当前结果没有有效数据", transform=self.ax_2d.transAxes,
                         ha="center", va="center", color=theme.TEXT_2,
                         fontfamily=["DejaVu Sans", "Microsoft YaHei"])
         self.ax_2d.set_axis_off()
@@ -42,7 +42,8 @@ class CropInteractionMixin:
                 popup.hide()
                 return True
             if in_canvas:
-                self.btn_tb_crop.setChecked(False)
+                button = self.btn_tb_erase if controller.operation == "erase" else self.btn_tb_crop
+                button.setChecked(False)
                 return True
         if not in_canvas or controller.selection is None:
             return False
@@ -81,6 +82,18 @@ class CropInteractionMixin:
                 widget.unsetCursor()
 
     def on_toggle_interactive_box(self, checked):
+        self._toggle_region_mode("crop", checked)
+
+    def on_toggle_erase(self, checked):
+        self._toggle_region_mode("erase", checked)
+
+    def _toggle_region_mode(self, operation, checked):
+        if checked:
+            other = self.btn_tb_crop if operation == "erase" else self.btn_tb_erase
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+            self.crop_controller.set_operation(operation)
         self.crop_controller.enabled = bool(checked)
         if not checked:
             self.crop_controller.popup.hide()
@@ -211,17 +224,20 @@ class CropInteractionMixin:
         selection = controller.selection
         if source is None or selection is None or source.page_kind == "control_panel":
             return
+        erasing = selection.operation == "erase"
+        action = "裁空" if erasing else "裁剪"
         if not self._render_exact_ready:
-            controller.popup.set_error("请等待当前结果计算完成后裁剪。")
+            controller.popup.set_error(f"请等待当前结果计算完成后{action}。")
             return
         context = self._compute_render_context(source)
         if context is None:
             return
         cropped = apply_selection(context, selection)
-        if cropped.get("crop_empty"):
+        if cropped.get("crop_empty") and not erasing:
             controller.popup.set_error("裁剪范围内没有有效数据。")
             return
-        volume_roi = source.page_kind == "home" and selection.view == "3d" and cropped["view"] == "3d"
+        volume_roi = (not erasing and not source.params.get("crop_regions")
+                      and source.page_kind == "home" and selection.view == "3d" and cropped["view"] == "3d")
         if volume_roi and abs(float(self.rotation_angle)) >= 1e-6:
             controller.popup.set_error("请先将 Z 轴旋转恢复为 0°，再裁剪全帧 ROI。")
             return
@@ -247,12 +263,13 @@ class CropInteractionMixin:
             if kind in {"axis_integral", "axis_integral_crop"}:
                 if not regions:
                     params["crop_base_rect"] = self._axis_crop_rect_from_params(source.params) if kind == "axis_integral_crop" else None
-                kind = "axis_integral_crop"
-                rect = cropped["plot_logical_bounds"]
-                params.update(crop_k_low=rect["x_low"], crop_k_up=rect["x_up"], crop_e_low=rect["y_low"], crop_e_up=rect["y_up"])
+                if not erasing:
+                    kind = "axis_integral_crop"
+                    rect = cropped["plot_logical_bounds"]
+                    params.update(crop_k_low=rect["x_low"], crop_k_up=rect["x_up"], crop_e_low=rect["y_low"], crop_e_up=rect["y_up"])
             regions.append(selection.to_dict())
             params["crop_regions"] = regions
-        title = self._make_unique_page_title(f"裁剪 - {source.title}")
+        title = self._make_unique_page_title(f"{action} - {source.title}")
         spec = AnalysisPageSpec(self._make_page_id(), title, kind, source.source_module,
                                 params=params, source_page_id=source.page_id, source_title=source.title,
                                 data_scope_id=scope_id)

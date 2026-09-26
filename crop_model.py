@@ -15,8 +15,11 @@ class CropSelection:
     axes: tuple
     bounds: tuple
     e_flip: bool = False
+    operation: str = "crop"
 
     def __post_init__(self):
+        if self.operation not in {"crop", "erase"}:
+            raise ValueError("未知的选区操作。")
         count = 3 if self.view == "3d" else 2
         if self.view not in CROP_VIEWS or len(self.axes) != count or len(self.bounds) != count * 2:
             raise ValueError("裁剪范围与当前视图不匹配。")
@@ -34,7 +37,8 @@ class CropSelection:
 
     @classmethod
     def from_dict(cls, value):
-        return cls(str(value["view"]), tuple(value["axes"]), tuple(value["bounds"]), bool(value.get("e_flip")))
+        return cls(str(value["view"]), tuple(value["axes"]), tuple(value["bounds"]),
+                   bool(value.get("e_flip")), str(value.get("operation", "crop")))
 
 
 def prepare_context(context):
@@ -216,6 +220,51 @@ def _crop_curve(curve, bounds):
     return dict(curve, x_data=x, y_data=np.where(valid, y, np.nan)), bool(np.any(valid))
 
 
+def _erase_selection(context, selection):
+    """Mask selected samples without changing the domain or backing arrays."""
+    result = dict(context)
+    view = context["view"]
+    if view in {"3d", "2d"}:
+        dims = 3 if view == "3d" else 2
+        intervals = [_index_interval(axis_values(context, i), *selection.bounds[2*i:2*i+2])
+                     for i in range(dims)]
+        if any(interval is None for interval in intervals):
+            return result
+        source = np.asarray(context["data"])
+        data = np.array(source, dtype=np.result_type(source.dtype, np.float32), copy=True)
+        data[tuple(slice(a, b + 1) for a, b in intervals)] = np.nan
+        result.update(data=data, crop_empty=not np.any(np.isfinite(data)))
+        result.pop("compact_data", None)
+        result.pop("compact_plot_logical_bounds", None)
+    elif view in {"1d", "1d_comparison"}:
+        def erase_curve(curve):
+            x, y = np.asarray(curve["x_data"]), np.asarray(curve["y_data"])
+            xl, xh, yl, yh = selection.bounds
+            selected = (x >= xl) & (x <= xh) & (y >= yl) & (y <= yh)
+            masked = np.where(selected, np.nan, y)
+            return dict(curve, y_data=masked), bool(np.any(np.isfinite(x) & np.isfinite(masked)))
+
+        if view == "1d":
+            result, valid = erase_curve(context)
+        else:
+            curves = [erase_curve(c) for c in context["curves"]]
+            result["curves"] = [c for c, _ in curves]
+            valid = any(valid for _, valid in curves)
+        result["crop_empty"] = not valid
+    else:
+        energy = np.asarray(context["energy_axis"])
+        curves = np.asarray(context["curves"])
+        display_x = curves + waterfall_offsets(context)[:, None]
+        xl, xh, yl, yh = selection.bounds
+        selected = ((display_x >= xl) & (display_x <= xh)
+                    & (energy[None, :] >= yl) & (energy[None, :] <= yh))
+        masked = np.where(selected, np.nan, curves)
+        result.update(curves=masked, crop_empty=not np.any(np.isfinite(masked)))
+        if context.get("raw_curves") is not None:
+            result["raw_curves"] = np.where(selected, np.nan, context["raw_curves"])
+    return result
+
+
 def apply_selection(context, selection):
     """Apply in the coordinate orientation captured at selection time.
 
@@ -231,7 +280,9 @@ def apply_selection(context, selection):
         return _empty(context)
     oriented = _orient(context, selection.e_flip)
     view = selection.view
-    if view in {"3d", "2d"}:
+    if selection.operation == "erase":
+        result = _erase_selection(oriented, selection)
+    elif view in {"3d", "2d"}:
         result = _crop_grid(oriented, selection)
     elif view == "1d":
         result, valid = _crop_curve(oriented, selection.bounds)
@@ -254,7 +305,7 @@ def apply_selection(context, selection):
             result["raw_curves"] = np.where(valid, np.asarray(oriented["raw_curves"])[:, emask], np.nan)
     if result["view"] == context["view"]:
         result = _orient(result, selection.e_flip)
-    result["crop_bounds"] = selection.bounds
+    result["erase_bounds" if selection.operation == "erase" else "crop_bounds"] = selection.bounds
     return result
 
 
@@ -286,4 +337,6 @@ def export_cropped_context(context, *, e_flip=False):
     else:
         raise ValueError("比较页暂不支持数据导出。")
     result["crop_range"] = np.asarray(context.get("crop_bounds", ()), dtype=float)
+    if "erase_bounds" in context:
+        result["erase_range"] = np.asarray(context["erase_bounds"], dtype=float)
     return result

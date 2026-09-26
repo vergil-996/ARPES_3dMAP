@@ -1226,20 +1226,23 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         grid.extent = tuple(int(v) for v in snapshot.payload["data_bounds"])
         grid.origin = (0.0, 0.0, 0.0)
         grid.spacing = tuple(float(v) for v in snapshot.payload["spacing"])
-        buffer = np.asfortranarray(volume)
+        from render_core import configure_volume_mask
+        has_mask = not np.all(np.isfinite(volume))
+        buffer = np.asfortranarray(np.nan_to_num(volume) if has_mask else volume)
         grid.point_data["values"] = buffer.ravel(order="F")
         opacity = mapped_opacity_values(snapshot.payload["opacity_mode"], level_info)
-        plotter.add_volume(
+        volume_actor = plotter.add_volume(
             grid,
             scalars="values",
             cmap=cmap,
             opacity=opacity,
             clim=[float(level_info["black_value"]), float(level_info["white_value"])],
             show_scalar_bar=False,
-            mapper="smart",
+            mapper="gpu" if has_mask else "smart",
             name="export_vol",
             render=False,
         )
+        configure_volume_mask(volume_actor, grid, volume)
         clip = snapshot.payload.get("clip_render_bounds")
         if clip is not None:
             _apply_clipping_planes(plotter, clip)

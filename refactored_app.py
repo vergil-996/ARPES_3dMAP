@@ -39,6 +39,14 @@ from siui.core import SiGlobal
 
 import theme
 from ui_controls import ActionButton
+from camera_view_controls import (
+    DEFAULT_AZIMUTH,
+    DEFAULT_ELEVATION,
+    DEFAULT_ROLL,
+    CameraPose,
+    pose_from_vectors,
+    vectors_from_pose,
+)
 from crop_controls import CropController
 from crop_integration import CropInteractionMixin
 from crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
@@ -152,6 +160,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._saved_3d_camera_position = None
         self._camera_e_flip_applied = False
         self._camera_observer_id = None
+        self._camera_interaction_observer_id = None
+        self._camera_view_sync_timer = None
 
         self.settings = QSettings("ARPES", "ARPES_3dMAP")
         saved_backend = self.settings.value("compute_backend", "Auto", type=str)
@@ -192,6 +202,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             )
         except Exception:
             self._camera_observer_id = None
+        # 相机交互期间按约 30 Hz 回读姿态（拖动/滚轮/平移中的输入框跟随），
+        # 交互结束由 EndInteractionEvent 再做一次精确回读并停表。
+        self._camera_view_sync_timer = QTimer(self)
+        self._camera_view_sync_timer.setInterval(33)
+        self._camera_view_sync_timer.timeout.connect(self._tick_camera_view_sync)
+        try:
+            self._camera_interaction_observer_id = self.plotter.iren.add_observer(
+                "StartInteractionEvent",
+                self._on_camera_interaction_started,
+            )
+        except Exception:
+            self._camera_interaction_observer_id = None
         self.page_render.set_nvidia_backend_available(self.backend_manager.gpu_available)
         self.page_render.set_backend_mode(self.backend_manager.mode)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
@@ -700,6 +722,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.btn_tb_crop.setStyleSheet(self.btn_tb_crop.styleSheet() +
             f"QPushButton:checked {{ background: {theme.ACCENT}; color: {theme.ACCENT_ON}; border-color: {theme.ACCENT}; }}")
         self.btn_tb_crop.setToolTip("开启裁剪：拖动选区，右键编辑范围并裁剪；Esc 退出")
+        self.btn_tb_erase = _make_tb_btn("裁空", "secondary", 80)
+        self.btn_tb_erase.setCheckable(True)
+        self.btn_tb_erase.setStyleSheet(self.btn_tb_crop.styleSheet())
+        self.btn_tb_erase.setToolTip("开启裁空：拖动选区，右键编辑范围并清空；Esc 退出")
         self.btn_tb_lock = _make_tb_btn("锁定色带", "secondary", 104)
         self.btn_tb_lock.setCheckable(True)
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
@@ -713,6 +739,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         row.addWidget(self.btn_tb_shot)
         row.addWidget(self.btn_tb_export)
         row.addWidget(self.btn_tb_crop)
+        row.addWidget(self.btn_tb_erase)
         row.addWidget(self.btn_tb_lock)
 
         row.addStretch(1)
@@ -864,6 +891,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return None
 
     def _capture_3d_camera_position(self, *_args):
+        # 交互结束（EndInteractionEvent）也走这里：先停掉 30 Hz 的粗回读，
+        # 再按当前相机补一次精确回读。
+        self._stop_camera_view_sync_timer()
         plotter = getattr(self, "plotter", None)
         stack = getattr(self, "left_display_stack", None)
         if plotter is None or stack is None or stack.currentWidget() is not plotter:
@@ -871,6 +901,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         snapshot = self._current_3d_camera_position()
         if snapshot is not None:
             self._saved_3d_camera_position = snapshot
+            self._sync_camera_view_controls()
 
     def _restore_3d_camera_position(self):
         snapshot = getattr(self, "_saved_3d_camera_position", None)
@@ -905,6 +936,165 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         snapshot = self._current_3d_camera_position()
         if snapshot is not None:
             self._saved_3d_camera_position = snapshot
+
+    # ------------------------------------------------------------------
+    # 「相机视角」面板：显隐驱动、姿态双向同步与重置
+    # ------------------------------------------------------------------
+    def _camera_view_active(self):
+        """当前是否确实在显示有效的 3D 场景（与 _render_active_page 的显隐判断同源）。"""
+        # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
+        # RuntimeError；实例 __dict__ 查询则安全。
+        context = self.__dict__.get("current_render_context")
+        if not isinstance(context, dict) or context.get("view") != "3d":
+            return False
+        plotter = self.__dict__.get("plotter")
+        stack = self.__dict__.get("left_display_stack")
+        return (
+            plotter is not None
+            and stack is not None
+            and stack.currentWidget() is plotter
+        )
+
+    def _set_camera_view_visible(self, visible, *, animate=True):
+        page = self.__dict__.get("page_render")
+        if page is not None:
+            page.set_camera_view_visible(visible, animate=animate)
+
+    def _current_camera_view_pose(self):
+        """当前相机的真实姿态读数；相机不可用时返回 None。"""
+        plotter = self.__dict__.get("plotter")
+        if plotter is None:
+            return None
+        try:
+            camera = plotter.camera
+            return pose_from_vectors(camera.position, camera.focal_point, camera.up)
+        except Exception:
+            return None
+
+    def _sync_camera_view_controls(self, *, force=False):
+        """把真实相机姿态回读到「相机视角」输入框（只读相机，不触发数据计算）。"""
+        page = self.__dict__.get("page_render")
+        if page is None:
+            return
+        pose = self._current_camera_view_pose()
+        if pose is not None:
+            page.sync_camera_pose(pose, force=force)
+
+    def _stop_camera_view_sync_timer(self):
+        timer = self.__dict__.get("_camera_view_sync_timer")
+        if timer is not None:
+            timer.stop()
+
+    def _on_camera_interaction_started(self, *_args):
+        """开始拖动/滚轮缩放：按约 30 Hz 回读，让输入框跟着画面走。"""
+        timer = self.__dict__.get("_camera_view_sync_timer")
+        if timer is None:
+            return
+        if not self._camera_view_active():
+            timer.stop()
+            return
+        timer.start()
+
+    def _tick_camera_view_sync(self):
+        if not self._camera_view_active():
+            self._stop_camera_view_sync_timer()
+            return
+        self._sync_camera_view_controls()
+
+    def _refresh_camera_view_scene(self, *, force_sync=False):
+        """相机被改过之后：按需修正裁剪范围并重绘画布。
+
+        只做相机与画布层面的更新，不触发数据计算、去噪、体数据重建或完整刷新。
+        """
+        plotter = self.__dict__.get("plotter")
+        if plotter is None:
+            return
+        try:
+            plotter.renderer.ResetCameraClippingRange()
+        except Exception:
+            pass
+        plotter.render()
+        self._capture_3d_camera_position()
+        if force_sync:
+            self._sync_camera_view_controls(force=True)
+
+    def on_camera_view_pose_committed(self, pose=None, field=None):
+        """输入框提交了新的姿态：保留观察中心与距离语义，只改相机姿态。
+
+        ``field`` 给出本次由用户改动的那一项（方位角 / 仰角 / 滚转角 / 距离）：
+        只有它采用输入框的值，其余各项沿用相机的精确读数，这样输入框的小数位
+        舍入不会反写、累积到相机上。``field`` 为空表示整组姿态都由 ``pose`` 指定。
+        """
+        if not self._camera_view_active():
+            return
+        if pose is None:
+            page = self.__dict__.get("page_render")
+            pose = page.camera_pose() if page is not None else None
+        if pose is None:
+            return
+
+        plotter = self.plotter
+        if field in {"azimuth", "elevation", "roll", "distance"}:
+            current = self._current_camera_view_pose()
+            if current is not None:
+                values = {
+                    "azimuth": current.azimuth,
+                    "elevation": current.elevation,
+                    "roll": current.roll,
+                    "distance": current.distance,
+                }
+                values[field] = getattr(pose, field)
+                pose = CameraPose(**values)
+        try:
+            focal_point = tuple(float(value) for value in plotter.camera.focal_point)
+            position, view_up = vectors_from_pose(
+                pose.azimuth,
+                pose.elevation,
+                pose.roll,
+                pose.distance,
+                focal_point,
+            )
+        except (TypeError, ValueError):
+            return
+
+        camera = plotter.camera
+        camera.position = position
+        camera.up = view_up
+        camera.OrthogonalizeViewUp()
+        # 这是绝对姿态设定：E 轴翻转的效果已经体现在当前相机里，
+        # 因此不动翻转开关，也不重放 180° 旋转。
+        self._refresh_camera_view_scene()
+
+    def on_camera_view_reset(self):
+        """「重置视角」：默认方向 + 默认滚转，观察中心对准当前内容并自动取景。"""
+        if not self._camera_view_active():
+            return
+
+        plotter = self.plotter
+        camera = plotter.camera
+        try:
+            focal_point = tuple(float(value) for value in camera.focal_point)
+            distance = float(camera.distance)
+            position, view_up = vectors_from_pose(
+                DEFAULT_AZIMUTH,
+                DEFAULT_ELEVATION,
+                DEFAULT_ROLL,
+                distance,
+                focal_point,
+            )
+        except (TypeError, ValueError):
+            return
+
+        camera.position = position
+        camera.up = view_up
+        camera.OrthogonalizeViewUp()
+        # 交给 VTK 按当前展示内容重新对焦并取景，与应用初次展示 3D 数据时一致。
+        plotter.reset_camera()
+        # 此刻相机是「未翻转的默认姿态」，交回既有 E 翻转机制按开关补齐状态：
+        # 开关打开时补一次 180°，下一次刷新就不会再多转一次。
+        self._camera_e_flip_applied = False
+        self._apply_pending_e_flip_camera()
+        self._refresh_camera_view_scene(force_sync=True)
 
     def _update_render_status(self, phase, backend=""):
         label = getattr(self, "render_status_label", None)
@@ -1426,6 +1616,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             lambda _checked: self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
         )
         self.btn_tb_crop.toggled.connect(self.on_toggle_interactive_box)
+        self.btn_tb_erase.toggled.connect(self.on_toggle_erase)
         self.timeline_bar.switch_flip.toggled.connect(self.on_toggle_e_flip)
         self.timeline_bar.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
         self.timeline_bar.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
@@ -1444,6 +1635,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         )
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
         self.page_render.combo_backend.currentTextChanged.connect(self.on_backend_mode_changed)
+        self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
+        self.page_render.camera_view_reset_requested.connect(self.on_camera_view_reset)
 
         self.page_control_blank.waterfall_step_box.editingFinished.connect(self.on_waterfall_step_changed)
         for button_name in ("button_increase", "button_decrease"):
@@ -3510,6 +3703,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         crop_button = self.__dict__.get("btn_tb_crop")
         if crop_button is not None:
             crop_button.setEnabled(has_data and active_spec is not None and active_spec.page_kind != "control_panel")
+        erase_button = self.__dict__.get("btn_tb_erase")
+        if erase_button is not None:
+            erase_button.setEnabled(has_data and active_spec is not None and active_spec.page_kind != "control_panel")
 
     @staticmethod
     def _format_filename_number(value):
@@ -5578,6 +5774,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def _reset_workspace_after_load(self):
         self.crop_controller.clear()
         self.btn_tb_crop.setChecked(False)
+        self.btn_tb_erase.setChecked(False)
         self.update_ax_slider_range()
         self._sync_slice_edits_from_logical_bounds()
         self._configure_time_controls()
@@ -6854,6 +7051,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self.left_display_stack.setCurrentIndex(2)
             self._clear_interactive_box()
             self.plotter.render()
+            self._set_camera_view_visible(False)
             return
 
         if self.core.raw_data is None:
@@ -6865,6 +7063,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             VisualEngine.clear_2d_colorbar(self.ax_2d)
             self.ax_2d.clear()
             self.canvas_2d.draw()
+            # 未加载数据时也会停在索引 0 的 3D 容器上，但那里没有可调的场景。
+            self._set_camera_view_visible(False)
             return
 
         try:
@@ -6879,6 +7079,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._activate_crop_context(spec, context)
         if context.get("crop_empty"):
             self._render_empty_crop()
+            self._set_camera_view_visible(False)
             return
         render_context = self._render_context_for_visual_flip(context)
         self.ax_2d.set_axis_on()
@@ -6980,6 +7181,14 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if not (preserve_2d_interaction and render_context["view"] == "2d"):
             self._refresh_axis_crop_interaction(spec, context)
 
+        # 「相机视角」只在真正显示 3D 场景时展开：目标状态不变时不会重播动画，
+        # 因此时间轴拖动、色带调整等普通 3D 重绘不会让面板反复出现。
+        is_3d_view = render_context["view"] == "3d"
+        self._set_camera_view_visible(is_3d_view)
+        if is_3d_view:
+            # 相机快照 / E 轴翻转 / 程序恢复都已在上面落定，这里回读最终姿态。
+            self._sync_camera_view_controls()
+
     def on_result_page_closed(self, page_id):
         self.crop_controller.remove_page(page_id)
         self.refresh_coordinator.cancel_page(page_id)
@@ -7015,7 +7224,27 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.backend_manager.clear_caches()
         if hasattr(self, "volume_session"):
             self.volume_session.clear(render=False)
+        self._teardown_camera_view_bindings()
         super().closeEvent(event)
+
+    def _teardown_camera_view_bindings(self):
+        """窗口关闭时清掉「相机视角」新增的计时器与 VTK 观察器。"""
+        self._stop_camera_view_sync_timer()
+        interactor = None
+        plotter = self.__dict__.get("plotter")
+        if plotter is not None:
+            interactor = getattr(plotter, "iren", None)
+        if interactor is None:
+            return
+        for attribute in ("_camera_observer_id", "_camera_interaction_observer_id"):
+            observer_id = self.__dict__.get(attribute)
+            if observer_id is None:
+                continue
+            try:
+                interactor.remove_observer(observer_id)
+            except Exception:
+                pass
+            self.__dict__[attribute] = None
 
     def _build_home_export_payload(self, raw_data, coords):
         if isinstance(raw_data, ScopedDataVolume):

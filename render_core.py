@@ -10,6 +10,21 @@ from vtkmodules.util.numpy_support import numpy_to_vtk
 import theme
 
 
+def configure_volume_mask(volume, grid, data):
+    """Hide missing voxels explicitly; NaNs alone are unreliable in VTK textures."""
+    if not hasattr(volume.mapper, "SetMaskInput"):
+        return
+    finite = np.isfinite(data)
+    if np.all(finite):
+        volume.mapper.SetMaskInput(None)
+        return
+    mask = pv.ImageData()
+    mask.CopyStructure(grid)
+    mask.point_data["mask"] = finite.astype(np.uint8).ravel(order="F")
+    volume.mapper.SetMaskTypeToBinary()
+    volume.mapper.SetMaskInput(mask)
+
+
 class VisualEngine:
     """渲染与绘图引擎，负责所有 3D 和 2D 的视觉呈现"""
 
@@ -682,6 +697,8 @@ class VolumeRenderSession:
         self.grid = None
         self.volume = None
         self.host_buffer = None
+        self.level_data = None
+        self.has_mask = False
         self.vtk_scalars = None
         self.shape = None
         self.data_token = None
@@ -714,6 +731,8 @@ class VolumeRenderSession:
         self.volume = None
         self.host_buffer = None
         self.vtk_scalars = None
+        self.level_data = None
+        self.has_mask = False
         self.shape = None
         self.data_token = None
         self.level_info = None
@@ -786,10 +805,13 @@ class VolumeRenderSession:
                 f"{normalized_bounds}; expected {expected_shape}."
             )
         domain_signature = (normalized_full_shape, normalized_bounds)
+        has_mask = (not np.all(np.isfinite(source))
+                    if force_data or token != self.data_token else self.has_mask)
         if (
             not self.active
             or self.shape != tuple(source.shape)
             or self._domain_signature != domain_signature
+            or self.has_mask != has_mask
         ):
             self._build_scene(
                 source,
@@ -865,10 +887,11 @@ class VolumeRenderSession:
             clim=[self.level_info["black_value"], self.level_info["white_value"]],
             show_scalar_bar=True,
             scalar_bar_args=VisualEngine._3d_colorbar_args(self.plotter),
-            mapper="smart",
+            mapper="gpu" if self.has_mask else "smart",
             name="main_vol",
             render=False,
         )
+        configure_volume_mask(self.volume, self.grid, data)
         self.shape = shape
         self._style_signature = None
         self._clip_signature = None
@@ -877,7 +900,9 @@ class VolumeRenderSession:
         self.rebuild_count += 1
 
     def _attach_data(self, data):
-        buffer = np.asfortranarray(np.asarray(data, dtype=np.float32))
+        self.level_data = np.asarray(data, dtype=np.float32)
+        self.has_mask = not np.all(np.isfinite(self.level_data))
+        buffer = np.asfortranarray(np.nan_to_num(self.level_data) if self.has_mask else self.level_data)
         flat = buffer.ravel(order="F")
         if self.vtk_scalars is None:
             vtk_scalars = numpy_to_vtk(flat, deep=False)
@@ -896,6 +921,7 @@ class VolumeRenderSession:
         self.grid.GetPointData().Modified()
         self.grid.Modified()
         if self.volume is not None:
+            configure_volume_mask(self.volume, self.grid, data)
             self.volume.mapper.Modified()
         self.host_buffer = buffer
         self.shape = tuple(buffer.shape)
@@ -916,7 +942,7 @@ class VolumeRenderSession:
         if signature == self._style_signature:
             return
         self.level_info = VisualEngine._level_info(
-            self.host_buffer,
+            self.level_data,
             levels_params,
             include_zero=include_zero,
         )

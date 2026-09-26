@@ -1,4 +1,5 @@
 from PyQt5.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation
+from PyQt5.QtGui import QResizeEvent
 from PyQt5.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QWIDGETSIZE_MAX
 
 
@@ -9,6 +10,28 @@ def bounded_width(width, minimum, maximum):
 def scroll_content_width(scroll, minimum, maximum, *, gutter=12):
     available = int(scroll.width()) - int(gutter)
     return bounded_width(available, minimum, maximum)
+
+
+def refresh_scroll_bars(scroll):
+    """内容尺寸变化后重算滚动条。
+
+    :class:`SiScrollArea` 只在自身 ``resizeEvent`` 里更新滚动条长度、显隐与
+    拖动限制。控制页是靠在滚动区域尺寸不变的情况下 ``container.adjustSize()``
+    改变内容高度的（卡片显隐动画、自适应布局），于是这些状态一直是旧的：内容
+    高出视口时滚动条仍然隐藏，而 ``wheelEvent`` 里的 ``scroll_bar_vertical
+    .isVisible()`` 判断又把滚轮直接挡掉，底部控件既拖不到也滚不到。
+
+    这里发一次同尺寸的 resize 事件，复用 SiScrollArea 自己的那段计算。
+    """
+    if scroll is None or not hasattr(scroll, "resizeEvent"):
+        return
+    attachment = getattr(scroll, "attachment_", None)
+    if attachment is not None and (
+        int(attachment.width()) <= 0 or int(attachment.height()) <= 0
+    ):
+        return
+    size = scroll.size()
+    scroll.resizeEvent(QResizeEvent(size, size))
 
 
 def align_scroll_content(scroll, container, *, center_y_when_short=False):

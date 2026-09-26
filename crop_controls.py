@@ -42,9 +42,9 @@ class CropPopup(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
-        title = QLabel("裁剪范围", self)
-        title.setStyleSheet(theme.field_label_qss())
-        layout.addWidget(title)
+        self.title_label = QLabel("裁剪范围", self)
+        self.title_label.setStyleSheet(theme.field_label_qss())
+        layout.addWidget(self.title_label)
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(5)
@@ -75,6 +75,9 @@ class CropPopup(QFrame):
         layout.addWidget(self.apply_button)
 
     def set_selection(self, selection):
+        action = "裁空" if selection and selection.operation == "erase" else "裁剪"
+        self.title_label.setText("裁空范围" if action == "裁空" else "裁剪范围")
+        self.apply_button.setText(action)
         labels = axis_labels(selection) if selection else ()
         for i, (label, edit) in enumerate(zip(self.labels, self.edits)):
             active = selection is not None and i < len(selection.bounds)
@@ -127,6 +130,7 @@ class CropController(QObject):
         super().__init__(parent)
         self.popup = CropPopup(parent)
         self.cursor = scissors_cursor()
+        self.operation = "crop"
         self.enabled = False
         self.page_id = None
         self.selection = None
@@ -143,7 +147,14 @@ class CropController(QObject):
         saved = self.selections.get(page_id)
         if default and saved and (saved.view, saved.axes) == (default.view, default.axes):
             default = replace(saved, e_flip=e_flip)
-        self.set_selection(default, notify=False)
+        self.set_selection(replace(default, operation=self.operation) if default else None, notify=False)
+
+    def set_operation(self, operation):
+        self.operation = operation
+        self.cursor = QCursor(Qt.CrossCursor) if operation == "erase" else scissors_cursor()
+        self.popup.hide()
+        if self.selection is not None:
+            self.set_selection(replace(self.selection, operation=operation), notify=False)
 
     def set_selection(self, selection, *, notify=True):
         self.selection = selection

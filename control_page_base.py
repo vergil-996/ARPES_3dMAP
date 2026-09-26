@@ -20,6 +20,7 @@ from control_layout_utils import (
     align_scroll_content,
     bounded_width,
     centered_widget_row,
+    refresh_scroll_bars,
     scroll_content_width,
 )
 from ui_controls import ActionButton, SyncedSlider
@@ -247,6 +248,7 @@ class ControlPageBase(QWidget):
         if not hasattr(self, "scroll"):
             return
         self.container.adjustSize()
+        refresh_scroll_bars(self.scroll)
         align_scroll_content(self.scroll, self.container)
 
     def _apply_adaptive_layout(self):
@@ -281,6 +283,7 @@ class ControlPageBase(QWidget):
         self._apply_extra_widths(group_width, widths)
 
         self.container.adjustSize()
+        refresh_scroll_bars(self.scroll)
         align_scroll_content(self.scroll, self.container)
 
     def resizeEvent(self, event):
