@@ -20,13 +20,6 @@ ENV/
 htmlcov/
 coverage.xml
 
-# Local test sources and validation scripts
-/tests/
-/scripts/smoke_test.py
-/scripts/verify_color_lock.py
-/scripts/probe_frame_ranges.py
-/scripts/check_release_version.py
-
 # IDE
 .idea/
 .vscode/
@@ -37,16 +30,14 @@ coverage.xml
 /.codex/
 
 # PyInstaller build artifacts
-build/
-dist/
-release/
+/build/
+/dist/
+/release/
 *.spec
-!/ARPES_3dMAP.spec
-!/ARPES_3dMAP_gpu.spec
+!/packaging/pyinstaller/*.spec
 
 # Local smoke-test datasets and generated screenshots (keep scripts/tests)
-/smoke_data/
-/smoke_output/
+/.local/
 *.log
 
 # Local environment configuration and signing credentials
@@ -68,7 +59,4 @@ Claude-DeepSeek.bat
 # Local dependency checkout; releases install SiliconUI via requirements.txt
 /PyQt-SiliconUI-main/
 
-# design/ and docs/ are intentional project documentation and remain tracked.
-
-# Local maintainer release notes; do not publish to GitHub.
-/RELEASE_MAINTAINER.md
+# tests/, scripts/, docs/ and packaging/ are shared project sources.

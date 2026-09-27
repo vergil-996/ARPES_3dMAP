@@ -1,0 +1,13 @@
+{
+  "id": "flat_band_opacity",
+  "name": "平带增强",
+  "version": "1.0.0",
+  "api_version": 1,
+  "requires_app": "1.8.0",
+  "entry_point": "entry:FlatBandOpacityPlugin",
+  "capabilities": [
+    "opacity_multiplier"
+  ],
+  "description": "自行添加需要突出的平带，分别设定能量中心、覆盖厚度与增强量，并淡化远离目标能量的背景。只改变显示用不透明度，不改动原始强度、颜色映射、色条或数据导出数值。",
+  "author": "BandScope"
+}

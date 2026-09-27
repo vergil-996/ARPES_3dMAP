@@ -33,14 +33,65 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $version = (python -c "from app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
           if ($tag -ne "v$version") {
             throw "Release tag '$tag' does not match APP_VERSION '$version'."
           }
 
       - name: Compile application sources
         shell: pwsh
-        run: python -m compileall -q .
+        run: python -m compileall -q bandscope plugins scripts tests start.py plugin_api.py theme.py ui_controls.py
+
+      - name: Install test dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Run complete regression suite
+        shell: pwsh
+        run: python -m unittest discover -s tests -t . -p "test_*.py" -v
+
+  plugin:
+    name: Build extension package
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # 打包脚本只用到清单解析，装 numpy 就够，不必拉整套运行环境。
+      - name: Install packaging dependency
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check numpy
+
+      - name: Validate tag against app version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          if ($tag -ne "v$version") {
+            throw "Release tag '$tag' does not match APP_VERSION '$version'."
+          }
+
+      # 同一仓库、同一个应用 Release，插件只打一次包，CPU 与 NVIDIA 安装版共用。
+      # 脚本会重新打开产物核对清单与依赖，打包错误在这里就会失败。
+      - name: Build flat band opacity extension
+        shell: pwsh
+        run: python scripts/release/build_plugin.py flat_band_opacity --output-dir release
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BandScope-extensions
+          path: |
+            release/*.bsplugin
+            release/*.bsplugin.sha256
+          if-no-files-found: error
+          compression-level: 0
 
   build:
     name: Build ${{ matrix.flavor }} installer
@@ -52,10 +103,10 @@ jobs:
         include:
           - flavor: CPU
             requirements: requirements.txt
-            spec: ARPES_3dMAP.spec
+            spec: packaging/pyinstaller/ARPES_3dMAP.spec
           - flavor: NVIDIA
             requirements: requirements-gpu-cu13.txt
-            spec: ARPES_3dMAP_gpu.spec
+            spec: packaging/pyinstaller/ARPES_3dMAP_gpu.spec
 
     steps:
       - name: Check out tagged source
@@ -74,7 +125,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          $version = (python -c "from app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
           if ($tag -ne "v$version") {
             throw "Release tag '$tag' does not match APP_VERSION '$version'."
           }
@@ -96,7 +147,7 @@ jobs:
       - name: Compile installer
         shell: pwsh
         run: |
-          $version = (python -c "from app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
           $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
           if (-not $iscc) {
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -104,7 +155,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc)) {
             throw "ISCC.exe was not found after installing Inno Setup."
           }
-          & $iscc "/DAppVersion=$version" "/DBuildFlavor=${{ matrix.flavor }}" "installer\BandScope.iss"
+          & $iscc "/DAppVersion=$version" "/DBuildFlavor=${{ matrix.flavor }}" "packaging\windows\BandScope.iss"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Sign installer when certificate is configured
@@ -114,14 +165,14 @@ jobs:
           WINDOWS_SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
         run: |
-          $version = (python -c "from app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
           $installer = "release\BandScope-$version-Windows-x64-${{ matrix.flavor }}-Setup.exe"
-          .\scripts\sign_windows.ps1 -Path $installer
+          .\scripts\release\sign_windows.ps1 -Path $installer
 
       - name: Generate SHA-256 sidecar
         shell: pwsh
         run: |
-          $version = (python -c "from app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
+          $version = (python -c "from bandscope.app_metadata import APP_VERSION; print(APP_VERSION)").Trim()
           $installer = "release\BandScope-$version-Windows-x64-${{ matrix.flavor }}-Setup.exe"
           if (-not (Test-Path -LiteralPath $installer)) {
             throw "Expected installer was not produced: $installer"
@@ -142,10 +193,11 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, plugin]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all installers
+      # 扩展包与两种基础安装包挂在同一个 Release 上，扩展不单独建版本 tag。
+      - name: Download installers and extension packages
         uses: actions/download-artifact@v5
         with:
           pattern: BandScope-*
