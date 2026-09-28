@@ -51,23 +51,23 @@
 自动化（`.venv/Scripts/python.exe`，Windows 11 / Python 3.12.10）：
 
 ```powershell
-python -m unittest discover -s tests -t . -v     # 773 条通过（基线 678 条）
-python -m compileall -q bandscope plugins scripts tests start.py
+python -m unittest discover -s tests -t . -v     # 777 条通过（基线 678 条）
+python -m compileall -q bandscope plugins scripts tests start.py plugin_api.py theme.py ui_controls.py
 python scripts/release/check_release_version.py v1.11.0
 python scripts/release/build_plugin.py flat_band_opacity --output-dir .local/outputs/release-check
 ```
 
-新增 95 条：`tests/core/test_axis_interval.py`（50，区间规则、数值映射、序列化）、
+新增 99 条：`tests/core/test_axis_interval.py`（50，区间规则、数值映射、序列化）、
 `tests/ui/test_axis_interval_controller.py`（19，真实控件同步、锁定、模式）、
-`tests/integration/test_axis_interval_pages.py`（26，页面恢复与状态隔离、切片源范围、底栏布局）。
-既有 `test_second_derivative` / `test_time_integral_derivation` / `test_analysis_control_refresh`
-按新契约改写（不再依赖已删除的中心控件与 `locked_half_width`）。
+`tests/integration/test_axis_interval_pages.py`（30，页面恢复与状态隔离、轴向切换、切片源范围、
+底栏布局）。既有 `test_second_derivative` / `test_time_integral_derivation` /
+`test_analysis_control_refresh` 按新契约改写（不再依赖已删除的中心控件与 `locked_half_width`）。
 
-真实窗口（本机 NVIDIA 桌面，`windows` 平台，数据 `.local/data/scan07_dynamic.npz`）：
+真实窗口（本机 NVIDIA 桌面，`windows` 平台）：
 
 ```powershell
-python scripts/validation/verify_axis_interval.py .local/data/scan07_dynamic.npz        # 48 项全通过
-python scripts/validation/verify_axis_interval.py .local/data/NiHITP_calibrated_2.npz   # 52 项全通过（无时间轴）
+python scripts/validation/verify_axis_interval.py .local/data/scan07_dynamic.npz        # 54 项全通过
+python scripts/validation/verify_axis_interval.py .local/data/NiHITP_calibrated_2.npz   # 56 项全通过（无时间轴）
 python scripts/validation/verify_time_axis_visibility.py .local/data/scan07_dynamic.npz .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_crop_window.py .local/data/scan07_dynamic.npz
 python scripts/validation/verify_axis_titles.py .local/data/scan07_dynamic.npz
@@ -89,6 +89,8 @@ python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.n
 
 ## 验收中发现并已修复的缺陷
 
+实施过程中自查发现：
+
 1. **「应用」生成的新页面丢失采样点之间的端点**：新页面的区间原先只从整数 `low`/`up` 反推，
    精确物理端点被吸附到采样点（例如 `998.75~1496.25` 变成相邻采样值）。修复：
    `_build_axis_request_params` 把物理区间原样带给新页面；同时明确新页面不继承锁定状态
@@ -101,6 +103,31 @@ python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.n
 3. **单层切片页保存的位置与切片下标可能不一致**：模型保留精确物理值，切片取最近采样点，
    切页回来时位置会停在未吸附的值上。修复：`_update_slice_source_range` 把保存的区间对齐到
    该采样点。回归测试：`test_saved_interval_is_snapped_to_the_slice_sample`。
+
+一轮独立代码评审（用真实控件与核心在合成数据上逐条复现）又找出并已修复：
+
+4. **积分页上切换「选择轴向」会让模型与页面脱节（最严重）**：`_axis_interval_context` 读的是
+   `params["axis_index"]`，而该键只在渲染路径里才从下拉刷新。于是切换方向时重建用的是旧轴：
+   标签、输入框和模型都停在上一个轴，页面却按旧轴的物理区间映射出的新轴下标去积分
+   （X 轴全量 `0~10` 会变成 E 轴 `2~3` 的一薄层），并且这个错误范围会跨切页保留下来。
+   修复：`on_axis_selection_changed` 先把下拉写回页面参数再重建，并只保存一次。
+   回归测试：`test_switching_the_axis_direction_rebuilds_for_the_new_axis`。
+5. **3D 主页上只改输入框的区间不会被保存**：`flush_axis_refresh` 走到 `auto_refresh_integral`，
+   后者对非 2D 分析页提前返回，返回点在保存之前。表现是输入上下限后切页再回来，区间退回完整
+   范围，而输入框与选择盒还停在输入值上。修复：保存移到提前返回之前。
+   回归测试：`test_committing_a_box_on_a_3d_page_still_persists_the_interval`。
+6. **没有可编辑区间的页面仍显示上一页的数字与「已锁定」灯**：原先只清了宿主侧的模型，控制器
+   里的旧区间还会被同步到（已禁用的）控件与状态灯上。修复：新增
+   `AxisIntervalController.clear()`，清模型、禁用控件并把状态灯复位。
+   回归测试：`test_disabled_page_clears_the_controller_and_the_lock_light`。
+7. **删除旧方法时漏掉了 `combo_ax` 的禁用**：轴向选择器在所有页面都可改，而二阶导页的轴向由
+   页面固定，改下拉只会触发一次永远不生效的重建。修复：`_bind_axis_interval` 按页面类型恢复
+   下拉的启用状态。
+8. 收尾：位置标签宽度变化（`kx` → `kx / Å⁻¹`）时重新判定换行；删除已无调用方的
+   `set_position_enabled`。
+
+评审同时确认无遗留的已删接口引用、滑条 1000 等分映射在整个量程内可逆且两端可达、
+`AxisInterval` 边界输入不抛异常、页面激活时序正确、同步过程无信号递归。
 
 ## 未执行 / 已知问题
 
