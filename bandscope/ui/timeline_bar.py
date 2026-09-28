@@ -327,10 +327,14 @@ class TimelineBar(QFrame):
         return int(self.timeline_group.minimumSizeHint().width())
 
     def _view_controls_width(self):
-        return int(self.view_controls.minimumSizeHint().width())
+        widget = self.__dict__.get("view_controls")
+        return 0 if widget is None else int(widget.minimumSizeHint().width())
 
     def _groups_min_width(self):
         """第一行（位置组 + 时间轴组）在单行里的最小宽度。"""
+        if self.__dict__.get("axis_group") is None or self.__dict__.get("timeline_group") is None:
+            # 构造期间宿主布局可能已经来问最小尺寸。
+            return 0
         width = 0
         if self._axis_visible_target:
             width += self._axis_group_min_width()
