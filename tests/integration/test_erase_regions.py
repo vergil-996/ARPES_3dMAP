@@ -16,6 +16,7 @@ from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.core.crop_model import CropSelection, apply_crop_regions, apply_selection, export_cropped_context
 from bandscope.rendering.render_core import VolumeRenderSession
 from bandscope.ui.result_workspace import AnalysisPageSpec
+from tests.support.environment import requires_opengl
 
 
 class EraseModelTests(unittest.TestCase):
@@ -146,6 +147,7 @@ class EraseInteractionTests(unittest.TestCase):
         self.assertEqual(np.isnan(result["data"]).sum(), 8)
 
 
+@requires_opengl
 class EraseVolumeTests(unittest.TestCase):
     def test_volume_mask_renders_hole_and_updates_without_stale_voxels(self):
         plotter = pv.Plotter(off_screen=True, window_size=(240, 240))

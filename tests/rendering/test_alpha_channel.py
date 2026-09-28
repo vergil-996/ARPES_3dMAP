@@ -17,6 +17,7 @@ from bandscope.rendering.render_core import (
     normalize_opacity_multiplier,
     opacity_ramp_points,
 )
+from tests.support.environment import requires_opengl
 
 # 合成的体数据很小，但三轴都 > 1，体积渲染才有可采样厚度。
 SHAPE = (4, 4, 32)
@@ -280,6 +281,7 @@ class MaskUpdateTests(unittest.TestCase):
         self.assertEqual(float(flat[26]), 0.0)
 
 
+@requires_opengl
 class RenderChannelTests(unittest.TestCase):
     """离屏渲染：同强度不同能量必须得到不同不透明度与相同颜色。
 

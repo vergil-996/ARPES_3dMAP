@@ -11,6 +11,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from bandscope.exporting.publication_models import OutputOptions, resolve_style
 from bandscope.exporting.publication_renderers import render_3d
 from bandscope.rendering.render_core import VisualEngine
+from tests.support.environment import requires_opengl
 
 SHAPE = (6, 10, 48)
 FWHM_FRACTION = 0.08
@@ -123,6 +124,7 @@ def _row_profile(image, footprint):
     return rows, np.array([distance[r][footprint[r]].mean() for r in rows])
 
 
+@requires_opengl
 class ExportEffectTests(unittest.TestCase):
     def setUp(self):
         self.volume = _volume()
