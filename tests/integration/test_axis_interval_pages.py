@@ -37,6 +37,17 @@ def _spec(page_id, kind="axis_integral", **params):
     return AnalysisPageSpec(page_id, page_id, kind, "test", params=params)
 
 
+def _wait_for_animation(widget, *, timeout_ms=4000):
+    """等到宽度/高度动画落定；固定 sleep 在慢机器上会偶发失败。"""
+    animation = getattr(widget, "_visibility_animation", None)
+    waited = 0
+    while animation is not None and waited < timeout_ms:
+        QTest.qWait(25)
+        waited += 25
+        animation = getattr(widget, "_visibility_animation", None)
+    return animation is None
+
+
 class _Workspace:
     """最小工作区替身：只提供区间接入需要的当前页与页面查询。"""
 
@@ -459,24 +470,38 @@ class BottomBarLayoutTests(unittest.TestCase):
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=True)
-        QTest.qWait(320)
+        self.assertTrue(_wait_for_animation(bar.axis_group))
         self.assertFalse(bar.axis_group.isHidden())
 
         # 同类页面之间只更新内容，不重复呼出。
         bar.set_position_visible(True, animate=True)
         self.assertIsNone(getattr(bar.axis_group, "_visibility_animation", None))
+        self.assertFalse(bar.axis_group.isHidden())
 
     def test_reverse_collapse_continues_from_the_current_state(self):
         bar = TimelineBar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=True)
-        QTest.qWait(60)
+        # 呼出动画已同步启动：此刻反向收起必须从当前宽度继续，而不是硬跳变。
         self.assertIsNotNone(getattr(bar.axis_group, "_visibility_animation", None))
 
         bar.set_position_visible(False, animate=True)
-        QTest.qWait(320)
+        self.assertTrue(_wait_for_animation(bar.axis_group))
         self.assertTrue(bar.axis_group.isHidden())
+
+    def test_collapse_then_reveal_again_settles_visible(self):
+        bar = TimelineBar()
+        bar.resize(1500, bar.HEIGHT)
+        bar.show()
+        bar.set_position_visible(True, animate=True)
+        self.assertTrue(_wait_for_animation(bar.axis_group))
+        bar.set_position_visible(False, animate=True)
+        self.assertTrue(_wait_for_animation(bar.axis_group))
+
+        bar.set_position_visible(True, animate=True)
+        self.assertTrue(_wait_for_animation(bar.axis_group))
+        self.assertFalse(bar.axis_group.isHidden())
 
 
 if __name__ == "__main__":
