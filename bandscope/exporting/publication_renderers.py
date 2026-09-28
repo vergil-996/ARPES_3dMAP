@@ -1232,12 +1232,20 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
     try:
         plotter = pv.Plotter(off_screen=True, window_size=(rw_px, rh_px))
         plotter.set_background("white")
-        grid = pv.ImageData()
-        grid.extent = tuple(int(v) for v in snapshot.payload["data_bounds"])
-        grid.origin = (0.0, 0.0, 0.0)
-        grid.spacing = tuple(float(v) for v in snapshot.payload["spacing"])
-        from bandscope.rendering.render_core import attach_volume_alpha, configure_volume_mask
+        from bandscope.rendering.render_core import (
+            attach_volume_alpha,
+            build_volume_grid,
+            configure_volume_mask,
+        )
         has_mask = not np.all(np.isfinite(volume))
+        # 与主视图同源：掩膜路径必须零基 extent，否则这一页导出时会踩到同一个
+        # 驱动崩溃（见 build_volume_grid）。
+        grid = build_volume_grid(
+            volume.shape,
+            tuple(int(v) for v in snapshot.payload["data_bounds"]),
+            tuple(float(v) for v in snapshot.payload["spacing"]),
+            masked=has_mask,
+        )
         buffer = np.asfortranarray(np.nan_to_num(volume) if has_mask else volume)
         grid.point_data["values"] = buffer.ravel(order="F")
         opacity = mapped_opacity_values(snapshot.payload["opacity_mode"], level_info)

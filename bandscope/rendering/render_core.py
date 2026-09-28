@@ -10,8 +10,35 @@ from vtkmodules.util.numpy_support import numpy_to_vtk
 import bandscope.ui.theme as theme
 
 
+def build_volume_grid(shape, data_bounds, spacing, *, masked=False):
+    """体渲染网格；掩膜路径用零基 extent，ROI 起点写进 origin。
+
+    非零 extent 与 ``SetMaskInput`` 一起使用时，NVIDIA 驱动会在渲染阶段访问
+    越界（本机稳定复现：先拖动裁剪、再裁空，nvoglv64.dll 0xc0000005，崩溃点
+    就在 ``plotter.render()``）。掩膜路径因此回到零基 extent：世界坐标由
+    ``origin + index * spacing`` 给出，与非零 extent 的表示逐个采样点等价，
+    只是 VTK 内部贴图不再带起始索引偏移。无掩膜路径保持原有表示，避免重新
+    引入旧注释里记录过的整体 origin 偏移问题。
+    """
+    grid = pv.ImageData()
+    grid.spacing = tuple(float(value) for value in spacing)
+    if masked:
+        grid.extent = tuple(value for size in shape[:3] for value in (0, int(size) - 1))
+        grid.origin = tuple(
+            float(data_bounds[2 * axis]) * float(spacing[axis]) for axis in range(3)
+        )
+    else:
+        grid.extent = tuple(int(value) for value in data_bounds)
+        grid.origin = (0.0, 0.0, 0.0)
+    return grid
+
+
 def configure_volume_mask(volume, grid, data):
-    """Hide missing voxels explicitly; NaNs alone are unreliable in VTK textures."""
+    """Hide missing voxels explicitly; NaNs alone are unreliable in VTK textures.
+
+    网格必须已经是零基 extent（见 ``build_volume_grid``）：掩膜结构从网格复制，
+    带非零起始索引会让驱动崩溃。
+    """
     if not hasattr(volume.mapper, "SetMaskInput"):
         return
     finite = np.isfinite(data)
@@ -1138,6 +1165,7 @@ class VolumeRenderSession:
                 data_bounds=normalized_bounds,
                 full_shape=normalized_full_shape,
                 include_zero=bool(include_zero),
+                masked=has_mask,
             )
         elif force_data or token != self.data_token:
             self._attach_data(source)
@@ -1171,6 +1199,7 @@ class VolumeRenderSession:
         data_bounds,
         full_shape,
         include_zero=False,
+        masked=False,
     ):
         self.clear(render=False)
         shape = tuple(int(size) for size in data.shape)
@@ -1184,10 +1213,8 @@ class VolumeRenderSession:
         # GPU drivers after a second crop.  A non-zero extent carries the same
         # compact point count while making the ROI's absolute X/Y/E indices
         # explicit and keeping the dataset origin stable across scope changes.
-        self.grid = pv.ImageData()
-        self.grid.extent = tuple(int(value) for value in data_bounds)
-        self.grid.origin = (0.0, 0.0, 0.0)
-        self.grid.spacing = spacing
+        # 掩膜（裁空留下的 NaN 空缺）是例外：它必须零基，见 build_volume_grid。
+        self.grid = build_volume_grid(shape, data_bounds, spacing, masked=masked)
         if tuple(int(size) for size in self.grid.dimensions) != shape:
             raise ValueError(
                 f"VTK extent {data_bounds} produced dimensions "
