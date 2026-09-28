@@ -377,6 +377,32 @@ class PageShortcutFocusTests(unittest.TestCase):
             self.assertEqual(self.slider.value(), 11)
 
 
+class PageFocusIsolationTests(_WorkspaceFixture):
+    """树、搜索框与树内改名编辑框都会把方向键留下，不落回时间轴逐帧。"""
+
+    def setUp(self):
+        super().setUp()
+        self.analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        self.analyzer.timeline_bar = SimpleNamespace(slider_time=QSlider())
+
+    def test_the_tree_rows_hold_the_arrow_keys(self):
+        self.assertTrue(
+            self.analyzer._focus_blocks_frame_step(self.workspace.page_tree.tree)
+        )
+
+    def test_the_search_box_holds_the_arrow_keys(self):
+        self.assertTrue(
+            self.analyzer._focus_blocks_frame_step(self.workspace.page_tree.search_edit)
+        )
+
+    def test_the_inline_rename_editor_holds_the_arrow_keys(self):
+        self.assertTrue(self.workspace.page_tree.begin_rename("p1"))
+
+        editor = self.workspace.page_tree._editor
+        self.assertTrue(self.analyzer._focus_blocks_frame_step(editor))
+        self.workspace.page_tree._close_editor()
+
+
 class PageNumberShortcutTests(_WorkspaceFixture):
     """数字切页按页面树中可见行的顺序。"""
 
