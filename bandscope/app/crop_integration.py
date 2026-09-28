@@ -7,7 +7,7 @@ import copy
 from dataclasses import replace
 
 import numpy as np
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, Qt, QTimer
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
@@ -29,6 +29,18 @@ def _show_crop_popup_on_toggle(host, operation):
     if controller is None or controller.selection is None:
         return
     controller.popup.show_near(_crop_mode_button(host, operation))
+
+
+def _request_axis_title_menu(host, owner, global_pos):
+    """裁剪模式下右键被范围窗口占用：轴标题菜单排到过滤器之外再弹。
+
+    在事件过滤器里直接 ``exec_()`` 会开出嵌套事件循环，所以只排队一次调用；
+    宿主没有该能力（只填了部分属性的测试替身）时静默跳过。
+    """
+    show_menu = getattr(host, "_show_axis_title_menu", None)
+    if show_menu is None:
+        return
+    QTimer.singleShot(0, lambda: show_menu(owner, global_pos))
 
 
 def _sync_crop_popup_visibility(host, context):
@@ -59,7 +71,7 @@ class CropInteractionMixin:
         self.ax_2d.clear()
         self.ax_2d.text(0.5, 0.5, "当前结果没有有效数据", transform=self.ax_2d.transAxes,
                         ha="center", va="center", color=theme.TEXT_2,
-                        fontfamily=["DejaVu Sans", "Microsoft YaHei"])
+                        fontfamily=theme.MPL_FONT_FAMILIES)
         self.ax_2d.set_axis_off()
         self.canvas_2d.draw_idle()
 
@@ -87,12 +99,14 @@ class CropInteractionMixin:
             watched.setCursor(controller.cursor)
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
             self._show_crop_popup(event.globalPos())
+            _request_axis_title_menu(self, watched, event.globalPos())
             return True
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.RightButton:
             return True
         if event.type() == QEvent.ContextMenu:
             if not popup.isVisible():
                 self._show_crop_popup(event.globalPos())
+            _request_axis_title_menu(self, watched, event.globalPos())
             return True
         return False
 

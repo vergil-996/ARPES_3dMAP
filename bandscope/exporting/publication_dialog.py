@@ -1359,18 +1359,24 @@ class PublicationExportDialog(QDialog):
         window = self.main_window
         spec = window.left_workspace.current_spec()
         page_id = spec.page_id if spec is not None else None
+        # 页面改名也要算状态变化：快照里的来源名和默认文件名都跟着页面名走。
+        title = str(spec.title) if spec is not None else None
         t_idx = None
         if window.core.raw_data is not None and window.core.has_time_axis:
             try:
                 t_idx = int(window.timeline_bar.slider_time.value())
             except Exception:
                 t_idx = None
-        return page_id, t_idx
+        return page_id, t_idx, title
 
     def _snapshot_state_token(self):
         if self.snapshot is None:
-            return None, None
-        return self.snapshot.source_page_id, self.snapshot.home_frame_index
+            return None, None, None
+        return (
+            self.snapshot.source_page_id,
+            self.snapshot.home_frame_index,
+            self.snapshot.source_page_title,
+        )
 
     def _check_stale_source(self):
         try:

@@ -195,6 +195,55 @@ class CropControlTests(unittest.TestCase):
         canvas.deleteLater()
         plotter.deleteLater()
 
+    def test_right_click_in_crop_mode_also_asks_for_the_axis_title_menu(self):
+        """事件过滤器吞掉了右键，轴标题入口就得由它自己排出来。"""
+        canvas, plotter = QWidget(), QWidget()
+        plotter.interactor = plotter
+        host = SimpleNamespace(
+            crop_controller=self.controller,
+            canvas_2d=canvas,
+            plotter=plotter,
+            btn_tb_crop=SimpleNamespace(setChecked=Mock()),
+            _show_crop_popup=Mock(),
+            _show_axis_title_menu=Mock(),
+        )
+        self.controller.enabled = True
+        try:
+            press = QMouseEvent(
+                QEvent.MouseButtonPress, QPoint(2, 3), Qt.RightButton, Qt.RightButton, Qt.NoModifier
+            )
+            self.assertTrue(CropInteractionMixin._crop_event_filter(host, canvas, press))
+            # 菜单排在过滤器之外，跑一轮事件循环才会被调用。
+            QApplication.processEvents()
+            host._show_axis_title_menu.assert_called_once()
+            self.assertIs(host._show_axis_title_menu.call_args[0][0], canvas)
+        finally:
+            self.controller.enabled = False
+            canvas.deleteLater()
+            plotter.deleteLater()
+
+    def test_host_without_the_menu_ability_is_left_alone(self):
+        """只填了部分属性的测试替身不该因为少了菜单方法而报错。"""
+        canvas = QWidget()
+        canvas.interactor = canvas
+        host = SimpleNamespace(
+            crop_controller=self.controller,
+            canvas_2d=canvas,
+            plotter=canvas,
+            btn_tb_crop=SimpleNamespace(setChecked=Mock()),
+            _show_crop_popup=Mock(),
+        )
+        self.controller.enabled = True
+        try:
+            press = QMouseEvent(
+                QEvent.MouseButtonPress, QPoint(2, 3), Qt.RightButton, Qt.RightButton, Qt.NoModifier
+            )
+            self.assertTrue(CropInteractionMixin._crop_event_filter(host, canvas, press))
+            QApplication.processEvents()
+        finally:
+            self.controller.enabled = False
+            canvas.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

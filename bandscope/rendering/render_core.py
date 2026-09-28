@@ -1,7 +1,7 @@
 import numpy as np
 import vtk
 import pyvista as pv
-from matplotlib import colormaps
+from matplotlib import colormaps, transforms as mtransforms
 from matplotlib.colors import ListedColormap
 from PIL import Image
 from pyvista.plotting.cube_axes_actor import make_axis_labels
@@ -728,8 +728,18 @@ class VisualEngine:
             canvas.draw_idle()
             return False
 
+    #: 3D 三条轴名的既有默认文字（用户没有改名时使用）。
+    DEFAULT_3D_AXIS_TITLES = ("Kx", "Ky", "E (eV)")
+
     @staticmethod
-    def render_axes(plotter, data_shape, coords):
+    def render_axes(plotter, data_shape, coords, axis_titles=None):
+        """重画 3D 坐标轴与刻度；``axis_titles`` 为 X/Y/E 三条轴名。
+
+        传 None 时沿用既有默认文字，保持旧调用与既有截图不变。
+        """
+        titles = list(VisualEngine.DEFAULT_3D_AXIS_TITLES)
+        if axis_titles is not None:
+            titles = [str(title or "") for title in axis_titles][:3] + [""] * 3
         try:
             # 获取物理范围用于 Title 显示
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
@@ -746,14 +756,69 @@ class VisualEngine:
 
             actor = plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
                 axes_ranges=[float(np.min(xp)), float(np.max(xp)), float(np.min(yp)), float(np.max(yp)),
-                    float(np.min(zp)), float(np.max(zp))], font_size=10, color=ax_color, fmt="%.2f", xtitle="Kx",
-                ytitle="Ky", ztitle="E (eV)", render=False)
+                    float(np.min(zp)), float(np.max(zp))], font_size=10, color=ax_color, fmt="%.2f", xtitle=titles[0],
+                ytitle=titles[1], ztitle=titles[2], render=False)
 
             actor.SetAxisLabels(0, make_axis_labels(vmin=float(xp[0]), vmax=float(xp[-1]), n=actor.n_xlabels, fmt="%.2f"))
             actor.SetAxisLabels(1, make_axis_labels(vmin=float(yp[0]), vmax=float(yp[-1]), n=actor.n_ylabels, fmt="%.2f"))
             actor.SetAxisLabels(2, make_axis_labels(vmin=float(zp[0]), vmax=float(zp[-1]), n=actor.n_zlabels, fmt="%.2f"))
         except Exception as e:
             print(f"Axes Error: {e}")
+
+    #: mpl 的 XAxis/YAxis 只在 ``_autolabelpos`` 为真时自动排布标签（见
+    #: ``XAxis._init`` / ``YAxis._init``）：默认位置与该标志一并恢复，
+    #: 用户拖过位置后由 ``set_label_coords`` 关掉它。
+    _2D_AUTO_LABEL_POSITIONS = {"x": (0.5, 0.0), "y": (0.0, 0.5)}
+
+    @staticmethod
+    def _reset_2d_axis_label(ax, axis_key):
+        """恢复 matplotlib 的自动标签位置。"""
+        axis = ax.xaxis if axis_key == "x" else ax.yaxis
+        if axis_key == "x":
+            transform = mtransforms.blended_transform_factory(
+                ax.transAxes, mtransforms.IdentityTransform()
+            )
+        else:
+            transform = mtransforms.blended_transform_factory(
+                mtransforms.IdentityTransform(), ax.transAxes
+            )
+        axis.label.set_transform(transform)
+        axis.label.set_position(VisualEngine._2D_AUTO_LABEL_POSITIONS[axis_key])
+        axis._autolabelpos = True
+
+    @staticmethod
+    def reset_2d_axis_labels(ax):
+        """把横纵轴标签交还给 matplotlib 的自动排布。
+
+        ``ax_2d`` 是 2D 图像与 1D / 瀑布 / 对比页共用的坐标系：2D 页拖过轴标题
+        后 ``_autolabelpos`` 是关着的，1D 页渲染前不清回来，标签会停在画布外。
+        """
+        for axis_key in ("x", "y"):
+            VisualEngine._reset_2d_axis_label(ax, axis_key)
+
+    @staticmethod
+    def _apply_2d_axis_titles(ax, titles, positions=None):
+        """写入横纵轴标题；``positions`` 是拖动后的相对绘图区坐标。"""
+        positions = positions or {}
+        for axis_key in ("x", "y"):
+            axis = ax.xaxis if axis_key == "x" else ax.yaxis
+            axis.set_label_text(
+                str(titles.get(axis_key) or ""),
+                color="white",
+                fontfamily=theme.MPL_FONT_FAMILIES,
+            )
+            position = positions.get(axis_key)
+            if position is None:
+                VisualEngine._reset_2d_axis_label(ax, axis_key)
+            else:
+                axis.set_label_coords(float(position[0]), float(position[1]))
+
+    @staticmethod
+    def _2d_title_signature(axis_titles):
+        """轴标题文字签名；标题变化会让快速刷新缓存的底图失效。"""
+        if axis_titles is None:
+            return None
+        return tuple(str(axis_titles.get(axis_key) or "") for axis_key in ("x", "y"))
 
     @staticmethod
     def _2d_uses_equal_aspect(slice_info):
@@ -779,7 +844,17 @@ class VisualEngine:
         *,
         quality="exact",
         overlay_artists=(),
+        axis_titles=None,
+        axis_title_positions=None,
     ):
+        """画 2D 图像；``axis_titles`` 是 ``{"x": ..., "y": ...}`` 轴标题。
+
+        标题为空串表示隐藏该轴；``axis_title_positions`` 给的是相对绘图区坐标
+        （用户拖过的位置），缺省时恢复 matplotlib 的自动排布。``axis_titles``
+        为 None 表示这次渲染不管理轴标题（标签按重建路径的 ``ax.clear()`` 走）。
+        标题属于画面的一部分却不落在 ``ax.bbox`` 内，因此它进了渲染签名：
+        文字一变就让快速刷新的底图作废。
+        """
         try:
             VisualEngine._ensure_2d_preview_cache(ax, canvas)
             b, g, w = levels_params
@@ -832,7 +907,14 @@ class VisualEngine:
                 img = np.flip(img, axis=0)
                 ext[2], ext[3] = ext[3], ext[2]
 
-            render_signature = (slice_info.get("mode", "slice"), int(idx), tuple(img.shape))
+            # 轴标题属于画面的一部分，但不是 ax.bbox 内的像素：标题一变就必须
+            # 走整帧重绘，否则快速刷新会从旧底图里 blit 出过期的标签。
+            render_signature = (
+                slice_info.get("mode", "slice"),
+                int(idx),
+                tuple(img.shape),
+                VisualEngine._2d_title_signature(axis_titles),
+            )
             image = getattr(ax, "_arpes_image", None)
             can_update = (
                 image is not None
@@ -918,6 +1000,10 @@ class VisualEngine:
 
             # 额外加固：强制坐标轴刻度显示
             ax.tick_params(colors='white')
+            if axis_titles is not None:
+                VisualEngine._apply_2d_axis_titles(
+                    ax, axis_titles, axis_title_positions
+                )
             canvas.draw_idle()
 
         except Exception as e:
@@ -1102,6 +1188,7 @@ class VolumeRenderSession:
         full_shape=None,
         include_zero=False,
         opacity_multiplier=None,
+        axis_titles=None,
     ):
         source = np.asarray(data, dtype=np.float32)
         if source.ndim != 3:
@@ -1177,7 +1264,7 @@ class VolumeRenderSession:
         self._update_style(levels_params, opac_mode, cmap, include_zero=bool(include_zero))
         self._fill_alpha_channel(levels_params, opac_mode, bool(include_zero))
         self._update_clipping(clip_ranges)
-        self._update_axes(bool(show_axes), core_coords)
+        self._update_axes(bool(show_axes), core_coords, axis_titles)
         self._set_interactive_quality(quality)
 
         if saved_camera is not None:
@@ -1378,7 +1465,7 @@ class VolumeRenderSession:
             mapper.SetClippingPlanes(planes)
         self._clip_signature = signature
 
-    def _update_axes(self, show_axes, coords):
+    def _update_axes(self, show_axes, coords, axis_titles=None):
         coord_signature = None
         if show_axes and coords:
             pieces = []
@@ -1389,11 +1476,20 @@ class VolumeRenderSession:
                 else:
                     pieces.append((key, len(values), float(values[0]), float(values[-1])))
             coord_signature = tuple(pieces)
-        signature = bool(show_axes), coord_signature
+        # 轴名要进签名：坐标没变但改了名时同样需要重画。隐藏状态下也记名字，
+        # 这样先改名、后打开坐标轴开关能直接生效。
+        title_signature = (
+            None
+            if axis_titles is None
+            else tuple(str(title or "") for title in axis_titles)
+        )
+        signature = bool(show_axes), coord_signature, title_signature
         if signature == self._axes_signature:
             return
         if show_axes and coords:
-            VisualEngine.render_axes(self.plotter, self.grid.dimensions, coords)
+            VisualEngine.render_axes(
+                self.plotter, self.grid.dimensions, coords, axis_titles=axis_titles
+            )
         else:
             self.plotter.remove_bounds_axes()
         self._axes_signature = signature

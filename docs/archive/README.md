@@ -8,5 +8,6 @@
 - [图片导出研究计划（2026-09-21）](publication-export/publication_export_research_plan_2026-09-21.md)
 - [图片导出历史验收报告](publication-export/publication_export_acceptance/validation_report.md)
 - [项目目录整理验收（2026-09-27）](repository-layout/validation-2026-09-27.md)
+- [轴标题编辑与页面重命名（2026-09-28）](axis-titles/axis-title-editing.md)，验收截图同目录
 
 设计稿与验收截图均与对应记录放在同一主题目录。新输出先写入 `.local/outputs/`，不直接覆盖历史验收证据。

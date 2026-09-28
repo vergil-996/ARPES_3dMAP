@@ -106,6 +106,21 @@ def _resolve_xlabel(xlabel: str, coords, sources, units) -> str:
     return axis_label(key, sources.get(key, "index"), units.get(key))
 
 
+def _custom_axis_titles(window, page_id: str, view: str, context) -> Dict[str, str]:
+    """主画布上的自定义轴名（没改过的轴不出现在结果里）。
+
+    导出侧的自动轴名因此跟随主画布；截图样式的 ``xlabel_text`` /
+    ``ylabel_text`` / ``zlabel_text`` 覆盖仍然优先，拖动位置不参与导出排版。
+    """
+    getter = getattr(window, "_axis_title_snapshot_texts", None)
+    if getter is None:
+        return {}
+    try:
+        return dict(getter(page_id, view, context))
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # 快照捕获（GUI 线程）
 # ---------------------------------------------------------------------------
@@ -250,6 +265,9 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
     camera = _capture_camera(window)
     plotter = window.plotter
     viewport_aspect = max(plotter.width(), 1) / max(plotter.height(), 1)
+    custom_3d = _custom_axis_titles(
+        window, snapshot.source_page_id, "3d", render_context
+    )
 
     snapshot.camera = camera
     snapshot.payload = {
@@ -268,7 +286,9 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         "viewport_aspect": float(viewport_aspect),
         "level_info": level_info,
         "intensity_label": intensity_label_for(snapshot.page_kind),
-        "axis_titles": [snapshot.axis_label("X"), snapshot.axis_label("Y"), snapshot.axis_label("E")],
+        "axis_titles": [
+            custom_3d.get(key, snapshot.axis_label(key)) for key in ("X", "Y", "E")
+        ],
     }
 
 
@@ -341,17 +361,24 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
     level_info = compute_level_info(
         img, snapshot.levels_params, locked_range=snapshot.locked_range
     )
+    custom = _custom_axis_titles(window, snapshot.source_page_id, "2d", render_context)
     snapshot.payload = {
         "image": img,
         "extent": ext,
         "title": str(title),
-        "xlabel": axis_label(
-            x_key, snapshot.coord_sources.get(x_key, "index"),
-            snapshot.coord_units.get(x_key),
+        "xlabel": custom.get(
+            "x",
+            axis_label(
+                x_key, snapshot.coord_sources.get(x_key, "index"),
+                snapshot.coord_units.get(x_key),
+            ),
         ),
-        "ylabel": axis_label(
-            y_key, snapshot.coord_sources.get(y_key, "index"),
-            snapshot.coord_units.get(y_key),
+        "ylabel": custom.get(
+            "y",
+            axis_label(
+                y_key, snapshot.coord_sources.get(y_key, "index"),
+                snapshot.coord_units.get(y_key),
+            ),
         ),
         "level_info": level_info,
         "intensity_label": intensity_label_for(snapshot.page_kind),

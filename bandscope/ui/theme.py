@@ -88,6 +88,12 @@ R_L = 14
 FONT_FAMILY = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
 FONT_MONO = '"Consolas", "Courier New", monospace'
 
+#: matplotlib 的字体族回退表（mpl ≥ 3.6 逐字形回退）：用户能把轴标题改成中文，
+#: 而 DejaVu Sans 没有 CJK 字形，必须把系统中文字体排在后面兜底。取值与截图
+#: 样式的 ``font_family`` 默认值（publication_models._DEFAULT_STYLE）一致，
+#: 主画布与导出图的中文观感才不会两样。
+MPL_FONT_FAMILIES = ["DejaVu Sans", "Microsoft YaHei", "SimHei", "sans-serif"]
+
 # 供 QSS 大块样式表做 ``%`` 格式化用的令牌字典（避免 f-string 与 QSS 花括号冲突）
 QSS_TOKENS = {
     "BG0": BG_0,

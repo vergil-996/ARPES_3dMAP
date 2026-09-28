@@ -39,6 +39,14 @@ from siui.components.tooltip import ToolTipWindow
 from siui.core import SiGlobal
 
 import bandscope.ui.theme as theme
+from bandscope.ui.axis_title_controller import (
+    RESTORE_DEFAULT_TEXT,
+    AxisTitleController,
+    AxisTitleDialog,
+    AxisTitleState,
+    ThreeAxisTitlesDialog,
+    axis_title_key,
+)
 from bandscope.ui.ui_controls import ActionButton
 from bandscope.ui.camera_view_controls import (
     DEFAULT_AZIMUTH,
@@ -54,6 +62,7 @@ from bandscope.core.crop_model import apply_crop_regions, export_cropped_context
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.ui.blank_control_page import BlankControlPage
 from bandscope.core.data_trans import convert as convert_mat_to_npz
+from bandscope.exporting.publication_models import axis_label
 from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.ui.plot_coordinate_tooltip import PlotCoordinateTooltip
@@ -67,7 +76,7 @@ from bandscope.core.data_scope import (
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.rendering.refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
-from bandscope.ui.result_workspace import AnalysisPageSpec, ResultWorkspace
+from bandscope.ui.result_workspace import AnalysisPageSpec, PageRenameDialog, ResultWorkspace
 from bandscope.ui.settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
 from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.ui.toast import ToastManager
@@ -176,6 +185,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.axis_crop_selector = None
         self.axis_crop_overlay = None
         self.axis_crop_canvas_cid = None
+        # 轴标题是会话内状态：关页清该页、换数据整体清空。
+        self.axis_title_state = AxisTitleState()
+        self.axis_title_controller = None
 
         if "TOOL_TIP" not in SiGlobal.siui.windows:
             SiGlobal.siui.windows["TOOL_TIP"] = ToolTipWindow()
@@ -341,6 +353,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return True
         if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
             self._position_render_status()
+        if event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
+            # 失焦时结束标题拖动，避免松手事件永远收不到。
+            if self._axis_title_dragging():
+                self._reset_axis_title_interaction()
         if event.type() == QEvent.KeyPress:
             if not self._page_keyboard_shortcuts_enabled():
                 return super().eventFilter(watched, event)
@@ -512,8 +528,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self.canvas_2d,
             self.ax_2d,
             context_provider=lambda: self.current_render_context,
-            active_provider=lambda: self.left_display_stack.currentWidget() is self.canvas_2d,
+            active_provider=lambda: self._reads_2d_canvas() and not self._axis_title_dragging(),
             external_blit_provider=self._axis_crop_selector_will_blit,
+        )
+        self.axis_title_controller = AxisTitleController(
+            self.canvas_2d,
+            self.ax_2d,
+            self.axis_title_state,
+            title_context=self._axis_title_context,
+            edit_request=self._ask_axis_title,
+            active_provider=self._reads_2d_canvas,
+            cursor_sink=self._set_axis_title_cursor,
+            on_change=self._on_axis_title_changed,
         )
         self.left_display_stack.addWidget(self.canvas_2d)
 
@@ -1717,6 +1743,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
         self.left_workspace.page_closed.connect(self.on_result_page_closed)
+        self.left_workspace.page_updated.connect(self.on_result_page_updated)
+        self.left_workspace.page_rename_requested.connect(self._rename_page)
+        self.left_workspace.page_restore_name_requested.connect(self._restore_page_auto_title)
 
     def _initialize_result_workspace(self):
         home_spec = AnalysisPageSpec(
@@ -1861,8 +1890,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if descriptor is not None:
             spec.params["data_scope_label"] = descriptor.label
             suffix = self._scope_title_suffix(descriptor)
-            if suffix and not str(spec.title).endswith(suffix):
-                spec.title = f"{spec.title}{suffix}"
+            base = spec.auto_title if spec.auto_title is not None else spec.title
+            if suffix and not str(base).endswith(suffix):
+                base = f"{base}{suffix}"
+            self._apply_auto_page_title(spec, base)
 
     def _refresh_scope_hint(self, spec):
         workspace = getattr(self, "left_workspace", None)
@@ -2204,10 +2235,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if title is None:
             return
 
-        title = self._make_unique_page_title(title, exclude_page_id=target_spec.page_id)
+        self._apply_auto_page_title(target_spec, title)
         self.left_workspace.update_page(
             target_spec.page_id,
-            title=title,
             params=target_spec.params,
             source_page_id=target_spec.source_page_id,
         )
@@ -3056,6 +3086,75 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         up = int(up)
         return abs(up - low) + 1
 
+    # ------------------------------------------------------------------
+    # 页面标题
+    # ------------------------------------------------------------------
+    def _rename_page(self, page_id):
+        """双击页眉或右键菜单进入的改名流程；取消/空白输入不改变原名。"""
+        spec = self.left_workspace.page_by_id(page_id)
+        if spec is None or spec.page_kind == "control_panel":
+            return
+        dialog = PageRenameDialog(self, spec.title)
+        try:
+            if dialog.exec_() != PageRenameDialog.Accepted:
+                return
+            title = str(dialog.page_title() or "").strip()
+        finally:
+            dialog.deleteLater()
+        if not title:
+            return
+        self.left_workspace.set_page_title(
+            page_id, self._make_unique_page_title(title, exclude_page_id=page_id)
+        )
+
+    def _restore_home_page_title(self):
+        """换数据后首页回到自动名字；其余页面在 ``reset_to_home`` 里关闭。"""
+        workspace = self.__dict__.get("left_workspace")
+        getter = getattr(workspace, "home_spec", None)
+        home_spec = getter() if getter is not None else None
+        if home_spec is not None and home_spec.title_overridden:
+            workspace.set_page_title(
+                home_spec.page_id, home_spec.auto_title or home_spec.title, auto=True
+            )
+
+    def _restore_page_auto_title(self, page_id):
+        """恢复自动名称：用当前最新默认值，并重新执行去重规则。"""
+        spec = self.left_workspace.page_by_id(page_id)
+        if spec is None:
+            return
+        base = spec.auto_title if spec.auto_title is not None else spec.title
+        self.left_workspace.set_page_title(
+            page_id, self._make_unique_page_title(base, exclude_page_id=page_id), auto=True
+        )
+
+    def _apply_auto_page_title(self, spec, base_title):
+        """自动命名：更新底层默认值；用户改过名时保留显示名。
+
+        页面还没登记进工作区时（页面构造途中）只改内存里的默认名，去重与
+        刷新留给随后的 ``_add_page`` / ``add_page`` 调用方。
+        """
+        if spec is None:
+            return
+        spec.auto_title = str(base_title)
+        if spec.title_overridden:
+            return
+        workspace = self.__dict__.get("left_workspace")
+        if spec.page_id in getattr(workspace, "page_specs", {}):
+            workspace.set_page_title(
+                spec.page_id,
+                self._make_unique_page_title(spec.auto_title, exclude_page_id=spec.page_id),
+                auto=True,
+            )
+        else:
+            spec.title = spec.auto_title
+
+    def on_result_page_updated(self, page_id):
+        """改名等展示信息变更后同步状态栏与截图提示，不改页面身份与参数。"""
+        spec = self.left_workspace.current_spec()
+        if spec is not None and spec.page_id == page_id:
+            self._update_statusbar()
+            self._update_screenshot_tooltip()
+
     def _make_unique_page_title(self, base_title, exclude_page_id=None):
         existing_titles = {
             spec.title
@@ -3354,7 +3453,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
-            self._show_crop_popup(self.canvas_2d.mapToGlobal(pos))
+            # 裁剪模式下右键先把范围窗口移到光标处（原有行为），再补上轴标题入口。
+            global_pos = self.canvas_2d.mapToGlobal(pos)
+            self._show_crop_popup(global_pos)
+            self._show_axis_title_menu(self.canvas_2d, global_pos)
             return
         context = self.current_render_context
         show_curve_actions = (
@@ -3366,6 +3468,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
+        self._append_axis_title_actions(menu, self.canvas_2d, global_pos)
 
         if can_copy or can_paste or show_curve_actions:
             menu.addSeparator()
@@ -3382,9 +3485,12 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
     def _show_main_context_menu(self, pos):
         if self._crop_enabled():
-            self._show_crop_popup(self.plotter.mapToGlobal(pos))
+            global_pos = self.plotter.mapToGlobal(pos)
+            self._show_crop_popup(global_pos)
+            self._show_axis_title_menu(self.plotter, global_pos)
             return
         menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
+        self._append_axis_title_actions(menu, self.plotter, global_pos)
         menu.exec_(global_pos)
 
     def _get_clip_slices(self, logical_bounds=None):
@@ -5384,6 +5490,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return x_values, y_values
 
     def _style_1d_axes(self, context, *, ylabel):
+        # 复用同一个 ax_2d：2D 页拖过轴标题留下的显式位置在这里必须清掉。
+        VisualEngine.reset_2d_axis_labels(self.ax_2d)
         display_title = self._display_title_for_1d_plot(context["title"])
         self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12,
                              fontfamily=["DejaVu Sans", "Microsoft YaHei"])
@@ -5487,6 +5595,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             )
 
         self.ax_2d.set_title(context["title"], color="white", pad=28)
+        VisualEngine.reset_2d_axis_labels(self.ax_2d)
         self.ax_2d.set_xlabel(context["xlabel"], color="white")
         self.ax_2d.set_ylabel(context["ylabel"], color="white")
         self.ax_2d.tick_params(colors="white")
@@ -5500,6 +5609,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def on_result_page_activated(self, page_id):
         self.crop_controller.popup.hide()
         self._clear_axis_crop_interaction(redraw=False)
+        self._reset_axis_title_interaction()
         self._clear_interactive_box()
         previous_page_id = self.active_page_spec.page_id if self.active_page_spec is not None else None
         if previous_page_id is not None and previous_page_id != page_id:
@@ -5826,6 +5936,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.update_ax_slider_range()
         self._sync_slice_edits_from_logical_bounds()
         self._configure_time_controls()
+        # 轴标题是会话内设置，换数据后整体作废（页面标题也回到各自的自动名字）。
+        self._axis_titles().clear()
+        self._reset_axis_title_interaction()
         home_spec = self.left_workspace.home_spec()
         if home_spec is not None:
             home_spec.data_scope_id = self.FULL_SCOPE_ID
@@ -5834,6 +5947,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             home_spec.params["control_state"] = self._capture_control_state()
             self._persist_home_page_state(home_spec)
             self._refresh_scope_hint(home_spec)
+        self._restore_home_page_title()
         self.left_workspace.reset_to_home()
         self.plotter.set_background("white")
         self.global_refresh()
@@ -7082,6 +7196,254 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if selector is not None:
             selector.background = background
 
+    # ------------------------------------------------------------------
+    # 轴标题
+    # ------------------------------------------------------------------
+    def _reset_axis_title_interaction(self):
+        controller = self.__dict__.get("axis_title_controller")
+        if controller is not None:
+            controller.reset_interaction()
+
+    def _reads_2d_canvas(self):
+        stack = getattr(self, "left_display_stack", None)
+        return stack is not None and stack.currentWidget() is getattr(self, "canvas_2d", None)
+
+    def _axis_title_dragging(self):
+        controller = self.__dict__.get("axis_title_controller")
+        return bool(controller is not None and controller.dragging)
+
+    @staticmethod
+    def _axis_title_axis_keys(slice_info, plot_axes):
+        """2D 图上实际的横纵轴键：以 plot_axes 为准，缺省按切面回退。"""
+        x_key = (plot_axes or {}).get("x_key")
+        y_key = (plot_axes or {}).get("y_key")
+        if x_key and y_key:
+            return str(x_key), str(y_key)
+        axis_index = int((slice_info or {}).get("axis", 2))
+        info = My3DAnalyzer._axis_plot_info(axis_index)
+        return info["x_key"], info["y_key"]
+
+    def _axis_label_text(self, axis_key):
+        """坐标标签规则与导出共用一份：单位缺失不猜，索引回退标 index。"""
+        core = getattr(self, "core", None)
+        sources = dict(getattr(core, "coord_sources", {}) or {})
+        units = dict(getattr(core, "coord_units", {}) or {})
+        return axis_label(
+            str(axis_key),
+            str(sources.get(axis_key, "index")),
+            units.get(axis_key),
+        )
+
+    def _axis_title_defaults(self, x_key, y_key):
+        return {"x": self._axis_label_text(x_key), "y": self._axis_label_text(y_key)}
+
+    def _current_spec(self):
+        """当前页 spec；只填了部分属性的测试桩同样适用。"""
+        workspace = self.__dict__.get("left_workspace")
+        getter = getattr(workspace, "current_spec", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _axis_title_context(self, context=None, spec=None, page_id=None):
+        """2D 页的轴标题上下文（key + 默认文字）；非 2D 视图返回 None。"""
+        context = self.__dict__.get("current_render_context") if context is None else context
+        if not isinstance(context, dict) or context.get("view") != "2d":
+            return None
+        if spec is None and page_id is None:
+            spec = self._current_spec()
+        page_id = spec.page_id if spec is not None else page_id
+        if page_id is None:
+            return None
+        x_key, y_key = self._axis_title_axis_keys(
+            context.get("slice_info"), context.get("plot_axes")
+        )
+        return {
+            "key": axis_title_key(page_id, "2d", (x_key, y_key)),
+            "defaults": self._axis_title_defaults(x_key, y_key),
+        }
+
+    def _axis_title_snapshot_texts(self, page_id, view, context):
+        """导出快照使用的主画布自定义轴名；没改过的轴不出现在结果里。
+
+        只是把主画布的文字如实交给导出：风格的轴标签覆盖仍然优先，
+        拖动位置不参与导出排版。
+        """
+        state = self._axis_titles()
+        titles = {}
+        if view == "2d":
+            title_context = self._axis_title_context(context, page_id=page_id)
+            if title_context is None:
+                return titles
+            for axis in ("x", "y"):
+                value = state.text(title_context["key"], axis)
+                if value is not None:
+                    titles[axis] = value
+            return titles
+        key = self._three_d_axis_title_key(page_id=page_id)
+        if key is None:
+            return titles
+        for axis in self.THREE_D_AXIS_KEYS:
+            value = state.text(key, axis)
+            if value is not None:
+                titles[axis] = value
+        return titles
+
+    def _axis_titles(self):
+        """会话内的轴标题状态；测试桩没有该属性时给一个空状态。"""
+        state = self.__dict__.get("axis_title_state")
+        return state if state is not None else AxisTitleState()
+
+    def _render_2d_axis_titles(self, context, spec):
+        """2D 渲染参数：默认文字与用户覆盖合成后的标题与位置。"""
+        title_context = self._axis_title_context(context, spec)
+        if title_context is None:
+            return None, None
+        state = self._axis_titles()
+        return state.resolve(title_context["key"], title_context["defaults"]), {
+            axis: state.position(title_context["key"], axis)
+            for axis in ("x", "y")
+            if state.position(title_context["key"], axis) is not None
+        }
+
+    THREE_D_AXIS_KEYS = ("X", "Y", "E")
+
+    def _three_d_axis_title_key(self, spec=None, page_id=None):
+        if spec is None and page_id is None:
+            spec = self._current_spec()
+        page_id = spec.page_id if spec is not None else page_id
+        if page_id is None:
+            return None
+        return axis_title_key(page_id, "3d", self.THREE_D_AXIS_KEYS)
+
+    def _three_d_axis_titles(self, spec=None):
+        defaults = dict(zip(self.THREE_D_AXIS_KEYS, VisualEngine.DEFAULT_3D_AXIS_TITLES))
+        key = self._three_d_axis_title_key(spec)
+        if key is None:
+            return tuple(defaults[axis] for axis in self.THREE_D_AXIS_KEYS)
+        resolved = self._axis_titles().resolve(key, defaults)
+        return tuple(resolved[axis] for axis in self.THREE_D_AXIS_KEYS)
+
+    def _ask_axis_title(self, axis, current_text, default_text):
+        """2D 轴标题改名弹窗；取消返回 None。"""
+        dialog = AxisTitleDialog(
+            self,
+            axis_label="横" if axis == "x" else "纵",
+            text=current_text,
+            default_text=default_text,
+        )
+        try:
+            if dialog.exec_() != AxisTitleDialog.Accepted:
+                return None
+            if dialog.restored_default():
+                return RESTORE_DEFAULT_TEXT
+            return dialog.title_text()
+        finally:
+            dialog.deleteLater()
+
+    def _edit_three_d_axis_titles(self):
+        """3D 主画布右键入口：一次编辑 X / Y / E 三条轴名。"""
+        key = self._three_d_axis_title_key()
+        if key is None:
+            return
+        defaults = dict(zip(self.THREE_D_AXIS_KEYS, VisualEngine.DEFAULT_3D_AXIS_TITLES))
+        state = self._axis_titles()
+        current = state.resolve(key, defaults)
+        dialog = ThreeAxisTitlesDialog(
+            self,
+            axis_names=self.THREE_D_AXIS_KEYS,
+            texts=current,
+            defaults=VisualEngine.DEFAULT_3D_AXIS_TITLES,
+        )
+        try:
+            if dialog.exec_() != ThreeAxisTitlesDialog.Accepted:
+                return
+            if dialog.restored_default():
+                changed = state.reset_texts(key)
+            else:
+                titles = dialog.title_texts()
+                changed = False
+                for axis in self.THREE_D_AXIS_KEYS:
+                    changed = state.set_text(key, axis, titles.get(axis, "")) or changed
+        finally:
+            dialog.deleteLater()
+        if changed:
+            self._on_axis_title_changed()
+
+    def _set_axis_title_cursor(self, cursor):
+        if cursor is None:
+            self._update_crop_cursor()
+            return
+        self.canvas_2d.setCursor(cursor)
+
+    def _on_axis_title_changed(self):
+        """标题或位置变了：清掉快速刷新缓存并整帧重绘。"""
+        for attribute in ("_arpes_preview_background", "_arpes_preview_background_signature"):
+            if hasattr(self.ax_2d, attribute):
+                setattr(self.ax_2d, attribute, None)
+        self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
+
+    def _append_axis_title_actions(self, menu, owner, global_pos):
+        """把轴标题入口挂到右键菜单上；当前视图没有轴标题时不动菜单。"""
+        context = self.__dict__.get("current_render_context")
+        view = context.get("view") if isinstance(context, dict) else None
+        if view not in {"2d", "3d"}:
+            return False
+
+        state = self._axis_titles()
+        if view == "2d":
+            controller = self.__dict__.get("axis_title_controller")
+            title_context = self._axis_title_context(context)
+            if controller is None or title_context is None:
+                return False
+            menu.addSeparator()
+            key = title_context["key"]
+            for axis, name in (("x", "横轴标题…"), ("y", "纵轴标题…")):
+                action = menu.addAction(name)
+                action.triggered.connect(
+                    lambda _checked=False, target=axis: controller.edit(target)
+                )
+            reset_text = menu.addAction("恢复默认文字")
+            reset_text.setEnabled(bool(state.texts(key)))
+            reset_text.triggered.connect(lambda: controller.reset_texts())
+            reset_position = menu.addAction("恢复默认位置")
+            reset_position.setEnabled(
+                any(state.position(key, axis) is not None for axis in ("x", "y"))
+            )
+            reset_position.triggered.connect(lambda: controller.reset_positions())
+        else:
+            menu.addSeparator()
+            key = self._three_d_axis_title_key()
+            action = menu.addAction("轴标题…")
+            action.triggered.connect(self._edit_three_d_axis_titles)
+            reset_text = menu.addAction("恢复默认文字")
+            reset_text.setEnabled(bool(key and state.texts(key)))
+            reset_text.triggered.connect(self._restore_three_d_axis_titles)
+
+        return True
+
+    def _restore_three_d_axis_titles(self):
+        key = self._three_d_axis_title_key()
+        if key is None:
+            return
+        if self._axis_titles().reset_texts(key):
+            self._on_axis_title_changed()
+
+    def _show_axis_title_menu(self, owner, global_pos):
+        """单独弹一个只含轴标题条目的菜单（裁剪模式下右键被范围窗口占用时用）。"""
+        menu = QMenu(owner)
+        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
+        try:
+            if not self._append_axis_title_actions(menu, owner, global_pos):
+                return False
+            menu.exec_(global_pos)
+        finally:
+            menu.deleteLater()
+        return True
+
     def _render_active_page(self, quality=RenderQuality.EXACT, cause=None):
         spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
         if spec is None:
@@ -7097,6 +7459,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self.plot_coordinate_tooltip.hide(redraw=False)
             self.current_render_context = None
             self._clear_axis_crop_interaction(redraw=False)
+            self._reset_axis_title_interaction()
 
         if spec.page_kind == "control_panel":
             self._activate_crop_context(spec, None)
@@ -7193,6 +7556,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 full_shape=render_context.get("full_shape"),
                 include_zero=bool(render_context.get("include_zero", False)),
                 opacity_multiplier=opacity_multiplier,
+                axis_titles=self._three_d_axis_titles(spec),
             )
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
@@ -7204,6 +7568,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._clear_interactive_box()
             # 切到 1D / 2D 时插件卡片不参与渲染，但要拿到当前视图/坐标上下文。
             self._plugin_render_context(render_context)
+            axis_titles, axis_title_positions = self._render_2d_axis_titles(
+                render_context, spec
+            )
             preview_blitted = VisualEngine.render_2d_slice(
                 self.ax_2d,
                 self.canvas_2d,
@@ -7214,6 +7581,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 cmap=current_cmap,
                 quality=quality,
                 overlay_artists=self._active_2d_blit_artists(),
+                axis_titles=axis_titles,
+                axis_title_positions=axis_title_positions,
             )
             if quality == RenderQuality.PREVIEW and preview_blitted:
                 self._sync_active_2d_blit_background()
@@ -7257,12 +7626,14 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.crop_controller.remove_page(page_id)
         self.refresh_coordinator.cancel_page(page_id)
         self._clear_axis_prefix_cache(page_id)
+        self._axis_titles().forget_page(page_id)
         self._rotation_cache.clear()
         self._computed_volume_cache.clear()
         self._second_derivative_volume_cache = None
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
             self.current_render_context = None
             self._clear_axis_crop_interaction(redraw=False)
+            self._reset_axis_title_interaction()
 
         if self.last_visual_page_id == page_id:
             fallback_spec = self.left_workspace.current_spec()

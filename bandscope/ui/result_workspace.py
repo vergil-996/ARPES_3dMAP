@@ -5,10 +5,15 @@ from typing import Any, Dict, Optional
 from PyQt5.QtCore import QByteArray, QMimeData, QPoint, QRect, QSettings, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QCursor, QDrag, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
     QScrollArea,
     QToolButton,
     QTreeWidget,
@@ -25,6 +30,100 @@ from siui.templates.application.components.page_view.page_view import PageButton
 RESULT_PAGE_MIME = "application/x-bandscope-page-id"
 
 
+class PageRenameDialog(QDialog):
+    """页面改名输入框；空名称不允许提交。"""
+
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.setWindowTitle("重命名页面")
+        self.setModal(True)
+        self.setMinimumWidth(380)
+        self.setStyleSheet(f"QDialog {{ background-color: {theme.BG_2}; }}")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(10)
+
+        label = QLabel("页面名称：", self)
+        label.setStyleSheet(theme.field_label_qss())
+        root.addWidget(label)
+
+        self.edit = QLineEdit(self)
+        self.edit.setFixedHeight(32)
+        self.edit.setStyleSheet(theme.value_input_qss())
+        self.edit.setText(str(title or ""))
+        self.edit.setPlaceholderText("输入新的页面名称")
+        self.edit.selectAll()
+        root.addWidget(self.edit)
+
+        self.error_label = QLabel(self)
+        self.error_label.setStyleSheet(f"color: {theme.DANGER}; background: transparent;")
+        self.error_label.hide()
+        root.addWidget(self.error_label)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal, self
+        )
+        self.buttons.button(QDialogButtonBox.Ok).setText("确定")
+        self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        for button in self.buttons.buttons():
+            button.setFixedHeight(32)
+            accept_role = self.buttons.buttonRole(button) == QDialogButtonBox.AcceptRole
+            theme.style_push_button(button, "primary" if accept_role else "secondary")
+        self.buttons.accepted.connect(self._on_accept)
+        self.buttons.rejected.connect(self.reject)
+        self.edit.returnPressed.connect(self._on_accept)
+        row.addWidget(self.buttons)
+        root.addLayout(row)
+
+    def _on_accept(self):
+        if not self.edit.text().strip():
+            self.error_label.setText("名称不能为空。")
+            self.error_label.show()
+            return
+        self.accept()
+
+    def page_title(self) -> str:
+        return self.edit.text().strip()
+
+
+class PageTitleLabel(QLabel):
+    """工作区顶部的页面名称：双击改名，右键给出改名与恢复自动名称。"""
+
+    rename_requested = pyqtSignal()
+    restore_requested = pyqtSignal()
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.renameable = False
+        self.can_restore = False
+
+    def set_rename_state(self, renameable: bool, can_restore: bool):
+        self.renameable = bool(renameable)
+        self.can_restore = bool(can_restore)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.renameable:
+            self.rename_requested.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        if not self.renameable:
+            super().contextMenuEvent(event)
+            return
+        menu = QMenu(self)
+        rename_action = menu.addAction("重命名…")
+        rename_action.triggered.connect(self.rename_requested.emit)
+        restore_action = menu.addAction("恢复自动名称")
+        restore_action.setEnabled(self.can_restore)
+        restore_action.triggered.connect(self.restore_requested.emit)
+        menu.exec_(event.globalPos())
+        event.accept()
+
+
 
 @dataclass
 class AnalysisPageSpec:
@@ -38,6 +137,10 @@ class AnalysisPageSpec:
     source_page_id: Optional[str] = None
     source_title: Optional[str] = None
     data_scope_id: str = "full"
+    #: 自动命名算出的底层默认名；``None`` 表示与 ``title`` 相同。
+    auto_title: Optional[str] = None
+    #: 用户是否改过名。改过名后自动命名只更新 ``auto_title``，不动显示名。
+    title_overridden: bool = False
 
 
 class ResultPageButton(PageButton):
@@ -493,6 +596,11 @@ class ResultTreePopup(QFrame):
 class ResultWorkspace(QWidget):
     page_activated = pyqtSignal(str)
     page_closed = pyqtSignal(str)
+    #: 页面标题等展示信息更新后发出（改名、改名撤销、自动命名刷新）。
+    page_updated = pyqtSignal(str)
+    #: 用户要求改名 / 恢复自动名称；应用层负责弹窗、去重与落地。
+    page_rename_requested = pyqtSignal(str)
+    page_restore_name_requested = pyqtSignal(str)
 
     def __init__(self, display_widget: QWidget, parent=None):
         super().__init__(parent)
@@ -567,9 +675,12 @@ class ResultWorkspace(QWidget):
         header_layout.setSpacing(10)
         self.header.setFixedHeight(30)
 
-        self.page_title = QLabel("分析工作区", self.header)
+        self.page_title = PageTitleLabel("分析工作区", self.header)
         self.page_title.setMinimumWidth(0)
         self.page_title.setStyleSheet(theme.card_title_qss())
+        self.page_title.setToolTip("双击重命名页面")
+        self.page_title.rename_requested.connect(self._on_rename_requested)
+        self.page_title.restore_requested.connect(self._on_restore_requested)
         header_layout.addWidget(self.page_title, 1)
 
         self.scope_label = QLabel(self.header)
@@ -1116,6 +1227,9 @@ class ResultWorkspace(QWidget):
         self.tree_popup.set_current_page(self.current_page_id)
 
     def _add_page(self, spec: AnalysisPageSpec):
+        if spec.auto_title is None:
+            # 建页时的标题就是该页的自动名字；此后自动命名只更新它。
+            spec.auto_title = str(spec.title)
         self.page_specs[spec.page_id] = spec
         self._ensure_source_title(spec)
         self._add_to_tab_order(spec.page_id)
@@ -1126,16 +1240,59 @@ class ResultWorkspace(QWidget):
         spec = self.current_spec()
         if spec is None:
             self.page_title.setText("分析工作区")
+            self.page_title.setToolTip("双击重命名页面")
+            self.page_title.set_rename_state(False, False)
             self.scope_label.hide()
             self.close_button.hide()
             return
         title = str(spec.title)
+        # 工具页（控制面板等）没有页面语义，不提供改名。
+        renameable = spec.page_kind != "control_panel"
         self.page_title.setText(title)
-        self.page_title.setToolTip(title)
+        self.page_title.setToolTip(
+            f"{title}（双击重命名）" if renameable else title
+        )
+        self.page_title.set_rename_state(renameable, bool(spec.title_overridden))
         scope = str(spec.params.get("data_scope_label") or "")
         self.scope_label.setText(scope)
         self.scope_label.setVisible(bool(scope))
         self.close_button.setVisible(spec.closeable)
+
+    def _on_rename_requested(self):
+        if self.current_page_id is not None:
+            self.page_rename_requested.emit(self.current_page_id)
+
+    def _on_restore_requested(self):
+        if self.current_page_id is not None:
+            self.page_restore_name_requested.emit(self.current_page_id)
+
+    def _refresh_page_surfaces(self, page_id, *, notify):
+        """页面展示面统一刷新：页眉、侧栏提示、页面树与当前来源名称。"""
+        self._rebuild_title_index()
+        self._refresh_navigation_layout()
+        self._rebuild_tree_popup_if_visible()
+        spec = self.page_specs.get(page_id)
+        button = self.page_buttons.get(page_id)
+        if button is not None and spec is not None:
+            button.spec = spec
+            button.refresh_hint()
+        if page_id == self.current_page_id:
+            self._refresh_header()
+        if notify:
+            self.page_updated.emit(page_id)
+
+    def set_page_title(self, page_id, title, *, auto=False):
+        """落地页面名称：``auto=True`` 表示这是自动名称（不是用户命名）。"""
+        spec = self.page_specs.get(page_id)
+        if spec is None:
+            return None
+        text = str(title)
+        if text == spec.title and spec.title_overridden != auto:
+            return spec.title
+        spec.title = text
+        spec.title_overridden = not auto
+        self._refresh_page_surfaces(page_id, notify=True)
+        return spec.title
 
     def activate_page(self, page_id: str):
         if page_id not in self.page_specs:
@@ -1275,14 +1432,9 @@ class ResultWorkspace(QWidget):
             spec.source_page_id = source_page_id
 
         self._ensure_source_title(spec)
-        self._rebuild_title_index()
-        self._refresh_navigation_layout()
-        self._rebuild_tree_popup_if_visible()
-
-        button = self.page_buttons.get(page_id)
-        if button is not None:
-            button.spec = spec
-            button.refresh_hint()
+        # 当前页的页眉（标题 / 范围徽标）也在这条路径上刷新：单靠 activate_page
+        # 会留下过期标题。
+        self._refresh_page_surfaces(page_id, notify=title is not None)
 
     def page_by_id(self, page_id: Optional[str]) -> Optional[AnalysisPageSpec]:
         if page_id is None:
