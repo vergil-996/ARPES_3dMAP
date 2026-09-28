@@ -29,6 +29,24 @@ def isolate_runtime():
     QSettings.setDefaultFormat(QSettings.IniFormat)
     for scope in (QSettings.UserScope, QSettings.SystemScope):
         QSettings.setPath(QSettings.IniFormat, scope, _sandbox.name)
+    _redirect_default_settings(QSettings)
+
+
+def _redirect_default_settings(QSettings):
+    """让 ``QSettings(org, app)`` 也落到隔离目录。
+
+    本机 Qt 上 ``setDefaultFormat`` 对两参数构造器不生效（``format()`` 仍是
+    Native），主窗口与工作区又都用这个写法，不补一层就会把测试写进用户的真实
+    注册表。这里只改构造参数，格式与路径仍由上面的 setPath 决定。
+    """
+    original = QSettings.__init__
+
+    def patched(self, *args, **kwargs):
+        if len(args) == 2 and all(isinstance(arg, str) for arg in args):
+            args = (QSettings.IniFormat, QSettings.UserScope) + args
+        original(self, *args, **kwargs)
+
+    QSettings.__init__ = patched
 
 
 # GitHub 的 windows runner 没有可用的 OpenGL 驱动：VTK 拿不到像素格式，9.7 会兜底到

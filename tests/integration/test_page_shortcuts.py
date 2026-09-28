@@ -36,7 +36,7 @@ class ModifierPageShortcutRemovalTests(unittest.TestCase):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.left_display_stack = None
         analyzer.left_workspace = SimpleNamespace(
-            activate_page=Mock(), rail_page_ids=lambda: ["a", "b"], current_page_id="a"
+            activate_page=Mock(), visible_page_ids=lambda: ["a", "b"], current_page_id="a"
         )
         analyzer._select_control_page = Mock()
         analyzer._page_keyboard_shortcuts_enabled = lambda: True

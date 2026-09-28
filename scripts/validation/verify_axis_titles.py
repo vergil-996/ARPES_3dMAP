@@ -208,21 +208,6 @@ def right_click(widget, pos):
     )
 
 
-def tree_texts(tree):
-    """页面树里所有节点的文字（递归）。"""
-
-    def collect(item):
-        texts = [item.text(0)]
-        for index in range(item.childCount()):
-            texts.extend(collect(item.child(index)))
-        return texts
-
-    result = []
-    for index in range(tree.topLevelItemCount()):
-        result.extend(collect(tree.topLevelItem(index)))
-    return result
-
-
 def cube_axes_titles(window):
     actor = cube_axes_actor(window)
     if actor is None:
@@ -582,9 +567,8 @@ def main():
         spec = window.left_workspace.current_spec()
         state["original_2d_title"] = spec.title
         state["long_title"] = "超长的页面名称：沿能量轴积分得到的费米面（验收页眉排版）"
-        # 打开页面树：改名后它要跟着换字。
+        # 页面树常驻在左侧：改名后它要跟着换字。
         workspace = window.left_workspace
-        workspace._show_tree_popup(workspace.home_page_id, pinned=True)
         answer_dialog(text=f"  {state['long_title']}  ")
         workspace._on_rename_requested()
         QTimer.singleShot(800, guarded(step_page_rename_check))
@@ -593,8 +577,10 @@ def main():
         spec = window.left_workspace.current_spec()
         check("页面改名成功（首尾空白去掉）", spec.title == state["long_title"])
         check("页眉同步新名称", window.left_workspace.page_title.text() == state["long_title"])
-        button = window.left_workspace.page_buttons.get(spec.page_id)
-        check("侧栏提示同步新名称", button is not None and state["long_title"] in button.hint)
+        check(
+            "页面树同步新名称",
+            state["long_title"] in window.left_workspace.page_tree.entry_titles(),
+        )
         check("状态栏同步新名称", window.status_page.text() == state["long_title"])
         check(
             "长名称没有挤掉页眉的关闭按钮",
@@ -605,12 +591,7 @@ def main():
             "页面身份与计算参数不变",
             spec.page_id == state["page_2d"] and spec.params.get("axis_index") == 2,
         )
-        check(
-            "页面树同步新名称",
-            state["long_title"] in tree_texts(window.left_workspace.tree_popup.tree),
-        )
         save_shot(window, "page_title_renamed.png")
-        window.left_workspace._hide_tree_popup()
         QTimer.singleShot(200, guarded(step_page_home_rename))
 
     def step_page_home_rename():
@@ -640,11 +621,9 @@ def main():
 
     def step_page_restore_check():
         check(
-            "切页回来长名称仍在（页眉与侧栏同步）",
+            "切页回来长名称仍在（页眉与页面树同步）",
             window.left_workspace.current_spec().title == state["long_title"]
-            and state["long_title"] in window.left_workspace.page_buttons[
-                state["page_2d"]
-            ].hint,
+            and state["long_title"] in window.left_workspace.page_tree.entry_titles(),
         )
         window.left_workspace._on_restore_requested()
         QTimer.singleShot(800, guarded(step_page_restored_check))

@@ -76,7 +76,12 @@ from bandscope.core.data_scope import (
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.rendering.refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
-from bandscope.ui.result_workspace import AnalysisPageSpec, PageRenameDialog, ResultWorkspace
+from bandscope.ui.result_workspace import (
+    AnalysisPageSpec,
+    PageRenameDialog,
+    ResultWorkspace,
+    unique_title_among,
+)
 from bandscope.ui.settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
 from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.ui.toast import ToastManager
@@ -110,6 +115,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     FULL_SCOPE_ID = "full"
     ROTATION_CACHE_LIMIT = 4
     RENDER_STATUS_WIDTH = 330
+    #: 持有焦点时方向键留给文本编辑，不用于逐帧。
+    EDITABLE_CLASS_MARKERS = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
+    #: 持有焦点时方向键归这些控件自己用（滑条 / 下拉框 / 页面树）。
+    NAVIGATION_CLASS_MARKERS = ("Slider", "Combo", "Tree")
     CONTEXT_MENU_STYLE = (
         f"QMenu {{ color: {theme.TEXT_1}; background-color: {theme.BG_2}; }} "
         f"QMenu::item:selected {{ background-color: {theme.BG_4}; }}"
@@ -310,23 +319,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             _bind("Ctrl+W", self.left_workspace.close_current_page),
         ]
 
-    def _focus_blocks_frame_step(self):
-        """文本编辑、其它滑条、下拉框持有焦点时，方向键不用于逐帧。"""
-        if self._focus_accepts_number_input():
-            return True
-        focus_widget = QApplication.focusWidget()
+    def _focus_blocks_frame_step(self, focus_widget=None):
+        """文本编辑、其它滑条、下拉框、页面树持有焦点时，方向键不用于逐帧。
+
+        ``focus_widget`` 只给测试注入用；缺省看真实焦点。
+        """
+        if focus_widget is None:
+            focus_widget = QApplication.focusWidget()
         if focus_widget is None or focus_widget is self.timeline_bar.slider_time:
             return False
-        class_names = []
-        current_class = focus_widget.__class__
-        while current_class is not object:
-            class_names.append(current_class.__name__)
-            current_class = current_class.__base__
-        return any(
-            marker in class_name
-            for class_name in class_names
-            for marker in ("Slider", "Combo")
-        )
+        if self._widget_has_class_marker(focus_widget, self.EDITABLE_CLASS_MARKERS):
+            return True
+        return self._widget_has_class_marker(focus_widget, self.NAVIGATION_CLASS_MARKERS)
 
     def _handle_frame_step_shortcut(self, event):
         """←/→ 逐帧移动时间轴，Shift+←/→ 步进 10 帧（允许按住连发）。"""
@@ -386,19 +390,23 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         }
         return key_to_index.get(event.key())
 
-    def _focus_accepts_number_input(self):
-        focus_widget = QApplication.focusWidget()
-        if focus_widget is None:
+    @staticmethod
+    def _widget_has_class_marker(widget, markers) -> bool:
+        """按基类名判断控件种类；Qt 没有稳定的类型查询，类名链够用且不依赖导入。"""
+        if widget is None:
             return False
-
-        class_names = []
-        current_class = focus_widget.__class__
+        current_class = widget.__class__
         while current_class is not object:
-            class_names.append(current_class.__name__)
+            name = current_class.__name__
+            if any(marker in name for marker in markers):
+                return True
             current_class = current_class.__base__
+        return False
 
-        editable_markers = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
-        return any(marker in class_name for class_name in class_names for marker in editable_markers)
+    def _focus_accepts_number_input(self):
+        return self._widget_has_class_marker(
+            QApplication.focusWidget(), self.EDITABLE_CLASS_MARKERS
+        )
 
     @staticmethod
     def _widget_is_descendant(widget, ancestor):
@@ -482,7 +490,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return False
 
     def _ordered_left_workspace_page_ids(self):
-        return self.left_workspace.rail_page_ids()
+        # 数字切页按页面树中当前可见行的顺序走。
+        return self.left_workspace.visible_page_ids()
 
     def _select_left_workspace_page_by_index(self, index):
         page_ids = self._ordered_left_workspace_page_ids()
@@ -1746,6 +1755,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.left_workspace.page_updated.connect(self.on_result_page_updated)
         self.left_workspace.page_rename_requested.connect(self._rename_page)
         self.left_workspace.page_restore_name_requested.connect(self._restore_page_auto_title)
+        self.left_workspace.set_delete_confirm_handler(self._confirm_page_delete)
 
     def _initialize_result_workspace(self):
         home_spec = AnalysisPageSpec(
@@ -1896,12 +1906,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._apply_auto_page_title(spec, base)
 
     def _refresh_scope_hint(self, spec):
+        """数据范围变化后刷新该页在树里的提示，不动页面身份与顺序。"""
         workspace = getattr(self, "left_workspace", None)
         if workspace is None or spec is None:
             return
-        button = workspace.page_buttons.get(spec.page_id)
-        if button is not None and hasattr(button, "refresh_hint"):
-            button.refresh_hint()
+        refresh_row = getattr(workspace, "refresh_page_row", None)
+        if refresh_row is not None:
+            refresh_row(spec.page_id)
 
     def _referenced_scope_descriptors(self, extra=None):
         scope_ids = {self.FULL_SCOPE_ID}
@@ -3101,11 +3112,41 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             title = str(dialog.page_title() or "").strip()
         finally:
             dialog.deleteLater()
-        if not title:
-            return
-        self.left_workspace.set_page_title(
-            page_id, self._make_unique_page_title(title, exclude_page_id=page_id)
+        # 与树内改名共用一套提交逻辑：去空白、空名保持原名、重名自动编号。
+        self.left_workspace.apply_page_rename(page_id, title)
+
+    def _confirm_page_delete(self, plan):
+        """删除确认：显示目标名称与将删除的总数，默认按钮是“取消”。"""
+        if plan.get("blocked"):
+            self._show_message(
+                "无法删除页面",
+                "该分支包含主页或不可关闭的工具页，已取消删除。",
+                QMessageBox.Information,
+            )
+            return False
+
+        title = str(plan.get("title") or "")
+        count = int(plan.get("count") or 1)
+        if count > 1:
+            text = (
+                f"确定删除页面“{title}”吗？\n"
+                f"它的 {count - 1} 个派生页面会一起删除，共 {count} 个页面。"
+            )
+        else:
+            text = f"确定删除页面“{title}”吗？"
+        text += "\n\n只影响本次会话的页面，原始数据文件不会被修改。"
+
+        msg = self._create_message_box(
+            "删除页面",
+            text,
+            QMessageBox.Warning,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.No,
+            escape_button=QMessageBox.No,
         )
+        msg.button(QMessageBox.Yes).setText("删除")
+        msg.button(QMessageBox.No).setText("取消")
+        return msg.exec_() == QMessageBox.Yes
 
     def _restore_home_page_title(self):
         """换数据后首页回到自动名字；其余页面在 ``reset_to_home`` 里关闭。"""
@@ -3156,20 +3197,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._update_screenshot_tooltip()
 
     def _make_unique_page_title(self, base_title, exclude_page_id=None):
-        existing_titles = {
-            spec.title
-            for page_id, spec in self.left_workspace.page_specs.items()
-            if page_id != exclude_page_id
-        }
-        if base_title not in existing_titles:
-            return base_title
-
-        suffix = 2
-        while True:
-            candidate = f"{base_title}_{suffix}"
-            if candidate not in existing_titles:
-                return candidate
-            suffix += 1
+        # 去重规则只有一份（工作区也用它），树内改名与弹窗改名结果一致。
+        specs = getattr(self.left_workspace, "page_specs", None)
+        if specs is None:
+            return str(base_title)
+        return unique_title_among(
+            (
+                spec.title
+                for page_id, spec in specs.items()
+                if page_id != exclude_page_id
+            ),
+            base_title,
+        )
 
     def _curve_kind_for_spec(self, spec):
         if spec is None:
@@ -7648,6 +7687,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
     def closeEvent(self, event):
         self._save_splitter_sizes()
+        workspace = self.__dict__.get("left_workspace")
+        if workspace is not None:
+            workspace.save_nav_width()
         toast_manager = self.__dict__.get("toast_manager")
         if toast_manager is not None:
             toast_manager.clear()

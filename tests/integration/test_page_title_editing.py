@@ -100,25 +100,16 @@ class PageTitleSurfaceTests(_WorkspaceFixture):
         self.assertTrue(page.title_overridden)
         self.assertEqual(self.workspace.page_title.text(), "费米面")
         self.assertIn("费米面", self.workspace.page_title.toolTip())
-        self.assertIn("费米面", self.workspace.page_buttons["p1"].hint)
+        self.assertIn("费米面", self.workspace.page_tree.entry_titles())
         self.assertEqual(self.updated, ["p1"])
 
     def test_rename_also_refreshes_the_page_tree(self):
         self.workspace.add_page(_spec("p1", "X轴积分_5", source_page_id="home"))
-        self.workspace.popup_page_id = "home"
-        # 子控件的 isVisible() 跟着祖先走：树弹层要挂在可见的工作区上。
-        self.workspace.show()
-        self.workspace.tree_popup.show()
-        try:
-            self.workspace.set_page_title("p1", "费米面")
-            items = []
-            root = self.workspace.tree_popup.tree.topLevelItem(0)
-            for index in range(root.childCount()):
-                items.append(root.child(index).text(0))
-            self.assertEqual(items, ["费米面"])
-        finally:
-            self.workspace.tree_popup.hide()
-            self.workspace.hide()
+        self.workspace.set_page_title("p1", "费米面")
+
+        root = self.workspace.page_tree.tree.topLevelItem(0)
+        items = [root.child(index).text(0) for index in range(root.childCount())]
+        self.assertEqual(items, ["费米面"])
 
     def test_update_page_refreshes_the_current_header(self):
         page = _spec("p1", "X轴积分_5")

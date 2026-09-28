@@ -93,7 +93,8 @@ def main():
         window.on_cut()
 
     def left_page_ids():
-        return window.left_workspace.rail_page_ids()
+        # 数字切页按页面树的可见行顺序，验收读同一份顺序。
+        return window.left_workspace.visible_page_ids()
 
     def step_loaded():
         check("窗口是活动窗口（快捷键前提）", window._page_keyboard_shortcuts_enabled())
