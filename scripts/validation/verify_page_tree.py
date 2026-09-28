@@ -246,7 +246,6 @@ def main():
             "积分页挂在裁剪页下",
             item(window, state["crop"]).childCount() >= 1,
         )
-        panel(window).expand_all()
         check(
             "可见顺序是主页 → 裁剪 → 积分",
             panel(window).visible_page_ids()[:3] == ["home", state["crop"], state["integral"]],
@@ -309,7 +308,9 @@ def main():
 
     # ------------------------------------------------------------ 搜索
     def step_search():
-        panel(window).collapse_all()
+        # 用箭头收起整棵树，模拟用户手动折叠后再搜索。
+        for page_id in list(panel(window)._items):
+            item(window, page_id).setExpanded(False)
         state["expanded_before_search"] = item(window, "home").isExpanded()
         panel(window).search_edit.setText("费米面")
 

@@ -20,12 +20,10 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFrame,
-    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
-    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -342,20 +340,6 @@ class PageTreePanel(QWidget):
         self.search_edit.textChanged.connect(self._on_search_changed)
         root.addWidget(self.search_edit)
 
-        tools = QHBoxLayout()
-        tools.setContentsMargins(0, 0, 0, 0)
-        tools.setSpacing(6)
-        self.expand_all_button = self._make_tool_button("全部展开", "展开所有页面")
-        self.collapse_all_button = self._make_tool_button("全部折叠", "折叠所有页面")
-        self.locate_button = self._make_tool_button("定位当前页", "清空搜索并滚动到当前页面")
-        self.expand_all_button.clicked.connect(self.expand_all)
-        self.collapse_all_button.clicked.connect(self.collapse_all)
-        self.locate_button.clicked.connect(self.locate_current_page)
-        for button in (self.expand_all_button, self.collapse_all_button, self.locate_button):
-            tools.addWidget(button)
-        tools.addStretch(1)
-        root.addLayout(tools)
-
         self.tree = PageTreeView(self)
         self.tree.page_activated.connect(self.page_activated)
         self.tree.rename_requested.connect(self.begin_rename)
@@ -387,18 +371,6 @@ class PageTreePanel(QWidget):
             }
             QLineEdit#page_tree_search:focus {
                 border-color: %(ACC_DIM)s;
-            }
-            QToolButton#page_tree_tool {
-                background-color: %(BG3)s;
-                color: %(T2)s;
-                border: none;
-                border-radius: 6px;
-                padding: 3px 8px;
-                font-size: 11px;
-            }
-            QToolButton#page_tree_tool:hover {
-                background-color: %(BG4)s;
-                color: %(T1)s;
             }
             QTreeWidget#page_tree {
                 background-color: transparent;
@@ -436,15 +408,6 @@ class PageTreePanel(QWidget):
             }
             """ % theme.QSS_TOKENS
         )
-
-    def _make_tool_button(self, text, tooltip):
-        button = QToolButton(self)
-        button.setObjectName("page_tree_tool")
-        button.setText(text)
-        button.setToolTip(tooltip)
-        button.setCursor(Qt.PointingHandCursor)
-        button.setAutoRaise(True)
-        return button
 
     # ------------------------------------------------------------ 对外接口
     def set_pages(
@@ -489,11 +452,6 @@ class PageTreePanel(QWidget):
             self.reveal_page(page_id)
             return
         self._sync_current_row()
-
-    def locate_current_page(self):
-        """“定位当前页”按钮：清空搜索并展开祖先。"""
-        self.clear_search()
-        self.reveal_page(self._current_page_id)
 
     def reveal_page(self, page_id: Optional[str]):
         """展开祖先并滚动到该页；页面被搜索隐藏时先清空搜索。"""
@@ -712,26 +670,6 @@ class PageTreePanel(QWidget):
         page_id = self.tree.item_page_id(item)
         if page_id is not None and not self._search_text:
             self._expanded_ids.discard(page_id)
-
-    def expand_all(self):
-        self.tree.blockSignals(True)
-        try:
-            self.tree.expandAll()
-        finally:
-            self.tree.blockSignals(False)
-        if not self._search_text:
-            self._expanded_ids = {
-                page_id for page_id, item in self._items.items() if item.childCount()
-            }
-
-    def collapse_all(self):
-        self.tree.blockSignals(True)
-        try:
-            self.tree.collapseAll()
-        finally:
-            self.tree.blockSignals(False)
-        if not self._search_text:
-            self._expanded_ids = set()
 
     def _sync_current_row(self):
         item = self._items.get(self._current_page_id) if self._current_page_id else None

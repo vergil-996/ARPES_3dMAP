@@ -95,6 +95,15 @@ class _WorkspaceFixture(unittest.TestCase):
         rect = self.tree.visualItemRect(self.item(page_id))
         self._click_at(QPoint(rect.left() + 20, rect.center().y()))
 
+    def collapse_rows(self):
+        """把树收成只剩顶层，等价于逐行点箭头收起。"""
+        for page_id in list(self.panel._items):
+            self.item(page_id).setExpanded(False)
+
+    def expand_rows(self):
+        for page_id in list(self.panel._items):
+            self.item(page_id).setExpanded(True)
+
     def rename_to(self, page_id, text, *, cancelled=False):
         self.assertTrue(self.panel.begin_rename(page_id))
         self.panel._editor.setText(text)
@@ -241,7 +250,7 @@ class PageTreeExpansionTests(_WorkspaceFixture):
         self.assertEqual(self.item("p4").text(0), "改名后重建")
 
     def test_new_page_expands_ancestors_and_is_located(self):
-        self.panel.collapse_all()
+        self.collapse_rows()
         self.assertFalse(self.item("p1").isExpanded())
 
         self.workspace.add_page(
@@ -251,24 +260,16 @@ class PageTreeExpansionTests(_WorkspaceFixture):
         self.assertTrue(self.item("p1").isExpanded())
         self.assertIs(self.tree.currentItem(), self.item("p5"))
 
-    def test_expand_all_and_collapse_all(self):
-        self.panel.collapse_all()
-        self.assertFalse(self.item("p1").isExpanded())
-
-        self.panel.expand_all()
-        self.assertTrue(self.item("p1").isExpanded())
-        self.assertTrue(self.item("p2").isExpanded())
-
-    def test_expand_all_is_remembered_after_a_rebuild(self):
-        self.panel.collapse_all()
-        self.panel.expand_all()
+    def test_expanding_every_row_survives_a_rebuild(self):
+        self.collapse_rows()
+        self.expand_rows()
 
         self.workspace.refresh_navigation()
 
         self.assertTrue(self.item("p2").isExpanded())
 
     def test_deleting_a_page_does_not_resurrect_its_expansion(self):
-        self.panel.collapse_all()
+        self.collapse_rows()
         self.workspace.delete_page("p2", confirm=False)
 
         self.assertNotIn("p2", self.panel._items)
@@ -289,14 +290,14 @@ class PageTreeSearchTests(_WorkspaceFixture):
         self.assertIn("Fermi Surface", self.panel.entry_titles())
 
     def test_search_expands_the_path_temporarily(self):
-        self.panel.collapse_all()
+        self.collapse_rows()
 
         self.panel.search_edit.setText("B 组")
 
         self.assertTrue(self.item("p1").isExpanded())
 
     def test_clearing_search_restores_the_previous_expansion(self):
-        self.panel.collapse_all()
+        self.collapse_rows()
         self.panel.search_edit.setText("B 组")
         self.assertTrue(self.item("p1").isExpanded())
 
@@ -323,12 +324,12 @@ class PageTreeSearchTests(_WorkspaceFixture):
         self.assertFalse(self.item("p4").isHidden())
         self.assertIs(self.tree.currentItem(), self.item("p4"))
 
-    def test_locate_current_page_clears_the_search_and_expands_ancestors(self):
+    def test_revealing_a_page_clears_the_search_and_expands_its_ancestors(self):
         self.workspace.activate_page("p2")
-        self.panel.collapse_all()
+        self.collapse_rows()
         self.panel.search_edit.setText("D 组")
 
-        self.panel.locate_current_page()
+        self.panel.reveal_page("p2")
 
         self.assertEqual(self.panel.search_text(), "")
         self.assertTrue(self.item("p1").isExpanded())
@@ -517,7 +518,6 @@ class PageTreeHelperTests(unittest.TestCase):
         self.assertEqual(panel.entry_titles(), [])
         panel.set_current_page("missing")
         panel.reveal_page("missing")
-        panel.locate_current_page()
         panel.set_pages({}, {}, None)
 
         self.assertEqual(panel.visible_page_ids(), [])
