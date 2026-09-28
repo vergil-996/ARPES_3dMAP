@@ -168,6 +168,81 @@ def animate_widget_visibility(widget, visible, *, duration=220, target_height=No
     group.start()
 
 
+def animate_widget_width(widget, visible, *, duration=220, target_width=None,
+                         settle_show=None, on_update=None, on_settled=None):
+    """平滑展开/收起一个横向控件：宽度收放与透明度淡入淡出联动。
+
+    与 :func:`animate_widget_visibility` 同一套过渡参数（默认 220 ms、
+    InOutCubic），只是把高度换成宽度——底栏的位置滑条要和右侧时间轴分享
+    同一行的宽度，收放时释放/占用的就是横向空间。
+
+    落定后清除宽度约束，让控件回到布局的自然尺寸（可见时按拉伸因子继续
+    分享富余宽度，隐藏时由布局直接忽略）。
+    """
+    _stop_visibility_animation(widget)
+    visible = bool(visible)
+
+    if not visible and widget.isHidden():
+        return
+
+    effect = widget.graphicsEffect()
+    if not isinstance(effect, QGraphicsOpacityEffect):
+        effect = QGraphicsOpacityEffect(widget)
+        effect.setOpacity(1.0)
+        widget.setGraphicsEffect(effect)
+
+    start_width = int(widget.width()) if not widget.isHidden() else 0
+    if visible:
+        end_width = int(target_width or widget.sizeHint().width() or start_width or 1)
+        start_opacity = float(effect.opacity()) if not widget.isHidden() else 0.0
+        widget.setVisible(True)
+    else:
+        end_width = 0
+        start_opacity = float(effect.opacity())
+
+    widget.setMinimumWidth(start_width)
+    widget.setMaximumWidth(start_width)
+
+    group = QParallelAnimationGroup(widget)
+    width_anims = []
+    for prop in (b"minimumWidth", b"maximumWidth"):
+        anim = QPropertyAnimation(widget, prop, group)
+        anim.setDuration(duration)
+        anim.setStartValue(start_width)
+        anim.setEndValue(end_width)
+        anim.setEasingCurve(QEasingCurve.InOutCubic)
+        group.addAnimation(anim)
+        width_anims.append(anim)
+
+    if on_update is not None:
+        width_anims[0].valueChanged.connect(lambda _value: on_update())
+
+    fade = QPropertyAnimation(effect, b"opacity", group)
+    fade.setDuration(duration)
+    fade.setStartValue(start_opacity)
+    fade.setEndValue(1.0 if visible else 0.0)
+    fade.setEasingCurve(QEasingCurve.InOutCubic)
+    group.addAnimation(fade)
+
+    def _finish():
+        widget._visibility_animation = None
+        widget.setMinimumWidth(0)
+        widget.setMaximumWidth(QWIDGETSIZE_MAX)
+        if visible:
+            if settle_show is not None:
+                settle_show()
+        else:
+            widget.setVisible(False)
+        if widget.graphicsEffect() is effect:
+            widget.setGraphicsEffect(None)
+        if on_settled is not None:
+            on_settled()
+
+    group.finished.connect(_finish)
+    widget._visibility_animation = group
+    group.start()
+
+
 def combo_index_for_text(combo_box, text, *, aliases=None):
     target = (aliases or {}).get(text, text)
     for index in range(combo_box.count()):

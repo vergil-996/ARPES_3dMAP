@@ -1,5 +1,7 @@
 from PyQt5.QtCore import QSignalBlocker
+from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
+from siui.components.widgets import SiLabel
 
 import bandscope.ui.theme as theme
 from bandscope.ui.control_layout_utils import (
@@ -25,7 +27,6 @@ class DataProcessPage(ControlPageBase):
     TIME_DEPENDENT_OTHER_ITEMS = ("切片内强度积分",)
 
     def __init__(self, parent=None):
-        self.locked_half_width = 0
         self._is_updating = False
         self._time_axis_available = True
         self._filtered_out_other_selection = None
@@ -41,6 +42,42 @@ class DataProcessPage(ControlPageBase):
         combo.addItems(items)
         theme.raise_well_on_card(combo)
         return combo
+
+    def _create_length_block(self):
+        """「积分长度」输入行：与上下限滑条块同高，数值框右对齐。"""
+        container = QWidget(self)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        container.setFixedWidth(self.MIN_SLIDER_BLOCK_WIDTH)
+        self._adaptive_slider_blocks.append(container)
+
+        block = QVBoxLayout(container)
+        block.setContentsMargins(0, 0, 0, 0)
+        block.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        label = SiLabel("积分长度", container)
+        label.setStyleSheet(theme.field_label_qss())
+        head.addWidget(label)
+        head.addStretch()
+        block.addLayout(head)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addStretch()
+        row.addWidget(self.input_ax_length)
+        block.addLayout(row)
+        return container
+
+    def _create_button_row(self, buttons):
+        container = QWidget(self)
+        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(self.AXIS_VALUE_BOX_SPACING)
+        for button in buttons:
+            row.addWidget(button)
+        return container
 
     def build_body(self):
         grp_t, v_t = self._create_group("对时间轴积分")
@@ -67,24 +104,30 @@ class DataProcessPage(ControlPageBase):
 
         self.s_ax_up = self._create_accent_slider(axis=True)
         self.input_ax_up = self._create_axis_value_box()
+        self.input_ax_up.setToolTip("积分上限（物理坐标）")
 
         self.s_ax_low = self._create_accent_slider(axis=True)
         self.input_ax_low = self._create_axis_value_box()
+        self.input_ax_low.setToolTip("积分下限（物理坐标）")
 
-        self.s_ax_mid = self._create_accent_slider(axis=True)
-        self.input_ax_mid = self._create_axis_value_box()
+        # 中心位置控件已删除：位置由画布底栏的位置滑条控制，这里只保留
+        # 区间本身的端点、长度与锁定。
+        self.input_ax_length = self._create_axis_value_box()
+        self.input_ax_length.setToolTip("积分长度（物理跨度，可直接输入）")
 
-        self.s_ax_low.valueChanged.connect(self._on_axe_low_changed)
-        self.s_ax_up.valueChanged.connect(self._on_axe_up_changed)
-        self.s_ax_mid.valueChanged.connect(self._on_axe_mid_changed)
+        self.btn_ax_lock = self._create_btn("锁定区间", "secondary")
+        self.btn_ax_lock.setCheckable(True)
+        self.btn_ax_lock.setToolTip("锁定后上下限一起平移，区间长度保持不变")
 
         self.btn_ax_apply = self._create_btn("应用", "primary")
 
         v_ax.addLayout(centered_widget_row(self.combo_ax, self.MIN_COMBO_WIDTH))
         self._add_centered_slider_block(v_ax, "积分上限", self.s_ax_up, self.input_ax_up)
         self._add_centered_slider_block(v_ax, "积分下限", self.s_ax_low, self.input_ax_low)
-        self._add_centered_slider_block(v_ax, "中心位置", self.s_ax_mid, self.input_ax_mid)
-        v_ax.addLayout(centered_widget_row(self.btn_ax_apply, self.BUTTON_WIDTH))
+        v_ax.addLayout(centered_widget_row(self._create_length_block(), self.MIN_SLIDER_BLOCK_WIDTH))
+        v_ax.addLayout(
+            centered_widget_row(self._create_button_row((self.btn_ax_lock, self.btn_ax_apply)), self.MIN_GROUP_WIDTH)
+        )
         self.vbox.addLayout(centered_widget_row(grp_ax, self.MIN_GROUP_WIDTH))
 
         grp_other, v_other = self._create_group("其他积分")
@@ -162,85 +205,8 @@ class DataProcessPage(ControlPageBase):
         if value < self.s_t_low.value():
             self.s_t_low.setValue(value)
 
-    def _on_axe_low_changed(self, value):
-        if self._is_updating:
-            return
-        mid = int(self.s_ax_mid.value())
-        max_limit = int(self.s_ax_up.maximum())
-
-        if int(value) >= mid:
-            self._is_updating = True
-            self.s_ax_low.setValue(mid)
-            if self.s_ax_up.value() < mid:
-                self.s_ax_up.setValue(mid)
-            self._is_updating = False
-            self.locked_half_width = 0
-            return
-
-        target_up = 2 * mid - int(value)
-
-        if target_up > max_limit:
-            clamped_low = max(0, 2 * mid - max_limit)
-            self._is_updating = True
-            self.s_ax_low.setValue(clamped_low)
-            self._is_updating = False
-            self.locked_half_width = max_limit - mid
-            return
-
-        self._is_updating = True
-        self.s_ax_up.setValue(target_up)
-        self._is_updating = False
-        self.locked_half_width = target_up - mid
-
-    def _on_axe_up_changed(self, value):
-        if self._is_updating:
-            return
-        mid = int(self.s_ax_mid.value())
-        max_limit = int(self.s_ax_up.maximum())
-
-        if int(value) <= mid:
-            self._is_updating = True
-            self.s_ax_up.setValue(mid)
-            if self.s_ax_low.value() > mid:
-                self.s_ax_low.setValue(mid)
-            self._is_updating = False
-            self.locked_half_width = 0
-            return
-
-        target_low = 2 * mid - int(value)
-
-        if target_low < 0:
-            clamped_up = min(max_limit, 2 * mid)
-            self._is_updating = True
-            self.s_ax_up.setValue(clamped_up)
-            self._is_updating = False
-            self.locked_half_width = mid
-            return
-
-        self._is_updating = True
-        self.s_ax_low.setValue(target_low)
-        self._is_updating = False
-        self.locked_half_width = int(value) - mid
-
-    def _on_axe_mid_changed(self, new_mid):
-        if self._is_updating:
-            return
-
-        if self.locked_half_width == 0:
-            self.locked_half_width = (self.s_ax_up.value() - self.s_ax_low.value()) // 2
-
-        target_low = new_mid - self.locked_half_width
-        target_up = new_mid + self.locked_half_width
-        max_limit = self.s_ax_up.maximum()
-
-        actual_low = max(0, target_low)
-        actual_up = min(max_limit, target_up)
-
-        self._is_updating = True
-        self.s_ax_low.setValue(actual_low)
-        self.s_ax_up.setValue(actual_up)
-        self._is_updating = False
-        self.locked_half_width = min(new_mid - actual_low, actual_up - new_mid)
+    # 上下限的约束与联动由 bandscope.ui.axis_interval_controller 统一负责：
+    # 本页只在控件上暴露意图，不再自己维护中心/半宽，也不再在事件里回写。
 
     def export_state(self):
         return {
@@ -268,37 +234,8 @@ class DataProcessPage(ControlPageBase):
                 "index": int(self.combo_ax.currentIndex()),
                 "text": self.combo_ax.currentText(),
             },
-            "s_ax_low": {
-                "minimum": int(self.s_ax_low.minimum()),
-                "maximum": int(self.s_ax_low.maximum()),
-                "value": int(self.s_ax_low.value()),
-            },
-            "input_ax_low": {
-                "minimum": float(self.input_ax_low.minimum()),
-                "maximum": float(self.input_ax_low.maximum()),
-                "value": float(self.input_ax_low.value()),
-            },
-            "s_ax_up": {
-                "minimum": int(self.s_ax_up.minimum()),
-                "maximum": int(self.s_ax_up.maximum()),
-                "value": int(self.s_ax_up.value()),
-            },
-            "input_ax_up": {
-                "minimum": float(self.input_ax_up.minimum()),
-                "maximum": float(self.input_ax_up.maximum()),
-                "value": float(self.input_ax_up.value()),
-            },
-            "s_ax_mid": {
-                "minimum": int(self.s_ax_mid.minimum()),
-                "maximum": int(self.s_ax_mid.maximum()),
-                "value": int(self.s_ax_mid.value()),
-            },
-            "input_ax_mid": {
-                "minimum": float(self.input_ax_mid.minimum()),
-                "maximum": float(self.input_ax_mid.maximum()),
-                "value": float(self.input_ax_mid.value()),
-            },
-            "locked_half_width": int(self.locked_half_width),
+            # 积分区间的真值放在页面参数的 axis_interval 里；本页只保存
+            # 轴向选择和「其他积分」下拉，避免同一份状态存两份。
             "combo_other": {
                 "index": int(self.combo_other.currentIndex()),
                 "text": self.combo_other.currentText(),
@@ -313,12 +250,6 @@ class DataProcessPage(ControlPageBase):
             self.input_t_low,
             self.input_t_up,
             self.combo_ax,
-            self.s_ax_low,
-            self.s_ax_up,
-            self.s_ax_mid,
-            self.input_ax_low,
-            self.input_ax_up,
-            self.input_ax_mid,
             self.combo_other,
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
@@ -359,31 +290,6 @@ class DataProcessPage(ControlPageBase):
             if combo_ax_index is not None and 0 <= int(combo_ax_index) < self.combo_ax.count():
                 self.combo_ax.setCurrentIndex(int(combo_ax_index))
 
-            axis_controls = (
-                ("s_ax_low", "input_ax_low", self.s_ax_low, self.input_ax_low),
-                ("s_ax_up", "input_ax_up", self.s_ax_up, self.input_ax_up),
-                ("s_ax_mid", "input_ax_mid", self.s_ax_mid, self.input_ax_mid),
-            )
-            for slider_name, input_name, slider, value_box in axis_controls:
-                slider_state = state.get(slider_name) or {}
-                input_state = state.get(input_name) or {}
-                slider_minimum = slider_state.get("minimum")
-                slider_maximum = slider_state.get("maximum")
-                if slider_minimum is not None and slider_maximum is not None:
-                    slider.setRange(int(slider_minimum), int(slider_maximum))
-
-                if "value" in slider_state:
-                    value = int(slider_state["value"])
-                    value = max(int(slider.minimum()), min(int(slider.maximum()), value))
-                    slider.setValue(value)
-
-                if "value" in input_state:
-                    box_value = float(input_state["value"])
-                    box_value = max(float(value_box.minimum()), min(float(value_box.maximum()), box_value))
-                    value_box.setValue(box_value)
-                elif "value" in slider_state:
-                    value_box.setValue(float(slider.value()))
-
             combo_other_state = state.get("combo_other") or {}
             # 下拉项会随时间轴有无动态过滤，文本比下标更可靠，优先按文本恢复。
             combo_other_index = None
@@ -399,13 +305,6 @@ class DataProcessPage(ControlPageBase):
                 combo_other_index = combo_other_state.get("index")
             if combo_other_index is not None and 0 <= int(combo_other_index) < self.combo_other.count():
                 self.combo_other.setCurrentIndex(int(combo_other_index))
-
-            self.locked_half_width = int(
-                state.get(
-                    "locked_half_width",
-                    abs(int(self.s_ax_up.value()) - int(self.s_ax_low.value())) // 2,
-                )
-            )
         finally:
             self._is_updating = previous_updating
             del blockers

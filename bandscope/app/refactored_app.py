@@ -60,6 +60,8 @@ from bandscope.ui.crop_controls import CropController
 from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.core.crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from bandscope.core.analyzer_core import AnalyzerCore
+from bandscope.core.axis_interval import AxisInterval, AxisSpace, nearest_index
+from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
 from bandscope.ui.blank_control_page import BlankControlPage
 from bandscope.core.data_trans import convert as convert_mat_to_npz
 from bandscope.exporting.publication_models import axis_label
@@ -156,6 +158,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._pending_roi_scope_id = None
         self._syncing_controls = False
         self._syncing_axis_value_boxes = False
+        # 积分区间的唯一真值：控件、页面参数与计算都从这里派生。
+        self.axis_space = None
+        self.axis_interval = None
+        self.axis_interval_controller = AxisIntervalController(self)
         self.axis_source_mode = "frame"
         self.loaded_npz_stem = "data"
         self.global_waterfall_step = BlankControlPage.DEFAULT_WATERFALL_STEP
@@ -165,6 +171,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._orig_volume_opacity = None
         self._box_interacting = False
         self._box_bounds_signature = None
+        self._canvas_layout_pending = False
         self.rotation_angle = 0.0
         self._rendered_rotation_angle = 0.0
         self._actor_preview_rotation_angle = None
@@ -653,6 +660,21 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._build_statusbar()
         outer_layout.addWidget(self.statusbar)
 
+        # 区间控制器把右侧卡片的上下限/长度/锁定、底栏位置滑条和状态灯接到
+        # 同一个模型上；装配放在所有控件创建之后，避免半成品控件参与同步。
+        self.axis_interval_controller.attach(
+            slider_up=self.page_data.s_ax_up,
+            box_up=self.page_data.input_ax_up,
+            slider_low=self.page_data.s_ax_low,
+            box_low=self.page_data.input_ax_low,
+            box_length=self.page_data.input_ax_length,
+            button_lock=self.page_data.btn_ax_lock,
+            slider_position=self.timeline_bar.slider_axis,
+            box_position=self.timeline_bar.input_axis,
+            label_lock=self.status_lock,
+        )
+        self.axis_interval_controller.set_mode(IntervalEditMode.DISABLED)
+
     def _save_splitter_sizes(self, *_args):
         sizes = getattr(self, "main_splitter", None)
         if sizes is not None:
@@ -762,6 +784,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         self.status_state = QLabel("● 就绪", self.statusbar)
         self.status_state.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px; background: transparent;")
+        # 区间锁定指示：跟在运行状态灯旁边，绿=已锁定、灰=未锁定。
+        self.status_lock = QLabel("● 区间未锁定", self.statusbar)
+        self.status_lock.setStyleSheet(
+            f"color: {theme.TEXT_3}; font-size: 11px; background: transparent;"
+        )
         self.status_page = QLabel("未加载数据", self.statusbar)
         self.status_page.setStyleSheet(base_qss)
         self.status_cursor = QLabel("", self.statusbar)
@@ -770,6 +797,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.status_info.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
 
         row.addWidget(self.status_state)
+        row.addWidget(self.status_lock)
         row.addWidget(self.status_page)
         row.addWidget(self.status_cursor)
         row.addStretch(1)
@@ -812,6 +840,31 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if backend:
             parts.append(f"{backend}计算")
         self.status_info.setText(" · ".join(parts))
+
+    def _on_canvas_layout_changed(self):
+        """底条呼出/收起/换行后合并刷新画布几何，不在动画每一帧反复重建。"""
+        if self.__dict__.get("_canvas_layout_pending"):
+            return
+        self._canvas_layout_pending = True
+        QTimer.singleShot(0, self._flush_canvas_layout_refresh)
+
+    def _flush_canvas_layout_refresh(self):
+        self._canvas_layout_pending = False
+        self._position_render_status()
+        stack = self.__dict__.get("left_display_stack")
+        plotter = self.__dict__.get("plotter")
+        if (
+            stack is None
+            or plotter is None
+            or self.core.raw_data is None
+            or stack.currentWidget() is not plotter
+        ):
+            return
+        try:
+            plotter.render()
+        except Exception:
+            # 动画只改布局与绘制，渲染失败不应打断交互。
+            pass
 
     def _position_render_status(self):
         label = getattr(self, "render_status_label", None)
@@ -1722,30 +1775,12 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.page_data.s_t_low.sliderReleased.connect(self.flush_axis_refresh)
         self.page_data.s_t_up.sliderReleased.connect(self.flush_axis_refresh)
         self._connect_time_value_box_signals()
-        self.page_data.s_ax_low.valueChanged.connect(
-            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_low, value)
-        )
-        self.page_data.s_ax_up.valueChanged.connect(
-            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_up, value)
-        )
-        self.page_data.s_ax_mid.valueChanged.connect(
-            lambda value: self.on_axis_slider_value_changed(self.page_data.input_ax_mid, value)
-        )
-        self.page_data.input_ax_low.valueChanged.connect(
-            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_low, self.page_data.s_ax_low)
-        )
-        self.page_data.input_ax_up.valueChanged.connect(
-            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_up, self.page_data.s_ax_up)
-        )
-        self.page_data.input_ax_mid.valueChanged.connect(
-            lambda _value: self.on_axis_physical_value_changed(self.page_data.input_ax_mid, self.page_data.s_ax_mid)
-        )
-        self.page_data.s_ax_low.valueChanged.connect(self.schedule_axis_refresh)
-        self.page_data.s_ax_up.valueChanged.connect(self.schedule_axis_refresh)
-        self.page_data.s_ax_mid.valueChanged.connect(self.schedule_axis_refresh)
-        self.page_data.s_ax_low.sliderReleased.connect(self.on_axis_bound_released)
-        self.page_data.s_ax_up.sliderReleased.connect(self.on_axis_bound_released)
-        self.page_data.s_ax_mid.sliderReleased.connect(self.flush_axis_refresh)
+        # 区间控件的约束、联动与刷新时机统一由 axis_interval_controller 决定：
+        # 拖动只发预览，释放/输入提交才发精确刷新，一次操作只落定一次。
+        self.axis_interval_controller.intervalChanged.connect(self.schedule_axis_refresh)
+        self.axis_interval_controller.intervalCommitted.connect(self.flush_axis_refresh)
+        self.axis_interval_controller.lockChanged.connect(self.on_axis_lock_changed)
+        self.timeline_bar.layoutChanged.connect(self._on_canvas_layout_changed)
         self.page_data.btn_ax_apply.clicked.connect(self.on_apply_axis_integral)
         self.page_data.btn_other_apply.clicked.connect(self.on_apply_other_integral)
         self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
@@ -2115,22 +2150,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 block_signals=True,
             )
             self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
-            self._configure_second_derivative_axis_controls(owner_spec)
 
             if self.core.raw_data is not None:
-                self.update_ax_slider_range()
-                data_state = control_state.get("data_process") or {}
-                self.page_data.restore_state(
-                    {
-                        "combo_ax": data_state.get("combo_ax"),
-                        "s_ax_low": data_state.get("s_ax_low"),
-                        "s_ax_up": data_state.get("s_ax_up"),
-                        "s_ax_mid": data_state.get("s_ax_mid"),
-                        "locked_half_width": data_state.get("locked_half_width"),
-                    },
-                    block_signals=True,
-                )
-                self.sync_axis_value_boxes_from_sliders()
                 self.sync_time_value_boxes_from_sliders()
 
             if self._preserve_control_tab_on_next_page_sync:
@@ -2151,16 +2172,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         axis_index = int(self.page_data.combo_ax.currentIndex())
         axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
         source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
-        low, up, mid = self._axis_input_logical_values()
 
         target_spec.params["axis_index"] = axis_index
         target_spec.params["axis_name"] = axis_name
-        target_spec.params["low"] = int(low)
-        target_spec.params["up"] = int(up)
-        target_spec.params["mid"] = int(mid)
         target_spec.params["source_mode"] = source_mode
         target_spec.params["source_page_kind"] = "time_integral" if source_mode == "time_integral" else "home"
         target_spec.params.update(self._source_time_params())
+        self._persist_axis_interval_state(target_spec)
 
     def _persist_second_derivative_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
@@ -2170,51 +2188,31 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             or target_spec.params.get("source_view") != "2d"
         ):
             return
+        # 二阶导直接复用同一个区间模型，派生键名由 _persist_axis_interval_state
+        # 按来源页类型选择（slice_index / integral_*）。
+        self._persist_axis_interval_state(target_spec)
 
-        params = target_spec.params
-        if params.get("source_page_kind") == "home":
-            axis_index = int(params.get("slice_axis", -1))
-            if axis_index not in (0, 1) or self.core.raw_data is None:
-                return
-            axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
-            params["slice_index"] = int(
-                np.clip(int(self.page_data.s_ax_mid.value()), 0, axis_max)
-            )
+    def _seed_axis_interval_params(self, spec, *, axis_index, low, up, mid, locked=False):
+        """把整数索引范围写成新页面的物理区间参数。"""
+        coords = self._coords_for_axis(axis_index)
+        if coords.size == 0 or spec is None:
             return
-
-        if params.get("source_page_kind") != "axis_integral":
-            return
-        axis_index = int(params.get("axis_index", -1))
-        if axis_index not in (0, 1) or self.core.raw_data is None:
-            return
-        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
-        low = int(np.clip(int(self.page_data.s_ax_low.value()), 0, axis_max))
-        up = int(np.clip(int(self.page_data.s_ax_up.value()), 0, axis_max))
+        axis_max = int(coords.size - 1)
+        low = int(np.clip(int(low), 0, axis_max))
+        up = int(np.clip(int(up), 0, axis_max))
         if low > up:
             low, up = up, low
-        mid = int(np.clip(int(self.page_data.s_ax_mid.value()), low, up))
-        params["integral_low"] = low
-        params["integral_up"] = up
-        params["integral_mid"] = mid
-
-    def _configure_second_derivative_axis_controls(self, spec):
-        is_derivative = spec is not None and spec.page_kind == "second_derivative"
-        is_2d = is_derivative and spec.params.get("source_view") == "2d"
-        is_slice = is_2d and spec.params.get("source_page_kind") == "home"
-        is_integral = is_2d and spec.params.get("source_page_kind") == "axis_integral"
-
-        self.page_data.combo_ax.setEnabled(not is_derivative)
-        low_up_enabled = not is_derivative or is_integral
-        mid_enabled = not is_derivative or is_slice or is_integral
-        for widget in (
-            self.page_data.s_ax_low,
-            self.page_data.s_ax_up,
-            self.page_data.input_ax_low,
-            self.page_data.input_ax_up,
-        ):
-            widget.setEnabled(low_up_enabled)
-        for widget in (self.page_data.s_ax_mid, self.page_data.input_ax_mid):
-            widget.setEnabled(mid_enabled)
+        mid = int(np.clip(int(mid), low, up))
+        key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_index), "X")
+        interval = AxisInterval.from_indices(
+            coords, low, up, locked=bool(locked), axis_key=key
+        )
+        if interval is None:
+            return
+        spec.params["axis_interval"] = interval.as_dict()
+        spec.params["low"] = int(low)
+        spec.params["up"] = int(up)
+        spec.params["mid"] = int(mid)
 
     def _waterfall_title_from_params(self, params, k_step=None, *, ascii_only=False):
         axis_info = self._resolve_waterfall_axis_info(int(params.get("axis_index", -1)))
@@ -4551,7 +4549,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         normalized_source_mode = self._normalize_axis_source_mode(source_mode or self.axis_source_mode)
         low, up, mid = self._axis_input_logical_values()
 
-        return {
+        params = {
             "axis_index": axis_index,
             "axis_name": axis_name,
             "low": int(low),
@@ -4561,6 +4559,15 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "source_page_kind": "time_integral" if normalized_source_mode == "time_integral" else "home",
             **self._source_time_params(),
         }
+        # 区间可能停在采样点之间：整数下标表达不了，把物理区间原样带给新页面。
+        # 锁定是编辑方式而不是数据属性，新页面和「新数据默认未锁定」保持一致。
+        interval = self.__dict__.get("axis_interval")
+        space = self._axis_space_for_index(axis_index)
+        if interval is not None and interval.axis_key == space.key:
+            state = interval.as_dict()
+            state["locked"] = False
+            params["axis_interval"] = state
+        return params
 
     def _get_3d_source_context_for_axis(self, spec, raw_data):
         params = spec.params
@@ -5663,6 +5670,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if spec.page_kind != "control_panel":
             self.last_visual_page_id = spec.page_id
         self._sync_controls_from_page(spec)
+        # 轴向与区间状态在页面自己的参数里：控件恢复之后再绑定，避免用上一页
+        # 的区间覆盖这一页。
+        self._bind_axis_interval(spec)
         self._update_time_slider_state()
         self._request_scope_denoise_if_needed(spec)
         self.global_refresh()
@@ -5987,7 +5997,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._persist_home_page_state(home_spec)
             self._refresh_scope_hint(home_spec)
         self._restore_home_page_title()
+        # 新数据默认完整轴范围、未锁定：旧区间不能带到新数据上。
+        self.axis_interval = None
+        self.axis_space = None
         self.left_workspace.reset_to_home()
+        self._bind_axis_interval(self.left_workspace.home_spec(), animate=False)
         self.plotter.set_background("white")
         self.global_refresh()
         self.plotter.reset_camera()
@@ -6014,120 +6028,253 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._reset_workspace_after_load()
         self._update_statusbar()
 
-    def update_ax_slider_range(self):
-        if self.core.raw_data is None:
+    # ------------------------------------------------------------------
+    # 积分区间：物理空间 + 唯一真值
+    # ------------------------------------------------------------------
+    def _coords_for_axis(self, axis_index):
+        key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_index), "X")
+        coords = (getattr(self.core, "coords", None) or {}).get(key)
+        if coords is None:
+            return np.array([], dtype=np.float64)
+        return np.asarray(coords, dtype=np.float64).flatten()
+
+    def _axis_space_for_index(self, axis_index):
+        """按轴向构造物理空间描述（范围、采样坐标、单位与来源）。"""
+        key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_index), "X")
+        return AxisSpace(
+            key,
+            (getattr(self.core, "coords", None) or {}).get(key),
+            unit=(getattr(self.core, "coord_units", None) or {}).get(key),
+            source=(getattr(self.core, "coord_sources", None) or {}).get(key, "index"),
+        )
+
+    def _axis_interval_context(self, spec=None):
+        """当前页面需要哪种区间编辑：``(轴向下标, 编辑模式, 是否显示位置控件)``。"""
+        spec = spec if spec is not None else self.__dict__.get("active_page_spec")
+        if spec is None or self.core.raw_data is None:
+            return 0, IntervalEditMode.DISABLED, False
+
+        params = spec.params or {}
+        kind = spec.page_kind
+        if kind in {"axis_integral", "axis_integral_crop"}:
+            return int(params.get("axis_index", 0)), IntervalEditMode.FULL, True
+        if kind == "second_derivative" and params.get("source_view") == "2d":
+            if params.get("source_page_kind") == "axis_integral":
+                return int(params.get("axis_index", 0)), IntervalEditMode.FULL, True
+            if params.get("source_page_kind") == "home":
+                return int(params.get("slice_axis", 0)), IntervalEditMode.POSITION, True
+            return 0, IntervalEditMode.DISABLED, False
+        if kind == "home":
+            if self._spec_slice_axis(spec) is not None:
+                # 单层切片页：位置控件只移动切片位置。
+                return int(self._spec_slice_axis(spec)), IntervalEditMode.POSITION, True
+            return int(self.page_data.combo_ax.currentIndex()), IntervalEditMode.FULL, False
+        return 0, IntervalEditMode.DISABLED, False
+
+    def _spec_slice_axis(self, spec):
+        """页面是否呈现 3D 数据体里的一张切片；是则返回该切片的轴向下标。"""
+        params = spec.params or {}
+        info = params.get("home_slice_info")
+        if isinstance(info, dict) and "axis" in info:
+            return int(info["axis"])
+
+        regions = params.get("crop_regions") or []
+        first = regions[0] if regions else None
+        if not isinstance(first, dict) or first.get("view") != "3d":
+            return None
+        axes = list(first.get("axes") or [])
+        bounds = list(first.get("bounds") or [])
+        if len(axes) != 3 or len(bounds) != 6:
+            return None
+        flat = [index for index in range(3) if bounds[2 * index] == bounds[2 * index + 1]]
+        # 三维范围里恰好塌缩一根轴才是单层切片；多根塌缩属于非法裁剪。
+        return flat[0] if len(flat) == 1 else None
+
+    def _slice_physical_position(self, spec, axis_index):
+        """切片页当前的物理位置；取不到时返回 None。"""
+        params = spec.params or {}
+        info = params.get("home_slice_info")
+        if isinstance(info, dict) and int(info.get("axis", -1)) == int(axis_index):
+            return float(self.core.logical_to_physical(axis_index, int(info.get("index", 0))))
+
+        regions = params.get("crop_regions") or []
+        first = regions[0] if regions else None
+        if isinstance(first, dict) and first.get("view") == "3d":
+            bounds = list(first.get("bounds") or [])
+            if len(bounds) == 6 and bounds[2 * axis_index] == bounds[2 * axis_index + 1]:
+                return float(bounds[2 * axis_index])
+        state = params.get("axis_interval")
+        if isinstance(state, dict):
+            low = state.get("low")
+            if low is not None:
+                return float(low)
+        return None
+
+    def _restore_axis_interval(self, spec, space, mode):
+        """恢复页面自己的区间；旧页面从已保存的整数索引范围迁移。"""
+        params = (spec.params if spec is not None else None) or {}
+        state = params.get("axis_interval")
+        interval = None
+        if isinstance(state, dict) and state.get("axis_key") == space.key:
+            interval = AxisInterval.from_dict(state)
+
+        if interval is None and mode == IntervalEditMode.POSITION and spec is not None:
+            axis_index = self._spec_slice_axis(spec)
+            position = None if axis_index is None else self._slice_physical_position(spec, axis_index)
+            if position is not None:
+                position = min(max(float(position), space.minimum), space.maximum)
+                interval = space.as_interval(low=position, up=position)
+
+        if interval is None:
+            # 旧页面：从已保存的整数索引范围反推物理区间。旧的
+            # locked_half_width 不解释成新锁定状态，一律从未锁定开始。
+            legacy_low = params.get("low")
+            legacy_up = params.get("up", legacy_low)
+            if legacy_low is not None:
+                interval = AxisInterval.from_indices(
+                    space.coords,
+                    int(legacy_low),
+                    int(legacy_up if legacy_up is not None else legacy_low),
+                    axis_key=space.key,
+                )
+
+        if interval is None:
+            interval = space.as_interval()
+        else:
+            interval.set_bounds(space.minimum, space.maximum)
+
+        if mode == IntervalEditMode.POSITION:
+            # 位置模式下区间退化成零长度：只移动，不扩缩。
+            center = min(max(interval.center, space.minimum), space.maximum)
+            interval = space.as_interval(low=center, up=center)
+        return interval
+
+    def _bind_axis_interval(self, spec, *, animate=True):
+        """页面切换时把区间模型和控件绑到该页自己的轴与状态上。"""
+        axis_index, mode, show_position = self._axis_interval_context(spec)
+        controller = self.axis_interval_controller
+        bar = self.__dict__.get("timeline_bar")
+
+        if mode == IntervalEditMode.DISABLED:
+            self.axis_space = None
+            self.axis_interval = None
+            controller.set_mode(mode)
+            if bar is not None:
+                bar.set_position_visible(False, animate=animate)
             return
 
-        axis_idx = self.page_data.combo_ax.currentIndex()
-        max_val = self.core.raw_data.shape[axis_idx] - 1
-        axis_labels = {0: "X", 1: "Y", 2: "Z"}
-        tooltip_func = lambda value, idx=axis_idx: f"{axis_labels.get(idx, 'Axis')}: {self.core.logical_to_physical(idx, value):.2f}"
+        space = self._axis_space_for_index(axis_index)
+        interval = self._restore_axis_interval(spec, space, mode)
+        self.axis_space = space
+        self.axis_interval = interval
+        controller.set_mode(mode)
+        controller.bind(space, interval)
+        if bar is not None:
+            bar.set_position_label(space.display_label)
+            bar.set_position_visible(show_position, animate=animate)
 
-        physical_min, physical_max, physical_step = self._axis_physical_range(axis_idx)
+    def update_ax_slider_range(self, *, reset=False):
+        """轴向或显示坐标变化后重建物理空间；已有的区间被夹回新范围。
 
-        self._syncing_axis_value_boxes = True
-        try:
-            for slider, value_box in self._axis_slider_box_pairs():
-                slider.setRange(0, max_val)
-                slider.setToolTipConvertionFunc(tooltip_func)
-                value_box.setRange(physical_min, physical_max)
-                value_box.setSingleStep(physical_step)
-                value_box.setValue(self.core.logical_to_physical(axis_idx, int(slider.value())))
-        finally:
-            self._syncing_axis_value_boxes = False
+        ``reset=True`` 用于用户主动切换积分方向：初始化完整范围并解锁。
+        """
+        if self.core.raw_data is None:
+            return
+        axis_index, mode, _show = self._axis_interval_context(self.__dict__.get("active_page_spec"))
+        if mode == IntervalEditMode.DISABLED:
+            return
+        space = self._axis_space_for_index(axis_index)
+        interval = self.__dict__.get("axis_interval")
+        if reset or interval is None or mode == IntervalEditMode.POSITION:
+            interval = self._restore_axis_interval(
+                self.__dict__.get("active_page_spec"), space, mode
+            ) if not reset else space.as_interval()
+        else:
+            interval.set_bounds(space.minimum, space.maximum)
+        self.axis_space = space
+        self.axis_interval = interval
+
+        controller = self.__dict__.get("axis_interval_controller")
+        if controller is not None:
+            controller.bind(space, interval)
+        bar = self.__dict__.get("timeline_bar")
+        if bar is not None and not bar.axis_group.isHidden():
+            bar.set_position_label(space.display_label)
 
     def on_axis_selection_changed(self, _index=None):
-        self.update_ax_slider_range()
-        if self.core.raw_data is None or self._syncing_controls:
+        """用户主动切换积分方向：初始化新轴的完整范围并解锁。"""
+        if self.core.raw_data is None:
+            return
+        self.update_ax_slider_range(reset=True)
+        if self._syncing_controls:
             return
         self.schedule_axis_refresh()
 
-    def _axis_slider_box_pairs(self):
-        return (
-            (self.page_data.s_ax_low, self.page_data.input_ax_low),
-            (self.page_data.s_ax_up, self.page_data.input_ax_up),
-            (self.page_data.s_ax_mid, self.page_data.input_ax_mid),
-        )
-
-    def _axis_physical_range(self, axis_idx):
-        axis_key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_idx), "X")
-        coords = self.core.coords.get(axis_key)
-        coords = np.asarray(coords, dtype=np.float64).flatten() if coords is not None else np.array([], dtype=np.float64)
-        finite = coords[np.isfinite(coords)]
-        if finite.size == 0:
-            return 0.0, 0.0, 0.01
-
-        physical_min = float(np.min(finite))
-        physical_max = float(np.max(finite))
-        if np.isclose(physical_min, physical_max):
-            physical_max = physical_min + 0.01
-
-        step = self._compute_axis_spacing(finite, 0.01)
-        step = max(float(step), 0.01)
-        return physical_min, physical_max, step
-
-    def _axis_physical_to_logical_index(self, axis_idx, physical_value):
-        if self.core.raw_data is None:
-            return 0
-
-        max_val = max(int(self.core.raw_data.shape[int(axis_idx)]) - 1, 0)
-        logical_value = self.core.physical_to_logical(axis_idx, float(physical_value))
-        return int(np.clip(round(logical_value), 0, max_val))
-
-    def _axis_input_logical_value(self, value_box, axis_idx):
-        return self._axis_physical_to_logical_index(axis_idx, float(value_box.value()))
-
     def _axis_input_logical_values(self):
-        axis_idx = int(self.page_data.combo_ax.currentIndex())
-        return (
-            self._axis_input_logical_value(self.page_data.input_ax_low, axis_idx),
-            self._axis_input_logical_value(self.page_data.input_ax_up, axis_idx),
-            self._axis_input_logical_value(self.page_data.input_ax_mid, axis_idx),
-        )
+        """区间映射到采样下标（低、高、中心），供计算与页面参数使用。"""
+        axis_index = int(self.page_data.combo_ax.currentIndex())
+        return self._axis_logical_values_for(axis_index)
 
-    def _set_axis_value_box_from_slider(self, value_box, logical_value):
-        if self.core.raw_data is None:
+    def _axis_logical_values_for(self, axis_index):
+        coords = self._coords_for_axis(axis_index)
+        interval = self.axis_interval
+        if interval is None:
+            maximum = max(len(coords) - 1, 0)
+            return 0, maximum, maximum // 2
+        low_idx, up_idx = interval.to_indices(coords)
+        mid_idx = int(np.clip(nearest_index(coords, interval.center), low_idx, up_idx))
+        return low_idx, up_idx, mid_idx
+
+    def on_axis_lock_changed(self, _locked):
+        """锁定只改变保存状态，不触发重算。"""
+        if self._syncing_controls:
+            return
+        self._persist_axis_interval_state()
+
+    def _persist_axis_interval_state(self, spec=None):
+        """把当前区间写回页面参数，并派生出整数范围供计算读取。"""
+        interval = self.axis_interval
+        target_spec = spec or self.left_workspace.current_spec()
+        if interval is None or target_spec is None or target_spec.page_kind == "control_panel":
             return
 
-        axis_idx = int(self.page_data.combo_ax.currentIndex())
-        physical_value = self.core.logical_to_physical(axis_idx, int(logical_value))
-        if physical_value < value_box.minimum():
-            value_box.setMinimum(float(physical_value))
-        elif physical_value > value_box.maximum():
-            value_box.setMaximum(float(physical_value))
-        blocker = QSignalBlocker(value_box)
-        try:
-            value_box.setValue(float(physical_value))
-        finally:
-            del blocker
+        axis_index = self._axis_index_for_interval(target_spec)
+        coords = self._coords_for_axis(axis_index)
+        low_idx, up_idx = interval.to_indices(coords)
+        mid_idx = int(np.clip(nearest_index(coords, interval.center), low_idx, up_idx))
 
-    def sync_axis_value_boxes_from_sliders(self):
-        for slider, value_box in self._axis_slider_box_pairs():
-            self._set_axis_value_box_from_slider(value_box, int(slider.value()))
+        params = target_spec.params
+        params["axis_interval"] = interval.as_dict()
 
-    def on_axis_slider_value_changed(self, value_box, logical_value):
-        if self.core.raw_data is None:
-            return
-        if self._syncing_controls or self._syncing_axis_value_boxes:
-            return
+        if target_spec.page_kind == "second_derivative" and params.get("source_view") == "2d":
+            source_kind = params.get("source_page_kind")
+            if source_kind == "home":
+                params["slice_index"] = int(low_idx)
+                return
+            if source_kind == "axis_integral":
+                params["integral_low"] = int(low_idx)
+                params["integral_up"] = int(up_idx)
+                params["integral_mid"] = int(mid_idx)
+                return
 
-        self._set_axis_value_box_from_slider(value_box, int(logical_value))
-
-    def on_axis_physical_value_changed(self, value_box, slider):
-        if self.core.raw_data is None:
-            return
-        if self._syncing_controls or self._syncing_axis_value_boxes:
+        if target_spec.page_kind == "home":
+            # 主页（含单层切片）不读 low/up/mid：切片位置由
+            # _update_slice_source_range 写回 home_slice_info 与裁剪链。
             return
 
-        axis_idx = int(self.page_data.combo_ax.currentIndex())
-        logical_value = self._axis_physical_to_logical_index(axis_idx, float(value_box.value()))
-        if int(slider.value()) == logical_value:
-            self._set_axis_value_box_from_slider(value_box, logical_value)
-            self.schedule_axis_refresh()
-            return
+        params["low"] = int(low_idx)
+        params["up"] = int(up_idx)
+        params["mid"] = int(mid_idx)
 
-        slider.setValue(logical_value)
-        self._set_axis_value_box_from_slider(value_box, logical_value)
+    def _axis_index_for_interval(self, spec):
+        if spec.page_kind == "second_derivative" and spec.params.get("source_view") == "2d":
+            if spec.params.get("source_page_kind") == "home":
+                return int(spec.params.get("slice_axis", 0))
+        if spec.page_kind == "home":
+            slice_axis = self._spec_slice_axis(spec)
+            if slice_axis is not None:
+                return int(slice_axis)
+        return int(spec.params.get("axis_index", self.page_data.combo_ax.currentIndex()))
 
     # ------------------------------------------------------------------
     # 时间积分：滑条 ↔ 物理值输入框联动（与坐标轴积分同一套机制）
@@ -6309,15 +6456,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         )
 
     def _seed_time_integrated_axis_control_state(self, spec, *, axis_index, low, up, mid):
-        """时间积分结果页的轴向控件状态：区间同时决定切片位置与积分厚度。"""
+        """时间积分结果页的轴向状态：区间同时决定切片位置与积分厚度。"""
         axis_index = int(axis_index)
-        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
-        low = int(np.clip(int(low), 0, axis_max))
-        up = int(np.clip(int(up), 0, axis_max))
-        if low > up:
-            low, up = up, low
-        mid = int(np.clip(int(mid), low, up))
-        physical_min, physical_max, _ = self._axis_physical_range(axis_index)
+        self._seed_axis_interval_params(spec, axis_index=axis_index, low=low, up=up, mid=mid)
 
         control_state = spec.params.get("control_state") or self._capture_control_state()
         control_state["axis_source_mode"] = "time_integral"
@@ -6326,23 +6467,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "index": axis_index,
             "text": ["X轴", "Y轴", "Z轴"][axis_index],
         }
-        for slider_name, value in (("s_ax_low", low), ("s_ax_up", up), ("s_ax_mid", mid)):
-            self._update_saved_widget_state(
-                data_state,
-                slider_name,
-                minimum=0,
-                maximum=axis_max,
-                value=value,
-            )
-        for input_name, value in (("input_ax_low", low), ("input_ax_up", up), ("input_ax_mid", mid)):
-            self._update_saved_widget_state(
-                data_state,
-                input_name,
-                minimum=physical_min,
-                maximum=physical_max,
-                value=float(self.core.logical_to_physical(axis_index, value)),
-            )
-
         self._update_saved_widget_state(data_state, "s_t_low", value=int(spec.params["source_t_low"]))
         self._update_saved_widget_state(data_state, "s_t_up", value=int(spec.params["source_t_up"]))
         t_physical_min, t_physical_max, _, _ = self._time_physical_range()
@@ -6354,7 +6478,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 maximum=t_physical_max,
                 value=float(self.core.logical_to_physical("delay", int(spec.params[slider_name]))),
             )
-        data_state["locked_half_width"] = max(min(mid - low, up - mid), 0)
         control_state["data_process"] = data_state
         self._store_control_state(spec, control_state)
 
@@ -6373,7 +6496,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             if axis_index not in (0, 1):
                 return
             low = up = mid = int(params["slice_index"])
-            locked_half_width = 0
         elif params.get("source_page_kind") == "axis_integral":
             axis_index = int(params.get("axis_index", -1))
             if axis_index not in (0, 1):
@@ -6383,15 +6505,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             )
             mid = int(params.get("integral_mid", round((low + up) / 2)))
             mid = int(np.clip(mid, low, up))
-            locked_half_width = max(min(mid - low, up - mid), 0)
         else:
             return
 
-        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
-        low = int(np.clip(low, 0, axis_max))
-        up = int(np.clip(up, 0, axis_max))
-        mid = int(np.clip(mid, low, up))
-        physical_min, physical_max, _ = self._axis_physical_range(axis_index)
+        self._seed_axis_interval_params(spec, axis_index=axis_index, low=low, up=up, mid=mid)
 
         control_state = spec.params.get("control_state") or self._capture_control_state()
         data_state = dict(control_state.get("data_process") or {})
@@ -6399,31 +6516,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "index": axis_index,
             "text": ["X轴", "Y轴", "Z轴"][axis_index],
         }
-        for name, value in (
-            ("s_ax_low", low),
-            ("s_ax_up", up),
-            ("s_ax_mid", mid),
-        ):
-            self._update_saved_widget_state(
-                data_state,
-                name,
-                minimum=0,
-                maximum=axis_max,
-                value=value,
-            )
-        for name, value in (
-            ("input_ax_low", low),
-            ("input_ax_up", up),
-            ("input_ax_mid", mid),
-        ):
-            self._update_saved_widget_state(
-                data_state,
-                name,
-                minimum=physical_min,
-                maximum=physical_max,
-                value=float(self.core.logical_to_physical(axis_index, value)),
-            )
-        data_state["locked_half_width"] = int(locked_half_width)
         control_state["data_process"] = data_state
         self._store_control_state(spec, control_state)
 
@@ -7048,22 +7140,21 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._rebuild_interactive_box(bounds)
         self._sync_slice_edits_from_logical_bounds(bounds)
 
-    @staticmethod
-    def _analysis_sliders_control_active_2d_page(spec):
+    def _analysis_sliders_control_active_2d_page(self, spec):
+        """位置控件能直接影响当前显示结果的页面：积分页、裁剪结果、切片页、2D 二阶导。"""
         if spec is None:
             return False
         if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             return True
-        return (
-            spec.page_kind == "second_derivative"
-            and spec.params.get("source_view") == "2d"
-        )
+        if spec.page_kind == "second_derivative" and spec.params.get("source_view") == "2d":
+            return True
+        return spec.page_kind == "home" and self._spec_slice_axis(spec) is not None
 
     def schedule_axis_refresh(self):
+        """拖动中的区间变化：保存页面状态并请求一次预览刷新。"""
         if (
             self.core.raw_data is None
             or self._syncing_controls
-            or self._syncing_axis_value_boxes
             or bool(getattr(self.__dict__.get("page_data"), "_is_updating", False))
         ):
             return
@@ -7074,14 +7165,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if self._can_show_interactive_box():
             self.sync_ax_sliders_to_box()
 
+        self._persist_axis_interval_for_current_page()
+
         current_spec = self.left_workspace.current_spec()
         if not self._analysis_sliders_control_active_2d_page(current_spec):
             return
-
-        if current_spec is not None and current_spec.page_kind == "second_derivative":
-            self._persist_second_derivative_page_state(current_spec)
-        else:
-            self._persist_axis_integral_page_state(current_spec)
         self.request_refresh(
             RefreshCause.ANALYSIS,
             interactive=True,
@@ -7089,6 +7177,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         )
 
     def flush_axis_refresh(self):
+        """一次操作落定（释放滑条 / 输入提交）：精确刷新一次。"""
         if self.core.raw_data is None:
             return
         self.auto_refresh_integral(exact=True)
@@ -7106,6 +7195,15 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
         self.left_workspace.add_page(candidate_spec)
 
+    def _persist_axis_interval_for_current_page(self):
+        """把当前区间写回它所属的页面（含单层切片的源范围）。"""
+        current_spec = self.left_workspace.current_spec()
+        if current_spec is None or self.__dict__.get("axis_interval") is None:
+            return
+        self._persist_axis_interval_state(current_spec)
+        if self._spec_slice_axis(current_spec) is not None:
+            self._update_slice_source_range(current_spec)
+
     def auto_refresh_integral(self, exact=False):
         if self._crop_enabled():
             self.sync_ax_sliders_to_box()
@@ -7114,15 +7212,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if not self._analysis_sliders_control_active_2d_page(current_spec):
             return
 
-        if current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            self._persist_axis_integral_page_state(current_spec)
-        elif (
-            current_spec.page_kind == "second_derivative"
-            and current_spec.params.get("source_view") == "2d"
-        ):
-            self._persist_second_derivative_page_state(current_spec)
-        else:
-            return
+        self._persist_axis_interval_for_current_page()
         self.request_refresh(
             RefreshCause.ANALYSIS,
             RenderQuality.EXACT if exact else RenderQuality.PREVIEW,

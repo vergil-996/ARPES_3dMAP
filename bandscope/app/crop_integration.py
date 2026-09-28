@@ -12,6 +12,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.widgets import RectangleSelector
 
 import bandscope.ui.theme as theme
+from bandscope.core.axis_interval import nearest_index
 from bandscope.core.crop_model import apply_selection, spatial_bounds
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.ui.result_workspace import AnalysisPageSpec
@@ -214,6 +215,79 @@ class CropInteractionMixin:
         domain = spatial_bounds(self.current_render_context)
         bounds = [float(np.clip(v, domain[2*(i//2)], domain[2*(i//2)+1])) for i, v in enumerate(bounds)]
         self._sync_slice_edits_from_logical_bounds(bounds)
+
+    def _update_slice_source_range(self, spec, *, axis_index=None):
+        """单层切片页移动位置：更新产生该切面的源范围。
+
+        切面来自裁剪链的第一层（三维范围里恰好塌缩一根轴）。位置变化只改
+        这一层的该轴上下限，面内裁剪与裁空链原样保留——否则旧的裁剪参数会
+        在下一次渲染时把位置覆盖回去。
+        """
+        interval = getattr(self, "axis_interval", None)
+        if spec is None or interval is None:
+            return False
+        if axis_index is None:
+            axis_index = self._spec_slice_axis(spec)
+        if axis_index is None:
+            return False
+        axis_index = int(axis_index)
+
+        coords = self._coords_for_axis(axis_index)
+        maximum = max(int(coords.size) - 1, 0)
+        index = int(np.clip(nearest_index(coords, interval.center), 0, maximum))
+        value = float(coords[index]) if coords.size else float(interval.center)
+
+        params = spec.params
+        changed = False
+
+        info = params.get("home_slice_info")
+        if isinstance(info, dict) and int(info.get("axis", -1)) == axis_index:
+            if int(info.get("index", -1)) != index:
+                info = dict(info)
+                info["index"] = index
+                params["home_slice_info"] = info
+                changed = True
+
+        regions = list(params.get("crop_regions") or [])
+        first = regions[0] if regions else None
+        if isinstance(first, dict) and first.get("view") == "3d":
+            bounds = list(first.get("bounds") or [])
+            if len(bounds) == 6 and bounds[2 * axis_index] != value:
+                bounds[2 * axis_index] = value
+                bounds[2 * axis_index + 1] = value
+                updated = dict(first)
+                updated["bounds"] = tuple(bounds)
+                params["crop_regions"] = [updated] + regions[1:]
+                changed = True
+
+        precise = params.get("precise_logical_bounds")
+        if precise is not None and len(precise) == 6:
+            if float(precise[2 * axis_index]) != float(index):
+                precise = list(precise)
+                precise[2 * axis_index] = float(index)
+                precise[2 * axis_index + 1] = float(index)
+                params["precise_logical_bounds"] = precise
+                changed = True
+
+        if not changed:
+            return False
+
+        # 位置在采样点之间时模型保留精确物理值，实际切片取最近采样点；
+        # 把保存的区间对齐到该采样点，切页回来时位置与切片下标才一致。
+        space = getattr(self, "axis_space", None)
+        if space is not None:
+            params["axis_interval"] = space.as_interval(low=value, up=value).as_dict()
+
+        # 当前页的会话状态与页面参数保持同一份值。
+        if self._is_current_page(spec):
+            if isinstance(params.get("home_slice_info"), dict) and self.home_slice_info is not None:
+                self.home_slice_info = dict(params["home_slice_info"])
+            if params.get("precise_logical_bounds") is not None:
+                self.precise_logical_bounds = list(params["precise_logical_bounds"])
+                self.last_synced_slice_texts = self._logical_bounds_to_texts(
+                    self.precise_logical_bounds
+                )
+        return True
 
     def _on_crop_selection_changed(self):
         selection = self.crop_controller.selection

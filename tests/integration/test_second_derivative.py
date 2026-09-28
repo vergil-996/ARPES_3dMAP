@@ -6,6 +6,7 @@ import numpy as np
 
 import bandscope.ui.theme as theme
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.ui.axis_interval_controller import IntervalEditMode
 
 
 class _StubControl:
@@ -15,6 +16,9 @@ class _StubControl:
 
     def value(self):
         return self._value
+
+    def currentIndex(self):
+        return int(self._value)
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
@@ -161,23 +165,31 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
 
 
 class SecondDerivativeSliderControlTests(unittest.TestCase):
+    """2D 二阶导页的区间模式：切片来源只移动位置，积分来源保留完整区间。"""
+
     @staticmethod
-    def _analyzer_with_axis_controls(low=0, up=0, mid=0):
+    def _analyzer_with_axis_interval(*, axis_index=0, low=None, up=None, locked=False):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
-        analyzer.core = SimpleNamespace(raw_data=np.zeros((10, 11, 12, 1)))
-        analyzer.page_data = SimpleNamespace(
-            combo_ax=_StubControl(),
-            s_ax_low=_StubControl(low),
-            s_ax_up=_StubControl(up),
-            s_ax_mid=_StubControl(mid),
-            input_ax_low=_StubControl(),
-            input_ax_up=_StubControl(),
-            input_ax_mid=_StubControl(),
+        analyzer.core = SimpleNamespace(
+            raw_data=np.zeros((10, 11, 12, 1)),
+            coords={
+                "X": np.linspace(-1.0, 1.0, 10),
+                "Y": np.linspace(-2.0, 2.0, 11),
+                "E": np.linspace(-3.0, 3.0, 12),
+                "delay": np.array([0.0]),
+            },
+            coord_sources={"X": "file", "Y": "file", "E": "file", "delay": "index"},
+            coord_units={},
         )
+        analyzer.page_data = SimpleNamespace(combo_ax=_StubControl(axis_index))
+        analyzer.left_workspace = SimpleNamespace(current_spec=lambda: None)
+        space = analyzer._axis_space_for_index(axis_index)
+        analyzer.axis_space = space
+        analyzer.axis_interval = space.as_interval(low=low, up=up, locked=locked)
         return analyzer
 
-    def test_slice_result_uses_only_center_slider(self):
-        analyzer = self._analyzer_with_axis_controls(low=1, up=8, mid=6)
+    def test_slice_result_only_moves_position(self):
+        analyzer = self._analyzer_with_axis_interval(axis_index=0, low=0.4, up=0.4)
         spec = SimpleNamespace(
             page_kind="second_derivative",
             params={
@@ -189,19 +201,17 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
         )
 
         analyzer._persist_second_derivative_page_state(spec)
-        analyzer._configure_second_derivative_axis_controls(spec)
+        _axis_index, mode, show_position = analyzer._axis_interval_context(spec)
 
+        # 切片位置取最近采样点；区间仍是零长度。
         self.assertEqual(spec.params["slice_index"], 6)
-        self.assertFalse(analyzer.page_data.combo_ax.enabled)
-        self.assertFalse(analyzer.page_data.s_ax_low.enabled)
-        self.assertFalse(analyzer.page_data.s_ax_up.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
-        self.assertFalse(analyzer.page_data.input_ax_low.enabled)
-        self.assertFalse(analyzer.page_data.input_ax_up.enabled)
-        self.assertTrue(analyzer.page_data.input_ax_mid.enabled)
+        self.assertEqual(spec.params["axis_interval"]["low"], spec.params["axis_interval"]["up"])
+        self.assertEqual(mode, IntervalEditMode.POSITION)
+        self.assertTrue(show_position)
 
-    def test_integral_result_uses_all_three_sliders(self):
-        analyzer = self._analyzer_with_axis_controls(low=9, up=2, mid=5)
+    def test_integral_result_keeps_the_full_interval(self):
+        # Y 轴步长 0.4：±1.2 正好落在采样点上，中心 0.0 是下标 5。
+        analyzer = self._analyzer_with_axis_interval(axis_index=1, low=-1.2, up=1.2)
         spec = SimpleNamespace(
             page_kind="second_derivative",
             params={
@@ -215,37 +225,32 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
         )
 
         analyzer._persist_second_derivative_page_state(spec)
-        analyzer._configure_second_derivative_axis_controls(spec)
+        _axis_index, mode, show_position = analyzer._axis_interval_context(spec)
 
         self.assertEqual(spec.params["integral_low"], 2)
-        self.assertEqual(spec.params["integral_up"], 9)
+        self.assertEqual(spec.params["integral_up"], 8)
         self.assertEqual(spec.params["integral_mid"], 5)
-        self.assertFalse(analyzer.page_data.combo_ax.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_low.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_up.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
+        self.assertEqual(mode, IntervalEditMode.FULL)
+        self.assertTrue(show_position)
 
-    def test_non_derivative_page_reenables_axis_controls(self):
-        analyzer = self._analyzer_with_axis_controls()
+    def test_3d_derivative_page_disables_the_interval_controls(self):
+        analyzer = self._analyzer_with_axis_interval()
         derivative_3d = SimpleNamespace(
             page_kind="second_derivative",
             params={"source_view": "3d", "source_page_kind": "home"},
         )
         regular_page = SimpleNamespace(page_kind="home", params={})
 
-        analyzer._configure_second_derivative_axis_controls(derivative_3d)
-        self.assertFalse(analyzer.page_data.s_ax_mid.enabled)
-        analyzer._configure_second_derivative_axis_controls(regular_page)
+        self.assertEqual(
+            analyzer._axis_interval_context(derivative_3d)[1], IntervalEditMode.DISABLED
+        )
+        _axis_index, mode, show_position = analyzer._axis_interval_context(regular_page)
+        self.assertEqual(mode, IntervalEditMode.FULL)
+        # 3D 主页仍可用区间控件驱动选择盒，但不显示底栏位置滑条。
+        self.assertFalse(show_position)
 
-        self.assertTrue(analyzer.page_data.combo_ax.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_low.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_up.enabled)
-        self.assertTrue(analyzer.page_data.s_ax_mid.enabled)
-
-    def test_new_slice_result_seeds_axis_and_center_control_state(self):
-        analyzer = self._analyzer_with_axis_controls()
-        analyzer.core.logical_to_physical = lambda _axis, value: float(value) * 0.25
-        analyzer._axis_physical_range = lambda _axis: (-1.0, 1.0, 0.25)
+    def test_new_slice_result_seeds_a_zero_length_interval(self):
+        analyzer = self._analyzer_with_axis_interval()
         analyzer._capture_control_state = lambda: {"data_process": {}}
         spec = SimpleNamespace(
             page_kind="second_derivative",
@@ -259,13 +264,33 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
 
         analyzer._seed_second_derivative_axis_control_state(spec)
 
-        data_state = spec.params["control_state"]["data_process"]
-        self.assertEqual(data_state["combo_ax"]["index"], 1)
-        self.assertEqual(data_state["s_ax_low"]["value"], 4)
-        self.assertEqual(data_state["s_ax_up"]["value"], 4)
-        self.assertEqual(data_state["s_ax_mid"]["value"], 4)
-        self.assertEqual(data_state["input_ax_mid"]["value"], 1.0)
-        self.assertEqual(data_state["locked_half_width"], 0)
+        interval = spec.params["axis_interval"]
+        self.assertEqual(interval["axis_key"], "Y")
+        self.assertEqual(interval["low"], interval["up"])
+        self.assertEqual((spec.params["low"], spec.params["up"], spec.params["mid"]), (4, 4, 4))
+        self.assertEqual(spec.params["control_state"]["data_process"]["combo_ax"]["index"], 1)
+
+    def test_new_integral_result_seeds_the_integral_window(self):
+        analyzer = self._analyzer_with_axis_interval()
+        analyzer._capture_control_state = lambda: {"data_process": {}}
+        spec = SimpleNamespace(
+            page_kind="second_derivative",
+            params={
+                "source_view": "2d",
+                "source_page_kind": "axis_integral",
+                "axis_index": 1,
+                "integral_low": 2,
+                "integral_up": 8,
+                "integral_mid": 5,
+            },
+        )
+
+        analyzer._seed_second_derivative_axis_control_state(spec)
+
+        interval = spec.params["axis_interval"]
+        self.assertEqual(interval["axis_key"], "Y")
+        self.assertLess(interval["low"], interval["up"])
+        self.assertEqual((spec.params["low"], spec.params["up"], spec.params["mid"]), (2, 8, 5))
 
 
 if __name__ == "__main__":

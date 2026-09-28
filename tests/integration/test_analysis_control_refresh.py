@@ -4,7 +4,10 @@ from types import SimpleNamespace
 import numpy as np
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.crop_model import CropSelection
+
+_FULL_INTERVAL = AxisInterval(0.0, 1.0)
 
 
 class AnalysisControlRefreshTests(unittest.TestCase):
@@ -13,12 +16,11 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.core = SimpleNamespace(raw_data=np.zeros((4, 5, 6, 1), dtype=np.float32))
         analyzer._syncing_controls = False
-        analyzer._syncing_axis_value_boxes = False
         analyzer.left_workspace = SimpleNamespace(current_spec=lambda: spec)
         analyzer._can_show_interactive_box = lambda: False
         analyzer.sync_ax_sliders_to_box = lambda: None
-        analyzer._persist_axis_integral_page_state = lambda _spec: None
-        analyzer._persist_second_derivative_page_state = lambda _spec: None
+        analyzer._persist_axis_interval_for_current_page = lambda: None
+        analyzer.axis_interval = _FULL_INTERVAL
         analyzer.request_refresh = lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("3D analysis controls must not request a refresh")
         )
@@ -66,7 +68,7 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         spec = SimpleNamespace(page_kind="axis_integral", params={})
         analyzer = self._analyzer_with_page(spec)
         calls = []
-        analyzer._persist_axis_integral_page_state = lambda target: calls.append(("persist", target))
+        analyzer._persist_axis_interval_for_current_page = lambda: calls.append(("persist", spec))
         analyzer.request_refresh = lambda *args, **kwargs: calls.append(("refresh", args, kwargs))
 
         analyzer.schedule_axis_refresh()
@@ -122,16 +124,17 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         expected = [0, 3, 2, 3, 0, 5]
         self.assertEqual(seen, [("box", expected), ("edits", expected)])
 
-    def test_switching_axis_updates_range_then_box_without_3d_compute(self):
+    def test_switching_axis_resets_the_space_then_refreshes_the_box(self):
         spec = SimpleNamespace(page_kind="home", params={})
         analyzer = self._analyzer_with_page(spec)
         calls = []
-        analyzer.update_ax_slider_range = lambda: calls.append("range")
+        analyzer.update_ax_slider_range = lambda **kwargs: calls.append(("range", kwargs))
         analyzer.schedule_axis_refresh = lambda: calls.append("box")
 
         analyzer.on_axis_selection_changed(2)
 
-        self.assertEqual(calls, ["range", "box"])
+        # 主动切换方向要重置为新轴的完整范围并解锁。
+        self.assertEqual(calls, [("range", {"reset": True}), "box"])
 
 
 if __name__ == "__main__":

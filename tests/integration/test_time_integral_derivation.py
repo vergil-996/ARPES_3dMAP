@@ -50,6 +50,14 @@ class TimeIntegralDerivationTests(unittest.TestCase):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.core = SimpleNamespace(
             raw_data=np.zeros(shape, dtype=np.float32),
+            coords={
+                "X": np.linspace(-1.0, 1.0, shape[0]),
+                "Y": np.linspace(-1.0, 1.0, shape[1]),
+                "E": np.linspace(-1.0, 1.0, shape[2]),
+                "delay": np.linspace(0.0, 3.0, shape[3]),
+            },
+            coord_sources={"X": "file", "Y": "file", "E": "file", "delay": "file"},
+            coord_units={},
             has_time_axis=True,
             logical_to_physical=lambda axis, value: float(value) * 0.5,
         )
@@ -71,7 +79,6 @@ class TimeIntegralDerivationTests(unittest.TestCase):
         analyzer._make_page_id = lambda: "derived-1"
         analyzer._persist_axis_integral_page_state = lambda _spec: None
         analyzer._seed_control_state_for_spec = lambda _spec: None
-        analyzer._axis_physical_range = lambda _axis: (-1.0, 1.0, 0.5)
         analyzer._time_physical_range = lambda: (0.0, 3.0, 0.5, 1)
         analyzer._capture_control_state = lambda: {"data_process": {}}
         return analyzer, added
@@ -100,17 +107,21 @@ class TimeIntegralDerivationTests(unittest.TestCase):
 
         analyzer.on_apply_time_integral()
 
-        control_state = added[0].params["control_state"]
+        params = added[0].params
+        # 新页面的区间以物理值保存，整数 low/up/mid 由它派生。
+        interval = params["axis_interval"]
+        self.assertEqual(interval["axis_key"], "Y")
+        self.assertAlmostEqual(interval["low"], 0.0, places=9)
+        self.assertAlmostEqual(interval["up"], 1.0, places=9)
+        self.assertFalse(interval["locked"])
+        self.assertEqual((params["low"], params["up"], params["mid"]), (2, 4, 3))
+
+        control_state = params["control_state"]
         data_state = control_state["data_process"]
         self.assertEqual(control_state["axis_source_mode"], "time_integral")
         self.assertEqual(data_state["combo_ax"], {"index": 1, "text": "Y轴"})
-        self.assertEqual(data_state["s_ax_low"], {"minimum": 0, "maximum": 4, "value": 2})
-        self.assertEqual(data_state["s_ax_up"]["value"], 4)
-        self.assertEqual(data_state["s_ax_mid"]["value"], 3)
-        self.assertEqual(data_state["input_ax_mid"]["value"], 1.5)
         self.assertEqual(data_state["s_t_low"]["value"], 1)
         self.assertEqual(data_state["s_t_up"]["value"], 3)
-        self.assertEqual(data_state["locked_half_width"], 1)
 
     def test_derived_2d_page_reads_the_time_integrated_volume(self):
         source = _axis_page()
