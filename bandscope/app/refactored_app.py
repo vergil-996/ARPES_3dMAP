@@ -6065,9 +6065,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 return int(params.get("slice_axis", 0)), IntervalEditMode.POSITION, True
             return 0, IntervalEditMode.DISABLED, False
         if kind == "home":
-            if self._spec_slice_axis(spec) is not None:
+            slice_axis = self._spec_slice_axis(spec)
+            if slice_axis is not None:
                 # 单层切片页：位置控件只移动切片位置。
-                return int(self._spec_slice_axis(spec)), IntervalEditMode.POSITION, True
+                return int(slice_axis), IntervalEditMode.POSITION, True
             return int(self.page_data.combo_ax.currentIndex()), IntervalEditMode.FULL, False
         return 0, IntervalEditMode.DISABLED, False
 
@@ -6152,13 +6153,14 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def _bind_axis_interval(self, spec, *, animate=True):
         """页面切换时把区间模型和控件绑到该页自己的轴与状态上。"""
         axis_index, mode, show_position = self._axis_interval_context(spec)
-        controller = self.axis_interval_controller
+        controller = self.__dict__.get("axis_interval_controller")
         bar = self.__dict__.get("timeline_bar")
 
         if mode == IntervalEditMode.DISABLED:
             self.axis_space = None
             self.axis_interval = None
-            controller.set_mode(mode)
+            if controller is not None:
+                controller.set_mode(mode)
             if bar is not None:
                 bar.set_position_visible(False, animate=animate)
             return
@@ -6167,8 +6169,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         interval = self._restore_axis_interval(spec, space, mode)
         self.axis_space = space
         self.axis_interval = interval
-        controller.set_mode(mode)
-        controller.bind(space, interval)
+        if controller is not None:
+            controller.set_mode(mode)
+            controller.bind(space, interval)
         if bar is not None:
             bar.set_position_label(space.display_label)
             bar.set_position_visible(show_position, animate=animate)
