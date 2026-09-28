@@ -5,7 +5,7 @@
 ## 发布前检查
 
 ```powershell
-python scripts/release/check_release_version.py v1.11.1
+python scripts/release/check_release_version.py v1.11.2
 python -m unittest discover -s tests -t . -v
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 ```
@@ -17,7 +17,7 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 ```powershell
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm packaging/pyinstaller/ARPES_3dMAP.spec
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.11.1 /DBuildFlavor=CPU packaging\windows\BandScope.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.11.2 /DBuildFlavor=CPU packaging\windows\BandScope.iss
 ```
 
 NVIDIA 环境安装 `requirements-gpu-cu13.txt`，使用 `packaging/pyinstaller/ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。CPU 与 NVIDIA 依赖建议使用独立虚拟环境。

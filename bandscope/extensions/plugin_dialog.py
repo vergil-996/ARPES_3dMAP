@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QModelIndex, Qt
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -94,6 +94,9 @@ class PluginManagerDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # 选中行要立刻反映到按钮上：只在 refresh() 里更新会漏掉用户点击选择，
+        # 按钮就一直停在打开面板时的「未选中」灰色状态。
+        self.table.itemSelectionChanged.connect(self._update_buttons)
         header = self.table.horizontalHeader()
         for index, (_, width) in enumerate(COLUMNS):
             header.setSectionResizeMode(index, QHeaderView.Fixed)
@@ -175,9 +178,13 @@ class PluginManagerDialog(QDialog):
     def selected_record(self):
         row = self.table.currentRow()
         records = self.manager.plugins()
-        if 0 <= row < len(records):
-            return records[row]
-        return None
+        if not 0 <= row < len(records):
+            return None
+        # 只认真正被选中的行：currentRow 可以被程序单独移动（清空选择、刷新后
+        # 行数变少），而卸载不可撤销，不该在「什么都没选中」时可用。
+        if not self.table.selectionModel().isRowSelected(row, QModelIndex()):
+            return None
+        return records[row]
 
     # ------------------------------------------------------------------ 操作
     def on_install(self):
