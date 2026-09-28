@@ -10,8 +10,9 @@
 - 相关工作：[轴标题编辑与页面重命名](../axis-titles/axis-title-editing.md)（改名规则
   已落地并复用）；[活动裁剪框](../../plans/interactive-crop-box.md) 仍未实施，与本次
   改动共用主窗口和裁剪接入。
-- 验收状态：676 条自动化测试通过；`verify_page_tree.py` 真实窗口 54 项检查全部通过；
+- 验收状态：679 条自动化测试通过；`verify_page_tree.py` 真实窗口 54 项检查全部通过；
   `verify_axis_titles.py`、`verify_page_shortcuts.py` 回归全部通过。
+  其中 3 条焦点隔离用例在 v1.10.0 打标签之后补入，只影响测试，不影响发布产物。
 - 本功能无遗留事项，本文件转为历史记录。
 
 ## 目标与交互（已实施）
@@ -96,12 +97,12 @@
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 ```
 
-- 676 条测试通过（原有 592 + 新增 84），无跳过、无失败。
+- 679 条测试通过（原有 592 + 新增 87），无跳过、无失败。
 - 新增 `tests/ui/test_page_tree.py`（53 条）：层级与顺序、点击与键盘、展开记忆、
   搜索路径与还原、同级排序与跨父拒绝、树内改名、长名称横向滚动、栏宽与跨重启恢复。
-- 新增 `tests/integration/test_page_management.py`（31 条）：删除预案与确认、
+- 新增 `tests/integration/test_page_management.py`（34 条）：删除预案与确认、
   取消/确认、祖先与分支回退、受保护节点、内部复位不确认、确认文案与默认按钮、
-  焦点隔离、数字切页顺序。
+  树 / 搜索框 / 树内编辑框的焦点隔离、数字切页顺序。
 - 新增 `tests/support/pages.py`：合成页面树构造器与设置重置；不依赖实验数据、
   用户注册表或已安装插件。
 
