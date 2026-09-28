@@ -132,6 +132,28 @@ def main():
               and abs(interval.up - window.axis_space.maximum) < 1e-9)
         check("默认未锁定", not interval.locked)
 
+        # —— 主动切换积分方向：模型、标签与页面参数一起指向新轴 ——
+        previous_index = ["X", "Y", "E"].index(window.axis_space.key)
+        other_index = 2 if previous_index != 2 else 0
+        page_data.combo_ax.setCurrentIndex(other_index)
+        expected_key = ["X", "Y", "E"][other_index]
+        check("切换方向后物理空间跟随下拉",
+              window.axis_space.key == expected_key, window.axis_space.key)
+        check("切换方向后位置标签跟随",
+              bar.axis_title_label.text().startswith(window.axis_space.label),
+              bar.axis_title_label.text())
+        check("切换方向后区间重置为新轴完整范围",
+              abs(controller.interval.low - window.axis_space.minimum) < 1e-9
+              and abs(controller.interval.up - window.axis_space.maximum) < 1e-9,
+              f"{controller.interval.low:.6g}~{controller.interval.up:.6g}")
+        current_params = window.left_workspace.current_spec().params
+        check("切换方向后页面参数跟随下拉",
+              current_params["axis_index"] == other_index, current_params.get("axis_index"))
+        check("切换方向后保存的区间属于新轴",
+              current_params["axis_interval"]["axis_key"] == expected_key)
+        # 重建后控制器换了新的区间对象，后面的检查必须重新取。
+        interval = controller.interval
+
         # —— 完整范围时整体平移无处可去：触边限制位移，长度与端点都不变 ——
         refresh_calls.clear()
         full_low, full_up = interval.low, interval.up
@@ -199,7 +221,7 @@ def main():
         page_data.btn_ax_lock.click()
         check("第一页已锁定", interval.locked)
 
-        page_data.combo_ax.setCurrentIndex(0)
+        # 不切换轴向：换轴会重建区间，这里只想验证两页各自保存自己的状态。
         page_data.btn_ax_apply.click()
         QTimer.singleShot(250, lambda: step_second_page(first_page_id, saved_low, saved_up))
 

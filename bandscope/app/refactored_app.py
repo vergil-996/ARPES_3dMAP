@@ -673,7 +673,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             box_position=self.timeline_bar.input_axis,
             label_lock=self.status_lock,
         )
-        self.axis_interval_controller.set_mode(IntervalEditMode.DISABLED)
+        # 加载数据前没有任何页面持有区间：控件先落下禁用态。
+        self.axis_interval_controller.clear()
 
     def _save_splitter_sizes(self, *_args):
         sizes = getattr(self, "main_splitter", None)
@@ -6156,11 +6157,15 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         controller = self.__dict__.get("axis_interval_controller")
         bar = self.__dict__.get("timeline_bar")
 
+        # 轴向由页面固定的结果页（二阶导）不允许在卡片里改方向。
+        is_derivative = spec is not None and spec.page_kind == "second_derivative"
+        self.page_data.combo_ax.setEnabled(not is_derivative)
+
         if mode == IntervalEditMode.DISABLED:
             self.axis_space = None
             self.axis_interval = None
             if controller is not None:
-                controller.set_mode(mode)
+                controller.clear()
             if bar is not None:
                 bar.set_position_visible(False, animate=animate)
             return
@@ -6208,10 +6213,22 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         """用户主动切换积分方向：初始化新轴的完整范围并解锁。"""
         if self.core.raw_data is None:
             return
+        # 下拉是轴向选择器的页面：先让页面参数跟上，否则重建区间时读到的还是
+        # 旧轴向，会把旧轴的物理区间映射到新轴上下标上。
+        self._adopt_combo_axis()
         self.update_ax_slider_range(reset=True)
         if self._syncing_controls:
             return
+        self._persist_axis_interval_for_current_page()
         self.schedule_axis_refresh()
+
+    def _adopt_combo_axis(self):
+        spec = self.__dict__.get("active_page_spec")
+        if spec is None or spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
+            return
+        axis_index = int(self.page_data.combo_ax.currentIndex())
+        spec.params["axis_index"] = axis_index
+        spec.params["axis_name"] = ["X轴", "Y轴", "Z轴"][axis_index]
 
     def _axis_input_logical_values(self):
         """区间映射到采样下标（低、高、中心），供计算与页面参数使用。"""
@@ -7211,11 +7228,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if self._crop_enabled():
             self.sync_ax_sliders_to_box()
 
+        # 先保存：3D 主页上输入框提交的区间同样要写回页面参数，否则切页
+        # 回来会退回完整范围，而输入框和选择盒还停在用户输入的值上。
+        self._persist_axis_interval_for_current_page()
+
         current_spec = self.left_workspace.current_spec()
         if not self._analysis_sliders_control_active_2d_page(current_spec):
             return
-
-        self._persist_axis_interval_for_current_page()
         self.request_refresh(
             RefreshCause.ANALYSIS,
             RenderQuality.EXACT if exact else RenderQuality.PREVIEW,

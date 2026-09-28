@@ -510,8 +510,5 @@ class TimelineBar(QFrame):
     def set_position_label(self, text):
         self.axis_title_label.setText(str(text))
         self.input_axis.setToolTip(f"{text}：当前积分区间中心（物理坐标，可直接输入）")
-
-    def set_position_enabled(self, enabled):
-        enabled = bool(enabled)
-        self.slider_axis.setEnabled(enabled)
-        self.input_axis.setEnabled(enabled)
+        # 标签宽度会改变第一行的最小宽度（例如 kx → kx / Å⁻¹），换行判定要跟着走。
+        self._apply_wrap(self._should_wrap())

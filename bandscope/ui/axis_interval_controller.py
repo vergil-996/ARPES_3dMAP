@@ -139,6 +139,39 @@ class AxisIntervalController(QObject):
         self._mode = mode
         self.sync_widgets()
 
+    def clear(self):
+        """当前页面没有可编辑区间：丢掉模型，控件回到中性禁用状态。
+
+        不能只把宿主侧的区间置空——控件仍会显示上一页的数字和锁定灯，
+        看起来像是这一页也有一个锁着的区间。
+        """
+        self._interval = None
+        self._space = None
+        self._mode = IntervalEditMode.DISABLED
+        self._reset_widgets()
+
+    def _reset_widgets(self):
+        widgets = self._widgets
+        targets = [widget for widget in widgets.values() if widget is not None]
+        blockers = [QSignalBlocker(widget) for widget in targets]
+        try:
+            for name, widget in widgets.items():
+                if widget is None or name == "label_lock":
+                    continue
+                widget.setEnabled(False)
+            button = widgets.get("button_lock")
+            if button is not None:
+                button.setChecked(False)
+                button.setText("锁定区间")
+            label = widgets.get("label_lock")
+            if label is not None:
+                label.setText("● 区间未锁定")
+                label.setStyleSheet(
+                    f"color: {theme.TEXT_3}; font-size: 11px; background: transparent;"
+                )
+        finally:
+            del blockers
+
     def set_locked(self, locked):
         if self._interval is None:
             return False

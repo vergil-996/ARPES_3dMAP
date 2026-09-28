@@ -110,6 +110,11 @@ class _AxisHarness:
         self.analyzer.precise_logical_bounds = None
         self.analyzer.last_synced_slice_texts = None
         self.analyzer.left_workspace = _Workspace(None)
+        # 页面切换链路会走到选择盒与刷新管线；这里只关心区间与页面参数。
+        self.refreshes = []
+        self.analyzer._can_show_interactive_box = lambda: False
+        self.analyzer.sync_ax_sliders_to_box = lambda: None
+        self.analyzer.request_refresh = lambda *args, **kwargs: self.refreshes.append(args[:1])
 
     def bind(self, spec, *, animate=False):
         self.analyzer.active_page_spec = spec
@@ -287,6 +292,54 @@ class PageIntervalBindingTests(unittest.TestCase):
         self.assertNotAlmostEqual(interval.low, float(self.harness.core.coords["X"][0]), places=9)
         # 锁定是编辑方式，新页面从头开始未锁定。
         self.assertFalse(interval.locked)
+
+    def test_switching_the_axis_direction_rebuilds_for_the_new_axis(self):
+        # 回归：下拉是轴向选择器时，必须先让页面参数跟上再重建区间，
+        # 否则旧轴的物理区间会被映射到新轴的下标上。
+        spec = _spec("integral", axis_index=0, low=2, up=8, mid=5)
+        self.harness.bind(spec)
+
+        self.harness.page_data.combo_ax.setCurrentIndex(2)
+        self.harness.analyzer.on_axis_selection_changed(2)
+
+        self.assertEqual(spec.params["axis_index"], 2)
+        self.assertEqual(spec.params["axis_name"], "Z轴")
+        self.assertEqual(self.harness.analyzer.axis_space.key, "E")
+        self.assertEqual(self.harness.bar.axis_title_label.text(), "E")
+        # 新轴的完整范围：E 轴 6 个采样点 → 0..5。
+        interval = self.harness.analyzer.axis_interval
+        self.assertAlmostEqual(interval.low, float(self.harness.core.coords["E"][0]), places=9)
+        self.assertAlmostEqual(interval.up, float(self.harness.core.coords["E"][-1]), places=9)
+        self.assertEqual((spec.params["low"], spec.params["up"]), (0, 5))
+        self.assertEqual(spec.params["axis_interval"]["axis_key"], "E")
+
+    def test_disabled_page_clears_the_controller_and_the_lock_light(self):
+        spec = _spec("integral", low=2, up=8, mid=5)
+        self.harness.bind(spec)
+        self.harness.controller.set_locked(True)
+        self.assertTrue(self.harness.page_data.btn_ax_lock.isChecked())
+
+        self.harness.bind(_spec("time", kind="time_integral"))
+
+        self.assertEqual(self.harness.controller.mode, IntervalEditMode.DISABLED)
+        self.assertIsNone(self.harness.controller.interval)
+        self.assertFalse(self.harness.page_data.s_ax_up.isEnabled())
+        self.assertFalse(self.harness.page_data.btn_ax_lock.isChecked())
+
+    def test_committing_a_box_on_a_3d_page_still_persists_the_interval(self):
+        # 回归：3D 主页上只有输入框提交、没有拖动滑条时，区间同样要写回页面
+        # 参数，否则切页回来会退回完整范围而输入框还停在用户输入的值上。
+        spec = _spec("home", kind="home")
+        self.harness.bind(spec)
+
+        self.harness.page_data.input_ax_up.setValue(0.4)
+        self.harness.page_data.input_ax_up.editingFinished.emit()
+        self.harness.analyzer.flush_axis_refresh()
+
+        self.assertIn("axis_interval", spec.params)
+        self.assertAlmostEqual(spec.params["axis_interval"]["up"], 0.4, places=9)
+        # 3D 页面不因区间变化请求重算。
+        self.assertEqual(self.harness.refreshes, [])
 
     def test_position_bar_label_uses_the_axis_and_its_unit(self):
         spec = _spec("integral", low=0, up=10, mid=5)
