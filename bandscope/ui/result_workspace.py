@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QDialog,
     QDialogButtonBox,
