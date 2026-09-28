@@ -64,9 +64,10 @@ osmesa.dll not found ... install the OSMesa library   (vtkOSOpenGLRenderWindow.c
 | 全量（无 GL，改后） | `VTK_DEFAULT_OPENGL_WINDOW=vtkOSOpenGLRenderWindow .local/venv-ci-probe/Scripts/python -m unittest discover -s tests -t . -v` | `Ran 519 tests ... OK (skipped=17)`（16 渲染 + 1 既有 CuPy 跳过），连跑 4 次 |
 | 全量（有 GL） | `.venv/Scripts/python -m unittest discover -s tests -t . -v` | `Ran 519 tests ... OK` |
 | 无 GL 逐模块扫描（改前） | `.local/outputs/gl_sweep.py` | 50 个模块：3 个整进程崩溃（就是上面三个），47 个通过 |
+| **真实 CI 运行** | push `594d19f`，run `36367226984` | `Ran 519 tests in 22.491s ... OK (skipped=17)` —— 16 条渲染跳过（带下面那条原因）+ 1 条既有 CuPy 跳过 |
 
-**未执行**：真正的 CI 运行（需要 push）。所以「剩下 500+ 条在 runner 上是否通过」
-目前仍未验证 —— 上一个 run 死在第一条渲染用例，这是本次修复之后才能看到的。
+CI 这一步同时回答了上一轮无法回答的问题：**除渲染路径外，剩下 500+ 条在 runner 上
+全部通过**。上一个 run 死在第一条渲染用例，这是套件第一次在 runner 上跑完。
 
 ## 剩余事项
 
@@ -79,9 +80,9 @@ osmesa.dll not found ... install the OSMesa library   (vtkOSOpenGLRenderWindow.c
 - **版本漂移**：本机 `.venv` 是 vtk 9.6.0/pyvista 0.47.1，CI 与安装包是 9.7.0/0.49.0。
   本轮不钉版本，但掩膜闪退那类驱动相关修复在 9.6 上验收、发布出去的是 9.7。
 - **一次未复现的失败**：无 GL 全量跑中出现过 1 个 failure（当时未记录用例名），之后
-  全量重跑 8 次、单模块重跑 12 次（另加 4 个 CPU 满载进程）都未复现。最可疑的是
-  `tests/rendering/test_refresh_pipeline.py` ——它用 20ms / 40ms 定时窗口 + 1.5s 轮询
-  断言合并行为，机器负载高时容易抖，但本轮**没有证实**。CI 上如果再红，先看这条。
+  全量重跑 8 次、单模块重跑 12 次（另加 4 个 CPU 满载进程）都未复现，CI 那次也没出现。
+  最可疑的是 `tests/rendering/test_refresh_pipeline.py` ——它用 20ms / 40ms 定时窗口 +
+  1.5s 轮询断言合并行为，机器负载高时容易抖，但本轮**没有证实**。CI 上如果再红，先看这条。
 - 复现环境 `.local/venv-ci-probe/`（约 150MB，不提交）保留：它是独立 venv，靠一个
   `.pth` 复用 `.venv` 的 site-packages，只把 vtk/pyvista 换成 CI 版本。不需要时
   `rm -rf .local/venv-ci-probe`。
