@@ -3,7 +3,7 @@
   "name": "平带增强",
   "version": "1.0.0",
   "api_version": 1,
-  "requires_app": "1.11.0",
+  "requires_app": "1.11.1",
   "entry_point": "entry:FlatBandOpacityPlugin",
   "capabilities": [
     "opacity_multiplier"
