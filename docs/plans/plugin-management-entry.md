@@ -3,12 +3,12 @@
 ## 状态与交接
 
 - 日期：2026-09-28（2026-10-06 更新）。
-- 状态：**阶段 A–F 均已实施并随 v1.12.1 发布**（落地内容、验证结果与未执行项见文末实施记录）。A、B 于 2026-10-05 完成；C（统一兼容规则）、D（官方来源验证）、E（官方目录与升级衔接）、F（分析插件 API）于 2026-10-06 完成。发布前置项已落地：内置公钥 `bandscope-official-2026` 随 v1.12.1 发布，私钥受控副本与仓库 Secret 已配置，Release 含签名插件包与签名目录；平带增强扩展升到 1.2.0，`requires_app` 放宽为 `>=1.9.0,<2.0.0`。**尚未完成的是人工验收**：C–F 真实窗口人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
+- 状态：**阶段 A–F 均已实施并随 v1.12.2 发布**（落地内容、验证结果与未执行项见文末实施记录）。A、B 于 2026-10-05 完成；C（统一兼容规则）、D（官方来源验证）、E（官方目录与升级衔接）、F（分析插件 API）于 2026-10-06 完成。发布前置项已落地：内置公钥 `bandscope-official-2026` 随 v1.12.2 发布，私钥受控副本与仓库 Secret 已配置，Release 含签名插件包与签名目录；平带增强扩展升到 1.2.0，`requires_app` 放宽为 `>=1.9.0,<2.0.0`。**尚未完成的是人工验收**：C–F 真实窗口人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
 - 负责范围：顶部入口与管理窗口、插件生命周期与安装恢复、兼容规则、官方来源验证、在线目录与升级衔接、分析插件 API，以及对应测试和发布验收。
 - 共享文件：主窗口、`bandscope/extensions/api.py`、更新控制器、依赖列表、两套 PyInstaller spec 和发布 CI 由集成任务统一协调。业务模块分别放入 `bandscope/extensions/`、`bandscope/updates/`；测试按责任放入 `tests/extensions/`、`tests/updates/` 和 `tests/integration/`。
 - 接手前阅读根目录及责任目录的 `AGENTS.md`，以及[目录地图](../architecture/repository-map.md)、[开发与测试](../development/testing.md)、[插件开发](../development/plugins.md)、[构建与发布](../development/releasing.md)、[当前交接](../handoffs/README.md)。重新检查工作区，按当前代码定位接入点。
-- 验收结果：统一回归套件 `python -m unittest discover -s tests -t . -v` → **979 项全部通过**（v1.12.1 发布前复跑同样全部通过）；发布链路端到端脚本 `scripts/validation/verify_plugin_release_flow.py` 全部通过（临时测试密钥，不联网）；阶段 A、B 的真实窗口验收见上一轮记录；v1.12.1 的正式签名密钥、内置公钥、签名插件包与签名目录随 Release 发布，发布门禁按设计生效。**未执行**：真实窗口的人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
-- 下一步：重建两套冻结包并复跑 `verify_frozen_plugin_flow.py` → 按[测试指南](../development/testing.md)做一轮真实窗口人工复核（含分析插件面板在二维页的显隐）→ 用 v1.12.1 客户端在官方插件页做一次真实的取目录、下载、安装与验签确认。全部完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
+- 验收结果：统一回归套件 `python -m unittest discover -s tests -t . -v` → **979 项全部通过**（v1.12.2 发布前复跑同样全部通过）；发布链路端到端脚本 `scripts/validation/verify_plugin_release_flow.py` 全部通过（临时测试密钥，不联网）；阶段 A、B 的真实窗口验收见上一轮记录；v1.12.2 的正式签名密钥、内置公钥、签名插件包与签名目录随 Release 发布，发布门禁按设计生效。**未执行**：真实窗口的人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
+- 下一步：重建两套冻结包并复跑 `verify_frozen_plugin_flow.py` → 按[测试指南](../development/testing.md)做一轮真实窗口人工复核（含分析插件面板在二维页的显隐）→ 用 v1.12.2 客户端在官方插件页做一次真实的取目录、下载、安装与验签确认。全部完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
 - 交付物：功能代码、相关回归测试、视觉验收记录。本文件为本功能唯一当前计划；实施期间更新状态，完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
 
 ## 实施顺序与默认约定
@@ -312,10 +312,10 @@
 
 ---
 
-## 发布记录（v1.12.1，2026-10-06）
+## 发布记录（v1.12.2，2026-10-06）
 
-- 首次推送 v1.12.0 标签后，发布工作流的测试任务因 `requirements.txt` 漏掉 `cryptography` 失败（CI 环境导入 `bandscope.extensions.trust` 报 `ModuleNotFoundError`，37 个测试模块无法导入），没有产出 Release。按仓库约定「已推的标签不覆盖」，改为补齐依赖后发补丁版 v1.12.1，插件版本与兼容声明不变。
-- 主程序升到 1.12.1；内置公钥 `bandscope-official-2026` 写入 `TRUSTED_PLUGIN_KEYS`，私钥受控副本在 `.local/maintainer/plugin-signing-key.pem`（不提交），仓库 Secrets `PLUGIN_SIGNING_KEY` / `PLUGIN_SIGNING_KEY_ID` 已配置。发布门禁（`sign_plugin.py --check-only`）保持失败即阻断，没有降级成警告。
-- 平带增强扩展升到 1.2.0，`requires_app` 由裸值 `1.11.2` 放宽为 `>=1.9.0,<2.0.0`（维护者明确要求，下限取插件机制与 `opacity_multiplier` 能力首次出现的 1.9.0）；二维积分演示插件的声明同步为 `>=1.12.1,<2.0.0`。
+- 发布连续失败两次，都没有产出 Release：v1.12.0 在测试任务失败（`requirements.txt` 漏掉 `cryptography`，CI 导入 `bandscope.extensions.trust` 报 `ModuleNotFoundError`，37 个测试模块无法导入）；v1.12.1 在插件任务的签名步骤失败（PowerShell 不替原生程序展开 `release/*.bsplugin`，签名脚本收到字面量后报“找不到文件”；该步骤此前从未真正执行过）。按仓库约定「已推的标签不覆盖，后续修复用新补丁版本」，改为 v1.12.2：补齐依赖、让 `sign_plugin.py` 自己展开通配符、工作流改为显式枚举文件，并给这段路径补了回归测试（`tests/extensions/test_trust.py` 的 `SignPluginCliTests`）。插件版本与兼容声明不变。
+- 主程序升到 1.12.2；内置公钥 `bandscope-official-2026` 写入 `TRUSTED_PLUGIN_KEYS`，私钥受控副本在 `.local/maintainer/plugin-signing-key.pem`（不提交），仓库 Secrets `PLUGIN_SIGNING_KEY` / `PLUGIN_SIGNING_KEY_ID` 已配置。发布门禁（`sign_plugin.py --check-only`）保持失败即阻断，没有降级成警告。
+- 平带增强扩展升到 1.2.0，`requires_app` 由裸值 `1.11.2` 放宽为 `>=1.9.0,<2.0.0`（维护者明确要求，下限取插件机制与 `opacity_multiplier` 能力首次出现的 1.9.0）；二维积分演示插件的声明同步为 `>=1.12.2,<2.0.0`。
 - 根 README、插件 README、[插件开发](../development/plugins.md)、[构建与发布](../development/releasing.md)、[当前交接](../handoffs/README.md)同步到新版本号与密钥状态。
-- 范围放宽的实际生效范围：只有 1.12.1 及以上的主程序能解析范围声明；1.9.0–1.11.2 的旧客户端继续使用各自 Release 里的历史插件包，不会被推送 1.2.0。这一限制已写入插件开发文档与插件 README，避免被读成“旧版也能装新版包”。
+- 范围放宽的实际生效范围：只有 1.12.2 及以上的主程序能解析范围声明；1.9.0–1.11.2 的旧客户端继续使用各自 Release 里的历史插件包，不会被推送 1.2.0。这一限制已写入插件开发文档与插件 README，避免被读成“旧版也能装新版包”。

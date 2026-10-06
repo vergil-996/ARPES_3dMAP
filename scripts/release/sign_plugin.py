@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import sys
 from pathlib import Path
 
@@ -47,6 +48,29 @@ from scripts.release.plugin_signing import (  # noqa: E402
 )
 
 PURPOSES = {"plugin": PURPOSE_PLUGIN, "catalog": PURPOSE_CATALOG}
+
+#: 出现这些字符的参数按通配符处理。
+_WILDCARD_CHARS = "*?["
+
+
+def expand_paths(raw_paths):
+    """展开调用方没有展开的通配符。
+
+    PowerShell 与 cmd 不会替原生程序展开 ``release/*.bsplugin``，会把字面量原样
+    传进来（CI 上第一次执行发布任务时就是这么失败的）。这里自己展开，让文档里的
+    ``sign_plugin.py release/*.bsplugin`` 在任何 shell 下都能用。没匹配到文件的
+    模式保持原样，交给下面的“找不到文件”报错，而不是静默签零个文件。
+    """
+    expanded = []
+    for raw in raw_paths:
+        text = str(raw)
+        if any(char in text for char in _WILDCARD_CHARS):
+            matches = sorted(glob.glob(text))
+            if matches:
+                expanded.extend(matches)
+                continue
+        expanded.append(text)
+    return expanded
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,7 +113,7 @@ def main(argv=None) -> int:
         return 2
 
     purpose = PURPOSES[args.purpose]
-    for raw in args.paths:
+    for raw in expand_paths(args.paths):
         target = Path(raw)
         if not target.is_file():
             print(f"找不到文件：{target}", file=sys.stderr)

@@ -3,7 +3,7 @@
   "name": "二维积分演示",
   "version": "1.0.0",
   "api_version": 2,
-  "requires_app": ">=1.12.1,<2.0.0",
+  "requires_app": ">=1.12.2,<2.0.0",
   "entry_point": "entry:IntegralDemoPlugin",
   "capabilities": [
     "data_snapshot_2d",

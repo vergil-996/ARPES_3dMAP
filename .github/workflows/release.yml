@@ -97,7 +97,11 @@ jobs:
         env:
           BANDSCOPE_PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
           BANDSCOPE_PLUGIN_SIGNING_KEY_ID: ${{ secrets.PLUGIN_SIGNING_KEY_ID }}
-        run: python scripts/release/sign_plugin.py release/*.bsplugin
+        run: |
+          # PowerShell 不替原生程序展开通配符，这里显式枚举（与下面的目录步骤一致）。
+          $packages = @(Get-ChildItem -Path release -Filter *.bsplugin | ForEach-Object { $_.FullName })
+          if ($packages.Count -eq 0) { throw "release/ 里没有可签名的扩展包。" }
+          python scripts/release/sign_plugin.py @packages
 
       # 目录保留仍受支持宿主的历史包：把上一版目录一并聚合进来。
       - name: Fetch the previous extension catalog

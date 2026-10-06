@@ -32,6 +32,7 @@ from bandscope.extensions.trust import (
     TrustError,
     build_signature,
     describe_source,
+    encode_public_key,
     inspect_package_source,
     parse_signature,
     sidecar_path,
@@ -397,6 +398,60 @@ class ActivationIntegrityTests(TrustTestCase):
         self.assertEqual(source["kind"], SOURCE_LEGACY)
         self.assertFalse(source["verified"])
         self.assertTrue(store_path.is_file())
+
+
+class SignPluginCliTests(unittest.TestCase):
+    """发布脚本的路径处理：PowerShell 与 cmd 不替原生程序展开通配符。
+
+    发布工作流第一次真跑签名步骤时，``release/*.bsplugin`` 被原样当成文件名传进来，
+    脚本报“找不到文件”直接失败；这里锁定“模式由脚本自己展开”的行为。
+    """
+
+    def setUp(self):
+        self._root = tempfile.TemporaryDirectory()
+        self.addCleanup(self._root.cleanup)
+        self.folder = Path(self._root.name)
+        self.key_id, self.private_key, _trusted = test_signing_key("cli-key")
+        # 就地修改内置公钥表：发布脚本在导入时绑定了同一个字典对象，替换属性影响不到
+        # 它（发布链路验收脚本同样用就地修改）。
+        patcher = mock.patch.dict(
+            trust_module.TRUSTED_PLUGIN_KEYS,
+            {self.key_id: encode_public_key(self.private_key.public_key())},
+            clear=True,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        from cryptography.hazmat.primitives import serialization
+
+        self.key_file = self.folder / "key.pem"
+        self.key_file.write_bytes(
+            self.private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+
+    def sign(self, pattern: str) -> int:
+        from scripts.release.sign_plugin import main as sign_main
+
+        return sign_main(
+            [pattern, "--key-file", str(self.key_file), "--key-id", self.key_id]
+        )
+
+    def test_pattern_signs_every_match(self):
+        (self.folder / "a.bsplugin").write_bytes(b"a")
+        (self.folder / "b.bsplugin").write_bytes(b"b")
+
+        self.assertEqual(self.sign(str(self.folder / "*.bsplugin")), 0)
+
+        self.assertTrue((self.folder / "a.bsplugin.sig").is_file())
+        self.assertTrue((self.folder / "b.bsplugin.sig").is_file())
+
+    def test_pattern_without_matches_still_fails(self):
+        # 没有匹配时保持原样交给“找不到文件”，不能静默地一个都不签。
+        self.assertEqual(self.sign(str(self.folder / "*.bsplugin")), 1)
 
 
 class TrustModuleBoundaryTests(unittest.TestCase):
