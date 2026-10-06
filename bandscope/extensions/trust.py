@@ -51,7 +51,7 @@ MAX_SIGNATURE_BYTES = 8 * 1024
 #: 表空表示宿主没有任何内置官方密钥：任何签名包都会被判为“未知密钥”，官方发布
 #: 任务也会因缺少匹配密钥而失败。表非空时，只有这里列出的 key_id 才算官方来源。
 #:
-#: ``bandscope-official-2026`` 自 v1.12.0 起内置。私钥在维护者受控位置与发布环境
+#: ``bandscope-official-2026`` 自 v1.12.1 起内置。私钥在维护者受控位置与发布环境
 #: Secret（``PLUGIN_SIGNING_KEY``）里，**不在仓库中**；轮换时新公钥要等宿主更新
 #: 部署到位后才能签发新包，旧公钥按支持期继续保留。
 TRUSTED_PLUGIN_KEYS: Dict[str, str] = {

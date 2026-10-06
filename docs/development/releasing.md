@@ -5,7 +5,7 @@
 ## 发布前检查
 
 ```powershell
-python scripts/release/check_release_version.py v1.12.0
+python scripts/release/check_release_version.py v1.12.1
 python -m unittest discover -s tests -t . -v
 python scripts/validation/verify_plugin_release_flow.py
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
@@ -28,7 +28,7 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 3. 在仓库 Secrets 里配置 `PLUGIN_SIGNING_KEY`（Base64 的 32 字节私钥种子，或 PKCS#8 PEM）与 `PLUGIN_SIGNING_KEY_ID`。
 4. 验证：`python scripts/release/sign_plugin.py --check-only`。这一步会同时确认“用来签名的私钥”与“仓库内置的公钥”是同一对；对不上就失败，不会先发一个客户端必然拒收的包。
 
-**当前状态**：内置公钥 `bandscope-official-2026` 已随 v1.12.0 发布，仓库 Secrets（`PLUGIN_SIGNING_KEY`、`PLUGIN_SIGNING_KEY_ID`）已配置，私钥的受控副本在 `.local/maintainer/plugin-signing-key.pem`（不提交）。发布工作流仍会在「Check the plugin signing key」一步核对私钥与内置公钥是同一对，对不上就失败——这是刻意的门禁（正式发布必须签名），不是可以跳过的检查。
+**当前状态**：内置公钥 `bandscope-official-2026` 已随 v1.12.1 发布，仓库 Secrets（`PLUGIN_SIGNING_KEY`、`PLUGIN_SIGNING_KEY_ID`）已配置，私钥的受控副本在 `.local/maintainer/plugin-signing-key.pem`（不提交）。发布工作流仍会在「Check the plugin signing key」一步核对私钥与内置公钥是同一对，对不上就失败——这是刻意的门禁（正式发布必须签名），不是可以跳过的检查。
 
 密钥轮换：新公钥要随宿主更新部署后才能签新包；旧公钥按明确的支持期保留在 `TRUSTED_PLUGIN_KEYS` 里，目录不能自行添加可信公钥。私钥丢失后无法再签出客户端认可的包，只能换新密钥并等宿主更新到位。
 
@@ -37,7 +37,7 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 ```powershell
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm packaging/pyinstaller/ARPES_3dMAP.spec
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.12.0 /DBuildFlavor=CPU packaging\windows\BandScope.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.12.1 /DBuildFlavor=CPU packaging\windows\BandScope.iss
 ```
 
 NVIDIA 环境安装 `requirements-gpu-cu13.txt`，使用 `packaging/pyinstaller/ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。CPU 与 NVIDIA 依赖建议使用独立虚拟环境。

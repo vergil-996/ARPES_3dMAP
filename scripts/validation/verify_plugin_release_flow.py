@@ -70,7 +70,7 @@ def main() -> int:
     check("1. 插件包构建成功", package.is_file(), str(package))
     manifest = json.loads((REPO_ROOT / "plugins" / "flat_band_opacity" / "plugin.json").read_text(encoding="utf-8"))
     check("1. 平带插件已提升版本", manifest["version"] != "1.0.0", manifest["version"])
-    # 兼容声明自 v1.12.0 起按范围放宽（维护者 2026-10-06 决定）：这里要求它仍然覆盖
+    # 兼容声明自 v1.12.1 起按范围放宽（维护者 2026-10-06 决定）：这里要求它仍然覆盖
     # 当前宿主版本。打包脚本做同一判定，这条把它显式记录下来，防止声明被改成不覆盖。
     requirement = parse_requires_app(manifest["requires_app"])
     check("1. 兼容声明覆盖当前宿主版本", requirement.accepts(app_metadata.APP_VERSION),

@@ -2,6 +2,8 @@
 numpy>=2.0
 # Version ranges and ordering for plugin compatibility rules (PEP 440).
 packaging>=23.0
+# Ed25519 signatures for official plugin packages and the plugin catalog.
+cryptography>=42.0
 scipy>=1.13
 h5py>=3.10
 PyWavelets>=1.5

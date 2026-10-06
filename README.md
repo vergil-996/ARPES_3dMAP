@@ -1,12 +1,17 @@
 # BandScope
 
-BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.12.0**。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.12.1**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
 ---
 
 ## 界面概览
+
+### v1.12.1 更新
+
+- **修复发布依赖缺项**：v1.12.0 的发布工作流在测试任务就失败——`requirements.txt` 漏了插件签名用的 `cryptography`，CI 环境导入 `bandscope.extensions.trust` 直接报 `ModuleNotFoundError`，因此没有产出任何 Release。v1.12.1 补齐该依赖并重新发布，功能内容与 v1.12.0 相同。
+- 主程序版本、安装器版本与扩展目录一致升到 1.12.1；平带增强扩展仍为 1.2.0，兼容声明不变。
 
 ### v1.12.0 更新
 

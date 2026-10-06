@@ -19,7 +19,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 ## 版本与兼容声明
 
 - `api_version` 是整数。宿主声明**支持集合**，当前为 `{1, 2}`；插件声明的版本必须落在集合里，不能因为主程序小版本接近就认定兼容。
-- `requires_app` 是裸版本（如 `1.12.0`）时按精确版本匹配，旧清单原样解释、不自动放宽；带运算符时按 [PEP 440 范围](https://packaging.pypa.io/en/stable/specifiers.html)解析，例如 `>=1.9.0,<2.0.0`。范围写法只有 1.12.0 起的主程序能解析：更早的主程序仍按精确匹配比较，看到范围声明会直接判为不兼容，因此放宽范围要配合新版主程序发布。
+- `requires_app` 是裸版本（如 `1.12.1`）时按精确版本匹配，旧清单原样解释、不自动放宽；带运算符时按 [PEP 440 范围](https://packaging.pypa.io/en/stable/specifiers.html)解析，例如 `>=1.9.0,<2.0.0`。范围写法只有 1.12.1 起的主程序能解析：更早的主程序仍按精确匹配比较，看到范围声明会直接判为不兼容，因此放宽范围要配合新版主程序发布。
 - `capabilities` 里每一项都必须由宿主支持，缺一不可：
 
 | 能力 | 含义 |
