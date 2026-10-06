@@ -10,7 +10,8 @@ binaries = []
 hiddenimports = ['plugin_api', 'theme', 'ui_controls', 'bandscope.extensions.ui']
 hiddenimports += collect_submodules('skimage')
 hiddenimports += collect_submodules('pywt')
-for package in ('siui', 'pyvista', 'pyvistaqt', 'vtk', 'matplotlib', 'cupy', 'cupyx', 'cuda'):
+for package in ('siui', 'pyvista', 'pyvistaqt', 'vtk', 'matplotlib', 'cupy', 'cupyx', 'cuda',
+                'cryptography'):
     package_data, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_data
     binaries += package_binaries

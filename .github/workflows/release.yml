@@ -63,10 +63,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # 打包脚本只用到清单解析，装 numpy 就够，不必拉整套运行环境。
+      # 打包脚本只用到清单解析、兼容判定与签名，不必拉整套运行环境。
       - name: Install packaging dependency
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check numpy
+        run: python -m pip install --disable-pip-version-check numpy packaging cryptography
 
       - name: Validate tag against app version
         shell: pwsh
@@ -83,6 +83,51 @@ jobs:
         shell: pwsh
         run: python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 
+      # 正式发布要求签名密钥与宿主内置公钥匹配；缺 Secret 或对不上就在这里失败，
+      # 而不是先发一个客户端必然拒收的包。
+      - name: Check the plugin signing key
+        shell: pwsh
+        env:
+          BANDSCOPE_PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+          BANDSCOPE_PLUGIN_SIGNING_KEY_ID: ${{ secrets.PLUGIN_SIGNING_KEY_ID }}
+        run: python scripts/release/sign_plugin.py --check-only
+
+      - name: Sign extension packages
+        shell: pwsh
+        env:
+          BANDSCOPE_PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+          BANDSCOPE_PLUGIN_SIGNING_KEY_ID: ${{ secrets.PLUGIN_SIGNING_KEY_ID }}
+        run: python scripts/release/sign_plugin.py release/*.bsplugin
+
+      # 目录保留仍受支持宿主的历史包：把上一版目录一并聚合进来。
+      - name: Fetch the previous extension catalog
+        shell: pwsh
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path previous | Out-Null
+          gh release download --repo "${{ github.repository }}" --pattern plugins-index.json --dir previous --clobber
+
+      - name: Build the extension catalog
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $args = @("scripts/release/build_plugin_catalog.py", "--tag", $tag,
+                    "--output", "release/plugins-index.json")
+          if (Test-Path -LiteralPath "previous/plugins-index.json") {
+            $args += @("--merge", "previous/plugins-index.json")
+          }
+          $args += (Get-ChildItem -Path release -Filter *.bsplugin | ForEach-Object { $_.FullName })
+          python @args
+
+      - name: Sign the extension catalog
+        shell: pwsh
+        env:
+          BANDSCOPE_PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+          BANDSCOPE_PLUGIN_SIGNING_KEY_ID: ${{ secrets.PLUGIN_SIGNING_KEY_ID }}
+        run: python scripts/release/sign_plugin.py release/plugins-index.json --purpose catalog
+
       - name: Upload extension artifact
         uses: actions/upload-artifact@v4
         with:
@@ -90,6 +135,9 @@ jobs:
           path: |
             release/*.bsplugin
             release/*.bsplugin.sha256
+            release/*.bsplugin.sig
+            release/plugins-index.json
+            release/plugins-index.json.sig
           if-no-files-found: error
           compression-level: 0
 

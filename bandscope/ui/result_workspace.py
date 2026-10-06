@@ -370,6 +370,15 @@ class ResultWorkspace(QWidget):
         self.activate_page(spec.page_id)
         return spec
 
+    def add_page_inactive(self, spec: AnalysisPageSpec) -> AnalysisPageSpec:
+        """登记新页但不切换当前页。
+
+        后台任务完成后由宿主建结果页时用它：用户正在看什么就继续看什么，结果页
+        挂在来源页下面等着被点开。
+        """
+        self._add_page(spec)
+        return spec
+
     def _add_page(self, spec: AnalysisPageSpec):
         if spec.auto_title is None:
             # 建页时的标题就是该页的自动名字；此后自动命名只更新它。

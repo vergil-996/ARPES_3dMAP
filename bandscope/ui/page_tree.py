@@ -48,6 +48,7 @@ PAGE_KIND_ICONS = {
     "edc_curve": "ic_fluent_document_data_filled",
     "second_derivative": "ic_fluent_document_data_filled",
     "log_curve": "ic_fluent_document_data_filled",
+    "plugin_curve": "ic_fluent_data_trending_filled",
 }
 DEFAULT_PAGE_ICON = "ic_fluent_document_data_filled"
 

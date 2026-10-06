@@ -1,0 +1,15 @@
+{
+  "id": "integral_demo",
+  "name": "二维积分演示",
+  "version": "1.0.0",
+  "api_version": 2,
+  "requires_app": ">=1.12.0,<2.0.0",
+  "entry_point": "entry:IntegralDemoPlugin",
+  "capabilities": [
+    "data_snapshot_2d",
+    "analysis_task",
+    "result_curve_1d"
+  ],
+  "description": "演示最小分析插件接口：抓取当前二维结果的只读快照，在后台沿指定轴积分，交回一维曲线由宿主建结果页。只读取数据，不改动原始强度、色阶或导出数值。",
+  "author": "BandScope"
+}

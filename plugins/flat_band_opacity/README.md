@@ -10,13 +10,21 @@ BandScope 官方扩展。自行添加需要突出的平带、分别设定能量�
 
 1. 从 BandScope 的 Release 页面下载与本机主程序版本匹配的
    `BandScope-flat_band_opacity-<版本>.bsplugin`。
-2. 在「渲染控制」页或画布上右键 →「扩展管理…」，点「导入扩展包…」选择下载的文件。
+2. 点顶部工具栏的「插件管理」，在窗口里点「安装插件…」选择下载的文件。
 3. 按提示重启 BandScope。重启后在「渲染控制」页会出现「平带增强」卡片。
 
 CPU 与 NVIDIA 安装版共用同一个扩展包。扩展不带自己的 NumPy / Qt / VTK / CUDA，
 全部复用主程序已有的运行环境。
 
-卸载：扩展管理里点「卸载」，同样重启后生效。
+卸载：插件管理里点「卸载」，同样重启后生效；重启前当前效果保持不变。
+
+官方发布的包带有 `.bsplugin.sig` 签名，插件管理里会显示「官方已验证」；本地自行
+导入的未签名包会显示「本地未验证」，需要你确认后才会安装。来源状态只说明包从哪
+来，不影响插件行为。
+
+当前版本 1.2.0：功能与 1.0.1 相同，兼容声明由「要求主程序 `1.11.2` 精确匹配」放宽为
+`>=1.9.0,<2.0.0`——2.0.0 以前的主程序都在声明范围内。范围写法由 1.12.0 起的插件管理
+解析，更早的主程序只认精确版本号，请配合 1.12.0 及以上的主程序安装本包。
 
 ## 使用
 
@@ -71,6 +79,7 @@ alpha  = clip(alpha_base * m(E), 0, 1)
 - 协议使用 `bandscope.extensions.api`；主题与共享控件通过
   `bandscope.extensions.ui` 导入，这些依赖由宿主提供。
 - 打包：`python scripts/release/build_plugin.py flat_band_opacity`，产物在 `release/`。
-  清单里的 `requires_app` 必须与当前主程序版本一致，否则构建会直接失败。
+  清单里的 `requires_app` 必须覆盖当前主程序版本：裸版本按精确匹配，带运算符按
+  PEP 440 范围解析，不通过构建会直接失败。
 - 业务测试在 `tests/plugins/flat_band_opacity/`；宿主测试在 `tests/extensions/`。
   从仓库根目录运行 `python -m unittest discover -s tests -t . -v`。

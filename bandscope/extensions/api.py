@@ -19,16 +19,26 @@
 from __future__ import annotations
 
 import abc
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-#: 宿主协议版本。插件清单里的 ``api_version`` 必须与之相等才会被加载。
-API_VERSION = 1
-
-#: 能力标识：插件可以提交沿能量轴的不透明度倍率。
-CAPABILITY_OPACITY_MULTIPLIER = "opacity_multiplier"
+#: 版本与能力的判定规则统一放在 ``compat``：安装、加载、构建脚本、官方目录和
+#: 升级评估共用同一组纯函数。这里重导出协议常量，插件与新代码仍从本模块引用。
+from bandscope.extensions.compat import (  # noqa: F401
+    ANALYSIS_CAPABILITIES,
+    API_VERSION,
+    CAPABILITY_ANALYSIS_TASK,
+    CAPABILITY_DATA_SNAPSHOT_2D,
+    CAPABILITY_OPACITY_MULTIPLIER,
+    CAPABILITY_RESULT_CURVE_1D,
+    SUPPORTED_API_VERSIONS,
+    SUPPORTED_CAPABILITIES,
+    evaluate_compatibility,
+    parse_requires_app,
+)
 
 #: 清单必填字段。
 REQUIRED_MANIFEST_FIELDS = (
@@ -81,13 +91,12 @@ def normalize_plugin_version(value: str) -> str:
     return text
 
 
-def parse_version(value: str) -> Tuple[int, ...]:
-    """把 ``1.2.3`` 拆成可比较的整数元组；非数字段按 0 处理。"""
-    parts = []
-    for chunk in str(value or "").split("."):
-        digits = "".join(char for char in chunk if char.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts or [0])
+def resolve_api_version(value) -> Optional[int]:
+    """插件声明与路径无关的整数接口版本；非法输入返回 None。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -147,18 +156,29 @@ class PluginManifest:
             author=str(payload.get("author") or ""),
         )
 
-    def check_compatibility(self, app_version: str, api_version: int = API_VERSION):
-        """加载插件代码之前必须通过的检查。"""
-        if int(self.api_version) != int(api_version):
-            raise PluginCompatibilityError(
-                f"{self.name} 需要宿主接口版本 {self.api_version}，"
-                f"当前主程序提供 {api_version}。"
-            )
-        if parse_version(self.requires_app) != parse_version(app_version):
-            raise PluginCompatibilityError(
-                f"{self.name} 需要主程序 {self.requires_app}，"
-                f"当前为 {app_version}。"
-            )
+    def check_compatibility(
+        self,
+        app_version: str,
+        *,
+        supported_apis=SUPPORTED_API_VERSIONS,
+        supported_capabilities=SUPPORTED_CAPABILITIES,
+    ):
+        """加载插件代码之前必须通过的检查。
+
+        结论与原因来自 ``compat.evaluate_compatibility``，与安装事务、构建脚本、
+        官方目录和升级评估完全相同；这里只负责把失败翻译成可展示的异常。
+        """
+        verdict = evaluate_compatibility(
+            name=self.name,
+            requires_app=self.requires_app,
+            api_version=self.api_version,
+            capabilities=self.capabilities,
+            app_version=app_version,
+            supported_apis=supported_apis,
+            supported_capabilities=supported_capabilities,
+        )
+        if not verdict.ok:
+            raise PluginCompatibilityError(verdict.reason)
 
 
 #: 坐标来源取值，与 ``analyzer_core`` 的 ``coord_sources`` 一致。
@@ -322,6 +342,14 @@ class Plugin(abc.ABC):
     def restore_state(self, state: Mapping[str, Any]) -> None:
         """恢复参数快照；实现必须容忍缺失与多余的字段。"""
 
+    def on_analysis_finished(self, handle, status: str, detail: str = "") -> None:
+        """分析任务结束（成功 / 失败 / 取消）后的通知。
+
+        默认什么都不做——v1 插件不会因为这个钩子被迫实现新方法。需要恢复按钮
+        状态或提示用户的 v2 插件在这里处理，``status`` 取 ``succeeded``、
+        ``failed``、``cancelled``。
+        """
+
     def reset_for_new_data(self) -> None:
         """加载新数据文件时清空与旧数据绑定的峰位。"""
 
@@ -331,11 +359,16 @@ class Plugin(abc.ABC):
 
 @dataclass
 class PluginRecord:
-    """注册表里一条已安装插件的状态。"""
+    """登记表里一条已安装插件的状态：期望配置 + 本会话运行状态。
+
+    期望配置（``version`` / ``path`` / ``digest`` / ``enabled`` / ``pending_removal``
+    等）来自登记表，可能已经指向“下次启动”的目标；``running`` 与 ``instance``
+    只描述当前会话。用户启停或卸载时**只改期望配置**，当前效果保持到重启。
+    """
 
     plugin_id: str
-    version: str
-    path: str
+    version: str = ""
+    path: str = ""
     enabled: bool = True
     manifest: Optional[PluginManifest] = None
     load_error: str = ""
@@ -344,6 +377,264 @@ class PluginRecord:
     pending_removal: bool = False
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # -- 期望配置（登记表 schema v2） ----------------------------------
+    #: 期望内容的摘要与路径（``path`` 相对扩展根）。
+    digest: str = ""
+    last_good_version: str = ""
+    last_good_digest: str = ""
+    previous_good_version: str = ""
+    previous_good_digest: str = ""
+    #: 已登记“恢复上一版本”，重启时执行。
+    restore_pending: bool = False
+    #: 上次加载失败且尚未重试的候选。
+    failed_candidate: Optional[Dict[str, Any]] = None
+    source: Dict[str, Any] = field(default_factory=dict)
+    #: 最近一次操作错误（例如卸载删除失败）的摘要。
+    last_operation_error: str = ""
+    #: 登记记录无法确认时的原因；非空即只读，不加载也不允许修改。
+    unconfirmed_reason: str = ""
+
+    # -- 本会话运行状态 ------------------------------------------------
+    running: bool = False
+    running_version: str = ""
+    #: 加载时登记表的配置修订与内容摘要，供健康回报核对。
+    started_revision: int = -1
+    started_digest: str = ""
+
     @property
     def ready(self) -> bool:
-        return self.instance is not None and not self.load_error
+        return self.running and self.instance is not None
+
+
+# ---------------------------------------------------------------------------
+# 分析插件（API 2）
+# ---------------------------------------------------------------------------
+
+#: 分析任务队列上限：一个工作线程、最多四个排队任务。
+MAX_ANALYSIS_QUEUE = 4
+
+#: 二维快照的数组顺序固定为 ``[x, y]``：第一维沿 x 轴，第二维沿 y 轴。
+ANALYSIS_ARRAY_ORDER = "[x, y]"
+
+
+class AnalysisUnavailable(PluginError):
+    """当前状态不满足分析的前置条件。
+
+    消息直接面向用户：预览中、计算未完成、当前不是二维结果页、带擦除区域的
+    裁空状态都属于这一类，逐条说明为什么现在不能分析。
+    """
+
+
+class AnalysisCancelled(Exception):
+    """分析任务已被取消；插件在检查点抛出它即可立即退出。"""
+
+
+class AnalysisBusy(Exception):
+    """该插件已有未结束的任务，或队列已满。
+
+    这是**预期内**的状态，不是错误：宿主已经向用户提示了忙碌原因，插件可以
+    直接忽略（正式接口返回 None，不抛给插件）。
+    """
+
+
+class AnalysisResultError(PluginError):
+    """插件交回的结果不符合契约（长度不等、含无穷值等）。"""
+
+
+@dataclass(frozen=True)
+class AnalysisInput2D:
+    """一次二维数值结果的只读快照。
+
+    数组顺序统一为 ``[x, y]``，``x`` / ``y`` 与对应维度**等长**并保留输入方向
+    （与页面上看到的一致，不做翻转）。``data`` 与坐标数组都是任务独占的只读
+    缓冲区：插件改不动它们，也不需要复制一份来保护原始数据。
+
+    单位只如实转述：没有单位元数据时保持空串，界面与结果里显示为 index 或
+    坐标值，绝不自动补成 ``eV`` / ``Å⁻¹``。
+    """
+
+    plugin_id: str
+    page_id: str
+    page_title: str
+    snapshot_id: str
+    data_generation: int
+    data: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    x_label: str = "x"
+    x_unit: str = ""
+    y_label: str = "y"
+    y_unit: str = ""
+    title: str = ""
+    frame_index: Optional[int] = None
+    frame_label: str = ""
+    roi_label: str = ""
+    scope_id: str = "full"
+    source: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return (int(self.data.shape[0]), int(self.data.shape[1]))
+
+    def x_axis_label(self) -> str:
+        return _axis_label(self.x_label, self.x_unit)
+
+    def y_axis_label(self) -> str:
+        return _axis_label(self.y_label, self.y_unit)
+
+    def describe(self) -> str:
+        """一行可读的来源说明，直接进结果页与日志。"""
+        parts = [self.title or self.page_title or self.page_id, f"{self.shape[0]}×{self.shape[1]}"]
+        if self.frame_label:
+            parts.append(self.frame_label)
+        if self.roi_label:
+            parts.append(self.roi_label)
+        return " · ".join(part for part in parts if part)
+
+
+def _axis_label(name: str, unit: str) -> str:
+    label = str(name or "").strip() or "index"
+    unit = str(unit or "").strip()
+    return f"{label} ({unit})" if unit else label
+
+
+@dataclass(frozen=True)
+class AnalysisCurve1D:
+    """插件交回的一维结果：宿主负责建页、展示与导出。
+
+    ``params`` 必须是可序列化的普通数据（数字、字符串、列表、字典）；它随结果
+    一起登记，用于复现和对照，不参与计算。
+    """
+
+    x: Sequence[float]
+    y: Sequence[float]
+    x_label: str = "x"
+    x_unit: str = ""
+    y_label: str = "Intensity"
+    y_unit: str = ""
+    title: str = ""
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+    def x_axis_label(self) -> str:
+        return _axis_label(self.x_label, self.x_unit)
+
+    def y_axis_label(self) -> str:
+        return _axis_label(self.y_label, self.y_unit)
+
+
+@dataclass(frozen=True)
+class AnalysisTaskHandle:
+    """一次已登记分析任务的句柄。"""
+
+    task_id: str
+    plugin_id: str
+    page_id: str
+    snapshot_id: str
+    title: str = ""
+
+
+@dataclass
+class CancelToken:
+    """协作取消信号。
+
+    插件在循环里调用 :meth:`raise_if_cancelled`（或读 :attr:`cancelled`）主动退出；
+    宿主不会强制终止线程，也不会在窗口销毁后回调控件。
+    """
+
+    _event: Any = field(default_factory=threading.Event)
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return bool(self._event.is_set())
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancelled:
+            raise AnalysisCancelled("分析任务已取消。")
+
+
+#: 插件提供的分析工作函数：``(快照, 冻结参数, 取消信号) -> AnalysisCurve1D``。
+AnalysisWork = Callable[..., AnalysisCurve1D]
+
+
+def validate_analysis_curve(curve: AnalysisCurve1D) -> AnalysisCurve1D:
+    """校验插件结果并转成宿主拥有的数值缓冲区。
+
+    - 必须是 :class:`AnalysisCurve1D`；
+    - x / y 必须是一维、非空且等长；
+    - x 必须有限（坐标不能缺测）；
+    - y 允许 NaN 表示缺测，但拒绝正负无穷——缺测不能被伪造成 0。
+    """
+    if not isinstance(curve, AnalysisCurve1D):
+        raise AnalysisResultError(
+            f"分析结果必须是 AnalysisCurve1D，收到 {type(curve).__name__}。"
+        )
+    try:
+        x = np.asarray(curve.x, dtype=np.float64).reshape(-1)
+        y = np.asarray(curve.y, dtype=np.float64).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise AnalysisResultError(f"分析结果不是数值数组：{exc}") from exc
+    if x.size == 0 or y.size == 0:
+        raise AnalysisResultError("分析结果为空。")
+    if x.size != y.size:
+        raise AnalysisResultError(
+            f"分析结果的 x（{x.size}）与 y（{y.size}）长度不一致。"
+        )
+    if not np.all(np.isfinite(x)):
+        raise AnalysisResultError("分析结果的 x 含缺测或非有限值，坐标必须完整。")
+    if np.any(np.isinf(y)):
+        raise AnalysisResultError("分析结果的 y 含无穷值；缺测请用 NaN 表示。")
+    x = np.array(x, dtype=np.float64, copy=True)
+    y = np.array(y, dtype=np.float64, copy=True)
+    x.setflags(write=False)
+    y.setflags(write=False)
+    return AnalysisCurve1D(
+        x=x,
+        y=y,
+        x_label=str(curve.x_label or "x"),
+        x_unit=str(curve.x_unit or ""),
+        y_label=str(curve.y_label or "Intensity"),
+        y_unit=str(curve.y_unit or ""),
+        title=str(curve.title or ""),
+        params=dict(curve.params or {}),
+    )
+
+
+def read_only_array(values, *, dtype=np.float64) -> np.ndarray:
+    """复制成任务独占的只读缓冲区。"""
+    array = np.array(values, dtype=dtype, copy=True)
+    array.setflags(write=False)
+    return array
+
+
+class PluginHostV2(PluginHost):
+    """API 2 宿主：在 v1 的上下文/刷新/提示之外增加分析能力。
+
+    v1 插件拿到的仍是 v1 接口，不会被要求实现这里的方法；声明了分析能力并
+    使用 API 2 的插件才需要它。实现由主程序提供，图形操作一律由宿主在主线程完成。
+    """
+
+    api_version = 2
+
+    @abc.abstractmethod
+    def capture_analysis_input(self) -> AnalysisInput2D:
+        """抓取当前二维结果的只读快照。
+
+        不可用时抛 :class:`AnalysisUnavailable`，消息可直接展示给用户。
+        """
+
+    @abc.abstractmethod
+    def submit_analysis(
+        self, work, *, title: str = "", params: Optional[Mapping[str, Any]] = None
+    ) -> Optional[AnalysisTaskHandle]:
+        """提交一次后台分析；返回句柄。
+
+        返回 ``None`` 表示当前不能提交（该插件上一个任务还没结束，或队列已满），
+        原因已经提示给用户。
+        """
+
+    @abc.abstractmethod
+    def cancel_analysis(self, handle: Optional[AnalysisTaskHandle]) -> None:
+        """请求取消；协作取消，未退出前不会启动该插件的下一个任务。"""

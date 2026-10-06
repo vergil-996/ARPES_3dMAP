@@ -2,6 +2,14 @@
 
 ## 本轮交接
 
+- 插件管理入口与系统完善（2026-10-06）：阶段 A–F 代码已全部落地并随 **v1.12.0**
+  发布：内置公钥 `bandscope-official-2026` 与仓库 Secret 已配置，Release 含签名插件包
+  与签名目录，平带增强扩展升到 1.2.0（`requires_app` 放宽为 `>=1.9.0,<2.0.0`，只有
+  1.12.0 及以上的主程序能解析范围声明）。统一回归 979 项通过。**剩余的是人工验收**：
+  C–F 真实窗口复核、CPU/NVIDIA 冻结包重建与 `verify_frozen_plugin_flow.py` 复跑、
+  线上在线安装的端到端验证。状态与验证结果见
+  [当前计划](../plans/plugin-management-entry.md) 的实施记录，密钥与发布流程见
+  [构建与发布](../development/releasing.md)。
 - [裁剪后裁空闪退：定位与修复（2026-09-27）](crop-erase-crash-2026-09-27.md)：
   驱动层访问违例（掩膜 + 非零 extent 的体网格），已修并复现/验收；打包版尚未重建。
 - [CI 首次运行失败：runner 没有 OpenGL（2026-09-27）](ci-no-opengl-2026-09-27.md)：

@@ -2,14 +2,13 @@
 
 ## 状态与交接
 
-- 日期：2026-09-28。
-- 状态：顶部入口方案已确认；用户随后要求把此前审查发现的完善项一并制定计划。本文件已扩展为分阶段实施计划。最终复核时，选择变化触发按钮更新已由并行任务合入仓库提交 `16c3a3b`；保留该修复，其余阶段按下文实施。本轮仅更新文档。
+- 日期：2026-09-28（2026-10-06 更新）。
+- 状态：**阶段 A–F 均已实施并随 v1.12.0 发布**（落地内容、验证结果与未执行项见文末实施记录）。A、B 于 2026-10-05 完成；C（统一兼容规则）、D（官方来源验证）、E（官方目录与升级衔接）、F（分析插件 API）于 2026-10-06 完成。发布前置项已落地：内置公钥 `bandscope-official-2026` 随 v1.12.0 发布，私钥受控副本与仓库 Secret 已配置，Release 含签名插件包与签名目录；平带增强扩展升到 1.2.0，`requires_app` 放宽为 `>=1.9.0,<2.0.0`。**尚未完成的是人工验收**：C–F 真实窗口人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
 - 负责范围：顶部入口与管理窗口、插件生命周期与安装恢复、兼容规则、官方来源验证、在线目录与升级衔接、分析插件 API，以及对应测试和发布验收。
 - 共享文件：主窗口、`bandscope/extensions/api.py`、更新控制器、依赖列表、两套 PyInstaller spec 和发布 CI 由集成任务统一协调。业务模块分别放入 `bandscope/extensions/`、`bandscope/updates/`；测试按责任放入 `tests/extensions/`、`tests/updates/` 和 `tests/integration/`。
-- 接手前阅读根目录及责任目录的 `AGENTS.md`，以及[目录地图](../architecture/repository-map.md)、[开发与测试](../development/testing.md)、[插件开发](../development/plugins.md)、[当前交接](../handoffs/README.md)。重新检查工作区，按当前代码定位接入点。
-- 调查期间有坐标轴积分交互重构及插件按钮修复并行进行，涉及主窗口、裁剪接入、底栏、积分控件与相关测试。本轮仅修改本计划和对应索引条目；接手时重新检查 `git status --short` 和最新提交，与其他任务协调共享文件，不按历史差异覆盖代码。
-- 验收结果：已完成代码调查；此前插件审查的 65 项既有测试通过，并复现了选择插件后管理按钮仍灰色的问题。最终复核发现该问题已新增修复和 `tests/extensions/test_plugin_dialog.py`，本轮未重新执行这些测试。这些结果属于历史基线和代码复核，不代表全部计划已验收；新功能回归与真实窗口视觉验收待实施时执行。
-- 下一步：按 A→B→C/D→E→F 顺序分阶段实施；每阶段记录结果和未执行项及原因，后续阶段不得因前一阶段通过而直接标记完成。
+- 接手前阅读根目录及责任目录的 `AGENTS.md`，以及[目录地图](../architecture/repository-map.md)、[开发与测试](../development/testing.md)、[插件开发](../development/plugins.md)、[构建与发布](../development/releasing.md)、[当前交接](../handoffs/README.md)。重新检查工作区，按当前代码定位接入点。
+- 验收结果：统一回归套件 `python -m unittest discover -s tests -t . -v` → **979 项全部通过**（v1.12.0 发布前复跑同样全部通过）；发布链路端到端脚本 `scripts/validation/verify_plugin_release_flow.py` 全部通过（临时测试密钥，不联网）；阶段 A、B 的真实窗口验收见上一轮记录；v1.12.0 的正式签名密钥、内置公钥、签名插件包与签名目录随 Release 发布，发布门禁按设计生效。**未执行**：真实窗口的人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
+- 下一步：重建两套冻结包并复跑 `verify_frozen_plugin_flow.py` → 按[测试指南](../development/testing.md)做一轮真实窗口人工复核（含分析插件面板在二维页的显隐）→ 用 v1.12.0 客户端在官方插件页做一次真实的取目录、下载、安装与验签确认。全部完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
 - 交付物：功能代码、相关回归测试、视觉验收记录。本文件为本功能唯一当前计划；实施期间更新状态，完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
 
 ## 实施顺序与默认约定
@@ -27,7 +26,7 @@
 - 所有插件管理操作在同一个“插件管理”窗口内完成。安装、更新、启用/停用和卸载均由用户发起；版本与运行状态在重启后切换，不做热替换或静默下载安装。
 - 保留本地 `.bsplugin` 导入。官方目录继续使用当前 GitHub 仓库的 Release，CPU/NVIDIA 共用插件包，不另建商店后端。
 - A、B 先作为可独立验收的管理功能修复；C、D 可在接口约定后分工，E 在兼容和信任校验通过后接入；F 单独交付，避免与管理可靠性修复混在同一批改动。
-- 当前代码仍是 API v1。最终复核的仓库提交 `16c3a3b` 中，主程序与平带插件 `requires_app` 为 1.11.2，而插件自身版本仍为 1.0.0。本文版本例子只说明规则，不授权直接扩大任何插件的兼容范围。
+- 当前代码仍是 API v1。最终复核的仓库提交 `16c3a3b` 中，主程序与平带插件 `requires_app` 为 1.11.2，而插件自身版本仍为 1.0.0。本文版本例子只说明规则，不授权直接扩大任何插件的兼容范围（2026-10-06：维护者已明确授权把平带增强扩展放宽为 `>=1.9.0,<2.0.0`，见文末发布记录）。
 
 ## 阶段 A：集中管理入口
 
@@ -210,3 +209,112 @@
 - 更新插件开发指南、插件 README、签名发布说明与用户安装说明。保留变更日志、登记表迁移说明、故障恢复步骤和尚未完成的外部配置项。
 - 集成负责人协调主窗口、API、依赖、spec、CI 和更新入口；子任务可认领存储/兼容、目录/签名、管理 UI、API 演示与测试，但先约定输入输出、状态归属和共享类型，避免同文件并行修改。
 - 本轮只交付计划文档；不生成生产密钥，不修改发布配置，不执行安装、卸载或线上发布。后续按阶段分别确认完成状态，全部完成后再归档本计划。
+
+---
+
+## 实施记录（阶段 A、B，2026-10-05）
+
+### 落地内容
+
+阶段 A（集中管理入口）：
+
+- 顶部工具栏移除 `backend_chip` 计算信息控件，原位置（版本按钮左侧）接入 92×32 的「插件管理」按钮（secondary 样式），点击打开/激活非模态管理窗口；仅当管理器自身无法构造（`plugin_session` 缺失）时禁用并提示原因。`render_status_label` 与底部状态栏保持不变。
+- 移除画布右键菜单里的「扩展管理…」重复入口；「检查更新」等其余菜单项不变。
+- 管理窗口按计划改造：窗口与文案统一为「插件管理」「安装插件…」；启用/停用按钮文案跟随所选插件状态；列表名称项用 `Qt.UserRole` 保存插件 id，刷新重排后按 id 恢复选择、操作按 id 定位；待卸载插件禁用启停与重复卸载，两个操作函数同样提前返回；卸载确认只说明“下次启动时执行”；管理提示统一为“安装、启用/停用或卸载后，请重启 BandScope 使设置完整生效”。新增「重试加载」「恢复上一版本」按钮与插件详情区。
+- 同步 `docs/development/plugins.md`、`plugins/flat_band_opacity/README.md` 与主 README 的当前行为说明（含登记表 v2 不与旧版混用的降级注意事项）。
+
+阶段 B（生命周期、安装事务与失败恢复）：
+
+- 新增 `bandscope/extensions/plugin_store.py`：登记表 schema v2（配置修订号、desired、last_good / previous_good、待卸载、恢复请求、失败候选、来源信息与最近错误，运行实例不序列化）；跨进程根锁（文件字节区间锁 + 进程内可重入）与会话租约（持有与否一律由操作系统锁判断）；内容按 `installed/<id>/<version>/<内容摘要>/` 不可变保存，摘要由相对路径、长度与字节按排序计算；安全启动维护——执行待卸载、应用恢复请求、清理未引用内容，检测到其他活跃会话时整段推迟。
+- `plugin_manager.py` 重做：期望配置与当前实例分离（启停/卸载/更新只写登记表，当前效果保持到重启）；安装事务“校验 → 临时解包 → 完整性检查 → 不可变落盘 → 原子替换登记表”，同版本不同内容拒绝、相同内容幂等、安装保留用户原启用意愿；v1 登记表迁移（先备份 `registry.json.v1.bak`，逐条校验并把内容重组进摘要目录，无法确认的条目原样保留为只读）；加载失败写入失败候选且不自动重复，管理窗口提供「重试加载」「恢复上一版本」（登记后重启执行，恢复前复核目标与宿主兼容）；健康回报携带启动时的配置修订与内容摘要，核对后才写 last_good / previous_good；统一 `shutdown()` 使每个实例的 `release()` 恰好一次；模块级安装/启停/卸载入口全部接受显式 root，修复自定义 root 下仍读环境变量的问题。
+- `api.py` 的 `PluginRecord` 扩展为“期望配置 + 会话状态”；`plugin_host.py` 面板挂载成功后回报健康，面板创建/挂载失败计为失败候选并立即释放实例；`refactored_app.py` 的加载提示只针对“本该运行却没加载”的插件，并转发启动说明（如卸载被其他会话推迟）。
+- 新增/更新测试：`tests/extensions/test_plugin_store.py`（迁移、摘要、损坏保护、原子写失败、锁、租约、两进程无丢失更新、真实文件占用下的卸载重试、恢复请求、清理）、`test_plugin_lifecycle.py`（自定义 root、恰好一次释放、面板失败释放、跨会话推迟、失败更新回退）、`test_plugin_dialog.py` 与 `test_plugin_manager.py` 按新语义重写扩展、`tests/integration/test_plugin_management_entry.py`（真实窗口入口用例，无 OpenGL 环境自动跳过）、共享构造器 `tests/support/plugins.py`；新增验收脚本 `scripts/validation/verify_plugin_management.py` 与 `verify_frozen_plugin_flow.py`。
+
+### 与计划的偏差（选择与理由）
+
+- **迁移清掉历史 `__pycache__` 并把内容重组进摘要目录**：v1 内容目录可能留有运行时字节码（不进入摘要）。迁移时先删除缓存、再计算摘要并搬进 `installed/<id>/<version>/<摘要>/`；加载全程禁止写字节码（`sys.dont_write_bytecode`），保证内容目录与摘要一一对应。
+- **面板初始化失败统一按“失败候选”处理并立即释放实例**：计划只要求“面板初始化后才标记 last_good”；这里把创建/挂载失败也记入登记表并释放，让「重试加载 / 恢复上一版本」覆盖这一类失败，同时满足“失败实例也要释放”。
+- **登记表损坏或 schema 未知时管理窗口为只读**：按“只读或恢复模式展示诊断”实现为窗口可开、显示诊断，写操作全部禁用，不提供以空表覆盖的入口。
+- **管理窗口的消息提示改用 `getattr(window, "_show_message", …)`**：原实现经 `window.__dict__` 取，主窗口的 `_show_message` 是方法，永远取不到而退回模态框；修正后复用主窗口的非模态提示。
+
+### 验证结果
+
+- 统一回归：`python -m unittest discover -s tests -t . -v` → **838 项全部通过**；扩展目录 125 项（存储 27、生命周期 6、管理面板 23、管理器 37、会话 30、导入兼容 2）。
+- 真实窗口验收：`scripts/validation/verify_plugin_management.py` → **24 项全部 PASS**，覆盖 1550×950、1280×800 与最窄宽度三档布局、未加载数据/裁剪模式进入管理窗口、窗口复用、状态列“运行中”、按钮文案；截图在 `.local/outputs/plugin_management/`。验收用真实构建的 flat_band_opacity 包安装，应用启动后按 schema v2 加载并写入 last_good。
+- 冻结包（CPU 与 NVIDIA 两套均构建成功、产物不含具体插件源码；启动 → 加载已安装插件 → 面板挂载 → 写入 last_good 全链路通过）：
+  - `verify_frozen_plugin_flow.py` CPU 与 NVIDIA **各 10 项全部 PASS**：基线加载、更新后 last_good 切换、1.0.0 作为 previous_good 保留且磁盘只留当前+一个回退、坏候选记录 failed 且未经重试不自动重复、恢复上一版本后 desired 回退且失败内容被清理、卸载后条目与目录移除。
+- CI 无 OpenGL 跳过的用例（单列）：`tests/integration/test_plugin_management_entry.py`（门控 `requires_opengl`）；`RealFileLockTests` 仅在 Windows 运行。
+
+### 未执行 / 后续
+
+- 阶段 C–F 见下节实施记录。
+- 未做人工鼠标操作复核：真实窗口验收由脚本驱动同一套公开接口并查看截图；拖拽手感、悬停提示等以人工复核为准，归于后续阶段一并执行。
+- 未走发布流程：本轮未升版本号、未打 tag、未发布 Release；发布时应把本记录随 release notes 一并体现。
+- 接手提示：先读 `plugin_store.py` / `plugin_manager.py` 的模块注释（路径格式、摘要定义、锁顺序、健康回报语义是全部不变量），再按 C→D→E→F 顺序推进；C 需要新增 `packaging` 依赖并同步两套 spec 与插件构建 CI。
+
+---
+
+## 实施记录（阶段 C–F，2026-10-06）
+
+### 落地内容
+
+阶段 C（统一兼容规则）：
+
+- 新增 `bandscope/extensions/compat.py`：`requires_app` 裸版本按 PEP 440 `==` 精确匹配、带运算符按 `SpecifierSet` 解析；`api_version` 改为宿主**支持集合**（`SUPPORTED_API_VERSIONS`，本阶段扩为 `{1, 2}`）；三项能力必须全部由宿主支持。安装、加载、构建脚本、目录筛选与升级评估共用 `evaluate_compatibility`，同一个声明到处得到同一句原因。
+- `api.parse_version`（抽数字比元组）删除，改由 `packaging.version.Version` 承担；`PluginManifest.check_compatibility` 变成对同一判定函数的一层异常包装。
+- `scripts/release/build_plugin.py` 改用同一判定，并打印“宿主版本 + 支持接口版本”作为 CI 记录；兼容声明不通过直接不出包。依赖新增 `packaging`（`requirements.txt`、发布工作流插件任务）。
+- 平带插件提升到 `1.0.1`；`requires_app` 保持裸值 `1.11.2`（精确匹配语义不变，不放宽范围）。
+
+阶段 D（官方来源验证）：
+
+- 新增 `bandscope/extensions/trust.py`：Ed25519 验签（`cryptography`），签名输入为「用途前缀 + 原始文件字节」，包与目录前缀不同；sidecar 记录协议版本、key_id、算法与 Base64 签名；`TRUSTED_PLUGIN_KEYS` 是唯一的信任来源（当前为空）。
+- 安装事务新增 `InstallSource`：未签名包默认拒绝（`accepted_unverified` 由界面确认后置位）；官方已验证插件换成未验证来源需要单独的 `accepted_downgrade` 确认；目录安装还核对 id/version/包 SHA-256。有签名但验不过一律拒绝，不降级。
+- 登记表来源分为「官方已验证 / 本地未验证 / 历史未验证」，v1 迁移条目记为 `legacy`。**激活前重新核对内容摘要**：从提交安装到重启加载之间内容被改动过的插件会被拒绝加载。
+- 发布脚本：`generate_plugin_key.py`（生成密钥、打印公钥条目）、`plugin_signing.py`（私钥加载与“私钥 ↔ 内置公钥”匹配校验）、`sign_plugin.py`（签名插件包与目录，支持 `--check-only` 作为发布门禁）。两套 PyInstaller spec 收集 `cryptography`。
+
+阶段 E（官方目录与升级衔接）：
+
+- 从更新服务抽出 `bandscope/updates/net.py`（HTTPS 主机白名单、超时、分块读取、进度、协作取消、大小与摘要校验、原子落盘）；`update_service` 改为复用，安装器下载不再是一份独立实现。
+- 新增 `bandscope/extensions/catalog.py`：目录 schema 1 的解析与校验（不可变 Release 地址、大小上限、摘要、同一 id/version 内容冲突拒绝）、目录验签、缓存（低于已接受修订号不替换）、版本选择（只推荐稳定版本、不自动降级、本地非标准版本不参与比较）、下载（包与签名一起校验，失败不留半截文件）。
+- 插件管理窗口改为「已安装 / 官方插件」两页：后台取目录、显示兼容结论与原因、确认来源与版本后下载安装；关闭窗口取消下载与取目录。
+- 新增 `bandscope/extensions/upgrade.py` 与更新提示接入：用**目录声明的目标宿主版本与接口集合**评估已安装插件，输出「可继续使用 / 升级后暂停加载 / 存在匹配更新 / 兼容性无法确认」清单；存在暂停或无法确认时默认选「稍后」，下载完成后启动安装器前再评估一次。
+- `scripts/release/build_plugin_catalog.py`：生成 `plugins-index.json`（可 `--merge` 上一版目录，同一 id/version 内容不一致直接拒绝；有签名的上一版先验签），发布工作流按「打包 → 校验密钥 → 签名包 → 聚合目录 → 签名目录」执行，缺密钥即失败。
+
+阶段 F（最小分析插件 API）：
+
+- `api.py` 增加 API 2 协议：`AnalysisInput2D`（`[x, y]` 顺序、坐标等长、只读缓冲区、单位只如实转述）、`AnalysisCurve1D`、`AnalysisTaskHandle`、`CancelToken`、`PluginHostV2`、`validate_analysis_curve`（x 必须有限，y 允许 NaN 但拒绝无穷），以及可选的 `Plugin.on_analysis_finished` 回调（v1 插件无需实现）。
+- 新增 `bandscope/extensions/analysis_host.py`：一个工作线程、最多四个排队任务、每插件最多一个未结束任务；协作取消（排队任务直接出队，运行中任务在插件检查点退出）；信号经主线程 QObject 转投，图形操作只在主线程。
+- `plugin_host.py`：快照抓取（只接受已完成精确结果；预览中、非 2D、`crop_empty`、带擦除区域都给出可展示原因）、提交/取消、结果校验与失效核对（数据代次变化或来源页关闭即丢弃）、`plugin_curve` 结果页创建（不强制切页），以及分析面板的挂载与按二维视图显隐。v1 卡片与 v2 分析面板各用一个挂载点，同一插件只挂一份面板。
+- `refactored_app.py`：`plugin_curve` 页类型、1D 上下文、导出分支（复用宿主 1D 路径）、来源页关闭时取消该页分析任务、启动时挂载分析面板；`result_workspace.add_page_inactive` 支持“建页但不切页”。
+- 新增演示插件 `plugins/integral_demo/`（API 2，三项分析能力）：纯数值积分与 NumPy 参考逐位一致，读只读快照、不改原始强度；面板提供方向选择、提交与取消。默认不加入 Release 发布清单。
+
+### 与计划的偏差（选择与理由）
+
+- **“未确认的未签名包直接拒绝”落在安装层而非只靠界面**：界面先给确认框，安装事务再独立复核一次并检查来源降级；这样绕过界面直接调 `install_package` 也拿不到默认放行。
+- **`submit_analysis` 忙碌时返回 `None` 而不是抛异常**：忙碌是预期状态，异常若从 Qt 槽里漏出去会终止进程；宿主已经用提示说明原因，插件可以什么都不做。
+- **分析面板挂在「处理分析」页而不是 3D 渲染控制页**：二维结果页默认停在「处理分析」页，挂在渲染页会导致用户看不到面板；显隐条件仍是“当前是二维视图”。
+- **目录缓存目录跟随扩展根**（`extension_root().parent / "plugins"`）而不是另拼一份 `LOCALAPPDATA`：测试与验收隔离扩展根时缓存一起被隔离，不会读到用户真实数据。
+- **`--merge` 的上一版目录“有签名就验签”**：首次带目录的发布没有前任，此时只提示不阻断；带签名却不通过的情况直接拒绝。
+
+### 验证结果
+
+- 统一回归：`python -m unittest discover -s tests -t . -v` → **979 项全部通过**（阶段 A、B 时为 838 项）。
+- 发布链路端到端（临时密钥、不联网、不发布）：`scripts/validation/verify_plugin_release_flow.py` → 全部通过：打包 → 缺密钥拒绝签名 → 签名成功 → 私钥与内置公钥匹配检查（不匹配被拒）→ 目录生成与签名 → 客户端解析/选择/摘要一致 → 官方来源安装并登记 key_id → 重启加载成功 → 篡改包被拒。
+- 分析插件端到端（真实构建 + 真实安装事务 + 真实结果页与导出路径）：`tests/integration/test_plugin_analysis_flow.py` 5 项通过，覆盖两种积分方向、结果挂在来源页下且不切页、原始强度逐位不变、v1/v2 面板分流、插件停用后结果仍可查看。
+- 新增测试模块：`tests/extensions/test_compat.py`、`test_trust.py`、`test_catalog.py`、`test_catalog_dialog.py`、`test_plugin_upgrade.py`、`test_analysis_host.py`、`test_plugin_analysis.py`、`tests/plugins/integral_demo/`。
+- 更新既有测试：安装路径现在要求显式来源（合成包统一用 `install_synthetic` / `synthetic_source`），不兼容用例改为切换宿主版本而不是改动磁盘清单（内容摘要会先一步拒绝）。
+
+### 未执行 / 后续
+
+- C–F 未做真实窗口人工复核（含分析面板在二维页的显隐、取目录与下载时的界面反馈）；未重建 CPU/NVIDIA 冻结包，`verify_frozen_plugin_flow.py` 未在本次改动后复跑；两套 spec 新增的 `cryptography` 收集只在本地验证过依赖可用，未实际构建。
+- 线上在线安装尚未由人工端到端走一遍（取目录 → 下载 → 验签 → 安装 → 重启加载）；发布产物只经过 CI 与自动化脚本验证。
+- 已安装的旧平带插件（1.0.0 / 1.0.1，未签名来源）与新的 1.2.0 签名包属来源转换，界面会要求用户确认；这条路径尚未在真实用户环境里验证。
+
+---
+
+## 发布记录（v1.12.0，2026-10-06）
+
+- 主程序升到 1.12.0；内置公钥 `bandscope-official-2026` 写入 `TRUSTED_PLUGIN_KEYS`，私钥受控副本在 `.local/maintainer/plugin-signing-key.pem`（不提交），仓库 Secrets `PLUGIN_SIGNING_KEY` / `PLUGIN_SIGNING_KEY_ID` 已配置。发布门禁（`sign_plugin.py --check-only`）保持失败即阻断，没有降级成警告。
+- 平带增强扩展升到 1.2.0，`requires_app` 由裸值 `1.11.2` 放宽为 `>=1.9.0,<2.0.0`（维护者明确要求，下限取插件机制与 `opacity_multiplier` 能力首次出现的 1.9.0）；二维积分演示插件的声明同步为 `>=1.12.0,<2.0.0`。
+- 根 README、插件 README、[插件开发](../development/plugins.md)、[构建与发布](../development/releasing.md)、[当前交接](../handoffs/README.md)同步到新版本号与密钥状态。
+- 范围放宽的实际生效范围：只有 1.12.0 及以上的主程序能解析范围声明；1.9.0–1.11.2 的旧客户端继续使用各自 Release 里的历史插件包，不会被推送 1.2.0。这一限制已写入插件开发文档与插件 README，避免被读成“旧版也能装新版包”。

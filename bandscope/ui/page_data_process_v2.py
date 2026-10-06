@@ -140,6 +140,75 @@ class DataProcessPage(ControlPageBase):
 
         self.vbox.addLayout(centered_widget_row(grp_other, self.MIN_GROUP_WIDTH))
 
+        # 分析插件挂载点：二维结果页的插件面板放在这里，由宿主按插件能力挂载与
+        # 显隐。基础安装包没有分析插件时这里始终为空，页面外观与之前一致。
+        self._analysis_cards = {}
+        self._analysis_card_target = {}
+        self._analysis_slot = QVBoxLayout()
+        self._analysis_slot.setContentsMargins(0, 0, 0, 0)
+        self._analysis_slot.setSpacing(self.SECTION_SPACING)
+        self.vbox.addLayout(self._analysis_slot)
+
+    # ------------------------------------------------------------------
+    # 分析插件卡片（宿主负责挂载、显隐与释放）
+    # ------------------------------------------------------------------
+    def mount_analysis_card(self, plugin_id, title, panel):
+        """挂一张分析插件卡片；重复挂载同一 id 会先移除旧卡片。"""
+        if plugin_id in self._analysis_cards:
+            self.remove_analysis_card(plugin_id)
+        group, body = self._create_group(title)
+        body.addWidget(panel)
+        row = centered_widget_row(group, self.MIN_GROUP_WIDTH)
+        self._analysis_slot.addLayout(row)
+        self._analysis_cards[plugin_id] = (group, row)
+        # 分析面板只在二维结果页显示，新挂载的卡片先按“不可见”登记：
+        # 主窗口在渲染二维页时会把它打开，避免在三维页里闪一下。
+        self._analysis_card_target[plugin_id] = False
+        set_widget_visibility_instant(group, False)
+        self._apply_adaptive_layout()
+        self.relayout_scroll_content()
+        return group
+
+    def remove_analysis_card(self, plugin_id):
+        entry = self._analysis_cards.pop(plugin_id, None)
+        self._analysis_card_target.pop(plugin_id, None)
+        if entry is None:
+            return
+        group, row = entry
+        if group in self._adaptive_groups:
+            self._adaptive_groups.remove(group)
+        while row.count():
+            item = row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._analysis_slot.removeItem(row)
+        self.relayout_scroll_content()
+
+    def set_analysis_card_visible(self, plugin_id, visible, *, animate=True):
+        entry = self._analysis_cards.get(plugin_id)
+        if entry is None:
+            return
+        group = entry[0]
+        if bool(visible) == self._analysis_card_target.get(plugin_id, False):
+            # 目标状态不变就不重播动画：每次二维重绘都会调到这里。
+            return
+        self._analysis_card_target[plugin_id] = bool(visible)
+        if animate:
+            animate_widget_visibility(
+                group,
+                visible,
+                on_update=self.relayout_scroll_content,
+                on_settled=self.relayout_scroll_content,
+            )
+        else:
+            set_widget_visibility_instant(group, visible)
+            self.relayout_scroll_content()
+
+    def analysis_card_ids(self):
+        return list(self._analysis_cards)
+
     # ------------------------------------------------------------------
     # 时间轴相关控件的显隐
     # ------------------------------------------------------------------

@@ -29,7 +29,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from bandscope.app_metadata import APP_VERSION  # noqa: E402
-from bandscope.extensions.api import API_VERSION, PluginError, PluginManifest  # noqa: E402
+from bandscope.extensions.api import PluginError, PluginManifest  # noqa: E402
+from bandscope.extensions.compat import (  # noqa: E402
+    SUPPORTED_API_VERSIONS,
+    evaluate_compatibility,
+)
 from bandscope.extensions.plugin_manager import (  # noqa: E402
     FORBIDDEN_LIBRARIES,
     PLUGIN_SUFFIX,
@@ -87,16 +91,20 @@ def build(plugin_id: str, output_dir: Path, app_version: str) -> Path:
         raise BuildError(
             f"清单里的 id 是 {manifest.plugin_id}，与目录名 {plugin_id} 不一致。"
         )
-    if int(manifest.api_version) != API_VERSION:
+    # 兼容判定与安装、加载、目录筛选共用同一个纯函数：构建时拦下的声明，装到
+    # 用户机器上也一定拦得住，不会在这里放行、到运行时才报不兼容。
+    verdict = evaluate_compatibility(
+        name=manifest.name,
+        requires_app=manifest.requires_app,
+        api_version=manifest.api_version,
+        capabilities=manifest.capabilities,
+        app_version=app_version,
+    )
+    if not verdict.ok:
         raise BuildError(
-            f"{manifest.name} 的 api_version={manifest.api_version}，"
-            f"当前宿主接口版本是 {API_VERSION}。"
-        )
-    expected = manifest.requires_app
-    if expected != app_version:
-        raise BuildError(
-            f"{manifest.name} 要求主程序 {expected}，而当前仓库版本是 {app_version}；"
-            "发布前请同步两者。"
+            f"{verdict.reason}"
+            "若本次发布确实扩大了兼容范围，请先完成对应宿主的回归验证并把新的"
+            "宿主/接口组合写进发布说明，不能只改声明上限。"
         )
 
     files = collect_files(package_dir)
@@ -154,6 +162,10 @@ def main(argv=None) -> int:
         help="用于核对 requires_app 的主程序版本（默认取 app_metadata）",
     )
     args = parser.parse_args(argv)
+
+    # 明确记录本次构建所针对的宿主/接口组合：兼容声明只覆盖真正验证过的组合。
+    apis = "、".join(str(item) for item in sorted(SUPPORTED_API_VERSIONS))
+    print(f"宿主版本 {args.app_version}；支持接口版本 {apis}")
 
     try:
         archive = build(args.plugin_id, Path(args.output_dir), args.app_version)

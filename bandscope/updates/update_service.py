@@ -19,7 +19,6 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlparse
 
 from bandscope.app_metadata import (
     APP_NAME,
@@ -30,17 +29,22 @@ from bandscope.app_metadata import (
     installer_asset_name,
 )
 
+# 主机白名单、分块读取、大小与摘要校验与插件目录共用同一套实现。
+from bandscope.updates.net import (  # noqa: F401  （沿用旧导入位置）
+    ALLOWED_DOWNLOAD_HOSTS,
+    DEFAULT_TIMEOUT_SECONDS,
+    DOWNLOAD_CHUNK_SIZE,
+    DownloadIntegrityError,
+    NetworkError,
+    UntrustedHostError,
+    ensure_https_download_url,
+    normalize_sha256,
+    save_stream,
+)
+
 
 GITHUB_API_VERSION = "2026-03-10"
-DEFAULT_TIMEOUT_SECONDS = 20
-DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_INSTALLER_BYTES = 2 * 1024 * 1024 * 1024
-ALLOWED_DOWNLOAD_HOSTS = {
-    "github.com",
-    "www.github.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-}
 SEMVER_PATTERN = re.compile(
     r"^(?:v)?(?P<major>0|[1-9]\d*)\."
     r"(?P<minor>0|[1-9]\d*)\."
@@ -50,7 +54,7 @@ SEMVER_PATTERN = re.compile(
 )
 
 
-class UpdateError(RuntimeError):
+class UpdateError(NetworkError):
     """Base class for user-presentable update failures."""
 
 
@@ -59,10 +63,6 @@ class ReleaseFormatError(UpdateError):
 
 
 class ReleaseAssetNotFound(UpdateError):
-    pass
-
-
-class DownloadIntegrityError(UpdateError):
     pass
 
 
@@ -184,23 +184,15 @@ class InstallerVerification:
         return self.signature_status == "Valid"
 
 
-def _normalize_sha256(value: str) -> str:
-    digest = str(value or "").strip().lower()
-    if digest.startswith("sha256:"):
-        digest = digest.partition(":")[2]
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        return ""
-    return digest
+_normalize_sha256 = normalize_sha256
 
 
 def _asset_digest(asset: dict) -> str:
-    return _normalize_sha256(asset.get("digest", ""))
+    return normalize_sha256(asset.get("digest", ""))
 
 
 def _ensure_https_download_url(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in ALLOWED_DOWNLOAD_HOSTS:
-        raise ReleaseFormatError(f"Release 资源使用了不受信任的下载地址：{url}")
+    ensure_https_download_url(url)
 
 
 class GitHubReleaseClient:
@@ -305,53 +297,23 @@ class GitHubReleaseClient:
             raise UpdateError("安装包超过 2 GiB 安全上限，已拒绝下载。")
 
         target_dir = Path(destination_dir) if destination_dir else update_cache_dir()
-        target_dir.mkdir(parents=True, exist_ok=True)
-        final_path = target_dir / asset.name
-        partial_path = final_path.with_suffix(final_path.suffix + ".part")
-        partial_path.unlink(missing_ok=True)
-
-        expected_digest = _normalize_sha256(asset.sha256)
+        expected_digest = normalize_sha256(asset.sha256)
         if not expected_digest:
             raise DownloadIntegrityError(
                 "GitHub 尚未提供该安装包的 SHA-256 摘要，已拒绝自动安装。"
             )
 
-        received = 0
-        digest = hashlib.sha256()
-        try:
-            with self._open(self._request(asset.download_url)) as response, partial_path.open("wb") as output:
-                final_url = getattr(response, "geturl", lambda: asset.download_url)()
-                _ensure_https_download_url(final_url)
-                while True:
-                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    received += len(chunk)
-                    if received > MAX_INSTALLER_BYTES:
-                        raise UpdateError("安装包下载量超过 2 GiB 安全上限。")
-                    digest.update(chunk)
-                    output.write(chunk)
-                    if progress is not None:
-                        progress(received, asset.size)
-        except Exception:
-            partial_path.unlink(missing_ok=True)
-            raise
-
-        if asset.size and received != asset.size:
-            partial_path.unlink(missing_ok=True)
-            raise DownloadIntegrityError(
-                f"安装包大小不完整：预期 {asset.size} 字节，实际 {received} 字节。"
+        with self._open(self._request(asset.download_url)) as response:
+            final_url = getattr(response, "geturl", lambda: asset.download_url)()
+            _ensure_https_download_url(final_url)
+            return save_stream(
+                response,
+                target_dir / asset.name,
+                max_bytes=MAX_INSTALLER_BYTES,
+                expected_size=asset.size,
+                expected_sha256=expected_digest,
+                progress=progress,
             )
-
-        actual_digest = digest.hexdigest()
-        if actual_digest != expected_digest:
-            partial_path.unlink(missing_ok=True)
-            raise DownloadIntegrityError(
-                "安装包 SHA-256 校验失败，文件可能损坏或已被篡改。"
-            )
-
-        os.replace(partial_path, final_path)
-        return final_path, actual_digest
 
 
 def update_cache_dir() -> Path:

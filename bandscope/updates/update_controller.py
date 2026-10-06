@@ -16,6 +16,8 @@ from bandscope.app_metadata import (
     current_build_flavor,
     is_frozen_build,
 )
+from bandscope.extensions.catalog import CatalogClient
+from bandscope.extensions.upgrade import evaluate_upgrade, format_impact
 from bandscope.updates.update_service import (
     GitHubReleaseClient,
     InstallerVerification,
@@ -37,14 +39,17 @@ NEW_VERSION_SNOOZE_SETTING = "updates/new_version_snooze_until_utc"
 
 
 class ReleaseCheckThread(QThread):
-    completed = pyqtSignal(object)
+    completed = pyqtSignal(object, object, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, client, current_version, flavor, parent=None):
+    def __init__(self, client, current_version, flavor, parent=None, catalog_client=None):
         super().__init__(parent)
         self.client = client
         self.current_version = current_version
         self.flavor = flavor
+        # 目录取不到（断网、没有签名目录）不是检查更新失败：升级提示仍要能弹出，
+        # 只是插件影响会显示为“无法确认”。
+        self.catalog_client = catalog_client
 
     def run(self):
         try:
@@ -52,7 +57,14 @@ class ReleaseCheckThread(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.completed.emit(result)
+        catalog = None
+        catalog_error = ""
+        if self.catalog_client is not None:
+            try:
+                catalog = self.catalog_client.fetch_catalog().catalog
+            except Exception as exc:
+                catalog_error = str(exc)
+        self.completed.emit(result, catalog, catalog_error)
 
 
 class InstallerDownloadThread(QThread):
@@ -98,11 +110,16 @@ class UpdateController(QObject):
         self.version_button = version_button
         self.flavor = current_build_flavor()
         self.client = GitHubReleaseClient()
+        self.catalog_client = CatalogClient(self.client)
         self._check_thread = None
         self._download_thread = None
         self._progress_dialog = None
         self._manual_check = False
         self._active_release = None
+        #: 最近一次检查到的官方插件目录与目标宿主，用于升级前后重新评估插件影响。
+        self._plugin_catalog = None
+        self._plugin_catalog_error = ""
+        self._plugin_impact = None
 
         try:
             cleanup_update_cache()
@@ -154,7 +171,9 @@ class UpdateController(QObject):
 
         self._manual_check = bool(manual)
         self._set_checking_state(True)
-        thread = ReleaseCheckThread(self.client, APP_VERSION, self.flavor, self)
+        thread = ReleaseCheckThread(
+            self.client, APP_VERSION, self.flavor, self, self.catalog_client
+        )
         thread.completed.connect(self._on_check_completed)
         thread.failed.connect(self._on_check_failed)
         thread.finished.connect(self._on_check_thread_finished)
@@ -193,8 +212,10 @@ class UpdateController(QObject):
             # Mutes only this dialog; the 12-hour check keeps running.
             self._start_snooze(FAILURE_SNOOZE_SETTING, FAILURE_SNOOZE_INTERVAL)
 
-    def _on_check_completed(self, result):
+    def _on_check_completed(self, result, catalog=None, catalog_error=""):
         self._record_check_time()
+        self._plugin_catalog = catalog
+        self._plugin_catalog_error = str(catalog_error or "")
         if not isinstance(result, UpdateCheckResult):
             if self._manual_check:
                 self._show_message("检查更新失败", "更新服务返回了无法识别的数据。", QMessageBox.Warning)
@@ -214,7 +235,35 @@ class UpdateController(QObject):
         if not self._manual_check and self._snooze_active(NEW_VERSION_SNOOZE_SETTING):
             return
         self._active_release = result.release
+        self._plugin_impact = self._evaluate_plugin_impact(result.release.version)
         self._prompt_for_update(result)
+
+    def _plugin_manager(self):
+        session = getattr(self.window, "plugin_session", None)
+        return getattr(session, "manager", None)
+
+    def _evaluate_plugin_impact(self, target_version):
+        """用目录声明的目标宿主评估已安装插件；缺元数据时归入“无法确认”。"""
+        manager = self._plugin_manager()
+        if manager is None:
+            return None
+        try:
+            return evaluate_upgrade(
+                manager,
+                self._plugin_catalog,
+                target_version=str(target_version),
+            )
+        except Exception as exc:
+            print(f"Plugin upgrade assessment failed: {exc}")
+            return None
+
+    def _impact_text(self, report) -> str:
+        if report is None:
+            return ""
+        text = format_impact(report)
+        if self._plugin_catalog_error:
+            text += f"\n（插件目录获取失败：{self._plugin_catalog_error}）"
+        return text
 
     def _prompt_for_update(self, result):
         release = result.release
@@ -230,6 +279,11 @@ class UpdateController(QObject):
             notes = notes[:1600].rstrip() + "\n……"
         box.setInformativeText(notes)
 
+        report = self._plugin_impact
+        impact = self._impact_text(report)
+        if impact:
+            box.setDetailedText("插件影响：\n" + impact)
+
         if is_frozen_build():
             primary = box.addButton("下载并安装", QMessageBox.AcceptRole)
         else:
@@ -237,7 +291,9 @@ class UpdateController(QObject):
         later = box.addButton("稍后", QMessageBox.RejectRole)
         skip = box.addButton("跳过此版本", QMessageBox.DestructiveRole)
         snooze = box.addButton("一周内不再提示", QMessageBox.ActionRole)
-        box.setDefaultButton(primary)
+        # 有插件会被暂停加载或兼容性无法确认时，默认选“稍后”，由用户明确继续。
+        blocking = bool(report is not None and report.has_blocking)
+        box.setDefaultButton(later if blocking else primary)
         box.setEscapeButton(later)
         box.exec_()
 
@@ -331,6 +387,11 @@ class UpdateController(QObject):
             )
             icon = QMessageBox.Warning
 
+        # 从“提示更新”到“下载完成”之间用户可能改过插件状态，这里再评估一次。
+        target_version = str(getattr(self._active_release, "version", "") or APP_VERSION)
+        self._plugin_impact = self._evaluate_plugin_impact(target_version)
+        report = self._plugin_impact
+
         box = QMessageBox(self.window)
         box.setWindowTitle("安装 BandScope 更新")
         box.setIcon(icon)
@@ -338,9 +399,15 @@ class UpdateController(QObject):
         box.setInformativeText(
             f"{signature_text}\n\n启动安装程序后 BandScope 将退出；安装器会在原目录覆盖升级，不会删除用户设置。"
         )
+        impact = self._impact_text(report)
+        if impact:
+            box.setDetailedText("插件影响（已重新评估）：\n" + impact)
         install_button = box.addButton("启动安装程序", QMessageBox.AcceptRole)
         cancel_button = box.addButton("取消", QMessageBox.RejectRole)
-        box.setDefaultButton(install_button if verification.signature_valid else cancel_button)
+        blocking = bool(report is not None and report.has_blocking)
+        box.setDefaultButton(
+            install_button if verification.signature_valid and not blocking else cancel_button
+        )
         box.setEscapeButton(cancel_button)
         box.exec_()
         if box.clickedButton() is not install_button:

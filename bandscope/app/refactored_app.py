@@ -112,6 +112,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
+    #: 插件分析结果页：数据完全来自结果快照，不重算、不参与体积后台计算。
+    PLUGIN_CURVE_PAGE_KIND = "plugin_curve"
     GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
     FULL_SCOPE_ID = "full"
@@ -252,10 +254,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             session = PluginSession(self)
             session.startup()
             session.mount_cards(self.page_render)
+            session.mount_analysis_cards(self.page_data)
             self.plugin_session = session
         except Exception as exc:
             print(f"Extension startup failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
+        # 工具栏先于本段构造：会话就绪（或失败）后刷新插件管理按钮状态。
+        self._update_plugin_button_state()
         # 提示要等窗口显示之后再弹，构造期 Toast 还没有可用的落点。
         QTimer.singleShot(0, self._notify_plugin_load_issues)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
@@ -747,13 +752,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         row.addStretch(1)
 
-        self.backend_chip = QLabel("", self.toolbar)
-        self.backend_chip.setFixedHeight(26)
-        self.backend_chip.setStyleSheet(
-            f"QLabel {{ color: {theme.TEXT_2}; background-color: {theme.BG_3}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 6px; padding: 2px 12px; font-size: 11px; }}"
-        )
-        row.addWidget(self.backend_chip)
+        self.btn_tb_plugins = _make_tb_btn("插件管理", "secondary", 92)
+        self.btn_tb_plugins.setToolTip("安装、卸载及启用/停用插件")
+        self.btn_tb_plugins.clicked.connect(self.open_plugin_manager)
+        self._update_plugin_button_state()
+        row.addWidget(self.btn_tb_plugins)
         row.addSpacing(8)
 
         self.btn_tb_version = ActionButton(self.toolbar)
@@ -1160,10 +1163,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             text, color = state_map.get(str(phase), (f"● {phase_text}", theme.TEXT_3))
             state_label.setText(text)
             state_label.setStyleSheet(f"color: {color}; font-size: 11px; background: transparent;")
-
-        backend_chip = self.__dict__.get("backend_chip")
-        if backend_chip is not None:
-            backend_chip.setText(f"● {compute_name}计算 · {self._render_device_label()}")
 
         self._update_statusbar()
 
@@ -1663,8 +1662,24 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             parts.append((record.plugin_id, repr(state)))
         return tuple(parts)
 
+    def _update_plugin_button_state(self):
+        """插件管理按钮：只有管理器自身无法构造时才禁用。
+
+        登记表损坏、迁移失败或单个插件加载失败都不该挡住管理入口——这些正是
+        需要进管理窗口看诊断、做恢复的情况。
+        """
+        button = self.__dict__.get("btn_tb_plugins")
+        if button is None:
+            return
+        available = self.__dict__.get("plugin_session") is not None
+        button.setEnabled(available)
+        if available:
+            button.setToolTip("安装、卸载及启用/停用插件")
+        else:
+            button.setToolTip("插件管理不可用：扩展模块未能初始化。")
+
     def open_plugin_manager(self):
-        """打开本地扩展管理面板（导入 / 启用 / 卸载）。"""
+        """打开插件管理面板（安装 / 启用停用 / 卸载 / 恢复）。"""
         session = self.__dict__.get("plugin_session")
         if session is None:
             return None
@@ -1672,24 +1687,51 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         return open_plugin_manager(self, session)
 
+    def add_plugin_result_page(self, *, title, source_page_id, source_title, data_scope_id, params):
+        """插件分析结果页：唯一标题、挂在来源页下、**不切换**当前页。
+
+        结果属于提交任务时的来源页与快照，用户正在看什么就继续看什么；新页在
+        左侧页面树里等着被点开。
+        """
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._make_unique_page_title(title),
+            page_kind=self.PLUGIN_CURVE_PAGE_KIND,
+            source_module="plugin_analysis",
+            source_page_id=source_page_id,
+            source_title=source_title,
+            data_scope_id=data_scope_id,
+            params=dict(params or {}),
+        )
+        self._seed_control_state_for_spec(spec)
+        self.left_workspace.add_page_inactive(spec)
+        self._toast_success("分析完成", f"{spec.title}（在左侧页面树中查看）")
+        return spec
+
     def _notify_plugin_load_issues(self):
-        """加载失败或不兼容的扩展不执行，但要让用户知道效果没被应用。
+        """把加载失败与启动说明告诉用户；不重复弹同一错误。
 
         这个函数由 QTimer 调起，抛出异常会被 PyQt 当成未捕获异常直接结束进程，
-        所以整体再兜一层。
+        所以整体再兜一层。停用或待卸载的插件不算“未加载”，不弹提示。
         """
         try:
             session = self._plugin_session()
             toast = self.__dict__.get("toast_manager")
             if session is None:
                 return
+            notes = []
             for record in session.manager.plugins():
-                if record.ready or not record.load_error:
+                if not record.load_error or record.ready:
                     continue
-                text = f"扩展「{record.plugin_id}」未加载：{record.load_error}"
+                if not record.enabled or record.pending_removal or record.unconfirmed_reason:
+                    continue
+                notes.append(f"插件「{record.plugin_id}」未加载：{record.load_error}")
+            for note in session.manager.notes():
+                notes.append(note)
+            for text in notes:
                 if toast is not None:
                     try:
-                        toast.show(text, level="warning", title="扩展未生效")
+                        toast.show(text, level="warning", title="插件")
                         continue
                     except Exception:
                         pass
@@ -3478,10 +3520,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             action.triggered.connect(
                 lambda _checked=False, target=popup: target.show_at(global_pos)
             )
-        # 用 __dict__ 取而不是方法调用：菜单构造也出现在只填了部分属性的测试桩上。
-        if self.__dict__.get("plugin_session") is not None:
-            extension_action = menu.addAction("扩展管理…")
-            extension_action.triggered.connect(self.open_plugin_manager)
         menu.addSeparator()
         update_action = menu.addAction(f"检查更新（当前 v{APP_VERSION}）")
         update_action.triggered.connect(
@@ -4932,6 +4970,24 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "curves": curves,
         }
 
+    def _get_plugin_curve_context(self, spec):
+        """插件分析结果页：数据完全来自结果快照，不重算、不依赖当前数据。
+
+        这样即使之后换了数据或关了来源页，已生成的结果仍然可以查看与导出。
+        """
+        snapshot = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        if snapshot is None:
+            return None
+        return {
+            "view": "1d",
+            "x_data": snapshot["x_data"],
+            "y_data": snapshot["y_data"],
+            "title": spec.title,
+            "xlabel": snapshot.get("xlabel") or "",
+            "ylabel": "Intensity (a.u.)",
+            "plugin_analysis": dict(spec.params.get("plugin_analysis") or {}),
+        }
+
     @staticmethod
     def _compute_axis_second_derivative(
         data,
@@ -5477,6 +5533,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._get_curve_comparison_context(spec)
         if spec.page_kind == self.LOG_1D_PAGE_KIND:
             return self._get_log_curve_context(spec)
+        if spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:
+            return self._get_plugin_curve_context(spec)
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
@@ -7769,6 +7827,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         session = self._plugin_session()
         if session is not None and session.card_ids():
             session.set_cards_visible(is_3d_view)
+        # 分析插件面板只在二维结果页显示，与 v1 卡片各管各的显隐。
+        if session is not None and session.analysis_card_ids():
+            session.set_analysis_cards_visible(render_context["view"] == "2d")
         if is_3d_view:
             # 相机快照 / E 轴翻转 / 程序恢复都已在上面落定，这里回读最终姿态。
             self._sync_camera_view_controls()
@@ -7776,6 +7837,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def on_result_page_closed(self, page_id):
         self.crop_controller.remove_page(page_id)
         self.refresh_coordinator.cancel_page(page_id)
+        # 来源页关闭后结果没有归属：取消它名下的分析任务，晚到的结果也会被丢弃。
+        session = self._plugin_session()
+        if session is not None:
+            session.cancel_page_analysis(page_id)
         self._clear_axis_prefix_cache(page_id)
         self._axis_titles().forget_page(page_id)
         self._rotation_cache.clear()
@@ -8252,8 +8317,32 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._build_waterfall_export_payload(spec, raw_data, coords)
         elif spec.page_kind == "second_derivative":
             return self._build_second_derivative_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:
+            return self._build_plugin_curve_export_payload(spec)
         else:
             return self._build_energy_dos_export_payload(spec, raw_data, coords)
+
+    def _build_plugin_curve_export_payload(self, spec):
+        """插件分析结果导出：复用宿主已有的 1D 曲线导出路径。"""
+        snapshot = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        if snapshot is None:
+            self._show_message("无法导出", "该插件结果页没有可用的曲线数据。", QMessageBox.Information)
+            return None
+        x_data = np.asarray(snapshot["x_data"], dtype=np.float64)
+        y_data = np.asarray(snapshot["y_data"], dtype=np.float64)
+        # 键名用坐标轴自己的名字：文本导出会据此写表头，npz/mat 也能看出是哪条轴。
+        x_key = str(snapshot.get("xlabel") or "").split(" ")[0].strip() or "x"
+        export_data = {
+            x_key: np.asarray(x_data, dtype=np.float32),
+            "intensity": np.asarray(y_data, dtype=np.float32),
+            "x_label": np.asarray([str(snapshot.get("xlabel") or "")]),
+            "source_title": np.asarray([str(snapshot.get("source_title") or "")]),
+        }
+        analysis = dict(spec.params.get("plugin_analysis") or {})
+        for key in ("plugin_id", "plugin_version", "snapshot_id", "data_generation", "scope_id"):
+            if key in analysis:
+                export_data[key] = np.asarray([analysis[key]])
+        return "导出分析结果", f"{self._sanitize_filename_component(spec.title)}.mat", export_data
 
     def export_current_result(self):
         spec = self.left_workspace.current_spec()

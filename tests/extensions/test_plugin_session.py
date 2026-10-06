@@ -21,7 +21,8 @@ from bandscope.extensions.api import (
     align_multiplier_to_voxels,
 )
 from bandscope.extensions.plugin_host import PluginSession
-from bandscope.extensions.plugin_manager import PluginManager, install_package
+from bandscope.extensions.plugin_manager import PluginManager
+from tests.support.plugins import install_synthetic
 from scripts.release.build_plugin import build as build_package
 
 PLUGIN_ID = "flat_band_opacity"
@@ -143,7 +144,7 @@ class SessionTestCase(unittest.TestCase):
         os.environ["BANDSCOPE_EXTENSION_ROOT"] = str(self.root)
         self.addCleanup(self._restore)
         archive = build_package(PLUGIN_ID, self.root / "dist", APP_VERSION)
-        install_package(archive, app_version=APP_VERSION)
+        install_synthetic(archive, app_version=APP_VERSION)
 
     def _restore(self):
         if self._previous is None:
