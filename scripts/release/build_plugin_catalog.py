@@ -9,11 +9,11 @@
 
     # 先打包并签名，再生成目录（目录本身由 sign_plugin.py --purpose catalog 签名）
     python scripts/release/build_plugin_catalog.py \\
-        --tag v1.12.2 --output release/plugins-index.json \\
+        --tag v1.12.3 --output release/plugins-index.json \\
         release/BandScope-flat_band_opacity-1.0.1.bsplugin
 
     # 聚合上一版目录，保留仍受支持宿主的历史包
-    python scripts/release/build_plugin_catalog.py --tag v1.12.2 \\
+    python scripts/release/build_plugin_catalog.py --tag v1.12.3 \\
         --merge previous/plugins-index.json --output release/plugins-index.json release/*.bsplugin
 """
 from __future__ import annotations
@@ -195,7 +195,7 @@ def build(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="生成官方插件目录")
     parser.add_argument("packages", nargs="+", help="已签名的 .bsplugin 文件")
-    parser.add_argument("--tag", required=True, help="本次 Release 的 tag，例如 v1.12.2")
+    parser.add_argument("--tag", required=True, help="本次 Release 的 tag，例如 v1.12.3")
     parser.add_argument("--output", required=True, help="输出 plugins-index.json 的路径")
     parser.add_argument("--merge", default=None, help="上一版 plugins-index.json，用于保留历史记录")
     parser.add_argument("--host-version", default=APP_VERSION, help="目录声明的目标宿主版本")
