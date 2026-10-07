@@ -1,0 +1,16 @@
+{
+  "id": "band_reconstruct",
+  "name": "能带重构",
+  "version": "1.1.0",
+  "api_version": 3,
+  "requires_app": ">=1.12.3,<2.0.0",
+  "entry_point": "entry:BandReconstructPlugin",
+  "capabilities": [
+    "data_snapshot_3d",
+    "analysis_task",
+    "result_surface_2d",
+    "render_overlay_surface"
+  ],
+  "description": "按论文的 MRF 方法从三维强度体 I(kx, ky, E) 中逐带重构二维色散面：后台纯 NumPy/SciPy 计算，逐带初始化面与对齐参数可调，结果作为能带面结果页呈现、可导出，并可叠加到三维视图上。只读取宿主给的三维快照，不改动原始强度、色阶或导出数值。",
+  "author": "BandScope"
+}

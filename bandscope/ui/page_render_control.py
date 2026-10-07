@@ -1,5 +1,5 @@
 from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout
+from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.widgets import SiLabel
 
@@ -35,6 +35,8 @@ class RenderControlPage(ControlPageBase):
     #: 输入框提交新姿态（姿态, 本次改动的字段名）/ 请求重置相机：由主窗口连接渲染状态与相机实例。
     camera_pose_committed = pyqtSignal(object, str)
     camera_view_reset_requested = pyqtSignal()
+    #: 能带面叠加：某一层被用户勾选/取消（层键, 是否可见）。
+    overlay_visibility_changed = pyqtSignal(str, bool)
 
     def build_body(self):
         # 相机视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
@@ -125,6 +127,27 @@ class RenderControlPage(ControlPageBase):
         self._extension_slot.setSpacing(self.SECTION_SPACING)
         self.vbox.addLayout(self._extension_slot)
 
+        # 能带面叠加：插件面结果在三维视图里的显隐开关。没有面结果时整张卡片
+        # 收起（与扩展卡片一样，基础安装包看不到它）。
+        grp_overlay, v_overlay = self._create_group("能带面叠加")
+        self.grp_overlay = grp_overlay
+        self._overlay_rows = {}
+        self._overlay_signature = ()
+        self._overlay_visible_target = True
+        self._overlay_slot = QVBoxLayout()
+        self._overlay_slot.setContentsMargins(0, 0, 0, 0)
+        self._overlay_slot.setSpacing(4)
+        v_overlay.addLayout(self._overlay_slot)
+        self.overlay_hint = SiLabel(
+            "还没有可叠加的能带面：在三维视图上用能带重构插件跑一次，结果会自动出现在这里。",
+            grp_overlay,
+        )
+        self.overlay_hint.setWordWrap(True)
+        self.overlay_hint.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
+        v_overlay.addWidget(self.overlay_hint, 0, Qt.AlignHCenter)
+        self.vbox.addLayout(centered_widget_row(grp_overlay, self.MIN_GROUP_WIDTH))
+        self.set_overlay_card_visible(False, animate=False)
+
         # 全局计算后端（不随分析结果页保存）
         grp_backend, v_backend = self._create_group("性能与硬件")
         self.combo_backend = self._create_denoise_combo("计算后端", ["Auto", "CPU", "NVIDIA GPU"])
@@ -194,6 +217,91 @@ class RenderControlPage(ControlPageBase):
 
     def extension_card_ids(self):
         return list(self._extension_cards)
+
+    # ------------------------------------------------------------------
+    # 能带面叠加卡片（宿主提供层列表，勾选状态由宿主保存）
+    # ------------------------------------------------------------------
+    def set_overlay_layers(self, layers):
+        """按 ``(key, label, color, visible)`` 列表刷新卡片。
+
+        层集合与文案没变时只同步勾选状态（不重建控件），避免每次三维重绘都把
+        正在点的勾选框换掉。
+        """
+        signature = tuple((str(key), str(label), str(color or "")) for key, label, color, _v in layers)
+        if signature != self._overlay_signature:
+            self._overlay_signature = signature
+            self._rebuild_overlay_rows(layers)
+        for key, _label, _color, visible in layers:
+            self._set_overlay_row_checked(str(key), bool(visible))
+
+    def _rebuild_overlay_rows(self, layers):
+        while self._overlay_slot.count():
+            item = self._overlay_slot.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+            elif item.layout() is not None:
+                self._clear_layout(item.layout())
+        self._overlay_rows = {}
+        for key, label, color, visible in layers:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            chip = QLabel("■")
+            chip.setStyleSheet(f"color: {color or theme.ACCENT}; font-size: 13px;")
+            row.addWidget(chip)
+            check = QCheckBox(str(label))
+            check.setChecked(bool(visible))
+            check.toggled.connect(
+                lambda state, layer_key=str(key): self.overlay_visibility_changed.emit(
+                    layer_key, bool(state)
+                )
+            )
+            row.addWidget(check)
+            row.addStretch(1)
+            container = QWidget(self)
+            container.setLayout(row)
+            self._overlay_slot.addWidget(container)
+            self._overlay_rows[str(key)] = check
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _set_overlay_row_checked(self, key, visible):
+        check = self._overlay_rows.get(key)
+        if check is None or check.isChecked() == bool(visible):
+            return
+        blocker = QSignalBlocker(check)
+        try:
+            check.setChecked(bool(visible))
+        finally:
+            del blocker
+
+    def set_overlay_card_visible(self, visible, *, animate=True):
+        visible = bool(visible)
+        if self._overlay_visible_target == visible:
+            return
+        self._overlay_visible_target = visible
+        if animate:
+            animate_widget_visibility(
+                self.grp_overlay,
+                visible,
+                on_update=self.relayout_scroll_content,
+                on_settled=self.relayout_scroll_content,
+            )
+        else:
+            set_widget_visibility_instant(self.grp_overlay, visible)
+            self.relayout_scroll_content()
+
+    def overlay_layer_keys(self):
+        return list(self._overlay_rows)
 
     # ------------------------------------------------------------------
     # 「相机视角」显隐与数值同步（相机实例由主窗口持有）

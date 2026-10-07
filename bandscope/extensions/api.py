@@ -28,12 +28,16 @@ import numpy as np
 #: 版本与能力的判定规则统一放在 ``compat``：安装、加载、构建脚本、官方目录和
 #: 升级评估共用同一组纯函数。这里重导出协议常量，插件与新代码仍从本模块引用。
 from bandscope.extensions.compat import (  # noqa: F401
+    ANALYSIS_3D_CAPABILITIES,
     ANALYSIS_CAPABILITIES,
     API_VERSION,
     CAPABILITY_ANALYSIS_TASK,
     CAPABILITY_DATA_SNAPSHOT_2D,
+    CAPABILITY_DATA_SNAPSHOT_3D,
     CAPABILITY_OPACITY_MULTIPLIER,
+    CAPABILITY_RENDER_OVERLAY_SURFACE,
     CAPABILITY_RESULT_CURVE_1D,
+    CAPABILITY_RESULT_SURFACE_2D,
     SUPPORTED_API_VERSIONS,
     SUPPORTED_CAPABILITIES,
     evaluate_compatibility,
@@ -350,6 +354,13 @@ class Plugin(abc.ABC):
         ``failed``、``cancelled``。
         """
 
+    def on_analysis_progress(self, handle, fraction: float, message: str = "") -> None:
+        """分析任务的进度回传（可选）。
+
+        插件在 ``CancelToken.report_progress`` 里上报，宿主节流后在**主线程**回调
+        这里。默认什么都不做：不实现这个钩子的插件照常工作。
+        """
+
     def reset_for_new_data(self) -> None:
         """加载新数据文件时清空与旧数据绑定的峰位。"""
 
@@ -539,9 +550,16 @@ class CancelToken:
 
     插件在循环里调用 :meth:`raise_if_cancelled`（或读 :attr:`cancelled`）主动退出；
     宿主不会强制终止线程，也不会在窗口销毁后回调控件。
+
+    :meth:`report_progress` 是**可选**的进度回传通道：宿主没接线时它是无副作用的
+    空操作，接线后进度会被节流送到主线程（面板状态行与
+    ``Plugin.on_analysis_progress``）。加在令牌上而不是工作函数签名上，旧插件的
+    三参数工作函数完全不受影响。
     """
 
     _event: Any = field(default_factory=threading.Event)
+    #: 宿主注入的进度接收器 ``(fraction, message) -> None``；None 表示未接线。
+    progress_sink: Any = None
 
     def cancel(self) -> None:
         self._event.set()
@@ -553,6 +571,19 @@ class CancelToken:
     def raise_if_cancelled(self) -> None:
         if self.cancelled:
             raise AnalysisCancelled("分析任务已取消。")
+
+    def report_progress(self, fraction: float, message: str = "") -> None:
+        """汇报进度（``0..1``）；越界夹到端点，非有限值直接忽略。"""
+        sink = self.progress_sink
+        if sink is None:
+            return
+        try:
+            value = float(fraction)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(value):
+            return
+        sink(min(1.0, max(0.0, value)), str(message or ""))
 
 
 #: 插件提供的分析工作函数：``(快照, 冻结参数, 取消信号) -> AnalysisCurve1D``。
@@ -638,3 +669,240 @@ class PluginHostV2(PluginHost):
     @abc.abstractmethod
     def cancel_analysis(self, handle: Optional[AnalysisTaskHandle]) -> None:
         """请求取消；协作取消，未退出前不会启动该插件的下一个任务。"""
+
+
+# ---------------------------------------------------------------------------
+# 三维分析插件（API 3）
+# ---------------------------------------------------------------------------
+
+#: 三维快照的数组顺序：``[X, Y, E]``（前两维是动量平面，第三维是能量）。
+ANALYSIS_VOLUME_ORDER = "[X, Y, E]"
+
+#: 面结果的数组顺序：``z[i, j]`` 对应 ``(x[i], y[j])``。
+ANALYSIS_SURFACE_ORDER = "[i, j] = [x, y]"
+
+#: 一次分析允许交回的带面数量上限。
+MAX_SURFACE_BANDS = 64
+
+
+@dataclass(frozen=True)
+class AnalysisInput3D:
+    """当前三维体数据的只读快照。
+
+    取数语义与三维视图所见一致：当前页的**数据域**（ROI 裁剪后）→ 当前**时间帧**
+    → 若开启了全局去噪则取去噪后的体数据。**不含显示旋转**：``rotation_angle``
+    只如实记录当前显示角度，叠加渲染时由宿主把同一旋转施加到几何上。
+
+    数组固定为 ``[X, Y, E]``；``x`` / ``y`` / ``e`` 与对应维等长且已按同一数据域
+    切片。单位只如实转述，缺单位时保持空串。``volume`` 与坐标都是任务独占的
+    **只读**缓冲区，插件改不动；体数据里的 NaN 表示缺测（不是 0）。
+
+    生命周期：宿主只在任务存续期持有快照，任务结束即释放；插件不要在工作函数
+    返回后继续持有 ``volume``。
+    """
+
+    plugin_id: str
+    page_id: str
+    page_title: str
+    snapshot_id: str
+    data_generation: int
+    volume: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    e: np.ndarray
+    x_label: str = "X"
+    x_unit: str = ""
+    y_label: str = "Y"
+    y_unit: str = ""
+    e_label: str = "E"
+    e_unit: str = ""
+    frame_index: Optional[int] = None
+    frame_label: str = ""
+    scope_id: str = "full"
+    scope_label: str = "完整数据"
+    rotation_angle: float = 0.0
+    title: str = ""
+    source: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def shape(self) -> Tuple[int, int, int]:
+        return (
+            int(self.volume.shape[0]),
+            int(self.volume.shape[1]),
+            int(self.volume.shape[2]),
+        )
+
+    @property
+    def nbytes(self) -> int:
+        return int(self.volume.nbytes)
+
+    def describe(self) -> str:
+        """一行可读的来源说明，直接进结果页与日志。"""
+        parts = [
+            self.title or self.page_title or self.page_id,
+            "×".join(str(size) for size in self.shape),
+        ]
+        if self.frame_label:
+            parts.append(self.frame_label)
+        if self.scope_label:
+            parts.append(self.scope_label)
+        return " · ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
+class BandSurface:
+    """一条带的能量面：``z[i, j]`` 是 ``(x[i], y[j])`` 处的能量。
+
+    ``z`` 用 NaN 表示无解/未定；``color`` 与 ``opacity`` 只是显示偏好，阶段 3 的
+    三维叠加会用它们，宿主不认识时忽略即可。
+    """
+
+    z: np.ndarray
+    label: str = ""
+    color: str = ""
+    opacity: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class AnalysisSurface2D:
+    """插件交回的二维面结果：同一动量网格上的若干条带面。
+
+    一批带面共用 ``x`` / ``y`` 坐标与 ``z`` 的标签单位；宿主据此建面结果页
+    （逐个带面一页或带选择器由宿主决定），并负责展示与导出。``params`` 必须是
+    可序列化的普通数据。
+    """
+
+    x: Sequence[float]
+    y: Sequence[float]
+    surfaces: Sequence[BandSurface]
+    x_label: str = "kx"
+    x_unit: str = ""
+    y_label: str = "ky"
+    y_unit: str = ""
+    z_label: str = "E"
+    z_unit: str = ""
+    title: str = ""
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+    def x_axis_label(self) -> str:
+        return _axis_label(self.x_label, self.x_unit)
+
+    def y_axis_label(self) -> str:
+        return _axis_label(self.y_label, self.y_unit)
+
+    def z_axis_label(self) -> str:
+        return _axis_label(self.z_label, self.z_unit)
+
+
+def _monotonic_axis(values, name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    if array.size == 0:
+        raise AnalysisResultError(f"面结果的 {name} 坐标为空。")
+    if not np.all(np.isfinite(array)):
+        raise AnalysisResultError(f"面结果的 {name} 坐标含缺测或非有限值，坐标必须完整。")
+    diffs = np.diff(array)
+    if not (np.all(diffs > 0) or np.all(diffs < 0)):
+        raise AnalysisResultError(f"面结果的 {name} 坐标必须严格单调。")
+    return array
+
+
+def validate_analysis_surface(surface: AnalysisSurface2D) -> AnalysisSurface2D:
+    """校验面结果并转成宿主拥有的只读缓冲区。
+
+    - ``x`` / ``y`` 一维、非空、有限、严格单调；
+    - 每条带的 ``z`` 形状必须是 ``(len(x), len(y))``；允许 NaN（无解），拒绝 ±inf；
+    - 至少一条带、不超过 :data:`MAX_SURFACE_BANDS` 条；标签去重（重复时补序号）。
+    """
+    if not isinstance(surface, AnalysisSurface2D):
+        raise AnalysisResultError(
+            f"面结果必须是 AnalysisSurface2D，收到 {type(surface).__name__}。"
+        )
+    x = _monotonic_axis(surface.x, "x")
+    y = _monotonic_axis(surface.y, "y")
+    bands = list(surface.surfaces or ())
+    if not bands:
+        raise AnalysisResultError("面结果里至少需要一条带。")
+    if len(bands) > MAX_SURFACE_BANDS:
+        raise AnalysisResultError(
+            f"面结果最多支持 {MAX_SURFACE_BANDS} 条带，收到 {len(bands)} 条。"
+        )
+
+    normalized = []
+    used_labels = set()
+    for position, band in enumerate(bands):
+        if not isinstance(band, BandSurface):
+            raise AnalysisResultError(
+                f"第 {position + 1} 条带必须是 BandSurface，收到 {type(band).__name__}。"
+            )
+        try:
+            z = np.asarray(band.z, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise AnalysisResultError(f"第 {position + 1} 条带的数值无法解析：{exc}") from exc
+        if z.ndim != 2:
+            raise AnalysisResultError(f"第 {position + 1} 条带的 z 必须是二维数组。")
+        if z.shape != (x.size, y.size):
+            raise AnalysisResultError(
+                f"第 {position + 1} 条带的 z 形状 {z.shape} 与坐标网格 "
+                f"{(x.size, y.size)} 不一致。"
+            )
+        if np.any(np.isinf(z)):
+            raise AnalysisResultError(
+                f"第 {position + 1} 条带的 z 含无穷值；无解请用 NaN 表示。"
+            )
+        label = str(band.label or "").strip() or f"Band {position + 1}"
+        if label in used_labels:
+            suffix = 2
+            while f"{label} ({suffix})" in used_labels:
+                suffix += 1
+            label = f"{label} ({suffix})"
+        used_labels.add(label)
+
+        opacity = band.opacity
+        if opacity is not None:
+            try:
+                opacity = float(opacity)
+            except (TypeError, ValueError):
+                opacity = None
+            else:
+                opacity = min(1.0, max(0.0, opacity))
+        normalized.append(
+            BandSurface(
+                z=read_only_array(z),
+                label=label,
+                color=str(band.color or "").strip(),
+                opacity=opacity,
+            )
+        )
+
+    return AnalysisSurface2D(
+        x=read_only_array(x),
+        y=read_only_array(y),
+        surfaces=tuple(normalized),
+        x_label=str(surface.x_label or "kx"),
+        x_unit=str(surface.x_unit or ""),
+        y_label=str(surface.y_label or "ky"),
+        y_unit=str(surface.y_unit or ""),
+        z_label=str(surface.z_label or "E"),
+        z_unit=str(surface.z_unit or ""),
+        title=str(surface.title or ""),
+        params=dict(surface.params or {}),
+    )
+
+
+class PluginHostV3(PluginHostV2):
+    """API 3 宿主：在 API 2 之上增加三维体数据快照。
+
+    API 1 / API 2 插件看到的句柄行为不变；声明 ``data_snapshot_3d`` 的插件才需要
+    这个方法。面结果（``result_surface_2d``）不新增调用接口：宿主在任务成功回调里
+    按结果类型建页，插件只负责交回 :class:`AnalysisSurface2D`。
+    """
+
+    api_version = 3
+
+    @abc.abstractmethod
+    def capture_analysis_input_3d(self) -> AnalysisInput3D:
+        """抓取当前三维体数据的只读快照。
+
+        不可用时抛 :class:`AnalysisUnavailable`：未加载数据、结果未完成、数据域为
+        空、快照超过宿主上限都会给出可直接展示的原因。
+        """

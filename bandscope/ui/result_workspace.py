@@ -205,6 +205,9 @@ class ResultWorkspace(QWidget):
         self.header = QFrame(self.content_frame)
         self.header.setObjectName("result_header")
         header_layout = QHBoxLayout(self.header)
+        self.header_layout = header_layout
+        #: 页头里由宿主按页面插入的控件（当前用于插件面结果页的带选择器）。
+        self.header_extra = None
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(10)
         self.header.setFixedHeight(30)
@@ -336,6 +339,23 @@ class ResultWorkspace(QWidget):
     def set_delete_confirm_handler(self, handler: Optional[Callable[[dict], bool]]):
         """宿主提供的删除确认：``handler(plan) -> bool``。未设置时直接删除。"""
         self._delete_confirm_handler = handler
+
+    def set_header_extra(self, widget: Optional[QWidget]) -> None:
+        """在页头（标题之后、来源标签之前）放一个随页面切换的控件。
+
+        传 ``None`` 表示清空。宿主负责在切页/重绘时调用；重复传入同一个控件不做
+        任何事，避免每次重绘都重建控件（会打断下拉框的交互）。
+        """
+        if widget is self.header_extra:
+            return
+        previous = self.header_extra
+        self.header_extra = widget
+        if previous is not None:
+            self.header_layout.removeWidget(previous)
+            previous.setParent(None)
+            previous.deleteLater()
+        if widget is not None:
+            self.header_layout.insertWidget(1, widget)
 
     def set_home_page(self, spec: AnalysisPageSpec):
         spec.closeable = False

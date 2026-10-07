@@ -18,26 +18,33 @@
 from __future__ import annotations
 
 import uuid
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot
 
+from bandscope.core.crop_model import SPATIAL_LABELS
+from bandscope.core.data_scope import scoped_descriptor_from_array
 from bandscope.extensions.analysis_host import AnalysisTaskRunner
 from bandscope.extensions.api import (
+    ANALYSIS_3D_CAPABILITIES,
     ANALYSIS_ARRAY_ORDER,
     ANALYSIS_CAPABILITIES,
+    ANALYSIS_VOLUME_ORDER,
     SOURCE_FILE,
     AnalysisInput2D,
+    AnalysisInput3D,
     AnalysisResultError,
+    AnalysisSurface2D,
     AnalysisTaskHandle,
     AnalysisUnavailable,
     EnergyAxisSpec,
     PluginContext,
-    PluginHostV2,
+    PluginHostV3,
     align_multiplier_to_voxels,
     read_only_array,
     validate_analysis_curve,
+    validate_analysis_surface,
 )
 from bandscope.extensions.plugin_manager import PluginManager
 
@@ -50,15 +57,18 @@ EFFECT_CAUSE_LABEL = "plugin"
 #: 结果页里记录插件分析来源的参数键。
 ANALYSIS_PARAMS_KEY = "plugin_analysis"
 
+#: 一次三维快照的体积上限：超过就拒绝并给出可展示的原因（约 1 GiB）。
+MAX_SNAPSHOT_3D_BYTES = 1024**3
 
-class _HostBridge(PluginHostV2):
+
+class _HostBridge(PluginHostV3):
     """交给插件的宿主句柄；只暴露协议允许的动作。
 
     每个插件拿到的句柄绑定自己的 ``plugin_id``：分析任务的排队与限制是按插件
     计的，句柄必须知道它在替谁提交。
     """
 
-    api_version = 2
+    api_version = 3
 
     def __init__(self, session: "PluginSession", plugin_id: str = ""):
         self._session = session
@@ -85,6 +95,10 @@ class _HostBridge(PluginHostV2):
 
     def cancel_analysis(self, handle) -> None:
         self._session.cancel_analysis(handle)
+
+    # -- v3 -------------------------------------------------------------
+    def capture_analysis_input_3d(self) -> AnalysisInput3D:
+        return self._session.capture_analysis_input_3d(self._plugin_id)
 
 
 def _region_operation(region) -> str:
@@ -121,6 +135,10 @@ class _AnalysisGateway(QObject):
     def on_busy(self, plugin_id, reason) -> None:
         self._session.on_analysis_busy(plugin_id, reason)
 
+    @pyqtSlot(object, float, str)
+    def on_progress(self, handle, fraction, message) -> None:
+        self._session.on_analysis_progress(handle, fraction, message)
+
 
 class PluginSession:
     """一个主窗口对应一个会话。"""
@@ -133,6 +151,7 @@ class PluginSession:
         self._context = PluginContext()
         self._cards: Dict[str, object] = {}
         self._analysis_cards: Dict[str, object] = {}
+        self._analysis_page_ref = None
         self._failed: Dict[str, str] = {}
         # 分析任务：快照只留在宿主手里，结果页也由宿主创建。
         self._snapshots: Dict[str, AnalysisInput2D] = {}
@@ -142,6 +161,7 @@ class PluginSession:
         self._analysis_runner.failed.connect(self._analysis_gateway.on_failed)
         self._analysis_runner.cancelled.connect(self._analysis_gateway.on_cancelled)
         self._analysis_runner.busy.connect(self._analysis_gateway.on_busy)
+        self._analysis_runner.progress.connect(self._analysis_gateway.on_progress)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -348,9 +368,10 @@ class PluginSession:
         for record in self.manager.ready_plugins():
             if record.plugin_id in self._cards:
                 continue
-            if self.is_analysis_plugin(record):
-                # 声明了分析能力的插件走「处理分析」页的挂载点，面板只在二维
-                # 结果页显示；这里跳过，避免同一插件挂出两份面板。
+            if self.is_analysis_card_plugin(record):
+                # 声明了分析能力的插件走「处理分析」页的挂载点（二维插件在二维
+                # 结果页显示、三维插件在三维视图显示）；这里跳过，避免同一插件
+                # 挂出两份面板。
                 continue
             try:
                 panel = record.instance.create_panel(self.host_for(record.plugin_id))
@@ -437,11 +458,38 @@ class PluginSession:
     # 能力 5：分析（API 2）
     # ------------------------------------------------------------------
     @staticmethod
-    def is_analysis_plugin(record) -> bool:
-        """是否声明了完整的分析能力（三项缺一不可）。"""
+    def _capabilities(record) -> set:
         manifest = getattr(record, "manifest", None)
-        capabilities = set(getattr(manifest, "capabilities", ()) or ())
-        return set(ANALYSIS_CAPABILITIES).issubset(capabilities)
+        return set(getattr(manifest, "capabilities", ()) or ())
+
+    @classmethod
+    def is_analysis_plugin(cls, record) -> bool:
+        """是否声明了完整的二维分析能力（三项缺一不可）。"""
+        return set(ANALYSIS_CAPABILITIES).issubset(cls._capabilities(record))
+
+    @classmethod
+    def is_analysis_plugin_3d(cls, record) -> bool:
+        """是否声明了完整的三维分析能力（三项缺一不可）。"""
+        return set(ANALYSIS_3D_CAPABILITIES).issubset(cls._capabilities(record))
+
+    @classmethod
+    def is_analysis_card_plugin(cls, record) -> bool:
+        """是否需要挂分析面板（二维或三维分析插件都挂，只是显隐视图不同）。"""
+        return cls.is_analysis_plugin(record) or cls.is_analysis_plugin_3d(record)
+
+    @classmethod
+    def analysis_panel_views(cls, record) -> Tuple[str, ...]:
+        """分析面板在哪些视图下显示。
+
+        二维快照插件在二维结果页显示（现状不变）；三维快照插件在三维视图显示，
+        因为它的输入是当前数据域的体数据。
+        """
+        views = []
+        if cls.is_analysis_plugin(record):
+            views.append("2d")
+        if cls.is_analysis_plugin_3d(record):
+            views.append("3d")
+        return tuple(views)
 
     @staticmethod
     def _analysis_unavailable(spec, context) -> str:
@@ -560,9 +608,109 @@ class PluginSession:
             },
         )
 
+    # ------------------------------------------------------------------
+    # 能力 6：三维快照（API 3）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _analysis_unavailable_3d(spec, window) -> str:
+        """能不能抓三维快照；能则返回空串，不能则返回可展示的原因。"""
+        if spec is None:
+            return "当前没有可分析的页面。"
+        if getattr(window, "original_raw_data", None) is None:
+            return "还没有加载数据，无法抓取三维快照。"
+        if not getattr(window, "_render_exact_ready", False):
+            return "当前结果正在计算中，请等计算完成后重试。"
+        return ""
+
+    def capture_analysis_input_3d(self, plugin_id: str) -> AnalysisInput3D:
+        """抓取当前页数据域的三维强度体快照。
+
+        取数与三维视图所见一致：当前页的数据域（ROI）→ 当前时间帧 → 含全局去噪；
+        **不含**显示旋转（``rotation_angle`` 只如实记录，叠加渲染时由宿主代偿）。
+        坐标按同一数据域切片，体积超过上限时抛出带原因的
+        :class:`AnalysisUnavailable`。
+        """
+        window = self.window
+        spec = window.left_workspace.current_spec() or window.left_workspace.home_spec()
+        reason = self._analysis_unavailable_3d(spec, window)
+        if reason:
+            raise AnalysisUnavailable(reason)
+
+        raw_data, coords = window._get_display_state_for_spec(spec)
+        if raw_data is None or coords is None:
+            raise AnalysisUnavailable("当前页没有可用的数据域，无法抓取三维快照。")
+
+        frame_index, frame_label = self._current_frame(window)
+        data_3d = window._get_data_for_t_from_raw(raw_data, 0 if frame_index is None else frame_index)
+        values = np.asarray(data_3d, dtype=np.float32)
+        if values.ndim != 3 or values.size == 0:
+            raise AnalysisUnavailable("当前数据不是三维体，无法抓取快照。")
+        required = int(values.size) * int(np.dtype(np.float32).itemsize)
+        if required > MAX_SNAPSHOT_3D_BYTES:
+            raise AnalysisUnavailable(
+                f"三维快照约 {required / 1024 ** 3:.2f} GiB，超过 "
+                f"{MAX_SNAPSHOT_3D_BYTES / 1024 ** 3:.0f} GiB 上限；"
+                "请先用 ROI 缩小数据域后重试。"
+            )
+
+        descriptor = scoped_descriptor_from_array(data_3d)
+        bounds = (
+            descriptor.spatial_bounds
+            if descriptor is not None and not descriptor.is_full
+            else None
+        )
+
+        def axis_values(key: str) -> np.ndarray:
+            array = np.asarray(coords.get(key), dtype=np.float64).reshape(-1)
+            if bounds is None:
+                return array
+            index = {"X": 0, "Y": 1, "E": 2}[key]
+            return array[bounds[2 * index] : bounds[2 * index + 1] + 1]
+
+        axes = {key: axis_values(key) for key in ("X", "Y", "E")}
+        for key, size in zip(("X", "Y", "E"), values.shape):
+            if axes[key].size != int(size):
+                raise AnalysisUnavailable(
+                    f"{key} 轴坐标长度 {axes[key].size} 与体数据维度 {int(size)} 不一致，"
+                    "无法生成可分析的三维快照。"
+                )
+
+        units = {key: self._coordinate_meta(window, key)[1] for key in ("X", "Y", "E")}
+        scope_label = descriptor.label if descriptor is not None else "完整数据"
+        return AnalysisInput3D(
+            plugin_id=str(plugin_id or ""),
+            page_id=str(spec.page_id),
+            page_title=str(spec.title),
+            snapshot_id=uuid.uuid4().hex,
+            data_generation=int(getattr(window, "shared_denoise_version", 0) or 0),
+            # 复制成任务独占的只读缓冲区：插件改不动，也不必自己再复制一份。
+            volume=read_only_array(values, dtype=np.float32),
+            x=read_only_array(axes["X"]),
+            y=read_only_array(axes["Y"]),
+            e=read_only_array(axes["E"]),
+            x_label=SPATIAL_LABELS["X"],
+            x_unit=str(units["X"] or ""),
+            y_label=SPATIAL_LABELS["Y"],
+            y_unit=str(units["Y"] or ""),
+            e_label=SPATIAL_LABELS["E"],
+            e_unit=str(units["E"] or ""),
+            frame_index=frame_index,
+            frame_label=frame_label,
+            scope_id=str(getattr(spec, "data_scope_id", "full") or "full"),
+            scope_label=str(scope_label),
+            rotation_angle=float(getattr(window, "rotation_angle", 0.0) or 0.0),
+            title=str(spec.title),
+            source={
+                "page_kind": str(spec.page_kind),
+                "data_order": ANALYSIS_VOLUME_ORDER,
+                "denoise_version": int(getattr(window, "shared_denoise_version", 0) or 0),
+                "roi_bounds": list(bounds) if bounds is not None else None,
+            },
+        )
+
     def submit_analysis(self, plugin_id, snapshot, work, *, title="", params=None):
         """提交一次后台分析；忙碌时提示用户并返回 None。"""
-        if not isinstance(snapshot, AnalysisInput2D):
+        if not isinstance(snapshot, (AnalysisInput2D, AnalysisInput3D)):
             self.notify("分析快照无效，请重新抓取后再提交。", level="warning")
             return None
         handle = self._analysis_runner.submit(
@@ -574,6 +722,24 @@ class PluginSession:
 
     def cancel_analysis(self, handle) -> None:
         self._analysis_runner.cancel(handle)
+
+    def on_analysis_progress(self, handle, fraction, message="") -> None:
+        """进度回到主线程：只转给还在跑的那个任务所属插件。
+
+        任务结束后（快照已释放）晚到的进度直接丢弃，避免面板被过期消息刷屏。
+        """
+        task_id = str(getattr(handle, "task_id", ""))
+        if task_id not in self._snapshots:
+            return
+        plugin_id = str(getattr(handle, "plugin_id", ""))
+        record = self.manager.record(plugin_id)
+        instance = getattr(record, "instance", None) if record is not None else None
+        if instance is None:
+            return
+        try:
+            instance.on_analysis_progress(handle, float(fraction), str(message or ""))
+        except Exception as exc:
+            self._failed[plugin_id] = f"进度回调失败：{type(exc).__name__}: {exc}"
 
     def cancel_page_analysis(self, page_id: str) -> int:
         """来源页关闭时取消它名下的分析任务。"""
@@ -605,13 +771,16 @@ class PluginSession:
         except Exception as exc:
             self._failed[plugin_id] = f"分析回调失败：{type(exc).__name__}: {exc}"
 
-    def on_analysis_succeeded(self, handle, curve) -> None:
+    def on_analysis_succeeded(self, handle, result) -> None:
         """主线程收结果：校验 → 核对来源 → 建结果页（不切换当前页）。"""
         snapshot = self._snapshots.pop(getattr(handle, "task_id", ""), None)
         if snapshot is None:
             return
+        if isinstance(result, AnalysisSurface2D):
+            self._finish_surface_result(handle, snapshot, result)
+            return
         try:
-            validated = validate_analysis_curve(curve)
+            validated = validate_analysis_curve(result)
         except AnalysisResultError as exc:
             self.on_analysis_failed(handle, str(exc))
             return
@@ -664,6 +833,79 @@ class PluginSession:
             return
         self._notify_plugin_task(handle, "succeeded")
 
+    def _finish_surface_result(self, handle, snapshot, surface) -> None:
+        """面结果：一条带一个结果页，页内带选择器可切换同组带面。
+
+        一个任务交回同一动量网格上的若干条带面；逐带建页（对照 ``plugin_curve``
+        的一结果一页），每页的 ``base_surface`` 都带全组数据与自己的默认带号，
+        阶段 3 的叠加图层可以直接按页取用。
+        """
+        try:
+            validated = validate_analysis_surface(surface)
+        except AnalysisResultError as exc:
+            self.on_analysis_failed(handle, str(exc))
+            return
+        window = self.window
+        if self._result_is_stale(snapshot):
+            self._notify_plugin_task(handle, "cancelled", "数据已更新，结果已作废。")
+            return
+        source_spec = window.left_workspace.page_by_id(snapshot.page_id)
+        if source_spec is None:
+            self._notify_plugin_task(handle, "cancelled", "来源页已关闭，结果已丢弃。")
+            return
+
+        bands = validated.surfaces
+        base_title = validated.title or f"{snapshot.page_title} 能带面"
+        analysis = {
+            "plugin_id": snapshot.plugin_id,
+            "plugin_version": self._plugin_version(snapshot.plugin_id),
+            "task_id": str(getattr(handle, "task_id", "")),
+            "snapshot_id": snapshot.snapshot_id,
+            "data_generation": snapshot.data_generation,
+            "source_page_id": snapshot.page_id,
+            "source_title": source_spec.title,
+            "source_description": snapshot.describe(),
+            "scope_id": snapshot.scope_id,
+            "params": dict(validated.params),
+        }
+        base_surface = {
+            "x": validated.x,
+            "y": validated.y,
+            "bands": [
+                {"label": band.label, "z": band.z, "color": band.color, "opacity": band.opacity}
+                for band in bands
+            ],
+            "x_label": validated.x_label,
+            "x_unit": validated.x_unit,
+            "y_label": validated.y_label,
+            "y_unit": validated.y_unit,
+            "z_label": validated.z_label,
+            "z_unit": validated.z_unit,
+        }
+        try:
+            for position, band in enumerate(bands):
+                title = base_title if len(bands) == 1 else f"{base_title} · {band.label}"
+                params = {
+                    "surface_kind": "plugin_surface",
+                    ANALYSIS_PARAMS_KEY: dict(
+                        analysis, band_index=position, band_label=band.label
+                    ),
+                    "base_surface": dict(base_surface, selected_band=position),
+                }
+                window.add_plugin_result_page(
+                    title=title,
+                    source_page_id=snapshot.page_id,
+                    source_title=source_spec.title,
+                    data_scope_id=snapshot.scope_id,
+                    params=params,
+                    result_kind="surface",
+                )
+        except Exception as exc:
+            self._failed[snapshot.plugin_id] = f"结果页创建失败：{type(exc).__name__}: {exc}"
+            self._notify_plugin_task(handle, "failed", "结果页创建失败。")
+            return
+        self._notify_plugin_task(handle, "succeeded")
+
     def _plugin_version(self, plugin_id: str) -> str:
         record = self.manager.record(plugin_id)
         if record is None:
@@ -684,10 +926,11 @@ class PluginSession:
     # ------------------------------------------------------------------
     def mount_analysis_cards(self, page_data) -> None:
         """把分析插件的面板挂到「处理分析」页；失败只记录，不影响界面。"""
+        self._analysis_page_ref = page_data
         for record in self.manager.ready_plugins():
             if record.plugin_id in self._analysis_cards:
                 continue
-            if not self.is_analysis_plugin(record):
+            if not self.is_analysis_card_plugin(record):
                 continue
             try:
                 panel = record.instance.create_panel(self.host_for(record.plugin_id))
@@ -710,11 +953,21 @@ class PluginSession:
             self._analysis_cards[record.plugin_id] = card
             self.manager.mark_healthy(record.plugin_id)
 
-    def set_analysis_cards_visible(self, visible: bool, *, animate: bool = True) -> None:
+    def set_analysis_cards_visible(self, view: str, *, animate: bool = True) -> None:
+        """按当前视图显隐各分析面板。
+
+        二维快照插件只在二维结果页出现；三维快照插件只在三维视图出现；同时声明
+        两类能力的插件两处都显示（同一份面板）。
+        """
         page_data = self._analysis_page()
         if page_data is None:
             return
+        current = str(view or "")
         for plugin_id in self._analysis_cards:
+            record = self.manager.record(plugin_id)
+            visible = (
+                current in self.analysis_panel_views(record) if record is not None else False
+            )
             try:
                 page_data.set_analysis_card_visible(plugin_id, visible, animate=animate)
             except Exception:
@@ -724,7 +977,18 @@ class PluginSession:
         return list(self._analysis_cards)
 
     def _analysis_page(self):
-        return getattr(self.window, "page_data", None)
+        """分析面板的挂载点：优先用真正挂过面板的那个页面。
+
+        重新从窗口上取 ``page_data`` 会在窗口拆除/测试桩上抛错，而且理论上可能
+        挂到另一个页面上；记住挂载点更可靠。
+        """
+        page = self._analysis_page_ref
+        if page is not None:
+            return page
+        try:
+            return getattr(self.window, "page_data", None)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # 刷新
@@ -746,7 +1010,12 @@ class PluginSession:
 
     def notify(self, message: str, *, level: str = "info") -> None:
         window = self.window
-        toast = getattr(window, "toast_manager", None)
+        try:
+            toast = getattr(window, "toast_manager", None)
+        except Exception:
+            # 窗口正在拆除（或测试桩没走完整初始化）时 getattr 也可能抛错：
+            # 提示失败不该影响任务本身。
+            toast = None
         if toast is not None and hasattr(toast, "show"):
             try:
                 toast.show(str(message))

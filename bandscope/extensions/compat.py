@@ -35,6 +35,16 @@ CAPABILITY_DATA_SNAPSHOT_2D = "data_snapshot_2d"
 CAPABILITY_ANALYSIS_TASK = "analysis_task"
 #: 能力标识：插件可以交回一维曲线结果，由宿主建结果页。
 CAPABILITY_RESULT_CURVE_1D = "result_curve_1d"
+#: 能力标识：插件可以抓取三维强度体的只读快照（当前数据域 + 当前帧 + 去噪）。
+CAPABILITY_DATA_SNAPSHOT_3D = "data_snapshot_3d"
+#: 能力标识：插件可以交回二维面结果（能带面），由宿主建面结果页。
+CAPABILITY_RESULT_SURFACE_2D = "result_surface_2d"
+#: 能力标识：面结果可以叠加进三维视图。
+#:
+#: 与另外两项三维能力不同，它**不是**必需的：`result_surface_2d` 的结果本来就会
+#: 出现在三维视图的「能带面叠加」卡片里。这个能力用于插件显式声明「我的面结果
+#: 适合叠加显示」，宿主也按同一集合判定兼容性。
+CAPABILITY_RENDER_OVERLAY_SURFACE = "render_overlay_surface"
 
 #: 分析插件（API 2）必须同时声明这三项能力，缺一不可。
 ANALYSIS_CAPABILITIES = (
@@ -43,13 +53,25 @@ ANALYSIS_CAPABILITIES = (
     CAPABILITY_RESULT_CURVE_1D,
 )
 
+#: 三维分析插件（API 3）必须同时声明这三项能力，缺一不可。
+ANALYSIS_3D_CAPABILITIES = (
+    CAPABILITY_DATA_SNAPSHOT_3D,
+    CAPABILITY_ANALYSIS_TASK,
+    CAPABILITY_RESULT_SURFACE_2D,
+)
+
 #: 宿主声明支持的插件接口版本集合。插件清单里的 ``api_version`` 必须是其中
 #: 之一才会被加载；新增接口版本时在这里追加，而不是让旧判断“近似通过”。
-SUPPORTED_API_VERSIONS = frozenset({1, 2})
+SUPPORTED_API_VERSIONS = frozenset({1, 2, 3})
 
 #: 宿主声明支持的能力集合。插件声明的能力必须全部在这里。
 SUPPORTED_CAPABILITIES = frozenset(
-    {CAPABILITY_OPACITY_MULTIPLIER, *ANALYSIS_CAPABILITIES}
+    {
+        CAPABILITY_OPACITY_MULTIPLIER,
+        *ANALYSIS_CAPABILITIES,
+        *ANALYSIS_3D_CAPABILITIES,
+        CAPABILITY_RENDER_OVERLAY_SURFACE,
+    }
 )
 
 #: 当前宿主接口版本（支持集合里最高的一个），供插件与构建脚本引用。

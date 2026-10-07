@@ -2,12 +2,13 @@
 
 ## 接口与目录
 
-插件源码放 `plugins/<id>/`，包含 `plugin.json`、`README.md`、入口模块和功能资源；测试放 `tests/plugins/<id>/`。现有平带插件（渲染效果）与二维积分演示插件（分析任务）分别作为两类示例。
+插件源码放 `plugins/<id>/`，包含 `plugin.json`、`README.md`、入口模块和功能资源；测试放 `tests/plugins/<id>/`。现有平带插件（渲染效果）、二维积分演示插件（API 2 分析任务）与能带重构插件（API 3 三维分析）分别作为三类示例。
 
 ```python
 from bandscope.extensions.api import (
     Plugin, PluginContext, PluginHost,        # API 1：上下文、刷新、提示
-    PluginHostV2, AnalysisInput2D, AnalysisCurve1D,  # API 2：分析任务
+    PluginHostV2, AnalysisInput2D, AnalysisCurve1D,  # API 2：二维分析任务
+    PluginHostV3, AnalysisInput3D, AnalysisSurface2D, BandSurface,  # API 3：三维分析
 )
 from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwitch
 ```
@@ -18,7 +19,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 
 ## 版本与兼容声明
 
-- `api_version` 是整数。宿主声明**支持集合**，当前为 `{1, 2}`；插件声明的版本必须落在集合里，不能因为主程序小版本接近就认定兼容。
+- `api_version` 是整数。宿主声明**支持集合**，当前为 `{1, 2, 3}`；插件声明的版本必须落在集合里，不能因为主程序小版本接近就认定兼容。声明 `api_version: 3` 的插件在只支持 `{1, 2}` 的旧主程序上会被直接拒绝并给出「需要接口版本 3」的原因，这是预期行为。
 - `requires_app` 是裸版本（如 `1.12.2`）时按精确版本匹配，旧清单原样解释、不自动放宽；带运算符时按 [PEP 440 范围](https://packaging.pypa.io/en/stable/specifiers.html)解析，例如 `>=1.9.0,<2.0.0`。范围写法只有 1.12.2 起的主程序能解析：更早的主程序仍按精确匹配比较，看到范围声明会直接判为不兼容，因此放宽范围要配合新版主程序发布。
 - `capabilities` 里每一项都必须由宿主支持，缺一不可：
 
@@ -26,8 +27,11 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 |---|---|
 | `opacity_multiplier` | 提交沿能量轴的不透明度倍率（API 1） |
 | `data_snapshot_2d` | 抓取已完成二维结果的只读快照（API 2） |
-| `analysis_task` | 提交后台分析任务（API 2） |
+| `analysis_task` | 提交后台分析任务（API 2/3） |
 | `result_curve_1d` | 交回一维曲线，由宿主建结果页（API 2） |
+| `data_snapshot_3d` | 抓取当前数据域的三维强度体快照（API 3） |
+| `result_surface_2d` | 交回二维面结果（能带面等），由宿主建面结果页（API 3） |
+| `render_overlay_surface` | 面结果可叠加进三维视图（API 3；可选增强，见下） |
 
 安装、启动加载、构建脚本、官方目录筛选与主程序升级评估共用同一套判定函数（`bandscope.extensions.compat`），同一份声明到哪儿都是同一个结论和同一句原因。构建脚本会在打包前用当前宿主核对一遍：不通过就不出包。
 
@@ -69,11 +73,64 @@ host.cancel_analysis(handle)
 - `Plugin.on_analysis_finished(handle, status, detail)` 是可选回调（`succeeded` / `failed` / `cancelled`），默认什么都不做；API 1 插件不会因为这个钩子被迫实现新方法。
 - 加载新数据、关闭来源页、用户取消或退出应用都会请求取消；完成回调会再核对数据代次，过期结果直接丢弃。
 
+### 三维分析（API 3）
+
+最小能力范围：**当前三维强度体 → 后台纯数值计算 → 新增二维面结果页**。
+
+```python
+class Plugin(Plugin):
+    def create_panel(self, host: PluginHostV3):
+        panel = MyPanel(host)          # 面板挂在「处理分析」页，只在三维视图显示
+        return panel
+
+def run_job(snapshot, params, cancel):        # 纯数值，工作线程里执行
+    cancel.raise_if_cancelled()
+    cancel.report_progress(0.4, "预处理完成")  # 可选：进度回传（宿主节流）
+    return AnalysisSurface2D(
+        x=kx, y=ky,
+        surfaces=[BandSurface(z=..., label="Band 1", color="#ff8a3d")],
+        z_label="E", z_unit="eV", title="...", params=params,
+    )
+
+# 面板里：
+snapshot = host.capture_analysis_input_3d()   # AnalysisUnavailable 携带可展示原因
+handle = host.submit_analysis(snapshot, run_job, title="能带重构", params={...})
+host.cancel_analysis(handle)
+```
+
+约定：
+
+- `AnalysisInput3D` 的数组顺序是 `[X, Y, E]`，取数语义与三维视图所见一致：当前页的
+  **数据域**（ROI 裁剪后）→ 当前**时间帧** → 若开启全局去噪则取去噪结果；**不含显示
+  旋转**（`rotation_angle` 只如实记录）。`x`/`y`/`e` 已按同一数据域切片，单位缺省时
+  保持空串。
+- 快照与坐标都是任务独占的**只读**缓冲区；体数据里的 NaN 表示缺测。宿主只在任务
+  存续期持有快照，任务结束即释放——插件不要在工作函数返回后继续持有 `volume`。
+- 快照体积有上限（约 1 GiB），超出时 `capture_analysis_input_3d` 抛
+  `AnalysisUnavailable` 并给出原因（提示用户先用 ROI 缩小数据域）。
+- `AnalysisSurface2D`：一批**共网格**的带面，`z[i, j]` 对应 `(x[i], y[j])`；`x`/`y`
+  必须严格单调，`z` 允许 NaN（无解）但拒绝 ±inf；带数上限 64。
+- 结果页一条带一页（都挂在来源页下、都不切换当前页），页头的带选择器可以在同一
+  组的带面之间切换；面结果页走二维渲染路径，因此 2D 裁剪/擦除、坐标提示与矩阵导出
+  都是宿主既有机制。数据代次变化或来源页关闭时结果照常作废。
+- 进度是**可选**的：`CancelToken.report_progress(fraction, message)` 未接线时是无
+  副作用的空操作；宿主节流后回调 `Plugin.on_analysis_progress(handle, fraction,
+  message)`（主线程，默认空实现）。
+- 面板显隐：声明 `data_snapshot_2d` 的插件面板只在二维结果页显示，声明
+  `data_snapshot_3d` 的只在三维视图显示；两类都声明则两处都显示（同一份面板）。
+- **三维叠加（`render_overlay_surface`，可选）**：面结果页的每个带面都会自动进入
+  三维视图「渲染控制」页的「能带面叠加」卡片，按带勾选显隐、用 `BandSurface.color`
+  着色、`opacity` 定不透明度。宿主负责世界坐标换算（与体渲染同一套
+  `index × spacing`）、数据级旋转与滚轮预览旋转的同步、以及换数据/关页后的清理；
+  插件不需要（也没有）额外的调用接口，声明这个能力只表示"我的面结果适合叠加"。
+  细节与已验证范围见[能带重构阶段 3 交接](../handoffs/band-reconstruct-stage3-2026-10-07.md)。
+
 ## 构建和验证
 
 ```powershell
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 python scripts/release/build_plugin.py integral_demo --output-dir release
+python scripts/release/build_plugin.py band_reconstruct --output-dir release
 python -m unittest discover -s tests/extensions -t . -v
 python -m unittest discover -s tests/plugins -t . -v
 ```

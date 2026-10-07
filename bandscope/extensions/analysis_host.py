@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from typing import Callable, Dict, Mapping, Optional
 
@@ -51,6 +52,11 @@ class AnalysisTaskRunner(QObject):
     cancelled = pyqtSignal(object, str)
     #: 提交被拒绝：(plugin_id, 可展示的原因)
     busy = pyqtSignal(str, str)
+    #: 进度：(handle, 0–1, 说明)；由工作线程发出，宿主在主线程收。
+    progress = pyqtSignal(object, float, str)
+
+    #: 进度节流间隔（秒）：工作线程可能每个迭代都上报，界面只按这个频率更新。
+    progress_interval = 0.2
 
     def __init__(self, parent=None, *, max_queue: int = MAX_ANALYSIS_QUEUE):
         super().__init__(parent)
@@ -99,7 +105,7 @@ class AnalysisTaskRunner(QObject):
             snapshot_id=snapshot.snapshot_id,
             title=str(title or ""),
         )
-        token = CancelToken()
+        token = CancelToken(progress_sink=self._make_progress_sink(handle))
         with self._lock:
             if self._closing:
                 return None
@@ -110,6 +116,26 @@ class AnalysisTaskRunner(QObject):
         )
         self._ensure_worker()
         return handle
+
+    def _make_progress_sink(self, handle: AnalysisTaskHandle) -> Callable[[float, str], None]:
+        """给令牌一个节流的进度接收器。
+
+        工作线程里可能每个迭代都上报；这里按 :attr:`progress_interval` 节流后再发
+        信号（100% 与最后一条说明永远放行），避免界面被高频事件淹没。
+        """
+        state = {"last": 0.0}
+        lock = threading.Lock()
+
+        def sink(fraction: float, message: str) -> None:
+            now = time.monotonic()
+            with lock:
+                if fraction < 1.0 and now - state["last"] < self.progress_interval:
+                    return
+                state["last"] = now
+            if not self._closing:
+                self.progress.emit(handle, float(fraction), str(message))
+
+        return sink
 
     def cancel(self, handle: Optional[AnalysisTaskHandle]) -> bool:
         """请求取消一个任务；返回是否确实登记了取消。"""

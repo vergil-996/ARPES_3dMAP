@@ -37,11 +37,20 @@ python scripts/validation/verify_camera_view_panel.py .local/data/NiHITP_calibra
 python scripts/validation/verify_time_axis_visibility.py .local/data/scan07_dynamic.npz .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_flat_band_alpha.py --bands 5
+python scripts/validation/verify_band_overlay.py
+python scripts/validation/verify_band_overlay_wse2.py
 python scripts/validation/verify_plugin_management.py
 python scripts/validation/verify_plugin_release_flow.py
 ```
 
 `verify_plugin_management.py` 用真实构建的插件包驱动完整窗口（需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`。
+
+`verify_band_overlay.py` 是**离屏**的：合成体数据 → 插件的工作函数重构 → 真实
+`VolumeRenderSession` + 叠加层渲染 → 截图，并给出"能带面是否落在体数据亮脊上"的
+数值指标（含真值面对照），不弹窗、不抢焦点。`verify_band_overlay_wse2.py` 是同一
+流程的**真实数据**版本：读 `.local/data/WSe2_step.npz`（t≈0 三帧平均、E 轴为索引
+坐标、能量窗口默认 [90, 199]），无真值面，指标含 ±1/±2 命中率、局部脊距与带间距，
+结论需人工核对截图。
 
 使用 `--output-dir <目录>` 指定输出。冒烟脚本另支持 `--size 1280x800`、`--hold`。数据探查和指定控件截图分别使用 `scripts/diagnostics/probe_frame_ranges.py` 与 `scripts/diagnostics/_verify_settled_grab.py`，同样传入 NPZ 路径。
 

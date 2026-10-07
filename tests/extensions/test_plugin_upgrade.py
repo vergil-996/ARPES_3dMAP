@@ -11,6 +11,7 @@ import tempfile
 
 from bandscope.app_metadata import APP_VERSION
 from bandscope.extensions.catalog import parse_catalog
+from bandscope.extensions.compat import SUPPORTED_API_VERSIONS
 from bandscope.extensions.plugin_manager import PluginManager, install_package
 from bandscope.extensions.upgrade import (
     IMPACT_OK,
@@ -30,9 +31,13 @@ from tests.support.plugins import (
 )
 
 
-def catalog_with(entries, *, revision=1, host_version="1.12.0", api_versions=(1, 2)):
+def catalog_with(entries, *, revision=1, host_version="1.12.0", api_versions=None):
     import json
 
+    # 默认让“目标宿主”与当前宿主支持同一组接口版本：这样默认目录里的插件
+    # 只要对当前宿主兼容，对目标宿主也兼容。需要更窄集合的用例显式传入。
+    if api_versions is None:
+        api_versions = tuple(sorted(SUPPORTED_API_VERSIONS))
     return parse_catalog(
         json.dumps(
             {

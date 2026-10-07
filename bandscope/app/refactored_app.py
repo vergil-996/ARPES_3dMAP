@@ -16,6 +16,7 @@ from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -78,6 +79,11 @@ from bandscope.core.data_scope import (
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.rendering.refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
+from bandscope.rendering.surface_overlay import (
+    DEFAULT_OPACITY as OVERLAY_DEFAULT_OPACITY,
+    OverlaySurface,
+    SurfaceOverlayManager,
+)
 from bandscope.ui.result_workspace import (
     AnalysisPageSpec,
     PageRenameDialog,
@@ -108,12 +114,26 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
+def _labeled_axis_text(label, unit) -> str:
+    """``标签 (单位)``；没有单位时只留标签，不猜也不补。"""
+    text = str(label or "").strip() or "index"
+    unit_text = str(unit or "").strip()
+    return f"{text} ({unit_text})" if unit_text else text
+
+
 class My3DAnalyzer(CropInteractionMixin, QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
     #: 插件分析结果页：数据完全来自结果快照，不重算、不参与体积后台计算。
     PLUGIN_CURVE_PAGE_KIND = "plugin_curve"
+    #: 插件面结果页（能带面等）：每个带面一页，页内可切换同组带面。
+    PLUGIN_SURFACE_PAGE_KIND = "plugin_surface"
+    #: ``add_plugin_result_page`` 的结果类别到页面类型的映射。
+    PLUGIN_RESULT_KINDS = {
+        "curve": PLUGIN_CURVE_PAGE_KIND,
+        "surface": PLUGIN_SURFACE_PAGE_KIND,
+    }
     GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
     FULL_SCOPE_ID = "full"
@@ -223,6 +243,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.crop_controller = CropController(self)
         self.toast_manager = ToastManager(self)
         self.volume_session = VolumeRenderSession(self.plotter)
+        # 插件能带面的三维叠加层：跟体渲染共用同一套世界坐标，独立于体 actor 管理。
+        self.surface_overlay = SurfaceOverlayManager(self.plotter)
         try:
             self._camera_observer_id = self.plotter.iren.add_observer(
                 "EndInteractionEvent",
@@ -1685,16 +1707,22 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         return open_plugin_manager(self, session)
 
-    def add_plugin_result_page(self, *, title, source_page_id, source_title, data_scope_id, params):
+    def add_plugin_result_page(
+        self, *, title, source_page_id, source_title, data_scope_id, params, result_kind="curve"
+    ):
         """插件分析结果页：唯一标题、挂在来源页下、**不切换**当前页。
 
         结果属于提交任务时的来源页与快照，用户正在看什么就继续看什么；新页在
-        左侧页面树里等着被点开。
+        左侧页面树里等着被点开。``result_kind`` 取 ``"curve"``（默认，一维曲线）
+        或 ``"surface"``（二维面结果）。
         """
+        page_kind = self.PLUGIN_RESULT_KINDS.get(str(result_kind))
+        if page_kind is None:
+            raise ValueError(f"未知的插件结果类别：{result_kind!r}")
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=self._make_unique_page_title(title),
-            page_kind=self.PLUGIN_CURVE_PAGE_KIND,
+            page_kind=page_kind,
             source_module="plugin_analysis",
             source_page_id=source_page_id,
             source_title=source_title,
@@ -1786,6 +1814,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.timeline_bar.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
         self.timeline_bar.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
 
+        self.page_render.overlay_visibility_changed.connect(self.on_overlay_visibility_changed)
         self.page_render.btn_apply_cmap.clicked.connect(
             lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
         )
@@ -2392,6 +2421,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def _invalidate_scope_render_state(self):
         """Drop geometry/texture state without releasing immutable source data."""
         self._invalidate_denoise_dependents()
+        # 数据域/去噪换代：能带面叠加层也一并清掉（结果本身仍留在结果页里）。
+        overlay = self.__dict__.get("surface_overlay")
+        if overlay is not None:
+            overlay.clear()
+        self._publish_overlay_layers([])
         self.current_render_context = None
         try:
             self._restore_volume_opacity_if_dimmed()
@@ -4986,6 +5020,230 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "plugin_analysis": dict(spec.params.get("plugin_analysis") or {}),
         }
 
+    def _plugin_surface_payload(self, spec):
+        """面结果页的 ``base_surface`` 载荷；结构不完整时返回 None。"""
+        payload = spec.params.get("base_surface")
+        if not isinstance(payload, dict):
+            return None
+        try:
+            x = np.asarray(payload.get("x"), dtype=np.float64).reshape(-1)
+            y = np.asarray(payload.get("y"), dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        bands = [band for band in (payload.get("bands") or ()) if isinstance(band, dict)]
+        if x.size < 2 or y.size < 2 or not bands:
+            return None
+        return {"x": x, "y": y, "bands": bands, "payload": payload}
+
+    def _plugin_surface_band_index(self, spec, bands):
+        """当前页显示的带号；越界时夹回范围内。"""
+        try:
+            index = int(spec.params.get("selected_band", 0))
+        except (TypeError, ValueError):
+            index = 0
+        return max(0, min(index, len(bands) - 1))
+
+    def _get_plugin_surface_context(self, spec):
+        """插件面结果页：数据完全来自结果快照，不重算、不依赖当前数据。
+
+        复用 2D 渲染路径（等价于 ``axis=2`` 的切面排布），因此裁剪/擦除、坐标提示、
+        矩阵导出都走既有机制；``coords["E"]`` 只是占位——本页没有真实能量轴，
+        面里的能量是 z 值。
+        """
+        loaded = self._plugin_surface_payload(spec)
+        if loaded is None:
+            return None
+        x, y, bands, payload = loaded["x"], loaded["y"], loaded["bands"], loaded["payload"]
+        index = self._plugin_surface_band_index(spec, bands)
+        try:
+            z = np.asarray(bands[index].get("z"), dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if z.shape != (x.size, y.size):
+            return None
+        label = str(bands[index].get("label") or "")
+        return {
+            "view": "2d",
+            "data": z,
+            "slice_info": {
+                "axis": 2,
+                "mode": "slice",
+                "index": index,
+                "title_override": label or spec.title,
+            },
+            "coords": {"X": x, "Y": y, "E": np.asarray([0.0, 1.0])},
+            "plot_axes": {
+                "x_key": "X",
+                "y_key": "Y",
+                "x_label": str(payload.get("x_label") or "kx"),
+                "y_label": str(payload.get("y_label") or "ky"),
+            },
+            "plot_logical_bounds": {
+                "x_low": 0,
+                "x_up": int(x.size) - 1,
+                "y_low": 0,
+                "y_up": int(y.size) - 1,
+            },
+            "plugin_surface": {
+                "band_index": int(index),
+                "band_label": label,
+                "band_count": len(bands),
+                "z_label": str(payload.get("z_label") or "E"),
+                "z_unit": str(payload.get("z_unit") or ""),
+            },
+        }
+
+    def _surface_overlay_layers(self):
+        """当前数据代次下仍然有效的能带面（一条带一层）。
+
+        结果页记录的 ``data_generation`` 与当前代次不符（换数据、重算去噪）时，
+        该页的带面不再进入列表——叠加层因此自动清掉过期结果，不需要额外的清理
+        信号。
+        """
+        generation = int(getattr(self, "shared_denoise_version", 0) or 0)
+        layers = []
+        workspace = self.__dict__.get("left_workspace")
+        if workspace is None:
+            return layers
+        for spec in workspace.page_specs.values():
+            if spec.page_kind != self.PLUGIN_SURFACE_PAGE_KIND:
+                continue
+            analysis = dict(spec.params.get("plugin_analysis") or {})
+            if int(analysis.get("data_generation", -1)) != generation:
+                continue
+            loaded = self._plugin_surface_payload(spec)
+            if loaded is None:
+                continue
+            x, y = loaded["x"], loaded["y"]
+            for index, band in enumerate(loaded["bands"]):
+                try:
+                    z = np.asarray(band.get("z"), dtype=np.float64)
+                except (TypeError, ValueError):
+                    continue
+                if z.shape != (x.size, y.size):
+                    continue
+                try:
+                    opacity = float(band.get("opacity"))
+                except (TypeError, ValueError):
+                    opacity = OVERLAY_DEFAULT_OPACITY
+                layers.append(
+                    OverlaySurface(
+                        key=f"{spec.page_id}:{index}",
+                        label=f"{spec.title} · {band.get('label') or f'Band {index + 1}'}",
+                        group=spec.page_id,
+                        x=x,
+                        y=y,
+                        z=z,
+                        color=str(band.get("color") or ""),
+                        opacity=min(1.0, max(0.05, opacity)),
+                    )
+                )
+        return layers
+
+    def _sync_surface_overlays(self, render_context, spec):
+        """三维视图重绘后同步叠加层；非三维视图一律清空。"""
+        overlay = self.__dict__.get("surface_overlay")
+        if overlay is None:
+            return
+        if not isinstance(render_context, dict) or render_context.get("view") != "3d":
+            overlay.clear()
+            self._publish_overlay_layers([])
+            return
+        coords = render_context.get("coords") or self.core.coords
+        full_shape = render_context.get("full_shape") or render_context["data"].shape
+        layers = self._surface_overlay_layers()
+        overlay.sync(
+            layers,
+            coords=coords,
+            full_shape=full_shape,
+            rotation_angle=float(getattr(self, "rotation_angle", 0.0) or 0.0),
+        )
+        self._publish_overlay_layers(layers)
+
+    def _publish_overlay_layers(self, layers):
+        """把层列表同步到「渲染控制」页的叠加卡片（勾选状态由叠加层持有）。"""
+        page = self.__dict__.get("page_render")
+        publish = getattr(page, "set_overlay_layers", None)
+        if publish is None:
+            return
+        overlay = self.__dict__.get("surface_overlay")
+        payload = [
+            (
+                layer.key,
+                layer.label,
+                layer.color,
+                bool(overlay.is_visible(layer.key)) if overlay is not None else True,
+            )
+            for layer in layers
+        ]
+        try:
+            publish(payload)
+            set_visible = getattr(page, "set_overlay_card_visible", None)
+            if set_visible is not None:
+                set_visible(bool(payload))
+        except Exception:
+            pass
+
+    def on_overlay_visibility_changed(self, key, visible):
+        """用户在「渲染控制」页勾选/取消某一层：只改显隐并重绘。"""
+        overlay = self.__dict__.get("surface_overlay")
+        if overlay is None:
+            return
+        overlay.set_visible(str(key), bool(visible))
+        try:
+            self.plotter.render()
+        except Exception:
+            pass
+
+    def _sync_surface_band_selector(self, spec):
+        """面结果页页头的带选择器：只在当前页/带列表变化时重建。"""
+        workspace = self.__dict__.get("left_workspace")
+        if workspace is None or not hasattr(workspace, "set_header_extra"):
+            return
+        surface_spec = spec if spec is not None and spec.page_kind == self.PLUGIN_SURFACE_PAGE_KIND else None
+        loaded = self._plugin_surface_payload(surface_spec) if surface_spec is not None else None
+        labels = tuple(str(band.get("label") or "") for band in loaded["bands"]) if loaded else ()
+        signature = (
+            getattr(surface_spec, "page_id", None),
+            labels,
+            self._plugin_surface_band_index(surface_spec, loaded["bands"]) if loaded else 0,
+        )
+        if signature == self.__dict__.get("_surface_header_signature"):
+            return
+        self._surface_header_signature = signature
+        if loaded is None or len(labels) <= 1:
+            workspace.set_header_extra(None)
+            return
+
+        combo = QComboBox()
+        combo.setObjectName("plugin_surface_band_selector")
+        combo.setFixedHeight(22)
+        combo.addItems([label or f"Band {position + 1}" for position, label in enumerate(labels)])
+        combo.setCurrentIndex(signature[2])
+        combo.setToolTip("切换该结果页显示的能带")
+        combo.setStyleSheet(
+            f"QComboBox {{ color: {theme.TEXT_1}; background-color: {theme.BG_3};"
+            f" border: 1px solid {theme.BORDER_HEX}; border-radius: 4px; padding: 1px 6px; }}"
+        )
+        page_id = surface_spec.page_id
+        combo.currentIndexChanged.connect(
+            lambda index, target=page_id: self._on_surface_band_changed(target, index)
+        )
+        workspace.set_header_extra(combo)
+
+    def _on_surface_band_changed(self, page_id, index):
+        """页内切换带号：写回页面参数并重绘当前页。"""
+        spec = self.left_workspace.page_by_id(page_id)
+        if spec is None or spec.page_kind != self.PLUGIN_SURFACE_PAGE_KIND:
+            return
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return
+        spec.params["selected_band"] = index
+        if self.left_workspace.current_spec() is spec:
+            self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
+
     @staticmethod
     def _compute_axis_second_derivative(
         data,
@@ -5533,6 +5791,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._get_log_curve_context(spec)
         if spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:
             return self._get_plugin_curve_context(spec)
+        if spec.page_kind == self.PLUGIN_SURFACE_PAGE_KIND:
+            return self._get_plugin_surface_context(spec)
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
@@ -5791,6 +6051,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             delta = target_angle - float(self._rendered_rotation_angle)
             session.volume.SetOrigin(100.0, 100.0, 100.0)
             session.volume.SetOrientation(0.0, 0.0, delta)
+            # 叠加层照搬同一个 actor 变换：滚轮预览期间体数据没有被重算，只有
+            # actor 在转，不跟住就会出现"面跟着体走不了"的错位。
+            overlay = self.__dict__.get("surface_overlay")
+            if overlay is not None:
+                overlay.set_actor_orientation((0.0, 0.0, delta))
             session._set_interactive_quality(RenderQuality.PREVIEW.value)
             self.plotter.render()
             session.render_count += 1
@@ -5810,6 +6075,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             session.volume.SetScale(1.0, 1.0, 1.0)
         except Exception:
             pass
+        # 体 actor 的预览旋转被复位，叠加层也要跟着复位。
+        overlay = self.__dict__.get("surface_overlay")
+        if overlay is not None:
+            overlay.set_actor_orientation((0.0, 0.0, 0.0))
 
     def on_apply_denoise(self):
         if self.original_raw_data is None:
@@ -7767,6 +8036,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             )
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
+            # 能带面叠加层跟在体渲染之后：它与体数据共用世界坐标，数据换代后
+            # 过期的结果不会进入列表，叠加层随之清掉。
+            self._sync_surface_overlays(render_context, spec)
             if self._box_interacting:
                 self._orig_volume_opacity = None
                 self._dim_current_volume()
@@ -7825,9 +8097,12 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         session = self._plugin_session()
         if session is not None and session.card_ids():
             session.set_cards_visible(is_3d_view)
-        # 分析插件面板只在二维结果页显示，与 v1 卡片各管各的显隐。
+        # 分析插件面板按视图显隐：二维快照插件在二维结果页、三维快照插件在三维
+        # 视图；与 v1 卡片各管各的。
         if session is not None and session.analysis_card_ids():
-            session.set_analysis_cards_visible(render_context["view"] == "2d")
+            session.set_analysis_cards_visible(render_context["view"])
+        # 面结果页的带选择器跟着当前页走，不是面结果页时清空。
+        self._sync_surface_band_selector(spec)
         if is_3d_view:
             # 相机快照 / E 轴翻转 / 程序恢复都已在上面落定，这里回读最终姿态。
             self._sync_camera_view_controls()
@@ -7876,6 +8151,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.backend_manager.clear_caches()
         if hasattr(self, "volume_session"):
             self.volume_session.clear(render=False)
+        if hasattr(self, "surface_overlay"):
+            # 叠加 actor 不在 VolumeRenderSession 的管理范围里，自己清。
+            self.surface_overlay.clear()
         session = self.__dict__.get("plugin_session")
         if session is not None:
             # 让插件拿到 release()：卡片没卸下来、外部资源没关都会拖住进程退出。
@@ -8317,6 +8595,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._build_second_derivative_export_payload(spec, raw_data, coords)
         elif spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:
             return self._build_plugin_curve_export_payload(spec)
+        elif spec.page_kind == self.PLUGIN_SURFACE_PAGE_KIND:
+            return self._build_plugin_surface_export_payload(spec)
         else:
             return self._build_energy_dos_export_payload(spec, raw_data, coords)
 
@@ -8338,6 +8618,60 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         }
         analysis = dict(spec.params.get("plugin_analysis") or {})
         for key in ("plugin_id", "plugin_version", "snapshot_id", "data_generation", "scope_id"):
+            if key in analysis:
+                export_data[key] = np.asarray([analysis[key]])
+        return "导出分析结果", f"{self._sanitize_filename_component(spec.title)}.mat", export_data
+
+    def _build_plugin_surface_export_payload(self, spec):
+        """插件面结果导出：当前带面的 x/y/z 数值 + 元数据。
+
+        矩阵的行对应 x 轴、列对应 y 轴，走的还是宿主既有的矩阵导出（文本/表格、
+        npz、mat）；裁剪/擦除过的页面在 ``_build_export_payload`` 里已被更靠前的
+        分支接管。
+        """
+        loaded = self._plugin_surface_payload(spec)
+        if loaded is None:
+            self._show_message("无法导出", "该插件结果页没有可用的面数据。", QMessageBox.Information)
+            return None
+        x, y, bands, payload = loaded["x"], loaded["y"], loaded["bands"], loaded["payload"]
+        index = self._plugin_surface_band_index(spec, bands)
+        try:
+            z = np.asarray(bands[index].get("z"), dtype=np.float64)
+        except (TypeError, ValueError):
+            z = None
+        if z is None or z.shape != (x.size, y.size):
+            self._show_message("无法导出", "该插件结果页的面数据不完整。", QMessageBox.Information)
+            return None
+
+        x_label = str(payload.get("x_label") or "kx")
+        y_label = str(payload.get("y_label") or "ky")
+        # 键名用坐标轴自己的名字：文本导出的表头与 npz/mat 的字段名都靠它。
+        x_key = x_label.split(" ")[0].strip() or "x"
+        y_key = y_label.split(" ")[0].strip() or "y"
+        if y_key == x_key:
+            y_key = f"{y_key}_y"
+        export_data = {
+            "sample": np.asarray(z, dtype=np.float32),
+            x_key: np.asarray(x, dtype=np.float32),
+            y_key: np.asarray(y, dtype=np.float32),
+            "x_label": np.asarray([_labeled_axis_text(x_label, payload.get("x_unit"))]),
+            "y_label": np.asarray([_labeled_axis_text(y_label, payload.get("y_unit"))]),
+            "z_label": np.asarray(
+                [_labeled_axis_text(payload.get("z_label") or "E", payload.get("z_unit"))]
+            ),
+            "band_label": np.asarray([str(bands[index].get("label") or "")]),
+            "source_title": np.asarray([str(spec.params.get("plugin_analysis", {}).get("source_title") or "")]),
+        }
+        analysis = dict(spec.params.get("plugin_analysis") or {})
+        for key in (
+            "plugin_id",
+            "plugin_version",
+            "snapshot_id",
+            "data_generation",
+            "scope_id",
+            "band_index",
+            "band_label",
+        ):
             if key in analysis:
                 export_data[key] = np.asarray([analysis[key]])
         return "导出分析结果", f"{self._sanitize_filename_component(spec.title)}.mat", export_data
