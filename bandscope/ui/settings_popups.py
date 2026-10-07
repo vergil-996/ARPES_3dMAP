@@ -1,6 +1,7 @@
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
+import bandscope.ui.theme as theme
 from bandscope.ui.control_layout_utils import combo_index_for_text
 from bandscope.ui.denoise_control_utils import (
     create_double_spin_box,
@@ -16,6 +17,13 @@ class _NonModalPopup(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+        # 独立顶层窗口不继承主窗口样式：不自己上底色时内容是深色卡片、
+        # 窗体却是系统默认浅色，分组标题的白字会糊成一片。
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"_NonModalPopup {{ background-color: {theme.BG_2}; }}"
+            f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
+        )
 
     def closeEvent(self, event):
         event.ignore()

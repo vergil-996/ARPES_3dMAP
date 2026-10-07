@@ -11,5 +11,7 @@
 - [轴标题编辑与页面重命名（2026-09-28）](axis-titles/axis-title-editing.md)，验收截图同目录
 - [左侧页面树改造（2026-09-28）](page-tree/page-tree-navigation.md)，验收截图同目录
 - [坐标轴积分交互重构（2026-09-28）](axis-interval/axis-integration-refactor.md)，验收截图同目录
+- [界面美化收尾（2026-10-07）](ui/ui-beautification-2026-10-07.md)，弹窗底色 / 表格选中态 / 页签 /
+  右键菜单 / 滚动条 / 消息框按钮层级；验收截图在 `.local/outputs/ui_beauty_audit_verify/`（不提交）
 
 设计稿与验收截图均与对应记录放在同一主题目录。新输出先写入 `.local/outputs/`，不直接覆盖历史验收证据。

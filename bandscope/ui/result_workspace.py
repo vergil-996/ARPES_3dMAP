@@ -133,6 +133,7 @@ class PageTitleLabel(QLabel):
             super().contextMenuEvent(event)
             return
         menu = QMenu(self)
+        menu.setStyleSheet(theme.context_menu_qss())
         rename_action = menu.addAction("重命名…")
         rename_action.triggered.connect(self.rename_requested.emit)
         restore_action = menu.addAction("恢复自动名称")

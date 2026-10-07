@@ -123,10 +123,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     EDITABLE_CLASS_MARKERS = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
     #: 持有焦点时方向键归这些控件自己用（滑条 / 下拉框 / 页面树）。
     NAVIGATION_CLASS_MARKERS = ("Slider", "Combo", "Tree")
-    CONTEXT_MENU_STYLE = (
-        f"QMenu {{ color: {theme.TEXT_1}; background-color: {theme.BG_2}; }} "
-        f"QMenu::item:selected {{ background-color: {theme.BG_4}; }}"
-    )
+    #: 右键菜单统一走 theme.context_menu_qss()（抬升面 + 圆角 + 禁用态 + 分隔线）。
+    CONTEXT_MENU_STYLE = theme.context_menu_qss()
 
     def __init__(self):
         super().__init__()

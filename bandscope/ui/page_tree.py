@@ -796,8 +796,5 @@ class PageTreePanel(QWidget):
         delete_action.setEnabled(entry.deletable)
         delete_action.triggered.connect(lambda: self.delete_requested.emit(page_id))
 
-        menu.setStyleSheet(
-            f"QMenu {{ color: {theme.TEXT_1}; background-color: {theme.BG_2}; }} "
-            f"QMenu::item:selected {{ background-color: {theme.BG_4}; }}"
-        )
+        menu.setStyleSheet(theme.context_menu_qss())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))

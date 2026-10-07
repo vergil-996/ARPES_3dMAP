@@ -25,14 +25,23 @@ QMessageBox QLabel {
     font-size: 14px;
 }
 QMessageBox QPushButton {
-    background-color: %(ACCENT)s;
-    color: %(ACC_ON)s;
-    font-weight: 600;
+    background-color: %(BG4)s;
+    color: %(T1)s;
+    border: 1px solid %(BORD)s;
     border-radius: 4px;
     padding: 5px 15px;
     min-width: 72px;
 }
 QMessageBox QPushButton:hover {
+    border-color: %(BORD_S)s;
+}
+QMessageBox QPushButton:default {
+    background-color: %(ACCENT)s;
+    color: %(ACC_ON)s;
+    border-color: %(ACCENT)s;
+    font-weight: 600;
+}
+QMessageBox QPushButton:default:hover {
     background-color: %(ACCENT_H)s;
 }
 QProgressDialog {
@@ -44,16 +53,18 @@ QProgressDialog QLabel {
     font-size: 14px;
 }
 QProgressDialog QPushButton {
-    background-color: %(ACCENT)s;
-    color: %(ACC_ON)s;
-    font-weight: 600;
+    background-color: %(BG4)s;
+    color: %(T1)s;
+    border: 1px solid %(BORD)s;
     border-radius: 4px;
     padding: 5px 15px;
     min-width: 72px;
 }
 QProgressDialog QPushButton:hover {
-    background-color: %(ACCENT_H)s;
+    border-color: %(BORD_S)s;
 }
+/* 进度框只有「取消」一颗按钮，且 Qt 把它设为默认按钮；这里刻意不给
+   :default 上主色，否则取消键会变成粉底主操作，主次反而颠倒。 */
 QProgressDialog QProgressBar {
     background-color: %(BG1)s;
     border: 1px solid %(BORD)s;
@@ -71,6 +82,9 @@ QToolTip {
     border: 1px solid %(ACC_DIM)s;
 }
 """ % theme.QSS_TOKENS
+
+#: 原生 Qt 容器（表格 / 树 / 滚动区）的深色滚动条；SiUI 自绘滚动条不受影响。
+APP_FEEDBACK_STYLE += theme.scrollbar_qss()
 
 
 def resource_path(relative_path):

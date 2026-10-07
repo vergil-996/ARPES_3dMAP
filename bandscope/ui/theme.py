@@ -338,6 +338,67 @@ def nav_tab_qss() -> str:
     )
 
 
+def context_menu_qss() -> str:
+    """原生 QMenu 右键菜单的统一 QSS（页面树 / 工作区 / 主窗口共用）。
+
+    深色抬升面 + 细边框 + 圆角，条目带足量内边距与禁用态；分隔线弱化到
+    边框色。替代之前散落的「只有底色和选中色」两行样式。
+    """
+    return (
+        "QMenu {"
+        f"color: {TEXT_1};"
+        f"background-color: {BG_3};"
+        f"border: 1px solid {BORDER_STRONG};"
+        f"border-radius: {R_S}px;"
+        "padding: 6px;"
+        "}"
+        "QMenu::item {"
+        "padding: 6px 24px 6px 12px;"
+        f"border-radius: {R_S - 2}px;"
+        "background: transparent;"
+        "}"
+        "QMenu::item:selected {"
+        f"background-color: {BG_4};"
+        "}"
+        "QMenu::item:disabled {"
+        f"color: {TEXT_3};"
+        "}"
+        "QMenu::separator {"
+        "height: 1px;"
+        f"background: {BORDER};"
+        "margin: 4px 8px;"
+        "}"
+    )
+
+
+def scrollbar_qss() -> str:
+    """原生滚动条（QTableWidget / QTreeWidget / QScrollArea 等）的深色细条 QSS。
+
+    SiUI 容器用自己的自绘滚动条，不走 QSS；这里只兜住原生 Qt 容器，
+    避免内容一多就冒出 Windows 亮色滚动条。
+    """
+    return (
+        "QScrollBar:vertical {"
+        "background: transparent; width: 10px; margin: 2px;"
+        "}"
+        "QScrollBar:horizontal {"
+        "background: transparent; height: 10px; margin: 2px;"
+        "}"
+        "QScrollBar::handle {"
+        f"background: {BG_4}; border-radius: 4px; min-height: 24px; min-width: 24px;"
+        "}"
+        "QScrollBar::handle:hover {"
+        f"background: {TEXT_3};"
+        "}"
+        "QScrollBar::add-line, QScrollBar::sub-line {"
+        "height: 0px; width: 0px; border: none; background: none;"
+        "}"
+        "QScrollBar::add-page, QScrollBar::sub-page {"
+        "background: none;"
+        "}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # SiUI 全局色板对齐
 # ---------------------------------------------------------------------------

@@ -155,6 +155,10 @@ class PluginManagerDialog(QDialog):
             f"QTableWidget {{ color: {theme.TEXT_1}; background-color: {theme.BG_2};"
             f" gridline-color: {theme.BORDER_HEX}; border: 1px solid {theme.BORDER_HEX};"
             f" border-radius: 6px; }}"
+            f"QTableWidget::item {{ padding: 2px 4px; }}"
+            f"QTableWidget::item:hover {{ background-color: {theme.BG_3}; }}"
+            f"QTableWidget::item:selected {{ background-color: {theme.ACCENT_SOFT};"
+            f" color: {theme.TEXT_1}; }}"
             f"QHeaderView::section {{ color: {theme.TEXT_2}; background-color: {theme.BG_3};"
             f" border: none; padding: 6px; }}"
         )
@@ -196,8 +200,11 @@ class PluginManagerDialog(QDialog):
             f"QTabWidget::pane {{ border: 1px solid {theme.BORDER_HEX};"
             f" border-radius: 6px; background-color: {theme.BG_1}; }}"
             f"QTabBar::tab {{ color: {theme.TEXT_2}; background: transparent;"
-            f" padding: 6px 14px; }}"
-            f"QTabBar::tab:selected {{ color: {theme.TEXT_1}; font-weight: 600; }}"
+            f" padding: 6px 14px; margin: 2px; border-radius: 6px;"
+            f" border: 1px solid transparent; }}"
+            f"QTabBar::tab:hover {{ color: {theme.TEXT_1}; }}"
+            f"QTabBar::tab:selected {{ color: {theme.ACCENT}; font-weight: 600;"
+            f" background-color: {theme.ACCENT_SOFT}; border-color: {theme.ACCENT_DIM}; }}"
         )
         self.tabs.addTab(self._build_installed_tab(), "已安装")
         self._catalog_tab_index = self.tabs.addTab(self._build_catalog_tab(), "官方插件")
@@ -335,9 +342,9 @@ class PluginManagerDialog(QDialog):
             if record.unconfirmed_reason:
                 status.setForeground(QColor(theme.TEXT_3))
             elif record.load_error and record.enabled and not record.running:
-                status.setForeground(Qt.red)
+                status.setForeground(QColor(theme.DANGER))
             elif record.pending_removal or record.restore_pending or record.failed_candidate:
-                status.setForeground(Qt.yellow)
+                status.setForeground(QColor(theme.WARNING))
             self.table.setItem(row, 2, status)
         target = select if select is not None else previous
         if target is not None:
@@ -772,7 +779,7 @@ class PluginManagerDialog(QDialog):
             self.catalog_table.setItem(row, 1, QTableWidgetItem(entry.version if entry else "—"))
             status = QTableWidgetItem(_catalog_status_text(match, record))
             if match.status == STATUS_INCOMPATIBLE:
-                status.setForeground(Qt.red)
+                status.setForeground(QColor(theme.DANGER))
             elif match.status in (STATUS_INSTALLABLE, STATUS_UPDATE_AVAILABLE):
                 status.setForeground(QColor(theme.ACCENT))
             self.catalog_table.setItem(row, 2, status)
