@@ -48,9 +48,30 @@ INCLUDED_SUFFIXES = (".py", ".json", ".md", ".txt", ".png", ".svg", ".qss")
 #: 不进入产物的开发期文件。
 EXCLUDED_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache"}
 
+#: zip 条目里写死的修改时间（DOS 时间格式下限 1980-01-01）。
+#:
+#: 这里**不能**沿用源文件的 mtime：CI 的 checkout 会把 mtime 设成运行时刻，
+#: 于是同一份源码每次发布会打出不同的摘要，而官方目录按「同一 id/version 的
+#: 内容必须一致」校验，会把这种漂移判成内容被替换，直接拒绝生成目录。
+#: 写死之后产物只由文件内容决定，重复打包得到同一个摘要。
+ZIP_ENTRY_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+
 
 class BuildError(Exception):
     pass
+
+
+def write_reproducible_entry(
+    archive: zipfile.ZipFile, path: Path, arcname: str
+) -> None:
+    """把一个文件写进归档，条目元数据固定，使产物只随内容变化。"""
+
+    info = zipfile.ZipInfo(arcname, date_time=ZIP_ENTRY_TIMESTAMP)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    # 显式按 POSIX 解释权限位，避免打包平台的差异漏进产物。
+    info.create_system = 3
+    info.external_attr = 0o644 << 16
+    archive.writestr(info, path.read_bytes())
 
 
 def collect_files(package_dir: Path):
@@ -121,7 +142,9 @@ def build(plugin_id: str, output_dir: Path, app_version: str) -> Path:
     archive_path = output_dir / archive_name
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in files:
-            archive.write(path, path.relative_to(package_dir).as_posix())
+            write_reproducible_entry(
+                archive, path, path.relative_to(package_dir).as_posix()
+            )
 
     verify_archive(archive_path)
     digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
