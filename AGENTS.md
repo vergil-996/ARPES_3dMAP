@@ -14,6 +14,7 @@
 - 发布工具放 `scripts/release/`；视觉验收放 `scripts/validation/`；排查工具放 `scripts/diagnostics/`。
 - 当前计划放 `docs/plans/`，未完成交接放 `docs/handoffs/`，已结束的记录连同附件放 `docs/archive/<主题>/`。
 - 实验数据放 `.local/data/`，临时输出放 `.local/outputs/`，日志放 `.local/logs/`。这些内容不提交。
+- 默认真实验证数据：`.local/data/WSe2_step.npz`（WSe₂ 时间分辨 ARPES，150×150×200×25，kx/ky 物理轴齐全、E 轴为索引坐标；源自 `D:\ARPES数据\npz_files\WSe2_step.npz`）。`scripts/validation/` 下需要真实数据的手动与视觉验收脚本默认使用它；自动化测试仍一律使用合成数据，不得依赖该文件。
 - 根目录不新增功能源码或日期命名的 Markdown。三个兼容模块只用于旧插件导入。
 
 ## 多 agent 分工
