@@ -37,11 +37,23 @@ from bandscope.exporting.publication_models import (
     PUB_LINESTYLES,
     TITLE_GAP_DEFAULT_MM,
     resolve_axis_labels,
+    publication_font_family,
 )
 
 RENDER_LOCK = threading.RLock()
 
 MM_PER_INCH = 25.4
+
+
+def _font_style_params(style, overrides):
+    from matplotlib.font_manager import fontManager
+    installed = {font.name for font in fontManager.ttflist}
+    params = dict(style.params)
+    params["font_family"] = [
+        name for name in publication_font_family(params, overrides)
+        if name in installed or name == "sans-serif"
+    ]
+    return params
 
 
 class RenderError(Exception):
@@ -182,15 +194,13 @@ def format_tick_labels(ticks: Sequence[float], vmin: float, vmax: float):
 
 
 def _apply_formatter(axis, ticks: np.ndarray, lo: float, hi: float) -> None:
-    labels, offset = format_tick_labels(ticks, lo, hi)
     axis.set_major_locator(matplotlib.ticker.FixedLocator(ticks))
-    axis.set_major_formatter(matplotlib.ticker.FixedFormatter(labels))
-    offset_text = axis.get_offset_text()
-    if offset:
-        offset_text.set_text(offset)
-        offset_text.set_visible(True)
-    else:
-        offset_text.set_visible(False)
+    # ScalarFormatter owns get_offset(); Axis.draw() otherwise erases manually
+    # assigned exponents when FixedFormatter.get_offset() returns an empty string.
+    formatter = ScalarFormatter(useMathText=False)
+    formatter.set_powerlimits((-3, 4))
+    axis.set_major_formatter(formatter)
+    axis.get_offset_text().set_visible(True)
 
 
 # ---------------------------------------------------------------------------
@@ -387,16 +397,25 @@ def _style_axes_frame(ax, style_params: Mapping[str, Any], overrides: Mapping[st
         spine.set_color(ink)
         spine.set_linewidth(lw)
     direction = style_params.get("tick_direction", "out")
+    tick_color = ink
+    if family == "2d":
+        direction = overrides.get("tick_direction", direction)
+        tick_color = overrides.get("tick_color", ink)
     ax.tick_params(
         axis="both",
         which="major",
         direction=direction,
         length=float(style_params.get("tick_length", 2.0)),
         width=float(style_params.get("tick_width", 0.6)),
-        colors=ink,
+        color=tick_color,
+        labelcolor=ink,
         labelsize=float(style_params.get("tick_label_size", 6.0)),
         labelfontfamily=style_params.get("font_family", "DejaVu Sans"),
     )
+    for axis in (ax.xaxis, ax.yaxis):
+        axis.get_offset_text().set_fontfamily(style_params.get("font_family", "DejaVu Sans"))
+        axis.get_offset_text().set_fontsize(float(style_params.get("tick_label_size", 6.0)))
+        axis.get_offset_text().set_color(ink)
     ax.grid(False)
 
 
@@ -422,6 +441,7 @@ def _add_panel_label(ax, overrides, style_params):
         transform=ax.transAxes,
         fontsize=float(style_params.get("panel_label_size", 8.0)),
         fontweight="bold",
+        fontfamily=style_params.get("font_family", "DejaVu Sans"),
         color=style_params.get("ink_color", "#000000"),
         ha="left", va="bottom",
         clip_on=False,
@@ -714,7 +734,7 @@ def _initial_margins(style_params) -> Dict[str, float]:
 
 
 def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
-    params = style.params
+    params = _font_style_params(style, overrides)
     family = "2d"
     width_mm = float(options.width_mm)
     height_mm = options.resolved_height_mm(family)
@@ -839,6 +859,7 @@ def _render_1d_axes_content(ax, snapshot, params):
                 xy=(offset + 0.5, 1.01),
                 xycoords=("data", "axes fraction"),
                 fontsize=float(params.get("tick_label_size", 6.0)),
+                fontfamily=params.get("font_family", "DejaVu Sans"),
                 color=ink, ha="center", va="bottom",
                 annotation_clip=False,
             )
@@ -847,8 +868,11 @@ def _render_1d_axes_content(ax, snapshot, params):
     return has_legend
 
 
-def render_1d(snapshot, style, overrides, options, dpi: int) -> Figure:
-    params = style.params
+def render_1d(snapshot, style, overrides, options, dpi: int, *, presentation=None) -> Figure:
+    if presentation is not None:
+        from bandscope.exporting.curve_renderer import render_presentation
+        return render_presentation(snapshot, style, overrides, options, dpi, presentation)
+    params = _font_style_params(style, overrides)
     family = "1d"
     width_mm = float(options.width_mm)
     height_mm = options.resolved_height_mm(family)
@@ -1178,7 +1202,7 @@ def _content_bbox(image, pad_px: int):
 def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
     import pyvista as pv  # 延迟导入：模块本身保持轻量可测
 
-    params = style.params
+    params = _font_style_params(style, overrides)
     family = "3d"
     width_mm = float(options.width_mm)
     height_mm = options.resolved_height_mm(family)
@@ -1460,16 +1484,19 @@ def register_renderer(family):
 _FAMILY_RENDERERS.update({"2d": render_2d, "1d": render_1d, "3d": render_3d})
 
 
-def render_snapshot(snapshot, style, overrides, options, dpi: Optional[int] = None) -> Figure:
+def render_snapshot(snapshot, style, overrides, options, dpi: Optional[int] = None, *, presentation=None) -> Figure:
     """预览与正式导出共用同一 renderer：仅 dpi 不同。"""
     renderer = _FAMILY_RENDERERS.get(snapshot.view_family)
     if renderer is None:
         raise RenderError(f"不支持的视图族：{snapshot.view_family}")
     with RENDER_LOCK:
+        if renderer is render_1d and presentation is not None:
+            return renderer(snapshot, style, overrides, options, int(dpi or options.dpi),
+                            presentation=presentation)
         return renderer(snapshot, style, overrides, options, int(dpi or options.dpi))
 
 
-def background_kwargs(options) -> Dict[str, Any]:
+def background_kwargs(options, figure=None) -> Dict[str, Any]:
     """画布底色的 savefig 参数，供正式导出与预览共用。
 
     透明背景要两个条件同时成立：``transparent=True`` 让 axes 的 patch 透明，
@@ -1478,7 +1505,8 @@ def background_kwargs(options) -> Dict[str, Any]:
     关掉该选项时 facecolor="white"，与引入透明背景前的行为逐位一致。
     """
     transparent = bool(getattr(options, "transparent", False))
-    return {"facecolor": "none" if transparent else "white", "transparent": transparent}
+    color = figure.get_facecolor() if figure is not None else "white"
+    return {"facecolor": "none" if transparent else color, "transparent": transparent}
 
 
 def save_figure(fig: Figure, path: str, options) -> None:
@@ -1488,7 +1516,7 @@ def save_figure(fig: Figure, path: str, options) -> None:
         raise RenderError(f"不支持的输出格式：{fmt}")
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
-    kwargs = background_kwargs(options)
+    kwargs = background_kwargs(options, fig)
     tmp_path = os.path.join(
         directory, f".{os.path.basename(path)}.{os.getpid()}.pubtmp"
     )

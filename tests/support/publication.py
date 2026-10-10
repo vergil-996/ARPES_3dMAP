@@ -125,3 +125,38 @@ def _make_1d_comparison_snapshot():
     )
 
 
+def make_single_curve_snapshot():
+    snapshot = _make_1d_comparison_snapshot()
+    snapshot.view = "1d"
+    snapshot.source_page_id = "single"
+    snapshot.snapshot_id = "single-snapshot"
+    snapshot.payload["curve"] = dict(snapshot.payload.pop("curves")[0], label=None, curve_id="main")
+    return snapshot
+
+
+def make_waterfall_snapshot(count=5):
+    snapshot = _make_1d_comparison_snapshot()
+    energy = np.linspace(-2, 2, 100)
+    snapshot.view = "waterfall"
+    snapshot.source_page_id = "waterfall"
+    snapshot.snapshot_id = "waterfall-snapshot"
+    snapshot.payload = dict(energy_axis=energy, curves=np.array([np.exp(-(energy - i / count) ** 2) for i in range(count)]),
+                            k_values=np.linspace(-1, 1, count), offset_step=1.2,
+                            curve_offsets=np.arange(count) * 1.2,
+                            curve_ids=[f"X:{i * 2}" for i in range(count)],
+                            title="瀑布图", xlabel="Intensity (normalized, arb. u.)", ylabel="E (eV)")
+    return snapshot
+
+
+class MemoryPublicationSettings:
+    def __init__(self):
+        self.data = {}
+
+    def value(self, key, default=None, type=None):
+        result = self.data.get(key, default)
+        return type(result) if type is not None and result is not None else result
+
+    def setValue(self, key, value):
+        self.data[key] = value
+
+

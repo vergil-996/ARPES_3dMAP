@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+from bandscope.exporting.curve_presentation import source_revision
 from bandscope.core.crop_model import waterfall_offsets
 
 from bandscope.exporting.publication_models import (
@@ -179,6 +180,7 @@ def capture_snapshot(window) -> PublicationSnapshot:
         coord_sources=sources,
         coord_units=units,
         source_desc=_build_source_desc(window, spec, render_context),
+        source_revision=source_revision(window, spec),
     )
     if spec.page_kind == "home" and window.core.has_time_axis:
         try:
@@ -404,7 +406,8 @@ def _freeze_1d(window, snapshot: PublicationSnapshot, render_context) -> None:
         snapshot.coord_sources, snapshot.coord_units,
     )
     snapshot.payload = {
-        "curve": {"x": x, "y": y, "label": None},
+        "curve": {"x": x, "y": y, "label": None, "curve_id": "main",
+                  "source_title": snapshot.source_page_title, "is_base": True, "palette_slot": 0},
         "title": str(render_context.get("title") or snapshot.source_page_title),
         "xlabel": xlabel,
         "ylabel": str(render_context.get("ylabel") or "Intensity (a.u.)"),
@@ -413,7 +416,7 @@ def _freeze_1d(window, snapshot: PublicationSnapshot, render_context) -> None:
 
 def _freeze_1d_comparison(window, snapshot: PublicationSnapshot, render_context) -> None:
     curves = []
-    for curve in render_context.get("curves", []):
+    for index, curve in enumerate(render_context.get("curves", [])):
         x, y = _ascending_xy(curve.get("x_data"), curve.get("y_data"))
         if x.size == 0:
             continue
@@ -422,6 +425,10 @@ def _freeze_1d_comparison(window, snapshot: PublicationSnapshot, render_context)
                 "x": x,
                 "y": y,
                 "label": str(curve.get("label") or curve.get("source_title") or f"Curve {len(curves) + 1}"),
+                "curve_id": str(curve.get("curve_id") or f"legacy:{index}"),
+                "source_title": str(curve.get("source_title") or snapshot.source_page_title),
+                "is_base": bool(curve.get("is_base", index == 0)),
+                "palette_slot": int(curve.get("palette_slot", index)),
             }
         )
     if not curves:
@@ -459,6 +466,10 @@ def _freeze_waterfall(window, snapshot: PublicationSnapshot, render_context) -> 
         "k_values": k_values,
         "offset_step": float(render_context.get("offset_step", 1.2)),
         "curve_offsets": waterfall_offsets(render_context).copy(),
+        "curve_ids": [f"{render_context.get('k_axis_key', 'k')}:{int(i)}" for i in
+                      render_context.get("sample_indices", np.arange(len(curves)))],
+        "palette_slots": np.asarray(render_context.get("sample_indices", np.arange(len(curves)))).copy(),
+        "palette_span": len(snapshot.coords.get(render_context.get("k_axis_key", ""), k_values)),
         "title": str(render_context.get("title") or snapshot.source_page_title),
         "xlabel": str(render_context.get("xlabel") or "Intensity (normalized, arb. u.)"),
         "ylabel": ylabel,
@@ -507,11 +518,12 @@ def default_filename(snapshot, style, options: OutputOptions) -> str:
     return f"{safe_filename(snapshot.source_page_title)}_{style.style_id}.{options.fmt}"
 
 
-def render_and_save(snapshot, style, overrides, options: OutputOptions, path: str) -> None:
+def render_and_save(snapshot, style, overrides, options: OutputOptions, path: str, *, presentation=None) -> None:
     """同一 renderer 生成正式文件；原子写入；失败不损坏旧文件。"""
     if options.fmt not in FAMILY_FORMATS.get(snapshot.view_family, ("png",)):
         raise ExportError(f"当前视图族首版不支持 {options.fmt.upper()} 输出。")
-    fig = render_snapshot(snapshot, style, overrides, options, dpi=int(options.dpi))
+    kwargs = {"presentation": presentation} if presentation is not None else {}
+    fig = render_snapshot(snapshot, style, overrides, options, dpi=int(options.dpi), **kwargs)
     try:
         save_figure(fig, path, options)
     finally:

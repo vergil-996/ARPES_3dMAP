@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import io
+import copy
 from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
@@ -34,6 +35,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -54,6 +56,9 @@ from bandscope.exporting.publication_models import (
     AXIS_LABEL_OVERRIDE_KEYS,
     FAMILY_FORMATS,
     FAMILY_LABELS,
+    ENGLISH_FONTS,
+    CHINESE_FONTS,
+    FONT_DEFAULTS,
     TITLE_GAP_DEFAULT_MM,
     OutputOptions,
     auto_axis_labels,
@@ -68,6 +73,11 @@ from bandscope.exporting.publication_renderers import (
     default_colorbar_center,
     render_snapshot,
 )
+from bandscope.exporting.curve_presentation import (
+    Figure1DPresentation, publication_session, source_revision,
+    load_presentation, save_presentation,
+)
+from bandscope.exporting.curve_style_editor import CurveStyleEditor
 
 CARD_DPI = 80          # 卡片预览 dpi（完整数据、较低像素）
 LARGE_DPI = 150        # 大图预览 dpi（与正式文件同一排版）
@@ -122,7 +132,7 @@ class _PreviewSignals(QObject):
 
 
 class _PreviewTask(QRunnable):
-    def __init__(self, key, revision, snapshot, style, overrides, options, dpi):
+    def __init__(self, key, revision, snapshot, style, overrides, options, dpi, presentation=None):
         super().__init__()
         self.key = key
         self.revision = revision
@@ -131,19 +141,20 @@ class _PreviewTask(QRunnable):
         self.overrides = overrides
         self.options = options
         self.dpi = dpi
+        self.presentation = presentation.clone() if presentation is not None else None
         self.signals = _PreviewSignals()
 
     @pyqtSlot()
     def run(self):
         try:
-            fig = render_snapshot(
-                self.snapshot, self.style, self.overrides, self.options, dpi=self.dpi
-            )
+            kwargs = {"presentation": self.presentation} if self.presentation is not None else {}
+            fig = render_snapshot(self.snapshot, self.style, self.overrides, self.options,
+                                  dpi=self.dpi, **kwargs)
             try:
                 buffer = io.BytesIO()
                 fig.savefig(
                     buffer, format="png", dpi=int(fig.get_dpi()),
-                    **background_kwargs(self.options),
+                    **background_kwargs(self.options, fig),
                 )
                 payload = buffer.getvalue()
             finally:
@@ -184,6 +195,8 @@ class _StyleCard(QToolButton):
         self.setCheckable(True)
         self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         self.setFixedSize(216, 224)
+        if style.view_family == "1d":
+            self.setFixedSize(168, 144)
         self.setCursor(Qt.PointingHandCursor)
         self._base_text = style.name
         self.setText(self._base_text)
@@ -207,7 +220,8 @@ class _StyleCard(QToolButton):
     def set_preview(self, pixmap: Optional[QPixmap]):
         if pixmap is None or pixmap.isNull():
             return
-        scaled = pixmap.scaled(196, 168, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        size = (148, 100) if self.style.view_family == "1d" else (196, 168)
+        scaled = pixmap.scaled(*size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.setIconSize(scaled.size())
         self.setIcon(QIcon(scaled))
 
@@ -239,6 +253,9 @@ class PublicationExportDialog(QDialog):
         self.snapshot = None
         self._draft_style_id: Optional[str] = None
         self._draft_overrides: Dict[str, Any] = {}
+        self.presentation = Figure1DPresentation()
+        self._page_style_drafts = {}
+        self._editor_valid = True
         self._committed_overrides: Dict[str, Dict[str, Any]] = {}
         self._preview_cache: Dict[Tuple, bytes] = {}
         self._preview_revision = 0
@@ -326,7 +343,22 @@ class PublicationExportDialog(QDialog):
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setStyleSheet(f"color: {theme.TEXT_2}; background: transparent;")
         self.preview_scroll.setWidget(self.preview_label)
-        layout.addWidget(self.preview_scroll, 1)
+        self.preview_splitter = QSplitter(Qt.Horizontal)
+        self.preview_splitter.addWidget(self.preview_scroll)
+        self.curve_editor = CurveStyleEditor(self.main_window.__dict__.get("settings"), self)
+        self.curve_editor.setMinimumWidth(420)
+        self.curve_editor.changed.connect(self._on_presentation_changed)
+        self.curve_editor.validityChanged.connect(self._on_editor_validity)
+        self.curve_editor.presetRequested.connect(self._apply_1d_preset)
+        self.curve_editor.externalRestored.connect(self._restore_1d_external)
+        self.curve_editor.resetAllRequested.connect(self._reset_1d_external)
+        self.curve_editor.legacy_overrides = lambda: self._draft_overrides
+        self.preview_splitter.addWidget(self.curve_editor)
+        self.preview_splitter.setSizes([640, 480])
+        self.preview_splitter.setCollapsible(0, False)
+        self.preview_splitter.setCollapsible(1, False)
+        self.curve_editor.hide()
+        layout.addWidget(self.preview_splitter, 1)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
@@ -448,6 +480,24 @@ class PublicationExportDialog(QDialog):
         self.frame_row.addStretch(1)
         tune_layout.addLayout(self.frame_row)
 
+        self.tick_row = QWidget()
+        tick_layout = QHBoxLayout(self.tick_row)
+        tick_layout.setContentsMargins(0, 0, 0, 0)
+        tick_layout.addWidget(QLabel("刻线方向"))
+        self.combo_tick_direction = QComboBox()
+        self.combo_tick_direction.addItem("朝内", "in")
+        self.combo_tick_direction.addItem("朝外", "out")
+        tick_layout.addWidget(self.combo_tick_direction)
+        tick_layout.addSpacing(12)
+        tick_layout.addWidget(QLabel("刻线颜色"))
+        self.combo_tick_color = QComboBox()
+        self.combo_tick_color.addItem("黑色", "#000000")
+        self.combo_tick_color.addItem("白色", "#ffffff")
+        self.combo_tick_color.setToolTip("仅改变坐标轴刻线颜色，刻度数字和轴名保持原样")
+        tick_layout.addWidget(self.combo_tick_color)
+        tick_layout.addStretch(1)
+        tune_layout.addWidget(self.tick_row)
+
         # 轴标签行：用户命名各轴名（四个视图族通用；2D/1D 横+纵两条，
         # 3D 是 X / Y / E 三条，与快照 axis_titles 的绘制顺序一致）
         self.axis_row = QHBoxLayout()
@@ -534,6 +584,24 @@ class PublicationExportDialog(QDialog):
             self.title_row.addWidget(widget)
         self.title_row.addStretch(1)
         tune_layout.addLayout(self.title_row)
+
+        font_row = QHBoxLayout()
+        self.font_row = font_row
+        self.combo_font_english = QComboBox()
+        self.combo_font_chinese = QComboBox()
+        from matplotlib.font_manager import fontManager
+        installed = {font.name for font in fontManager.ttflist}
+        for label, combo, choices in (
+            ("英文字体", self.combo_font_english, ENGLISH_FONTS),
+            ("中文字体", self.combo_font_chinese, CHINESE_FONTS),
+        ):
+            font_row.addWidget(QLabel(label))
+            for name, family in choices:
+                combo.addItem(name if family in installed else name + "（未安装）", family)
+            combo.setToolTip("用于标题、轴名、刻度和图例；未安装的字体自动回退。")
+            font_row.addWidget(combo)
+        font_row.addStretch(1)
+        tune_layout.addLayout(font_row)
 
         reset_row = QHBoxLayout()
         self.btn_reset_style = QPushButton("恢复该样式默认值")
@@ -624,6 +692,8 @@ class PublicationExportDialog(QDialog):
         self.spin_cbar_cx.valueChanged.connect(self._on_center_changed)
         self.spin_cbar_cy.valueChanged.connect(self._on_center_changed)
         self.combo_frame.currentIndexChanged.connect(self._on_tune_changed)
+        self.combo_tick_direction.currentIndexChanged.connect(self._on_tune_changed)
+        self.combo_tick_color.currentIndexChanged.connect(self._on_tune_changed)
         self.chk_box.toggled.connect(self._on_tune_changed)
         self.chk_grid.toggled.connect(self._on_tune_changed)
         self.chk_title.toggled.connect(self._on_tune_changed)
@@ -632,6 +702,8 @@ class PublicationExportDialog(QDialog):
         self.combo_title_pos.currentIndexChanged.connect(self._on_tune_changed)
         self.combo_title_align.currentIndexChanged.connect(self._on_tune_changed)
         self.spin_title_gap.valueChanged.connect(self._on_tune_changed)
+        self.combo_font_english.currentIndexChanged.connect(self._on_tune_changed)
+        self.combo_font_chinese.currentIndexChanged.connect(self._on_tune_changed)
         self.edit_panel_label.textChanged.connect(self._on_tune_changed)
         self.spin_body_size.valueChanged.connect(self._on_tune_changed)
         for edit in self.axis_edits:
@@ -646,6 +718,21 @@ class PublicationExportDialog(QDialog):
         self.spin_dpi.valueChanged.connect(self._on_output_changed)
         self.combo_format.currentIndexChanged.connect(self._on_output_changed)
         self.chk_transparent.toggled.connect(self._on_output_changed)
+        self.curve_editor.configure_common([
+            ("显示标题", self.chk_title, self.title_row),
+            ("标题文字", self.edit_title, self.title_row),
+            ("自动标题", self.btn_title_auto, self.title_row),
+            ("标题位置", self.combo_title_pos, self.title_row),
+            ("标题对齐", self.combo_title_align, self.title_row),
+            ("标题距离", self.spin_title_gap, self.title_row),
+            ("横轴名称", self.edit_axis_x, self.axis_row),
+            ("纵轴名称", self.edit_axis_y, self.axis_row),
+            ("自动轴名", self.btn_axis_auto, self.axis_row),
+            ("英文字体", self.combo_font_english, self.font_row),
+            ("中文字体", self.combo_font_chinese, self.font_row),
+            ("面板编号", self.edit_panel_label, self.frame_row),
+            ("坐标边框", self.combo_frame, self.frame_row),
+        ])
 
     # ------------------------------------------------------------- 打开/快照
 
@@ -678,10 +765,12 @@ class PublicationExportDialog(QDialog):
         return True
 
     def _adopt_snapshot(self, snapshot):
+        self._remember_page()
         self.snapshot = snapshot
         self._preview_cache.clear()
         self._big_ready = False
         family = snapshot.view_family
+        self._editor_valid = True
 
         self.family_badge.setText(f"当前：{FAMILY_LABELS.get(family, family)}")
         self.source_label.setText(f"来源：{snapshot.source_desc}（{snapshot.view} 结果）")
@@ -693,6 +782,24 @@ class PublicationExportDialog(QDialog):
         }
         self._draft_style_id = style.style_id
         self._draft_overrides = dict(self._committed_overrides.get(style.style_id, {}))
+        if family == "1d":
+            remembered = publication_session(self.main_window).pages.get(snapshot.source_page_id)
+            if remembered is not None:
+                self.presentation = remembered["presentation"].clone()
+                self._page_style_drafts = copy.deepcopy(remembered["drafts"])
+                self._draft_style_id = remembered["style_id"]
+                self._draft_overrides = dict(self._page_style_drafts.get(self._draft_style_id, {}))
+            else:
+                self.presentation = load_presentation(self.main_window.settings, style.style_id)
+                self._page_style_drafts = copy.deepcopy(self._committed_overrides)
+            self.curve_editor.set_snapshot(snapshot, self.presentation, self._current_style())
+            if self.width() < 1120:
+                self.resize(1120, 820)
+        self.curve_editor.setVisible(family == "1d")
+        self.curve_editor.show_common(family == "1d")
+        self.tune_toggle.setVisible(family != "1d")
+        if family == "1d":
+            self.tune_panel.hide()
 
         self._rebuild_cards()
         self._load_output_options_ui()
@@ -730,6 +837,7 @@ class PublicationExportDialog(QDialog):
     def _update_tune_availability(self):
         family = self.snapshot.view_family
         has_cbar = family in ("2d", "3d")
+        self.tick_row.setVisible(family == "2d")
         for row in (self.cbar_row, self.cbar_row2):
             for i in range(row.count()):
                 w = row.itemAt(i).widget()
@@ -761,16 +869,24 @@ class PublicationExportDialog(QDialog):
             (self.chk_cbar,), (self.combo_cbar_pos,), (self.combo_cbar_tick,),
             (self.spin_cbar_nticks,), (self.spin_cbar_len,), (self.chk_cbar_outline,),
             (self.combo_frame,),
+            (self.combo_tick_direction,), (self.combo_tick_color,),
             (self.chk_box,), (self.chk_grid,), (self.chk_title,), (self.edit_panel_label,),
             (self.edit_axis_x,), (self.edit_axis_y,), (self.edit_axis_z,),
             (self.edit_title,), (self.combo_title_pos,), (self.combo_title_align,),
             (self.spin_title_gap,),
+            (self.combo_font_english,), (self.combo_font_chinese,),
             (self.spin_body_size,),
             (self.spin_cbar_thick,), (self.spin_cbar_cx,), (self.spin_cbar_cy,),
         ]
         for (w,) in blockers:
             w.blockSignals(True)
         try:
+            for key, combo in (
+                ("font_english", self.combo_font_english),
+                ("font_chinese", self.combo_font_chinese),
+            ):
+                index = combo.findData(ov.get(key, FONT_DEFAULTS[key]))
+                combo.setCurrentIndex(max(0, index))
             self.chk_cbar.setChecked(bool(ov.get("colorbar_visible", True)))
             pos = ov.get("colorbar_position", params.get("colorbar_position", "right"))
             self.combo_cbar_pos.setCurrentIndex(
@@ -802,6 +918,11 @@ class PublicationExportDialog(QDialog):
                 )
             frame = ov.get("frame_mode", params.get("frame_mode", "open"))
             self.combo_frame.setCurrentIndex(0 if frame == "box" else 1)
+            for key, combo, default in (
+                ("tick_direction", self.combo_tick_direction, params.get("tick_direction", "out")),
+                ("tick_color", self.combo_tick_color, params.get("ink_color", "#000000")),
+            ):
+                combo.setCurrentIndex(max(0, combo.findData(ov.get(key, default))))
             self.chk_box.setChecked(bool(ov.get("show_box", params.get("show_box", False))))
             self.chk_grid.setChecked(bool(ov.get("show_grid", params.get("show_grid", False))))
             self.chk_title.setChecked(bool(ov.get("show_title", True)))
@@ -837,6 +958,12 @@ class PublicationExportDialog(QDialog):
     def _collect_overrides_from_ui(self) -> Dict[str, Any]:
         family = self.snapshot.view_family
         ov: Dict[str, Any] = {}
+        for key, combo in (
+            ("font_english", self.combo_font_english),
+            ("font_chinese", self.combo_font_chinese),
+        ):
+            if combo.currentData() != FONT_DEFAULTS[key]:
+                ov[key] = combo.currentData()
         if family in ("2d", "3d"):
             if not self.chk_cbar.isChecked():
                 ov["colorbar_visible"] = False
@@ -871,6 +998,13 @@ class PublicationExportDialog(QDialog):
             frame = "box" if self.combo_frame.currentIndex() == 0 else "open"
             if frame != self._current_style().params.get("frame_mode", "open"):
                 ov["frame_mode"] = frame
+        if family == "2d":
+            for key, combo, default in (
+                ("tick_direction", self.combo_tick_direction, self._current_style().params.get("tick_direction", "out")),
+                ("tick_color", self.combo_tick_color, self._current_style().params.get("ink_color", "#000000")),
+            ):
+                if combo.currentData() != default:
+                    ov[key] = combo.currentData()
         if family == "3d":
             if self.chk_box.isChecked() != bool(self._current_style().params.get("show_box", False)):
                 ov["show_box"] = self.chk_box.isChecked()
@@ -1064,9 +1198,19 @@ class PublicationExportDialog(QDialog):
         if style_id == self._draft_style_id:
             return
         # 切换样式不带入上一样式的覆盖参数（plan §4.1）
+        is_1d = self.snapshot is not None and self.snapshot.view_family == "1d"
+        if is_1d:
+            self._page_style_drafts[self._draft_style_id] = dict(self._draft_overrides)
         self._draft_style_id = style_id
-        self._draft_overrides = dict(self._committed_overrides.get(style_id, {}))
+        drafts = self._page_style_drafts if is_1d else self._committed_overrides
+        self._draft_overrides = dict(drafts.get(style_id, {}))
+        if is_1d:
+            self.curve_editor.style = self._current_style()
+            self.curve_editor.refresh()
         self._sync_tune_ui_from_draft()
+        if is_1d:
+            self.curve_editor.record_external()
+        self.cards[style_id].setChecked(True)
         self._regenerate_previews()
 
     def _on_tune_changed(self, *_args):
@@ -1074,11 +1218,81 @@ class PublicationExportDialog(QDialog):
             return
         self._refresh_center_defaults_if_untouched()
         self._draft_overrides = self._collect_overrides_from_ui()
+        if self.snapshot.view_family == "1d":
+            self.curve_editor.record_external()
+        self._invalidate_preview()
+        self._remember_page()
         self._debounce.start()
+
+    def _invalidate_preview(self):
+        self._preview_revision += 1
+        self._big_ready = False
+        self.btn_export.setEnabled(False)
+
+    def _remember_page(self):
+        if self.snapshot is None or self.snapshot.view_family != "1d":
+            return
+        self._page_style_drafts[self._draft_style_id] = dict(self._draft_overrides)
+        publication_session(self.main_window).pages[self.snapshot.source_page_id] = {
+            "presentation": self.presentation.clone(), "style_id": self._draft_style_id,
+            "drafts": copy.deepcopy(self._page_style_drafts),
+        }
+
+    def _on_presentation_changed(self):
+        self._invalidate_preview()
+        self._remember_page()
+        self._debounce.start()
+
+    def _on_editor_validity(self, valid, message):
+        self._editor_valid = valid
+        self.btn_export.setEnabled(valid and self._big_ready)
+        if message:
+            self.status_label.setText(message)
+
+    def _apply_1d_preset(self, preset):
+        valid_ids = {s.style_id for s in styles_for_family("1d")}
+        style_id = preset.get("style_id")
+        scientific = {k: v for k, v in self._draft_overrides.items()
+                      if k in ("title_text", "xlabel_text", "ylabel_text", "panel_label")}
+        if style_id in valid_ids:
+            self._page_style_drafts[self._draft_style_id] = dict(self._draft_overrides)
+            self._draft_style_id = style_id
+            self.curve_editor.style = self._current_style()
+        self._draft_overrides = {**validate_overrides("1d", preset.get("overrides", {})), **scientific}
+        self._rebuild_cards()
+        self._sync_tune_ui_from_draft()
+        self.curve_editor.refresh()
+        self._on_presentation_changed()
+
+    def _restore_1d_external(self, style_id, overrides):
+        self._draft_style_id = style_id
+        self._draft_overrides = dict(overrides)
+        self._rebuild_cards()
+        self._sync_tune_ui_from_draft()
+
+    def _reset_1d_external(self):
+        self._draft_overrides = {}
+        self._sync_tune_ui_from_draft()
+
+    def forget_page(self, page_id):
+        publication_session(self.main_window).forget_page(page_id)
+        if self.snapshot is not None and self.snapshot.source_page_id == page_id:
+            self.clear_session(clear_pages=False)
+
+    def clear_session(self, clear_pages=True):
+        if clear_pages:
+            publication_session(self.main_window).clear()
+        self.snapshot = None
+        self.curve_editor.snapshot = None
+        self._page_style_drafts.clear()
+        self._debounce.stop()
+        self._invalidate_preview()
+        self.close()
 
     def _reset_style_overrides(self):
         self._draft_overrides = {}
         self._sync_tune_ui_from_draft()
+        self._invalidate_preview()
         self._debounce.start()
 
     def _toggle_tune_panel(self, checked):
@@ -1172,6 +1386,7 @@ class PublicationExportDialog(QDialog):
             self.spin_dpi.setValue(600)
         # 尺寸/DPI/格式是独立输出偏好，立即持久化；恢复样式默认不重置它们
         persist_output_options(self.main_window.settings, self._collect_output_options())
+        self._invalidate_preview()
         self._debounce.start()
 
     # ------------------------------------------------------------- 预览生成
@@ -1185,6 +1400,7 @@ class PublicationExportDialog(QDialog):
             overrides_signature(ov),
             options.signature(self.snapshot.view_family),
             int(dpi),
+            self.presentation.signature() if self.snapshot.view_family == "1d" else None,
         )
 
     def _cache_put(self, key, payload: bytes):
@@ -1199,6 +1415,7 @@ class PublicationExportDialog(QDialog):
             self._pending_regenerate = True
             return
         self._preview_revision += 1
+        self._pool.clear()  # Drop queued renders from older revisions; running results are rejected below.
         self._big_ready = False
         self.btn_export.setEnabled(False)
         options = self._collect_output_options()
@@ -1230,6 +1447,7 @@ class PublicationExportDialog(QDialog):
                 task = _PreviewTask(
                     key, self._preview_revision, self.snapshot, style,
                     overrides, options, tier_dpi,
+                    self.presentation if family == "1d" else None,
                 )
                 task.signals.done.connect(self._on_preview_done)
                 task.signals.failed.connect(self._on_preview_failed)
@@ -1316,7 +1534,7 @@ class PublicationExportDialog(QDialog):
         if dpi == LARGE_DPI and style_id == self._draft_style_id:
             self._set_big_preview(pixmap)
             self._big_ready = True
-            self.btn_export.setEnabled(True)
+            self.btn_export.setEnabled(self._editor_valid)
             style_name = self._current_style().full_name
             self.status_label.setText(f"预览就绪：{style_name}（与导出文件同一排版）")
 
@@ -1361,21 +1579,18 @@ class PublicationExportDialog(QDialog):
         page_id = spec.page_id if spec is not None else None
         # 页面改名也要算状态变化：快照里的来源名和默认文件名都跟着页面名走。
         title = str(spec.title) if spec is not None else None
-        t_idx = None
-        if window.core.raw_data is not None and window.core.has_time_axis:
-            try:
-                t_idx = int(window.timeline_bar.slider_time.value())
-            except Exception:
-                t_idx = None
-        return page_id, t_idx, title
+        revision = source_revision(window, spec)
+        if self.snapshot is not None and not self.snapshot.source_revision:
+            revision = ()  # Older synthetic/external snapshots have no revision metadata.
+        return page_id, title, revision
 
     def _snapshot_state_token(self):
         if self.snapshot is None:
-            return None, None, None
+            return None, None, ()
         return (
             self.snapshot.source_page_id,
-            self.snapshot.home_frame_index,
             self.snapshot.source_page_title,
+            self.snapshot.source_revision,
         )
 
     def _check_stale_source(self):
@@ -1419,7 +1634,7 @@ class PublicationExportDialog(QDialog):
 
     def _on_export(self):
         """导出面板冻结的快照；写入成功后提交该视图族偏好。"""
-        if self.snapshot is None or not self._big_ready:
+        if self.snapshot is None or not self._big_ready or not self._editor_valid:
             return  # 正式预览未就绪时不可导出
         style = self._current_style()
         options = self._collect_output_options()
@@ -1437,9 +1652,8 @@ class PublicationExportDialog(QDialog):
         self.status_label.setText("正在渲染并写入文件…")
         QApplication.processEvents()
         try:
-            render_and_save(
-                self.snapshot, style, self._draft_overrides, options, path
-            )
+            kwargs = {"presentation": self.presentation.clone()} if self.snapshot.view_family == "1d" else {}
+            render_and_save(self.snapshot, style, self._draft_overrides, options, path, **kwargs)
         except (ExportError, RenderError, OSError, ValueError) as exc:
             self.status_label.setText(f"导出失败：{exc}")
             self.main_window._show_message("导出失败", str(exc))
@@ -1452,7 +1666,7 @@ class PublicationExportDialog(QDialog):
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.btn_export.setEnabled(self._big_ready)
+            self.btn_export.setEnabled(self._big_ready and self._editor_valid)
 
         commit_style(
             self.main_window.settings,
@@ -1462,6 +1676,9 @@ class PublicationExportDialog(QDialog):
         )
         self._cbar_pos_memory.clear()  # 导出成功后清空各位置几何记忆
         self._committed_overrides[style.style_id] = dict(self._draft_overrides)
+        if self.snapshot.view_family == "1d":
+            save_presentation(self.main_window.settings, style.style_id, self.presentation)
+            self._remember_page()
         self.cards[style.style_id].set_tuned(bool(self._draft_overrides))
         persist_output_options(self.main_window.settings, options)
         self.main_window._update_screenshot_tooltip()
@@ -1471,8 +1688,18 @@ class PublicationExportDialog(QDialog):
     # ------------------------------------------------------------- 关闭
 
     def closeEvent(self, event):
+        self._remember_page()
+        self._debounce.stop()
         self._stale_timer.stop()
         self._preview_revision += 1  # 使在途结果失效（协作式取消）
         self._pool.clear()
         self._cbar_pos_memory.clear()  # 面板关闭即清空各位置几何记忆
         super().closeEvent(event)
+
+    def reject(self):
+        self._remember_page()
+        self._debounce.stop()
+        self._stale_timer.stop()
+        self._preview_revision += 1
+        self._pool.clear()
+        super().reject()

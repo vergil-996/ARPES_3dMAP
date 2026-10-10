@@ -1,0 +1,47 @@
+{
+  "data": "D:\\ARPES_3dmap\\ARPES_3dMAP\\.local\\data\\WSe2_step.npz",
+  "checks": [
+    {
+      "check": "实测数据加载与逐帧曲线生成",
+      "status": "PASS"
+    },
+    {
+      "check": "single：PNG/PDF 与主视图状态隔离",
+      "status": "PASS"
+    },
+    {
+      "check": "single：1D 编辑窗口预览就绪",
+      "status": "PASS"
+    },
+    {
+      "check": "comparison：PNG/PDF 与主视图状态隔离",
+      "status": "PASS"
+    },
+    {
+      "check": "comparison：1D 编辑窗口预览就绪",
+      "status": "PASS"
+    },
+    {
+      "check": "宿主 log 衍生页创建",
+      "status": "PASS"
+    },
+    {
+      "check": "log：PNG/PDF 与主视图状态隔离",
+      "status": "PASS"
+    },
+    {
+      "check": "log：1D 编辑窗口预览就绪",
+      "status": "PASS"
+    },
+    {
+      "check": "waterfall：PNG/PDF 与主视图状态隔离",
+      "status": "PASS"
+    },
+    {
+      "check": "waterfall：1D 编辑窗口预览就绪",
+      "status": "PASS"
+    }
+  ],
+  "visual_review": "2026-10-10 已查看单曲线/比较/log 89 mm、瀑布89/183 mm PNG，以及比较曲线、标题/字体、注记编辑器截图；可读、无已见裁切重叠。未人工查看PDF，其他极端参数组合未逐项视觉复核。",
+  "scope": "真实主窗口、宿主 1D/比较/log/瀑布数据路径、截图编辑器和 PNG/PDF；未重建冻结包。"
+}

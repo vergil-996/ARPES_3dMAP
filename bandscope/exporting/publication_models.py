@@ -286,6 +286,30 @@ STYLE_REGISTRY: Dict[str, Dict[str, StyleSpec]] = {
 
 DEFAULT_STYLE_ID = {"3d": "3d_minimal", "2d": "2d_boxed", "1d": "1d_open"}
 
+# 固定推荐列表，保存字体族名称而非界面显示名称。
+ENGLISH_FONTS = (
+    ("DejaVu Sans（默认）", "DejaVu Sans"),
+    ("Arial", "Arial"),
+    ("Times New Roman", "Times New Roman"),
+    ("Georgia", "Georgia"),
+)
+CHINESE_FONTS = (
+    ("微软雅黑（默认）", "Microsoft YaHei"),
+    ("宋体", "SimSun"),
+    ("黑体", "SimHei"),
+    ("楷体", "KaiTi"),
+)
+FONT_DEFAULTS = {"font_english": "DejaVu Sans", "font_chinese": "Microsoft YaHei"}
+
+
+def publication_font_family(params, overrides):
+    """拉丁字形优先使用英文字体，中文逐字形回退至所选中文字体。"""
+    if not any(key in overrides for key in FONT_DEFAULTS):
+        return list(params.get("font_family", _COMMON_PARAMS["font_family"]))
+    families = [overrides.get(key, default) for key, default in FONT_DEFAULTS.items()]
+    families.extend(_COMMON_PARAMS["font_family"])
+    return list(dict.fromkeys(families))
+
 
 def styles_for_family(family: str) -> Tuple[StyleSpec, ...]:
     registry = STYLE_REGISTRY.get(family) or {}
@@ -306,6 +330,8 @@ def resolve_style(family: str, style_id: Optional[str]) -> StyleSpec:
 
 # 各键的合法取值；未列出或取值非法的键在校验时被丢弃。
 _OVERRIDE_SCHEMA = {
+    "font_english": ("choice", tuple(family for _, family in ENGLISH_FONTS)),
+    "font_chinese": ("choice", tuple(family for _, family in CHINESE_FONTS)),
     "colorbar_visible": ("bool", None),
     "colorbar_position": ("choice", ("right", "left", "top", "bottom")),
     "colorbar_tick_mode": ("choice", ("values", "endpoints", "lowhigh", "none")),
@@ -319,6 +345,8 @@ _OVERRIDE_SCHEMA = {
     "colorbar_cx": ("int", (0, 100)),
     "colorbar_cy": ("int", (0, 100)),
     "frame_mode": ("choice", ("box", "open")),
+    "tick_direction": ("choice", ("in", "out")),
+    "tick_color": ("choice", ("#000000", "#ffffff")),
     "show_box": ("bool", None),
     "show_grid": ("bool", None),
     "panel_label": ("str", 8),
@@ -362,6 +390,8 @@ def validate_overrides(family: str, overrides: Optional[Mapping[str, Any]]) -> D
         if schema is None:
             continue
         kind, constraint = schema
+        if key in ("tick_direction", "tick_color") and family != "2d":
+            continue
         if key in _COLORBAR_OVERRIDE_KEYS and family == "1d":
             continue  # 1D 通常没有色条
         if key == "frame_mode" and family == "3d":
@@ -577,6 +607,7 @@ class PublicationSnapshot:
     payload: Dict[str, Any] = field(default_factory=dict)
     source_desc: str = ""
     home_frame_index: Optional[int] = None
+    source_revision: Tuple = ()
 
     def axis_label(self, axis_key: str) -> str:
         return axis_label(

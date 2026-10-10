@@ -7,6 +7,10 @@
 - [UI 设计稿](ui/ui_redesign_mockup.html)
 - [图片导出研究计划（2026-09-21）](publication-export/publication_export_research_plan_2026-09-21.md)
 - [图片导出历史验收报告](publication-export/publication_export_acceptance/validation_report.md)
+- [1D 截图与导出样式优化（2026-10-10）](1d-export-style/README.md)：三阶段实施、自动化回归与实测窗口验收，含计划及样例。
+- [截图样式中英文字体选择（2026-10-09）](screenshot-font-selection/README.md)：英文 / 中文各四种字体，随样式保存。
+- [2D 截图刻线样式（2026-10-09）](screenshot-tick-style/README.md)：刻线方向与颜色，仅 2D 可见。
+- [坐标轴积分端点与 E 翻转修复（2026-10-09）](axis-interval-fix/README.md)：代码与自动化回归完成；真实窗口视觉验收未执行。
 - [项目目录整理验收（2026-09-27）](repository-layout/validation-2026-09-27.md)
 - [轴标题编辑与页面重命名（2026-09-28）](axis-titles/axis-title-editing.md)，验收截图同目录
 - [左侧页面树改造（2026-09-28）](page-tree/page-tree-navigation.md)，验收截图同目录

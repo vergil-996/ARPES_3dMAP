@@ -3280,8 +3280,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         source_title = str(snapshot.get("source_title") or title)
         label = str(snapshot.get("label") or source_title)
         xlabel = str(snapshot.get("xlabel") or "")
-        return {
+        result = {
             "curve_kind": curve_kind,
+            "curve_id": str(snapshot.get("curve_id") or ""),
             "title": title,
             "source_title": source_title,
             "label": label,
@@ -3289,6 +3290,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "x_data": x_data.astype(float).tolist(),
             "y_data": y_data.astype(float).tolist(),
         }
+        if isinstance(snapshot.get("palette_slot"), (int, np.integer)):
+            result["palette_slot"] = int(snapshot["palette_slot"])
+        if isinstance(snapshot.get("is_base"), bool):
+            result["is_base"] = snapshot["is_base"]
+        return result
 
     def _curve_snapshot_from_context(self, spec, context, *, label=None):
         if spec is None or context is None or context.get("view") != "1d":
@@ -3301,6 +3307,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         snapshot = self._normalize_curve_snapshot(
             {
                 "curve_kind": curve_kind,
+                "curve_id": "main",
                 "title": context.get("title") or spec.title,
                 "source_title": spec.title,
                 "label": label or spec.title,
@@ -3406,6 +3413,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         target_kind, base_curve, overlay_curves = group
         clipboard_curve["curve_kind"] = target_kind
+        # A paste is a new curve instance, even when its numerical source is identical.
+        clipboard_curve["curve_id"] = uuid.uuid4().hex
         overlay_curves = [copy.deepcopy(curve) for curve in overlay_curves]
         overlay_curves.append(copy.deepcopy(clipboard_curve))
 
@@ -4915,9 +4924,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if base_curve is None:
             return None
         base_curve["curve_kind"] = comparison_kind
+        base_curve.update(curve_id=base_curve.get("curve_id") or "legacy:base", is_base=True,
+                          palette_slot=base_curve.get("palette_slot", 0))
 
         curves = [base_curve]
-        for curve in spec.params.get("overlay_curves", []):
+        for index, curve in enumerate(spec.params.get("overlay_curves", [])):
             normalized = self._normalize_curve_snapshot(curve)
             if normalized is None:
                 continue
@@ -4926,6 +4937,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             if not self._curve_x_data_matches(base_curve, normalized):
                 continue
             normalized["curve_kind"] = comparison_kind
+            normalized.update(curve_id=normalized.get("curve_id") or f"legacy:overlay:{index}",
+                              is_base=False, palette_slot=normalized.get("palette_slot", index + 1))
             curves.append(normalized)
 
         return {
@@ -4942,15 +4955,19 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if base_curve is None:
             return None
         base_curve["curve_kind"] = self.LOG_1D_PAGE_KIND
+        base_curve.update(curve_id=base_curve.get("curve_id") or "legacy:base", is_base=True,
+                          palette_slot=base_curve.get("palette_slot", 0))
 
         curves = [base_curve]
-        for curve in spec.params.get("overlay_curves", []):
+        for index, curve in enumerate(spec.params.get("overlay_curves", [])):
             normalized = self._normalize_curve_snapshot(curve)
             if normalized is None:
                 continue
             if not self._curve_x_data_matches(base_curve, normalized):
                 continue
             normalized["curve_kind"] = self.LOG_1D_PAGE_KIND
+            normalized.update(curve_id=normalized.get("curve_id") or f"legacy:overlay:{index}",
+                              is_base=False, palette_slot=normalized.get("palette_slot", index + 1))
             curves.append(normalized)
 
         if len(curves) == 1:
@@ -5505,6 +5522,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "title": title,
             "energy_axis": energy_axis,
             "k_values": np.asarray(k_values, dtype=np.float64),
+            "k_axis_key": axis_info["k_axis_key"],
+            "sample_indices": x_low + valid_indices,
             "curves": normalized,
             "raw_curves": curves,
             "offset_step": 1.2,
@@ -5964,6 +5983,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return path
 
     def _reset_loaded_data_state(self, target_path):
+        from bandscope.exporting.curve_presentation import publication_session
+        publication_session(self).clear()
+        dialog = self.__dict__.get("_publication_dialog")
+        if dialog is not None:
+            dialog.clear_session()
         self.loaded_npz_stem = Path(target_path).stem
         canonical, original, base = self._canonical_data_aliases(self.core.raw_data)
         self.core.raw_data = canonical
@@ -7864,6 +7888,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._sync_camera_view_controls()
 
     def on_result_page_closed(self, page_id):
+        from bandscope.exporting.curve_presentation import publication_session
+        publication_session(self).forget_page(page_id)
+        dialog = self.__dict__.get("_publication_dialog")
+        if dialog is not None:
+            dialog.forget_page(page_id)
         self.crop_controller.remove_page(page_id)
         self.refresh_coordinator.cancel_page(page_id)
         # 来源页关闭后结果没有归属：取消它名下的分析任务，晚到的结果也会被丢弃。
