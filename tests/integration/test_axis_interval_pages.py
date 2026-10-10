@@ -230,6 +230,68 @@ class PageIntervalBindingTests(unittest.TestCase):
         self.assertTrue(self.harness.controller.interval.locked)
         self.assertTrue(self.harness.page_data.btn_ax_lock.isChecked())
 
+    def test_e_flip_preserves_selection_and_remaps_endpoint_boundaries(self):
+        h = self.harness
+        spec = _spec("energy", axis_index=2, low=0, up=2, mid=1)
+        h.page_data.combo_ax.setCurrentIndex(2)
+        interval = h.bind(spec)
+        interval.set_up(-0.7)
+        interval.set_low(-2.8)
+        interval.set_locked(True)
+        original = (interval.low, interval.up)
+        indices = h.analyzer._axis_input_logical_values()[:2]
+        h.analyzer._persist_axis_interval_state(spec)
+
+        h.bar.switch_flip.setChecked(True)
+        h.analyzer.update_ax_slider_range()
+        h.analyzer._persist_axis_interval_state(spec)
+        self.assertEqual(h.analyzer._axis_input_logical_values()[:2], indices)
+        self.assertAlmostEqual(h.page_data.input_ax_low.value(), 0.7)
+        self.assertAlmostEqual(h.page_data.input_ax_up.value(), 2.8)
+        self.assertTrue(h.analyzer.axis_interval.locked)
+        # 翻转后下限对应较大的采样下标，上限对应较小的下标。
+        coords = h.analyzer._coords_for_axis(2)
+        self.assertGreater(np.argmin(abs(coords - h.analyzer.axis_interval.low)),
+                           np.argmin(abs(coords - h.analyzer.axis_interval.up)))
+
+        h.bar.switch_flip.setChecked(False)
+        # 页面恢复也必须知道保存状态所用的坐标方向。
+        h.bind(spec)
+        self.assertAlmostEqual(h.analyzer.axis_interval.low, original[0])
+        self.assertAlmostEqual(h.analyzer.axis_interval.up, original[1])
+        self.assertEqual(h.analyzer._axis_input_logical_values()[:2], indices)
+
+    def test_e_flip_edit_maps_to_the_displayed_samples(self):
+        h = self.harness
+        h.bar.switch_flip.setChecked(True)
+        h.page_data.combo_ax.setCurrentIndex(2)
+        spec = _spec("energy", axis_index=2, low=0, up=5, mid=2)
+        h.bind(spec)
+        h.page_data.input_ax_low.setValue(0.6)
+        h.page_data.input_ax_low.editingFinished.emit()
+        h.page_data.input_ax_up.setValue(1.8)
+        h.page_data.input_ax_up.editingFinished.emit()
+        h.analyzer._persist_axis_interval_state(spec)
+        self.assertEqual((spec.params["low"], spec.params["up"]), (1, 2))
+        params = h.analyzer._build_axis_request_params()
+        self.assertTrue(params["axis_interval"]["display_e_flip"])
+        restored = _spec("new-energy", **params)
+        h.bind(restored)
+        self.assertAlmostEqual(h.analyzer.axis_interval.low, 0.6)
+        self.assertAlmostEqual(h.analyzer.axis_interval.up, 1.8)
+        data = h.core.raw_data[:, :, :, 0]
+        expected = data[:, :, 1:3].sum(axis=2)
+        low, up = h.analyzer._axis_input_logical_values()[:2]
+        np.testing.assert_array_equal(data[:, :, low:up + 1].sum(axis=2), expected)
+        # 同一映射也用于三维选区边界，不能再镜像一次。
+        bounds = []
+        h.analyzer._can_show_interactive_box = lambda: True
+        h.analyzer._get_full_logical_bounds = lambda: [0, 10, 0, 4, 0, 5]
+        h.analyzer._rebuild_interactive_box = lambda value: bounds.append(value)
+        h.analyzer._sync_slice_edits_from_logical_bounds = lambda value: None
+        My3DAnalyzer.sync_ax_sliders_to_box(h.analyzer)
+        self.assertEqual(bounds, [[0, 10, 0, 4, 1, 2]])
+
     def test_legacy_page_migrates_its_integer_range(self):
         spec = _spec("legacy", low=2, up=8, mid=5)
 

@@ -8,12 +8,12 @@
 交互规则（``locked`` 为假时端点各自独立，为真时整体平移）::
 
     操作        未锁定                      已锁定
-    修改上限    下限固定，中心和长度更新     按上限位移整体平移
-    修改下限    上限固定，中心和长度更新     按下限位移整体平移
+    修改上限    越过下限时推动下限          按上限位移整体平移
+    修改下限    越过上限时推动上限          按下限位移整体平移
     平移位置    保持长度整体平移             保持长度整体平移
     修改长度    以当前中心向两侧调整         输入框只读（调用方禁用）
 
-未锁定时端点不能越过另一端，越过就停在另一端，允许零长度（单层采样）。
+未锁定时端点越过另一端会推动它一起走，允许零长度（单层采样）。
 平移触边时限制位移，两端一起停，长度不变。
 """
 
@@ -210,8 +210,8 @@ class AxisInterval:
             return False
         if self._locked:
             return self._translate(value - self._up)
-        # 未锁定：下限固定，端点不能越过另一端。
-        return self._assign(up=self._clamp_endpoint(value, self._low, self._maximum))
+        value = self._clamp_endpoint(value, self._minimum, self._maximum)
+        return self._assign(low=min(self._low, value), up=value)
 
     def set_low(self, value):
         """修改下限；锁定时按下限位移整体平移。"""
@@ -220,7 +220,8 @@ class AxisInterval:
             return False
         if self._locked:
             return self._translate(value - self._low)
-        return self._assign(low=self._clamp_endpoint(value, self._minimum, self._up))
+        value = self._clamp_endpoint(value, self._minimum, self._maximum)
+        return self._assign(low=value, up=max(self._up, value))
 
     def set_center(self, value):
         """保持长度整体平移。"""
@@ -302,6 +303,20 @@ class AxisInterval:
         """零长度区间（单层采样）的切片下标。"""
 
         return nearest_index(coords, self.center)
+
+    def reverse_coordinates(self, coords):
+        """坐标解释翻转时保留采样位置（含亚采样端点）和锁定状态。"""
+        values = np.asarray(coords, dtype=np.float64).reshape(-1)
+        if values.size < 2:
+            return AxisInterval.from_dict(self.as_dict())
+        indices = np.arange(values.size, dtype=np.float64)
+        order = np.argsort(values)
+        endpoints = np.interp([self.low, self.up], values[order], indices[order])
+        low, up = sorted(np.interp(endpoints, indices, values[::-1]))
+        return AxisInterval(
+            self.minimum, self.maximum, low, up,
+            locked=self.locked, axis_key=self.axis_key,
+        )
 
     # ------------------------------------------------------------------
     # 序列化

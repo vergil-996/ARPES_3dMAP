@@ -102,6 +102,53 @@ class AxisIntervalControllerTests(unittest.TestCase):
         h.controller.intervalCommitted.emit()
         self.assertEqual(len(h.committed), 1)
 
+    def test_crossing_drags_push_the_other_endpoint_then_can_separate(self):
+        for coords in ([-1.0, 0.0, 1.0], [1.0, 0.0, -1.0]):
+            for name, targets in (("slider_low", (800, 900, 1000)), ("slider_up", (200, 100, 0))):
+                with self.subTest(coords=coords, slider=name):
+                    h = _Harness(coords)
+                    h.controller.interval.set_length(1.0)
+                    h.controller.sync_widgets()
+                    slider = getattr(h, name)
+                    for target in targets:
+                        slider.setValue(target)
+                        self.assertEqual(slider.value(), target)
+                        self.assertEqual(h.slider_low.value(), h.slider_up.value())
+                        self.assertEqual(h.box_low.value(), h.box_up.value())
+                        self.assertAlmostEqual(
+                            slider.property(slider.Property.TrackProgress),
+                            slider.value() / 1000.0,
+                        )
+                    self.assertEqual(len(h.changed), 3)
+                    slider.setValue(500)
+                    self.assertAlmostEqual(h.controller.interval.length, 1.0)
+                    self.assertLess(h.slider_low.value(), h.slider_up.value())
+
+    def test_endpoint_boxes_push_the_other_endpoint_on_commit(self):
+        h = self.harness
+        h.controller.interval.set_length(1.0)
+        h.controller.sync_widgets()
+        h.box_low.setValue(1.0)
+        h.box_low.editingFinished.emit()
+        self.assertEqual((h.box_low.value(), h.box_up.value()), (1.0, 1.0))
+        h.box_up.setValue(-1.0)
+        h.box_up.editingFinished.emit()
+        self.assertEqual((h.box_low.value(), h.box_up.value()), (-1.0, -1.0))
+        self.assertEqual(h.controller.interval.length, 0.0)
+        self.assertEqual(h.committed, [True, True])
+
+    def test_locked_endpoint_boxes_allow_translation_across_other_endpoint(self):
+        h = self.harness
+        h.controller.interval.set_length(0.5)
+        h.controller.set_locked(True)
+        h.box_low.setValue(0.5)
+        h.box_low.editingFinished.emit()
+        self.assertEqual((h.box_low.value(), h.box_up.value()), (0.5, 1.0))
+        h.box_up.setValue(-0.5)
+        h.box_up.editingFinished.emit()
+        self.assertEqual((h.box_low.value(), h.box_up.value()), (-1.0, -0.5))
+        self.assertEqual(h.controller.interval.length, 0.5)
+
     def test_box_edit_commits_without_a_separate_preview(self):
         h = self.harness
         h.box_up.setValue(0.5)

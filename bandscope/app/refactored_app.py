@@ -2251,6 +2251,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if interval is None:
             return
         spec.params["axis_interval"] = interval.as_dict()
+        if key == "E":
+            spec.params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
         spec.params["low"] = int(low)
         spec.params["up"] = int(up)
         spec.params["mid"] = int(mid)
@@ -4603,6 +4605,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if interval is not None and interval.axis_key == space.key:
             state = interval.as_dict()
             state["locked"] = False
+            if space.key == "E":
+                state["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
             params["axis_interval"] = state
         return params
 
@@ -5744,6 +5748,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         self._refresh_core_display_state()
         self.update_ax_slider_range()
+        self.sync_ax_sliders_to_box()
+        self._persist_axis_interval_for_current_page()
         self._sync_slice_edits_from_logical_bounds(self.precise_logical_bounds or self.clip_ranges)
         self.global_refresh()
 
@@ -6093,14 +6099,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         coords = (getattr(self.core, "coords", None) or {}).get(key)
         if coords is None:
             return np.array([], dtype=np.float64)
-        return np.asarray(coords, dtype=np.float64).flatten()
+        coords = np.asarray(coords, dtype=np.float64).flatten()
+        bar = self.__dict__.get("timeline_bar")
+        if key == "E" and bar is not None and bar.switch_flip.isChecked():
+            coords = coords[::-1]
+        return coords
 
     def _axis_space_for_index(self, axis_index):
         """按轴向构造物理空间描述（范围、采样坐标、单位与来源）。"""
         key = AnalyzerCore.AXIS_INDEX_MAP.get(int(axis_index), "X")
         return AxisSpace(
             key,
-            (getattr(self.core, "coords", None) or {}).get(key),
+            self._coords_for_axis(axis_index),
             unit=(getattr(self.core, "coord_units", None) or {}).get(key),
             source=(getattr(self.core, "coord_sources", None) or {}).get(key, "index"),
         )
@@ -6153,14 +6163,17 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         params = spec.params or {}
         info = params.get("home_slice_info")
         if isinstance(info, dict) and int(info.get("axis", -1)) == int(axis_index):
-            return float(self.core.logical_to_physical(axis_index, int(info.get("index", 0))))
+            coords = self._coords_for_axis(axis_index)
+            return float(coords[int(np.clip(info.get("index", 0), 0, len(coords) - 1))]) if coords.size else None
 
         regions = params.get("crop_regions") or []
         first = regions[0] if regions else None
         if isinstance(first, dict) and first.get("view") == "3d":
             bounds = list(first.get("bounds") or [])
             if len(bounds) == 6 and bounds[2 * axis_index] == bounds[2 * axis_index + 1]:
-                return float(bounds[2 * axis_index])
+                index = self.core.physical_to_logical(axis_index, bounds[2 * axis_index])
+                coords = self._coords_for_axis(axis_index)
+                return float(np.interp(index, np.arange(coords.size), coords)) if coords.size else None
         state = params.get("axis_interval")
         if isinstance(state, dict):
             low = state.get("low")
@@ -6175,6 +6188,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         interval = None
         if isinstance(state, dict) and state.get("axis_key") == space.key:
             interval = AxisInterval.from_dict(state)
+            if interval is not None and space.key == "E":
+                flipped = bool(self.timeline_bar.switch_flip.isChecked())
+                if bool(state.get("display_e_flip", False)) != flipped:
+                    interval = interval.reverse_coordinates(space.coords[::-1])
 
         if interval is None and mode == IntervalEditMode.POSITION and spec is not None:
             axis_index = self._spec_slice_axis(spec)
@@ -6249,7 +6266,19 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return
         space = self._axis_space_for_index(axis_index)
         interval = self.__dict__.get("axis_interval")
-        if reset or interval is None or mode == IntervalEditMode.POSITION:
+        previous_space = self.__dict__.get("axis_space")
+        remapped = False
+        if (
+            not reset and interval is not None and previous_space is not None
+            and space.key == previous_space.key == "E"
+            and not np.array_equal(space.coords, previous_space.coords)
+            and np.array_equal(space.coords, previous_space.coords[::-1])
+        ):
+            # 翻转只改变坐标解释：保留同一采样选区与亚采样端点，物理
+            # 上下限重新排序，不能把旧上限直接当作新上限。
+            interval = interval.reverse_coordinates(previous_space.coords)
+            remapped = True
+        if reset or interval is None or (mode == IntervalEditMode.POSITION and not remapped):
             interval = self._restore_axis_interval(
                 self.__dict__.get("active_page_spec"), space, mode
             ) if not reset else space.as_interval()
@@ -6321,6 +6350,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
         params = target_spec.params
         params["axis_interval"] = interval.as_dict()
+        if interval.axis_key == "E":
+            params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
 
         if target_spec.page_kind == "second_derivative" and params.get("source_view") == "2d":
             source_kind = params.get("source_page_kind")

@@ -13,6 +13,22 @@ from bandscope.core.axis_interval import (
 )
 
 
+class ReverseCoordinateTests(unittest.TestCase):
+    def test_nonuniform_axis_keeps_fractional_sample_positions(self):
+        coords = np.array([-4.0, -1.0, 0.0, 2.0])
+        interval = AxisInterval(-4.0, 2.0, -2.5, -0.5, locked=True, axis_key="E")
+        flipped = interval.reverse_coordinates(coords)
+        self.assertAlmostEqual(flipped.low, -0.5)
+        self.assertAlmostEqual(flipped.up, 1.0)
+        self.assertEqual(flipped.to_indices(coords[::-1]), interval.to_indices(coords))
+        restored = flipped.reverse_coordinates(coords[::-1])
+        self.assertEqual(restored.as_dict(), interval.as_dict())
+
+    def test_single_sample_axis_keeps_the_interval(self):
+        interval = AxisInterval(0.0, 0.01, 0.0, 0.0, axis_key="E")
+        self.assertEqual(interval.reverse_coordinates([0.0]).as_dict(), interval.as_dict())
+
+
 class NearestIndexTests(unittest.TestCase):
     def test_picks_the_closest_sample_for_increasing_coords(self):
         coords = np.array([-1.0, -0.5, 0.0, 0.5, 1.0])
@@ -62,13 +78,13 @@ class IntervalRuleTests(unittest.TestCase):
         self.assertEqual(self.interval.low, 5.0)
         self.assertEqual(self.interval.up, 8.0)
 
-    def test_unlocked_endpoints_cannot_cross_and_stop_at_the_other_end(self):
+    def test_unlocked_endpoints_push_the_other_end_when_crossing(self):
         self.assertTrue(self.interval.set_up(1.0))
-        self.assertEqual((self.interval.low, self.interval.up), (2.0, 2.0))
+        self.assertEqual((self.interval.low, self.interval.up), (1.0, 1.0))
 
         self.interval = AxisInterval(0.0, 10.0, low=2.0, up=8.0)
         self.assertTrue(self.interval.set_low(9.0))
-        self.assertEqual((self.interval.low, self.interval.up), (8.0, 8.0))
+        self.assertEqual((self.interval.low, self.interval.up), (9.0, 9.0))
 
     def test_zero_length_is_allowed(self):
         self.interval.set_up(2.0)

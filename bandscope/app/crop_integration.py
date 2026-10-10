@@ -236,6 +236,8 @@ class CropInteractionMixin:
         maximum = max(int(coords.size) - 1, 0)
         index = int(np.clip(nearest_index(coords, interval.center), 0, maximum))
         value = float(coords[index]) if coords.size else float(interval.center)
+        # 裁剪链保存原始物理坐标；控件显示的 E 坐标可能已翻转。
+        source_value = float(self.core.logical_to_physical(axis_index, index))
 
         params = spec.params
         changed = False
@@ -252,9 +254,9 @@ class CropInteractionMixin:
         first = regions[0] if regions else None
         if isinstance(first, dict) and first.get("view") == "3d":
             bounds = list(first.get("bounds") or [])
-            if len(bounds) == 6 and bounds[2 * axis_index] != value:
-                bounds[2 * axis_index] = value
-                bounds[2 * axis_index + 1] = value
+            if len(bounds) == 6 and bounds[2 * axis_index] != source_value:
+                bounds[2 * axis_index] = source_value
+                bounds[2 * axis_index + 1] = source_value
                 updated = dict(first)
                 updated["bounds"] = tuple(bounds)
                 params["crop_regions"] = [updated] + regions[1:]
@@ -277,6 +279,8 @@ class CropInteractionMixin:
         space = getattr(self, "axis_space", None)
         if space is not None:
             params["axis_interval"] = space.as_interval(low=value, up=value).as_dict()
+            if space.key == "E":
+                params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
 
         # 当前页的会话状态与页面参数保持同一份值。
         if self._is_current_page(spec):

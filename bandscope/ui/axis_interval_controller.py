@@ -240,7 +240,12 @@ class AxisIntervalController(QObject):
             if box is None:
                 continue
             box.setDecimals(decimals)
-            box.setRange(space.minimum, space.maximum)
+            minimum, maximum = space.minimum, space.maximum
+            if interval.locked and name == "box_low":
+                maximum = space.maximum - interval.length
+            elif interval.locked and name == "box_up":
+                minimum = space.minimum + interval.length
+            box.setRange(minimum, maximum)
             box.setSingleStep(step)
             box.setValue(float(physical))
 
@@ -344,11 +349,12 @@ class AxisIntervalController(QObject):
     def _apply(self, operation):
         if self._syncing or self._interval is None:
             return False
-        if not operation(self._interval):
-            return False
+        changed = operation(self._interval)
+        # 被轴边界约束的输入也必须复位控件，即使模型没有变化。
         self.sync_widgets()
-        self.intervalChanged.emit()
-        return True
+        if changed:
+            self.intervalChanged.emit()
+        return changed
 
     def _tooltip_func(self, space):
         unit = "" if space.describes_index or not space.unit else f" {space.unit}"
