@@ -1,5 +1,5 @@
 """Coordinate-aware, non-destructive cropping shared by views and exports."""
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 
 import numpy as np
 
@@ -93,6 +93,8 @@ def selection_for_context(context, *, e_flip=False):
     if context is None or context.get("view") not in CROP_VIEWS or context.get("crop_empty"):
         return None
     view = context["view"]
+    if view == "3d":
+        context = _orient(context, e_flip)
     if view in {"3d", "2d"}:
         axes = SPATIAL_KEYS if view == "3d" else tuple(context["plot_axes"][p + "_key"] for p in ("x", "y"))
         ranges = []
@@ -132,6 +134,20 @@ def axis_labels(selection):
     return tuple(SPATIAL_LABELS.get(key, key) for key in selection.axes)
 
 
+def reorient_volume_selection(context, selection, e_flip):
+    """Keep absolute voxel positions when a saved 3D draft changes orientation."""
+    if selection.view != "3d" or selection.e_flip == e_flip:
+        return replace(selection, e_flip=e_flip)
+    coords = np.asarray(context["coords"]["E"], dtype=float)
+    source = coords[::-1] if selection.e_flip else coords
+    target = coords[::-1] if e_flip else coords
+    indices = np.arange(len(coords), dtype=float)
+    xp, fp = (source[::-1], indices[::-1]) if source[0] > source[-1] else (source, indices)
+    positions = np.interp(selection.bounds[4:6], xp, fp)
+    bounds = (*selection.bounds[:4], *sorted(np.interp(positions, indices, target)))
+    return replace(selection, bounds=bounds, e_flip=e_flip)
+
+
 def waterfall_offsets(context):
     return np.asarray(context.get("curve_offsets", np.arange(len(context["curves"])) * float(context.get("offset_step", 1.2))), dtype=float)
 
@@ -142,7 +158,11 @@ def _orient(context, flip):
         return context
     result = dict(context)
     view = context["view"]
-    if view == "2d" and int(context["slice_info"]["axis"]) in (0, 1):
+    if view == "3d":
+        # Match the 3D renderer: reverse coordinate labels, keep voxels and
+        # absolute ROI indices untouched (the camera supplies the rotation).
+        result["coords"] = dict(context["coords"], E=np.asarray(context["coords"]["E"])[::-1])
+    elif view == "2d" and int(context["slice_info"]["axis"]) in (0, 1):
         result["data"] = np.flip(context["data"], axis=1)
     elif view == "1d" and "energy" in str(context.get("xlabel", "")).lower():
         result["y_data"] = np.flip(context["y_data"])
@@ -303,7 +323,13 @@ def apply_selection(context, selection):
         result.update(energy_axis=energy[emask], curves=np.where(valid, curves, np.nan), curve_offsets=offsets, crop_empty=not np.any(valid))
         if oriented.get("raw_curves") is not None:
             result["raw_curves"] = np.where(valid, np.asarray(oriented["raw_curves"])[:, emask], np.nan)
-    if result["view"] == context["view"]:
+    if view == "3d":
+        # Also restore canonical coordinates when a volume becomes a slice.
+        result["coords"] = context["coords"]
+        if result["view"] == "2d":
+            x, y = axis_values(result, 0), axis_values(result, 1)
+            result["slice_info"] = dict(result["slice_info"], extent_override=[float(x[0]), float(x[-1]), float(y[0]), float(y[-1])])
+    elif result["view"] == context["view"]:
         result = _orient(result, selection.e_flip)
     result["erase_bounds" if selection.operation == "erase" else "crop_bounds"] = selection.bounds
     return result

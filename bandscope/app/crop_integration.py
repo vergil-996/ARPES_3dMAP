@@ -171,7 +171,10 @@ class CropInteractionMixin:
             return None
         result = []
         for i, key in enumerate(selection.axes):
-            result.extend(sorted(self.core.physical_to_logical(key, v) for v in selection.bounds[2*i:2*i+2]))
+            indices = [self.core.physical_to_logical(key, v) for v in selection.bounds[2*i:2*i+2]]
+            if key == "E" and selection.e_flip:
+                indices = [len(self.core.coords["E"]) - 1 - v for v in indices]
+            result.extend(sorted(indices))
         return result
 
     def _get_render_bounds_for_box(self, logical_bounds=None):
@@ -195,13 +198,17 @@ class CropInteractionMixin:
         if bounds is None:
             return
         self.precise_logical_bounds = list(bounds)
-        physical = self.core.logical_bounds_to_physical_bounds(bounds)
+        flipped = self.timeline_bar.switch_flip.isChecked()
+        coordinate_bounds = list(bounds)
+        if flipped:
+            coordinate_bounds[4:6] = [len(self.core.coords["E"]) - 1 - v for v in bounds[4:6]]
+        physical = self.core.logical_bounds_to_physical_bounds(coordinate_bounds)
         physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
         self.last_synced_slice_texts = self._logical_bounds_to_texts(bounds)
         controller = self.__dict__.get("crop_controller")
         if controller is not None and controller.selection is not None and controller.selection.view == "3d":
             try:
-                controller.set_selection(replace(controller.selection, bounds=physical), notify=False)
+                controller.set_selection(replace(controller.selection, bounds=physical, e_flip=flipped), notify=False)
             except ValueError:
                 # A zero-thickness VTK handle gesture on multiple axes is not a
                 # valid slice. Keep the last valid draft instead.
@@ -398,6 +405,12 @@ class CropInteractionMixin:
                     kind = "axis_integral_crop"
                     rect = cropped["plot_logical_bounds"]
                     params.update(crop_k_low=rect["x_low"], crop_k_up=rect["x_up"], crop_e_low=rect["y_low"], crop_e_up=rect["y_up"])
+            if selection.view == "3d" and selection.e_flip:
+                # Persist canonical physical coordinates so slice-position
+                # controls and subsequent pages use the original axis domain.
+                physical = self.core.logical_bounds_to_physical_bounds(self._crop_logical_bounds())
+                physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
+                selection = replace(selection, bounds=physical, e_flip=False)
             regions.append(selection.to_dict())
             params["crop_regions"] = regions
         title = self._make_unique_page_title(f"{action} - {source.title}")

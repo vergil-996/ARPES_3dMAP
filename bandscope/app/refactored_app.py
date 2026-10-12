@@ -16,7 +16,6 @@ from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -38,6 +37,7 @@ from scipy.io import savemat
 from siui.components.tooltip import ToolTipWindow
 from siui.core import SiGlobal
 
+from bandscope.ui.file_dialogs import RememberingFileDialog as QFileDialog
 import bandscope.ui.theme as theme
 from bandscope.ui.axis_title_controller import (
     RESTORE_DEFAULT_TEXT,
@@ -1831,7 +1831,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.left_workspace.page_updated.connect(self.on_result_page_updated)
         self.left_workspace.page_rename_requested.connect(self._rename_page)
         self.left_workspace.page_restore_name_requested.connect(self._restore_page_auto_title)
-        self.left_workspace.set_delete_confirm_handler(self._confirm_page_delete)
 
     def _initialize_result_workspace(self):
         home_spec = AnalysisPageSpec(
@@ -3155,39 +3154,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             dialog.deleteLater()
         # 与树内改名共用一套提交逻辑：去空白、空名保持原名、重名自动编号。
         self.left_workspace.apply_page_rename(page_id, title)
-
-    def _confirm_page_delete(self, plan):
-        """删除确认：显示目标名称与将删除的总数，默认按钮是“取消”。"""
-        if plan.get("blocked"):
-            self._show_message(
-                "无法删除页面",
-                "该分支包含主页或不可关闭的工具页，已取消删除。",
-                QMessageBox.Information,
-            )
-            return False
-
-        title = str(plan.get("title") or "")
-        count = int(plan.get("count") or 1)
-        if count > 1:
-            text = (
-                f"确定删除页面“{title}”吗？\n"
-                f"它的 {count - 1} 个派生页面会一起删除，共 {count} 个页面。"
-            )
-        else:
-            text = f"确定删除页面“{title}”吗？"
-        text += "\n\n只影响本次会话的页面，原始数据文件不会被修改。"
-
-        msg = self._create_message_box(
-            "删除页面",
-            text,
-            QMessageBox.Warning,
-            buttons=QMessageBox.Yes | QMessageBox.No,
-            default_button=QMessageBox.No,
-            escape_button=QMessageBox.No,
-        )
-        msg.button(QMessageBox.Yes).setText("删除")
-        msg.button(QMessageBox.No).setText("取消")
-        return msg.exec_() == QMessageBox.Yes
 
     def _restore_home_page_title(self):
         """换数据后首页回到自动名字；其余页面在 ``reset_to_home`` 里关闭。"""
@@ -7784,9 +7750,12 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
             volume_data = render_context["data"]
             stride = 1
+            # Time scrubbing keeps the exact voxel grid: striding drops narrow
+            # peaks, changes normalization/opacity distance and rebuilds the
+            # scene on release. Interactive mapper sampling still limits cost.
             if (
                 quality == RenderQuality.PREVIEW
-                and cause not in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}
+                and cause not in {RefreshCause.DATA_SOURCE, RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}
                 and render_context.get("data_bounds") is None
                 and int(np.prod(volume_data.shape, dtype=np.int64)) > 2_500_000
             ):

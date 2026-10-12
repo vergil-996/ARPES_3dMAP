@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
-from bandscope.core.crop_model import axis_labels, selection_for_context
+from bandscope.core.crop_model import axis_labels, reorient_volume_selection, selection_for_context
 
 
 def scissors_cursor():
@@ -228,7 +228,7 @@ class CropController(QObject):
         default = selection_for_context(context, e_flip=e_flip)
         saved = self.selections.get(page_id)
         if default and saved and (saved.view, saved.axes) == (default.view, default.axes):
-            default = replace(saved, e_flip=e_flip)
+            default = reorient_volume_selection(context, saved, e_flip)
         self.set_selection(replace(default, operation=self.operation) if default else None, notify=False)
 
     def set_operation(self, operation):

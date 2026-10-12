@@ -5,9 +5,41 @@ import pyvista as pv
 from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from bandscope.rendering.render_core import VolumeRenderSession
+from tests.support.environment import requires_opengl
 
 
 class VolumeRenderSessionTests(unittest.TestCase):
+    @requires_opengl
+    def test_time_preview_and_exact_reuse_scene_and_opacity_mapping(self):
+        plotter = pv.Plotter(off_screen=True, window_size=(240, 180))
+        try:
+            session = VolumeRenderSession(plotter)
+            data = np.ones((14, 12, 10), dtype=np.float32)
+            data[1, 1, 1] = 70.0
+            weights = np.linspace(0.5, 1.5, 10, dtype=np.float32)
+            session.render(data, (0, 50, 100), "linear", show_axes=False,
+                           opacity_multiplier=weights)
+            actor, mapper, grid = session.volume, session.volume.mapper, session.grid
+            replacement = np.asfortranarray(data * 0.8)
+            session.render(replacement, (0, 50, 100), "linear", show_axes=False,
+                           quality="preview", opacity_multiplier=weights)
+            levels = dict(session.level_info)
+            alpha = session.alpha_channel.buffer.copy()
+            unit_distance = actor.GetProperty().GetScalarOpacityUnitDistance()
+            uploads = session.data_update_count
+            session.render(replacement, (0, 50, 100), "linear", show_axes=False,
+                           quality="exact", opacity_multiplier=weights)
+            self.assertIs(session.volume, actor)
+            self.assertIs(session.volume.mapper, mapper)
+            self.assertIs(session.grid, grid)
+            self.assertEqual(session.rebuild_count, 1)
+            self.assertEqual(session.data_update_count, uploads)
+            self.assertEqual(session.level_info, levels)
+            np.testing.assert_array_equal(session.alpha_channel.buffer, alpha)
+            self.assertEqual(actor.GetProperty().GetScalarOpacityUnitDistance(), unit_distance)
+        finally:
+            plotter.close()
+
     def test_same_shape_reuses_scene_and_style_does_not_upload_scalars(self):
         plotter = pv.Plotter(off_screen=True, window_size=(240, 180))
         try:

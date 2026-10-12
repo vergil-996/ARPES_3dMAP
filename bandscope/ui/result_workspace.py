@@ -6,11 +6,11 @@
 （会话内也跨重启保存，见 ``_save_tab_order``）决定。
 
 改名、删除、排序都先在本模块落地，再通过信号通知宿主：
-``page_closed`` 逐页发出（先子后父），删除的确认文案由宿主提供的处理器决定。
+``page_closed`` 逐页发出（先子后父），单页与多页删除均直接执行。
 """
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -180,8 +180,6 @@ class ResultWorkspace(QWidget):
         self.title_to_page_id: Dict[str, str] = {}
         self.activation_history = []
         self.children_by_parent: Dict[Optional[str], list] = {}
-        #: 删除确认处理器：``handler(plan) -> bool``，返回 True 才真正删除。
-        self._delete_confirm_handler: Optional[Callable[[dict], bool]] = None
 
         self.settings = QSettings("ARPES", "ARPES_3dMAP")
         raw_order = self.settings.value("result_workspace/tab_order", "", type=str)
@@ -240,6 +238,7 @@ class ResultWorkspace(QWidget):
         self.page_tree.rename_committed.connect(self.apply_page_rename)
         self.page_tree.restore_name_requested.connect(self.page_restore_name_requested)
         self.page_tree.delete_requested.connect(self.delete_page)
+        self.page_tree.pages_delete_requested.connect(self.delete_pages)
         self.page_tree.reorder_requested.connect(self.move_page_within_siblings)
 
         self.splitter = QSplitter(Qt.Horizontal, self)
@@ -333,10 +332,6 @@ class ResultWorkspace(QWidget):
         self.footer_widget = widget
         self.content_layout.addWidget(widget)
 
-    def set_delete_confirm_handler(self, handler: Optional[Callable[[dict], bool]]):
-        """宿主提供的删除确认：``handler(plan) -> bool``。未设置时直接删除。"""
-        self._delete_confirm_handler = handler
-
     def set_home_page(self, spec: AnalysisPageSpec):
         spec.closeable = False
         self.home_page_id = spec.page_id
@@ -377,10 +372,10 @@ class ResultWorkspace(QWidget):
         后台任务完成后由宿主建结果页时用它：用户正在看什么就继续看什么，结果页
         挂在来源页下面等着被点开。
         """
-        self._add_page(spec)
+        self._add_page(spec, reveal=False)
         return spec
 
-    def _add_page(self, spec: AnalysisPageSpec):
+    def _add_page(self, spec: AnalysisPageSpec, *, reveal=True):
         if spec.auto_title is None:
             # 建页时的标题就是该页的自动名字；此后自动命名只更新它。
             spec.auto_title = str(spec.title)
@@ -389,7 +384,7 @@ class ResultWorkspace(QWidget):
         self._add_to_tab_order(spec.page_id)
         self._rebuild_title_index()
         self._refresh_navigation_layout()
-        if spec.page_id != self.home_page_id:
+        if reveal and spec.page_id != self.home_page_id:
             # 新页面自动展开祖先并定位；被搜索隐藏时先清空搜索。
             self.page_tree.reveal_page(spec.page_id)
 
@@ -691,23 +686,35 @@ class ResultWorkspace(QWidget):
             "fallback_id": parent_id if parent_id in self.page_specs else self.home_page_id,
         }
 
-    def delete_page(self, page_id, *, confirm=True) -> bool:
-        """统一删除入口：父页连同全部后代一起删，逐页发既有关闭通知。"""
-        plan = self.page_delete_plan(page_id)
-        if plan is None or plan["blocked"]:
-            if plan is not None and confirm:
-                self._confirm_delete(plan)
-            return False
-        if confirm and not self._confirm_delete(plan):
-            return False
-        self._apply_delete(plan["ids"], plan["fallback_id"])
-        return True
+    def delete_page(self, page_id) -> bool:
+        """直接删除页面及全部后代，与批量删除共用同一入口。"""
+        return self.delete_pages([page_id])
 
-    def _confirm_delete(self, plan) -> bool:
-        handler = self._delete_confirm_handler
-        if handler is None:
-            return True
-        return bool(handler(plan))
+    def delete_pages(self, page_ids: Sequence[str]) -> bool:
+        """直接删除选中分支，跳过受保护分支；重复后代只清理一次。"""
+        selected = set(page_ids)
+        removed = set()
+        for page_id in self._ordered_page_ids():
+            if page_id not in selected:
+                continue
+            plan = self.page_delete_plan(page_id)
+            if plan is not None and not plan["blocked"]:
+                removed.update(plan["ids"])
+        if not removed:
+            return False
+
+        # 在摘掉记录前沿当前页的来源链找到最近存活祖先；多分支删除只回退一次。
+        fallback_id = self.current_page_id
+        visited = set()
+        while fallback_id in removed and fallback_id not in visited:
+            visited.add(fallback_id)
+            fallback_id = self._parent_page_id_for_id(fallback_id)
+        if fallback_id in removed or fallback_id not in self.page_specs:
+            fallback_id = self.home_page_id
+
+        ordered = [pid for pid in self._ordered_page_ids() if pid in removed]
+        self._apply_delete(ordered, fallback_id)
+        return True
 
     def _apply_delete(self, page_ids, fallback_id=None):
         """批量核心：先摘记录，再逐页通知，最后统一刷新并激活存活页面。"""
@@ -731,8 +738,8 @@ class ResultWorkspace(QWidget):
         for page_id in removed:
             self.page_closed.emit(page_id)
 
-        self._refresh_navigation_layout()
         if not current_removed:
+            self._refresh_navigation_layout()
             self.page_tree.set_current_page(self.current_page_id)
             self._refresh_header()
             return
@@ -742,6 +749,7 @@ class ResultWorkspace(QWidget):
         if target_id in self.page_specs:
             self.activate_page(target_id)
         else:
+            self._refresh_navigation_layout()
             self.page_tree.set_current_page(None)
             self._refresh_header()
 
@@ -777,7 +785,7 @@ class ResultWorkspace(QWidget):
             self.delete_page(self.current_page_id)
 
     def reset_to_home(self):
-        """换数据时的内部复位：不弹删除确认，直接清到只剩主页。"""
+        """换数据时的内部复位：直接清到只剩主页。"""
         home_id = self.home_page_id
         removable = [pid for pid in self._ordered_page_ids() if pid != home_id]
         self._apply_delete(removable, home_id)

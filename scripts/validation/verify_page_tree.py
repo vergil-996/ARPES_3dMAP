@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""页面树的真实窗口验收：层级、长中文名、搜索、栏宽、删除确认与快捷键隔离。
+"""页面树的真实窗口验收：层级、长中文名、搜索、栏宽、直接/框选删除与快捷键隔离。
 
 验证点：
 1. 页面树常驻主页左侧，派生页按来源关系逐级挂靠；展开箭头只收展、点名称才切页；
@@ -7,14 +7,15 @@
 3. 搜索显示命中页面及其祖先，清空后还原展开状态，无匹配时空结果提示且画布不动；
 4. 拖动改栏宽、低于最小值被夹住、画布至少 320 像素，栏宽跨会话保留；
 5. 3D 主页 → 裁剪页 → 积分页逐级切换，页眉、画布与树选中行保持同步；
-6. 删除先弹确认（含目标名称、总数、默认取消）；取消后页面仍在，确认后整支删除；
+6. 页眉关闭直接删除当前页；左侧树空白处拖框选中多个分支，Delete 直接连带后代删除；
 7. 主页受保护不可删除；数字切页按树中可见行顺序；页面树持焦时方向键不逐帧。
 
 未覆盖：1D 曲线页（EDC / 瀑布图 / 曲线比较）的树内切换——这些页面的生成依赖
 特定数据与控件状态，已有 ``verify_axis_titles.py`` / ``verify_page_shortcuts.py``
 负责其真实窗口验收；本脚本只覆盖 2D / 3D 结果页。
 
-用法: .venv/Scripts/python.exe scripts/validation/verify_page_tree.py <npz路径> [--dynamic]
+用法: .venv/Scripts/python.exe scripts/validation/verify_page_tree.py [npz路径] [--dynamic]
+默认数据: .local/data/WSe2_step.npz；输出: .local/outputs/verify_page_tree/。
 """
 import os
 import sys
@@ -72,23 +73,13 @@ class _NullToast:
         pass
 
 
-def answer_message_box(button):
-    """删除确认是模态框：答案要在 exec_() 之前排好，并记下按钮文字。"""
-
+def reject_unexpected_delete_confirmation():
+    """回归时若仍弹确认，记为失败并关闭，避免验收脚本卡在模态框里。"""
     def act():
         box = QApplication.activeModalWidget()
-        if not isinstance(box, QMessageBox):
-            failures.append("没有找到删除确认弹窗")
-            return
-        state.setdefault("delete_boxes", []).append(
-            {
-                "text": box.text(),
-                "default": box.defaultButton().text() if box.defaultButton() else "",
-                "yes": box.button(QMessageBox.Yes).text(),
-                "no": box.button(QMessageBox.No).text(),
-            }
-        )
-        box.button(button).click()
+        if isinstance(box, QMessageBox):
+            failures.append("删除仍弹出二次确认")
+            box.reject()
 
     QTimer.singleShot(0, act)
 
@@ -151,9 +142,12 @@ def child_page_ids(window, page_id):
 
 def main():
     global NPZ, OUT_DIR
-    from scripts.validation._common import arguments
+    from scripts.validation._common import REPO_ROOT, arguments
 
-    args = arguments("verify_page_tree", dynamic=True)
+    args = arguments(
+        "verify_page_tree", dynamic=True,
+        default_data=REPO_ROOT / ".local" / "data" / "WSe2_step.npz",
+    )
     NPZ, OUT_DIR = str(args.data), str(args.output_dir)
     if args.size:
         width, height = (int(value) for value in args.size.lower().split("x"))
@@ -179,6 +173,8 @@ def main():
 
     def finish():
         save_shot(window, "page_tree_final.png")
+        # 走宿主关闭流程，释放插件会话持有的临时登记表锁。
+        window.close()
         if failures:
             print(f"[RESULT] {len(failures)} 项失败", flush=True)
             for label in failures:
@@ -377,45 +373,83 @@ def main():
             f"栏宽跨重启保留（读回 {state['reopened_width']}）",
             state["reopened_width"] == 260,
         )
-        QTimer.singleShot(200, guarded(step_delete_cancel))
+        QTimer.singleShot(200, guarded(step_delete_direct))
 
-    # ------------------------------------------------------ 切页与删除
-    def step_delete_cancel():
-        workspace(window).activate_page(state["crop"])
-        state["before_delete"] = sorted(workspace(window).page_specs)
-        state["delete_count"] = workspace(window).page_delete_plan(state["crop"])["count"]
-        check("裁剪支路包含两个页面", state["delete_count"] == 2)
-
-        answer_message_box(QMessageBox.No)
-        workspace(window).close_current_page()
-        QTimer.singleShot(1200, guarded(step_delete_cancel_check))
-
-    def step_delete_cancel_check():
-        boxes = state.get("delete_boxes", [])
-        check("删除前弹出确认", bool(boxes))
-        if boxes:
-            box = boxes[-1]
-            check("确认里写出目标名称", state["long_title"] in box["text"])
-            check(f"确认里写出总数 {state['delete_count']}", str(state["delete_count"]) in box["text"])
-            check("默认按钮是取消", box["default"] == box["no"])
-            check("确认按钮文字是删除 / 取消", (box["yes"], box["no"]) == ("删除", "取消"))
-        check("取消后页面仍在", sorted(workspace(window).page_specs) == state["before_delete"])
-        save_shot(window, "page_tree_delete_confirm.png")
-        QTimer.singleShot(200, guarded(step_delete_confirm))
-
-    def step_delete_confirm():
+    # ------------------------------------------------------ 直接删除 / 框选批量删除
+    def step_delete_direct():
+        workspace(window).activate_page(state["integral"])
         state["closed_events"] = []
         workspace(window).page_closed.connect(state["closed_events"].append)
-        answer_message_box(QMessageBox.Yes)
-        workspace(window).close_current_page()
-        QTimer.singleShot(2000, guarded(step_delete_confirm_check))
+        reject_unexpected_delete_confirmation()
+        workspace(window).close_button.click()
+        QTimer.singleShot(1200, guarded(step_delete_direct_check))
 
-    def step_delete_confirm_check():
+    def step_delete_direct_check():
+        check("页眉关闭直接删除当前积分页", state["integral"] not in workspace(window).page_specs)
+        check("直接删除只关闭该叶子页面", state["closed_events"] == [state["integral"]])
+        check("直接删除回退最近存活父页", workspace(window).current_page_id == state["crop"])
+        check("直接删除没有模态确认", QApplication.activeModalWidget() is None)
+        save_shot(window, "page_tree_delete_direct.png")
+        # 在保留的真实裁剪页上重新生成子页，批量删除要验证连带后代。
+        window.on_apply_axis_integral()
+        QTimer.singleShot(4000, guarded(step_batch_make_sibling))
+
+    def step_batch_make_sibling():
+        state["batch_child"] = workspace(window).current_page_id
+        check("批删准备包含裁剪派生的积分子页", state["batch_child"] not in {"home", state["crop"]})
+        check("积分子页仍归属裁剪页", state["batch_child"] in child_page_ids(window, state["crop"]))
+        workspace(window).activate_page("home")
+        window.on_apply_axis_integral()
+        QTimer.singleShot(4000, guarded(step_box_select))
+
+    def step_box_select():
+        state["batch_sibling"] = workspace(window).current_page_id
+        check("批删准备包含不相干的主页积分分支", state["batch_sibling"] in child_page_ids(window, "home"))
+        check("主页积分分支是新页面", state["batch_sibling"] not in {"home", state["crop"], state["batch_child"]})
+        workspace(window).apply_page_rename(state["crop"], "裁剪分支")
+        workspace(window).apply_page_rename(state["batch_child"], "裁剪积分")
+        workspace(window).apply_page_rename(state["batch_sibling"], "主页积分")
+        workspace(window).activate_page("home")
+        workspace(window).set_nav_width(320)
+        tree(window).expandAll()
+        tree(window).scrollToTop()
+        tree(window).horizontalScrollBar().setValue(0)
+        QApplication.processEvents()
+
+        state["batch_ids"] = [state["crop"], state["batch_child"], state["batch_sibling"]]
+        rects = [tree(window).visualItemRect(item(window, page_id)) for page_id in state["batch_ids"]]
+        first = min(rects, key=lambda rect: rect.top())
+        last = max(rects, key=lambda rect: rect.bottom())
+        viewport = tree(window).viewport()
+        start = QPoint(viewport.width() - 10, last.bottom() + 12)
+        end = QPoint(first.left() + 8, first.top() + 2)
+        check("框选从树下方空白区域开始", tree(window).itemAt(start) is None)
+        send_mouse(viewport, QEvent.MouseButtonPress, start, buttons=Qt.LeftButton)
+        send_mouse(viewport, QEvent.MouseMove, end, button=Qt.NoButton, buttons=Qt.LeftButton)
+        QApplication.processEvents()
+        save_shot(window, "page_tree_box_select.png")
+        send_mouse(viewport, QEvent.MouseButtonRelease, end)
+        check("框选选中多个分支与后代", set(tree(window).selected_page_ids()) == set(state["batch_ids"]))
+        check("框选不切换当前画布", workspace(window).current_page_id == "home")
+        save_shot(window, "page_tree_batch_selected.png")
+        QTimer.singleShot(200, guarded(step_batch_delete))
+
+    def step_batch_delete():
+        state["closed_events"].clear()
+        reject_unexpected_delete_confirmation()
+        tree(window).setFocus()
+        QApplication.sendEvent(tree(window), QKeyEvent(QEvent.KeyPress, Qt.Key_Delete, Qt.NoModifier))
+        QTimer.singleShot(2000, guarded(step_batch_delete_check))
+
+    def step_batch_delete_check():
         remaining = sorted(workspace(window).page_specs)
-        check("确认后父页与子页一起删除", remaining == ["home"])
-        check("删除逐页发出关闭通知", sorted(state["closed_events"]) == sorted([state["crop"], state["integral"]]))
-        check("子页先于父页收到通知", state["closed_events"].index(state["integral"]) < state["closed_events"].index(state["crop"]))
-        check("当前页回退到主页", workspace(window).current_page_id == "home")
+        check("Delete 批量直接删除所选父页与后代", remaining == ["home"])
+        check("批量删除没有模态确认", QApplication.activeModalWidget() is None)
+        check("每个批删页面仅收到一次关闭通知", sorted(state["closed_events"]) == sorted(state["batch_ids"]))
+        events = state["closed_events"]
+        check("批量删除仍先子后父通知", state["batch_child"] in events and state["crop"] in events and events.index(state["batch_child"]) < events.index(state["crop"]))
+        check("存活的主页画布保持当前页面", workspace(window).current_page_id == "home")
+        save_shot(window, "page_tree_batch_deleted.png")
         QTimer.singleShot(200, guarded(step_home_protected))
 
     def step_home_protected():

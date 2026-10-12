@@ -5,7 +5,7 @@
 
 - 点击名称切换页面；点击展开箭头只展开/收起，不切页。
 - 右键或 F2 在树内直接改名，Enter 或失焦保存，Esc 取消。
-- 右键“删除页面”或 Delete 请求删除；是否确认、删哪些页由 ``ResultWorkspace`` 决定。
+- 空白处拖动框选，Ctrl/Shift 多选；右键或 Delete 请求删除选中的页面。
 - 拖拽只在同一父节点内排序，父节点携带整支移动。
 - 顶部搜索按名称过滤（不区分大小写），显示命中页面及其祖先；清空后恢复原展开状态与滚动位置。
 
@@ -15,7 +15,7 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QRubberBand,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -127,6 +128,7 @@ class PageTreeView(QTreeWidget):
     page_activated = pyqtSignal(str)
     rename_requested = pyqtSignal(str)
     delete_requested = pyqtSignal(str)
+    pages_delete_requested = pyqtSignal(list)
     reorder_requested = pyqtSignal(str, str, bool)
 
     def __init__(self, parent=None):
@@ -136,7 +138,7 @@ class PageTreeView(QTreeWidget):
         self.setFrameShape(QFrame.NoFrame)
         self.setIndentation(16)
         self.setUniformRowHeights(True)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setExpandsOnDoubleClick(False)
         self.setAnimated(False)
@@ -152,6 +154,10 @@ class PageTreeView(QTreeWidget):
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self._dragged_item: Optional[QTreeWidgetItem] = None
         self._pressed_on_branch = False
+        self._selection_click = False
+        self._rubber_origin: Optional[QPoint] = None
+        self._rubber_base_ids: set = set()
+        self._rubber_band = QRubberBand(QRubberBand.Rectangle, self.viewport())
         self.itemClicked.connect(self._on_item_clicked)
 
     # ---------------------------------------------------------------- 取值
@@ -182,6 +188,85 @@ class PageTreeView(QTreeWidget):
             walk(self.topLevelItem(index))
         return ordered
 
+    @staticmethod
+    def item_is_displayed(item: QTreeWidgetItem) -> bool:
+        """排除搜索隐藏行及折叠分支内的行，避免残留选择被意外删除。"""
+        if item.isHidden():
+            return False
+        parent = item.parent()
+        while parent is not None:
+            if parent.isHidden() or not parent.isExpanded():
+                return False
+            parent = parent.parent()
+        return True
+
+    def displayed_items(self) -> List[QTreeWidgetItem]:
+        items: List[QTreeWidgetItem] = []
+
+        def walk(item):
+            if item.isHidden():
+                return
+            items.append(item)
+            if item.isExpanded():
+                for index in range(item.childCount()):
+                    walk(item.child(index))
+
+        for index in range(self.topLevelItemCount()):
+            walk(self.topLevelItem(index))
+        return items
+
+    def selected_page_ids(self, *, deletable_only=False) -> List[str]:
+        return [
+            self.item_page_id(item)
+            for item in self.displayed_items()
+            if item.isSelected()
+            and (not deletable_only or item.data(0, Qt.UserRole + 1))
+        ]
+
+    def prune_hidden_selection(self):
+        # selectedItems() 本身不返回隐藏行；遍历所有节点才能清掉隐藏选择。
+        def walk(item):
+            if item.isSelected() and not self.item_is_displayed(item):
+                item.setSelected(False)
+            for index in range(item.childCount()):
+                walk(item.child(index))
+
+        for index in range(self.topLevelItemCount()):
+            walk(self.topLevelItem(index))
+
+    def request_delete_selected(self):
+        selected = self.selected_page_ids()
+        page_ids = self.selected_page_ids(deletable_only=True)
+        if not page_ids:
+            return
+        if len(selected) > 1:
+            self.pages_delete_requested.emit(page_ids)
+        else:
+            self.delete_requested.emit(page_ids[0])
+
+    def row_at(self, pos):
+        """名称右侧空白仍属于该行，可用于右键菜单和框选起点判断。"""
+        item = self.itemAt(pos)
+        if item is not None:
+            return item
+        for item in self.displayed_items():
+            rect = self.visualItemRect(item)
+            if rect.top() <= pos.y() <= rect.bottom():
+                return item
+        return None
+
+    def _blank_hit(self, pos):
+        item = self.row_at(pos)
+        if item is None:
+            return True
+        rect = self.visualItemRect(item)
+        icon_width = max(16, self.iconSize().width()) if not item.icon(0).isNull() else 0
+        name_right = (
+            rect.left() + icon_width
+            + self.fontMetrics().horizontalAdvance(item.text(0)) + 12
+        )
+        return pos.x() > name_right
+
     # ---------------------------------------------------------------- 点击
     def _branch_hit(self, pos):
         """返回 ``(点中展开箭头?, 命中的条目)``。"""
@@ -204,6 +289,9 @@ class PageTreeView(QTreeWidget):
         这里整条吃掉，既不切页也不动当前行。
         """
         if event.button() == Qt.LeftButton:
+            self._selection_click = bool(
+                event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier)
+            )
             on_arrow, item = self._branch_hit(event.pos())
             if on_arrow and item is not None:
                 self._pressed_on_branch = True
@@ -211,16 +299,62 @@ class PageTreeView(QTreeWidget):
                 event.accept()
                 return
             self._pressed_on_branch = False
+            if self._blank_hit(event.pos()):
+                self.setFocus(Qt.MouseFocusReason)
+                self._rubber_origin = event.pos()
+                self._rubber_base_ids = (
+                    set(self.selected_page_ids()) if self._selection_click else set()
+                )
+                if not self._selection_click:
+                    self.clearSelection()
+                event.accept()
+                return
+        if event.button() == Qt.RightButton:
+            item = self.row_at(event.pos())
+            if item is not None and item.isSelected():
+                self.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+                event.accept()
+                return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self._rubber_origin is not None:
+            rect = QRect(self._rubber_origin, event.pos()).normalized()
+            self._rubber_band.setGeometry(rect)
+            self._rubber_band.show()
+            for item in self.displayed_items():
+                row_rect = self.visualItemRect(item)
+                row_rect.setLeft(0)
+                row_rect.setRight(self.viewport().width() - 1)
+                intersects = row_rect.intersects(rect) and row_rect.intersects(
+                    self.viewport().rect()
+                )
+                item.setSelected(
+                    intersects or self.item_page_id(item) in self._rubber_base_ids
+                )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
+        if self._rubber_origin is not None and event.button() == Qt.LeftButton:
+            self._rubber_origin = None
+            self._rubber_band.hide()
+            self._rubber_base_ids.clear()
+            self._selection_click = False
+            event.accept()
+            return
         if self._pressed_on_branch and event.button() == Qt.LeftButton:
             self._pressed_on_branch = False
+            self._selection_click = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
+        self._selection_click = False
 
     def _on_item_clicked(self, item, _column):
+        if self._selection_click:
+            return
         page_id = self.item_page_id(item)
         if page_id is not None:
             self.page_activated.emit(page_id)
@@ -236,9 +370,7 @@ class PageTreeView(QTreeWidget):
             event.accept()
             return
         if key == Qt.Key_Delete:
-            page_id = self.item_page_id(item)
-            if page_id is not None:
-                self.delete_requested.emit(page_id)
+            self.request_delete_selected()
             event.accept()
             return
         if key == Qt.Key_F2:
@@ -262,6 +394,8 @@ class PageTreeView(QTreeWidget):
 
     # ---------------------------------------------------------------- 拖拽
     def startDrag(self, supported_actions):
+        if len(self.selected_page_ids()) != 1:
+            return
         self._dragged_item = self.currentItem()
         try:
             super().startDrag(supported_actions)
@@ -309,6 +443,7 @@ class PageTreePanel(QWidget):
     rename_committed = pyqtSignal(str, str)
     restore_name_requested = pyqtSignal(str)
     delete_requested = pyqtSignal(str)
+    pages_delete_requested = pyqtSignal(list)
     reorder_requested = pyqtSignal(str, str, bool)
 
     MAX_DEPTH = 64
@@ -323,6 +458,7 @@ class PageTreePanel(QWidget):
         self._expanded_ids: set = set()
         self._known_page_ids: set = set()
         self._current_page_id: Optional[str] = None
+        self._synced_current_page_id: Optional[str] = None
         self._anchor_page_id: Optional[str] = None
         self._search_anchor_id: Optional[str] = None
         self._search_text = ""
@@ -345,6 +481,7 @@ class PageTreePanel(QWidget):
         self.tree.page_activated.connect(self.page_activated)
         self.tree.rename_requested.connect(self.begin_rename)
         self.tree.delete_requested.connect(self.delete_requested)
+        self.tree.pages_delete_requested.connect(self.pages_delete_requested)
         self.tree.reorder_requested.connect(self.reorder_requested)
         self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.itemCollapsed.connect(self._on_item_collapsed)
@@ -417,7 +554,7 @@ class PageTreePanel(QWidget):
         children_by_parent: Dict[Optional[str], Sequence[str]],
         current_page_id: Optional[str] = None,
     ):
-        """重建树。展开状态、滚动位置与搜索词都在重建中保留。"""
+        """重建树，保留展开、滚动、搜索与仍可见的选择。"""
         signature = self._make_signature(entries, children_by_parent)
         if signature == self._signature:
             self._current_page_id = current_page_id
@@ -425,6 +562,9 @@ class PageTreePanel(QWidget):
             return
 
         self._remember_anchor()
+        selected_ids = set(self.tree.selected_page_ids())
+        focus_id = self.tree.item_page_id(self.tree.currentItem())
+        preserve_selection = current_page_id == self._current_page_id
         self._entries = dict(entries)
         self._children = {
             parent_id: [str(pid) for pid in ids if str(pid) in entries]
@@ -436,6 +576,15 @@ class PageTreePanel(QWidget):
                 self._parent_of_id.setdefault(page_id, parent_id)
         self._current_page_id = current_page_id
         self._rebuild_tree()
+        if preserve_selection:
+            self.tree.clearSelection()
+            focus_item = self._items.get(focus_id)
+            if focus_item is not None and self.tree.item_is_displayed(focus_item):
+                self.tree.setCurrentItem(focus_item, 0, QItemSelectionModel.NoUpdate)
+            for page_id in selected_ids:
+                item = self._items.get(page_id)
+                if item is not None and self.tree.item_is_displayed(item):
+                    item.setSelected(True)
         self._signature = signature
         self._sync_current_row()
         self._restore_anchor()
@@ -465,7 +614,7 @@ class PageTreePanel(QWidget):
             self.clear_search()
         self._expand_ancestors(page_id)
         self.tree.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-        self.tree.setCurrentItem(item)
+        self.tree.setCurrentItem(item, 0, QItemSelectionModel.ClearAndSelect)
 
     def clear_search(self):
         if not self._search_text:
@@ -511,6 +660,7 @@ class PageTreePanel(QWidget):
         item.setText(0, entry.title)
         item.setIcon(0, page_kind_icon(entry.page_kind))
         item.setToolTip(0, entry.tooltip())
+        item.setData(0, Qt.UserRole + 1, entry.deletable)
         self._signature = self._make_signature(self._entries, self._children)
 
     def _make_signature(self, entries, children_by_parent):
@@ -594,6 +744,7 @@ class PageTreePanel(QWidget):
                 continue
             item = QTreeWidgetItem([entry.title])
             item.setData(0, Qt.UserRole, page_id)
+            item.setData(0, Qt.UserRole + 1, entry.deletable)
             item.setIcon(0, page_kind_icon(entry.page_kind))
             item.setToolTip(0, entry.tooltip())
             item.setFlags(
@@ -660,7 +811,7 @@ class PageTreePanel(QWidget):
         if item is None or item.isHidden():
             return
         self.tree.scrollToItem(item, QAbstractItemView.PositionAtCenter)
-        self.tree.setCurrentItem(item)
+        self.tree.setCurrentItem(item, 0, QItemSelectionModel.ClearAndSelect)
 
     def _on_item_expanded(self, item):
         page_id = self.tree.item_page_id(item)
@@ -668,17 +819,25 @@ class PageTreePanel(QWidget):
             self._expanded_ids.add(page_id)
 
     def _on_item_collapsed(self, item):
+        self.tree.prune_hidden_selection()
         page_id = self.tree.item_page_id(item)
         if page_id is not None and not self._search_text:
             self._expanded_ids.discard(page_id)
 
     def _sync_current_row(self):
+        # 活动页面与批量选择是两份状态。刷新同一活动页时不覆盖用户的选择。
+        if self._current_page_id == self._synced_current_page_id:
+            return
+        self._synced_current_page_id = self._current_page_id
         item = self._items.get(self._current_page_id) if self._current_page_id else None
         if item is None:
             self.tree.setCurrentItem(None)
+            self.tree.clearSelection()
             return
-        if self.tree.currentItem() is not item:
-            self.tree.setCurrentItem(item)
+        if self.tree.item_is_displayed(item):
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.ClearAndSelect)
+        else:
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
 
     # ------------------------------------------------------------ 搜索
     def _on_search_changed(self, text):
@@ -731,6 +890,7 @@ class PageTreePanel(QWidget):
             self._apply_expansion()
             self._restore_anchor()
             self._sync_current_row()
+        self.tree.prune_hidden_selection()
 
     # ------------------------------------------------------------ 改名
     def begin_rename(self, page_id) -> bool:
@@ -775,26 +935,35 @@ class PageTreePanel(QWidget):
 
     # ------------------------------------------------------------ 右键菜单
     def _on_context_menu(self, pos):
-        item = self.tree.itemAt(pos)
+        item = self.tree.row_at(pos)
         page_id = self.tree.item_page_id(item)
         entry = self._entries.get(page_id) if page_id else None
         if entry is None:
             return
-        self.tree.setCurrentItem(item)
+        if item.isSelected():
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+        else:
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.ClearAndSelect)
+
+        selected_ids = self.tree.selected_page_ids()
+        deletable_ids = self.tree.selected_page_ids(deletable_only=True)
 
         menu = QMenu(self)
         rename_action = menu.addAction("重命名")
-        rename_action.setEnabled(entry.renameable)
+        rename_action.setEnabled(entry.renameable and len(selected_ids) == 1)
         rename_action.triggered.connect(lambda: self.begin_rename(page_id))
 
         restore_action = menu.addAction("恢复自动名称")
-        restore_action.setEnabled(entry.renameable)
+        restore_action.setEnabled(entry.renameable and len(selected_ids) == 1)
         restore_action.triggered.connect(lambda: self.restore_name_requested.emit(page_id))
 
         menu.addSeparator()
-        delete_action = menu.addAction("删除页面")
-        delete_action.setEnabled(entry.deletable)
-        delete_action.triggered.connect(lambda: self.delete_requested.emit(page_id))
+        delete_label = (
+            f"删除选中的 {len(deletable_ids)} 个页面" if len(selected_ids) > 1 else "删除页面"
+        )
+        delete_action = menu.addAction(delete_label)
+        delete_action.setEnabled(bool(deletable_ids))
+        delete_action.triggered.connect(self.tree.request_delete_selected)
 
         menu.setStyleSheet(theme.context_menu_qss())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))

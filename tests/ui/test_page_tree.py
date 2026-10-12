@@ -7,12 +7,14 @@
 """
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QEvent, QPoint, Qt
 from PyQt5.QtGui import QKeyEvent, QMouseEvent
-from PyQt5.QtWidgets import QAbstractItemView, QApplication
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidget
 
 from bandscope.ui import theme
 from bandscope.ui.page_tree import PAGE_KIND_ICONS, PageTreeEntry, PageTreePanel
@@ -211,19 +213,16 @@ class PageTreeKeyboardTests(_WorkspaceFixture):
         self.assertEqual(self.activated, [])
         self.assertEqual(self.workspace.current_page_id, before)
 
-    def test_delete_asks_the_workspace_and_a_cancelled_confirm_keeps_the_page(self):
-        requested, plans = [], []
+    def test_delete_directly_removes_the_selected_branch(self):
+        requested = []
         self.panel.delete_requested.connect(requested.append)
-        self.workspace.set_delete_confirm_handler(
-            lambda plan: plans.append(plan) or False
-        )
         self.tree.setCurrentItem(self.item("p2"))
 
         self.press(Qt.Key_Delete)
 
         self.assertEqual(requested, ["p2"])
-        self.assertEqual([plan["page_id"] for plan in plans], ["p2"])
-        self.assertIn("p2", self.workspace.page_specs)
+        self.assertNotIn("p2", self.workspace.page_specs)
+        self.assertNotIn("p3", self.workspace.page_specs)
 
     def test_f2_opens_the_inline_editor(self):
         self.tree.setCurrentItem(self.item("p2"))
@@ -270,10 +269,196 @@ class PageTreeExpansionTests(_WorkspaceFixture):
 
     def test_deleting_a_page_does_not_resurrect_its_expansion(self):
         self.collapse_rows()
-        self.workspace.delete_page("p2", confirm=False)
+        self.workspace.delete_page("p2")
 
         self.assertNotIn("p2", self.panel._items)
         self.assertNotIn("p2", self.panel._expanded_ids)
+
+
+class PageTreeMultiSelectionTests(_WorkspaceFixture):
+    def name_position(self, page_id):
+        rect = self.tree.visualItemRect(self.item(page_id))
+        return QPoint(rect.left() + 20, rect.center().y())
+
+    def click(self, page_id, modifiers=Qt.NoModifier):
+        QTest.mouseClick(self.tree.viewport(), Qt.LeftButton, modifiers, self.name_position(page_id))
+
+    def drag_blank(self, first_id, last_id, modifiers=Qt.NoModifier):
+        first = self.tree.visualItemRect(self.item(first_id))
+        last = self.tree.visualItemRect(self.item(last_id))
+        x = self.tree.viewport().width() - 8
+        start, end = QPoint(x, first.top() + 2), QPoint(x - 12, last.bottom() - 2)
+        for event_type, position, button, buttons in (
+            (QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton),
+            (QEvent.MouseMove, end, Qt.NoButton, Qt.LeftButton),
+        ):
+            QApplication.sendEvent(self.tree.viewport(), QMouseEvent(event_type, position, button, buttons, modifiers))
+        self.assertTrue(self.tree._rubber_band.isVisible())
+        QApplication.sendEvent(
+            self.tree.viewport(),
+            QMouseEvent(QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton, modifiers),
+        )
+        self.assertFalse(self.tree._rubber_band.isVisible())
+
+    def test_blank_drag_selects_rows_without_activating_them(self):
+        before = self.workspace.current_page_id
+        self.drag_blank("p2", "p4")
+        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p3", "p4"])
+        self.assertEqual(self.activated, [])
+        self.assertEqual(self.workspace.current_page_id, before)
+
+    def test_blank_drag_then_delete_emits_batch_and_removes_descendants_once(self):
+        requested, closed = [], []
+        self.panel.pages_delete_requested.connect(requested.append)
+        self.workspace.page_closed.connect(closed.append)
+        self.drag_blank("p2", "p4")
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertEqual(requested, [["p2", "p3", "p4"]])
+        self.assertEqual(set(self.workspace.page_specs), {HOME_ID, "p1"})
+        self.assertCountEqual(closed, ["p2", "p3", "p4"])
+
+    def test_ctrl_click_adds_and_removes_without_switching_page(self):
+        self.click("p2")
+        self.activated.clear()
+        self.click("p4", Qt.ControlModifier)
+        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p4"])
+        self.assertEqual(self.activated, [])
+        self.assertEqual(self.workspace.current_page_id, "p2")
+        self.click("p2", Qt.ControlModifier)
+        self.assertEqual(self.tree.selected_page_ids(), ["p4"])
+        self.assertEqual(self.activated, [])
+
+    def test_shift_click_selects_a_range_without_switching_page(self):
+        self.click("p1")
+        self.activated.clear()
+        self.click("p4", Qt.ShiftModifier)
+        self.assertEqual(self.tree.selected_page_ids(), ["p1", "p2", "p3", "p4"])
+        self.assertEqual(self.activated, [])
+        self.assertEqual(self.workspace.current_page_id, "p1")
+
+    def test_ctrl_blank_drag_adds_to_existing_selection(self):
+        self.click("p1")
+        self.activated.clear()
+        self.drag_blank("p3", "p4", Qt.ControlModifier)
+        self.assertEqual(self.tree.selected_page_ids(), ["p1", "p3", "p4"])
+        self.assertEqual(self.activated, [])
+
+    def test_right_click_on_selection_keeps_the_batch_and_deletes_from_menu(self):
+        self.drag_blank("p2", "p4")
+        captured = []
+
+        def execute(menu, _pos):
+            captured.append((self.tree.selected_page_ids(), [action.text() for action in menu.actions()]))
+            menu.actions()[-1].trigger()
+
+        position = self.name_position("p3")
+        QTest.mouseClick(self.tree.viewport(), Qt.RightButton, Qt.NoModifier, position)
+        with patch.object(QMenu, "exec_", new=execute):
+            self.tree.customContextMenuRequested.emit(position)
+        self.assertEqual(captured[0][0], ["p2", "p3", "p4"])
+        self.assertIn("删除选中的 3 个页面", captured[0][1])
+        self.assertEqual(set(self.workspace.page_specs), {HOME_ID, "p1"})
+
+    def test_right_click_unselected_row_replaces_the_batch(self):
+        self.drag_blank("p2", "p4")
+        position = self.name_position("p1")
+        QTest.mouseClick(self.tree.viewport(), Qt.RightButton, Qt.NoModifier, position)
+        with patch.object(QMenu, "exec_", return_value=None):
+            self.tree.customContextMenuRequested.emit(position)
+        self.assertEqual(self.tree.selected_page_ids(), ["p1"])
+        self.assertEqual(self.activated, [])
+
+    def test_rebuild_and_refresh_keep_selection_and_focused_row(self):
+        self.click("p2")
+        self.click("p4", Qt.ControlModifier)
+        self.workspace.set_page_title("p1", "重新构建")
+        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p4"])
+        self.assertEqual(self.tree.item_page_id(self.tree.currentItem()), "p4")
+        self.workspace.refresh_navigation()
+        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p4"])
+
+    def test_inactive_page_keeps_existing_selection_focus_and_delete_target(self):
+        self.click("p2")
+        self.click("p4", Qt.ControlModifier)
+        self.workspace.add_page_inactive(
+            page_spec("p5", "后台结果", "axis_integral", source_page_id=HOME_ID)
+        )
+        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p4"])
+        self.assertEqual(self.tree.item_page_id(self.tree.currentItem()), "p4")
+        self.assertEqual(self.workspace.current_page_id, "p2")
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertEqual(set(self.workspace.page_specs), {HOME_ID, "p1", "p5"})
+
+    def test_inactive_page_keeps_the_search_query_and_selection(self):
+        self.click("p2")
+        self.panel.search_edit.setText("B 组")
+        self.workspace.add_page_inactive(
+            page_spec("p5", "后台结果", "axis_integral", source_page_id=HOME_ID)
+        )
+        self.assertEqual(self.panel.search_text(), "B 组")
+        self.assertEqual(self.panel.visible_page_ids(), [HOME_ID, "p1", "p2"])
+        self.assertEqual(self.tree.selected_page_ids(), ["p2"])
+        self.assertEqual(self.tree.item_page_id(self.tree.currentItem()), "p2")
+        self.assertEqual(self.workspace.current_page_id, "p2")
+
+    def test_activating_another_page_replaces_the_batch_selection(self):
+        self.drag_blank("p2", "p4")
+        self.workspace.activate_page("p1")
+        self.assertEqual(self.tree.selected_page_ids(), ["p1"])
+        self.assertEqual(self.workspace.current_page_id, "p1")
+
+    def test_filter_prunes_hidden_selection_and_delete_keeps_hidden_pages(self):
+        self.click("p2")
+        self.click("p4", Qt.ControlModifier)
+        self.panel.search_edit.setText("B 组")
+        self.assertFalse(self.item("p4").isSelected())
+        self.assertEqual(self.tree.selected_page_ids(), ["p2"])
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertIn("p4", self.workspace.page_specs)
+
+    def test_collapsing_a_branch_prunes_selected_descendants(self):
+        self.drag_blank("p2", "p4")
+        self.click_arrow("p1")
+        self.assertFalse(self.item("p2").isSelected())
+        self.assertFalse(self.item("p3").isSelected())
+        self.assertEqual(self.tree.selected_page_ids(), ["p4"])
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertIn("p2", self.workspace.page_specs)
+
+    def test_rubber_band_ignores_rows_in_collapsed_branches(self):
+        self.item("p1").setExpanded(False)
+        self.drag_blank("p1", "p4")
+        self.assertEqual(self.tree.selected_page_ids(), ["p1", "p4"])
+        self.assertFalse(self.item("p2").isSelected())
+        self.assertFalse(self.item("p3").isSelected())
+
+    def test_protected_page_is_excluded_from_the_batch_signal(self):
+        requested = []
+        self.panel.pages_delete_requested.connect(requested.append)
+        self.drag_blank(HOME_ID, "p4")
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertEqual(requested, [["p1", "p2", "p3", "p4"]])
+        self.assertEqual(set(self.workspace.page_specs), {HOME_ID})
+
+    def test_clicking_blank_deselects_and_delete_does_nothing(self):
+        self.click("p2")
+        QTest.mouseClick(self.tree.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(10, self.tree.viewport().height() - 10))
+        QTest.keyClick(self.tree, Qt.Key_Delete)
+        self.assertEqual(self.tree.selected_page_ids(), [])
+        self.assertIn("p2", self.workspace.page_specs)
+
+    def test_dragging_a_name_passes_to_qt_for_sibling_sorting(self):
+        start, end = self.name_position("p1"), self.name_position("p4")
+        QTest.mousePress(self.tree.viewport(), Qt.LeftButton, Qt.NoModifier, start)
+        with patch.object(QTreeWidget, "mouseMoveEvent") as qt_move:
+            QApplication.sendEvent(
+                self.tree.viewport(),
+                QMouseEvent(QEvent.MouseMove, end, Qt.NoButton, Qt.LeftButton, Qt.NoModifier),
+            )
+        QTest.mouseRelease(self.tree.viewport(), Qt.LeftButton, Qt.NoModifier, end)
+        qt_move.assert_called_once()
+        self.assertFalse(self.tree._rubber_band.isVisible())
+        self.assertIsNone(self.tree._rubber_origin)
 
 
 class PageTreeSearchTests(_WorkspaceFixture):

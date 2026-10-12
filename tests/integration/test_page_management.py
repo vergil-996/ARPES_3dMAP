@@ -1,23 +1,25 @@
 # -*- coding: utf-8 -*-
-"""页面删除与宿主接入：统一删除核心、确认文案、快捷键焦点隔离。
+"""直接删除、批量删除与宿主清理：合并完整分支并保持页面切换与关闭顺序。
 
-覆盖设计意图：删除永远连带整支派生页（搜索隐藏的也算），确认里给出目标名称与
-总数且默认取消；删到当前页的祖先时退到最近的存活父页，删别的分支不动当前页；
-预览/复位这类内部清空不弹确认。方向键与数字键在页面树持有焦点时归树使用。
+删除连带整支派生页（搜索隐藏的也算）；当前页被删时只回退一次到最近存活祖先，
+删别的分支不切页。宿主收到关闭通知时全部待删记录已经摘除。方向键与数字键
+在页面树持有焦点时归树使用。
 """
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QKeyEvent
-from PyQt5.QtWidgets import QApplication, QLineEdit, QMessageBox, QSlider, QTreeWidget
+from PyQt5.QtWidgets import QApplication, QLineEdit, QSlider, QTreeWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.exporting.curve_presentation import publication_session
 from bandscope.ui import theme
+from bandscope.ui.axis_title_controller import AxisTitleState, axis_title_key
 from tests.support.pages import HOME_ID, make_workspace, page_spec, reset_workspace_settings
 
 TREE = [
@@ -40,18 +42,11 @@ class _WorkspaceFixture(unittest.TestCase):
         self.workspace.resize(900, 600)
         self.workspace.show()
         self.closed = []
-        self.plans = []
-        self.answers = []
         self.workspace.page_closed.connect(self.closed.append)
-        self.workspace.set_delete_confirm_handler(self._confirm)
 
     def tearDown(self):
         self.workspace.hide()
         self.workspace.deleteLater()
-
-    def _confirm(self, plan):
-        self.plans.append(plan)
-        return self.answers.pop(0) if self.answers else True
 
     def remaining(self):
         return sorted(self.workspace.page_specs)
@@ -106,21 +101,11 @@ class PageDeletePlanTests(_WorkspaceFixture):
 
 
 class PageDeleteFlowTests(_WorkspaceFixture):
-    def test_cancel_keeps_every_page(self):
-        self.answers.append(False)
-
-        self.assertFalse(self.workspace.delete_page("p1"))
-
-        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3", "p4"])
-        self.assertEqual(self.closed, [])
-        self.assertEqual(len(self.plans), 1)
-
     def test_delete_removes_the_subtree_and_notifies_each_page_from_child_to_parent(self):
-        self.workspace.delete_page("p1")
+        self.assertTrue(self.workspace.delete_page("p1"))
 
         self.assertEqual(self.closed, ["p3", "p2", "p1"])
         self.assertEqual(self.remaining(), ["home", "p4"])
-        self.assertEqual(self.plans[0]["count"], 3)
 
     def test_the_surviving_pages_keep_their_order_and_records(self):
         before = [spec.title for page_id, spec in self.workspace.page_specs.items() if page_id != "p1"]
@@ -181,27 +166,27 @@ class PageDeleteFlowTests(_WorkspaceFixture):
                 continue
             self.assertEqual(self.workspace.page_specs[page_id].title, title)
 
-    def test_close_current_page_uses_the_same_rule_and_confirmation(self):
+    def test_close_current_page_directly_removes_the_whole_branch(self):
         self.workspace.activate_page("p1")
-        self.answers.append(False)
 
         self.workspace.close_current_page()
 
-        self.assertEqual(self.plans[0]["page_id"], "p1")
-        self.assertEqual(self.plans[0]["count"], 3)
-        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3", "p4"])
-
-        self.answers.append(True)
-        self.workspace.close_current_page()
         self.assertEqual(self.remaining(), ["home", "p4"])
         self.assertEqual(self.workspace.current_page_id, HOME_ID)
+        self.assertEqual(self.closed, ["p3", "p2", "p1"])
 
-    def test_reset_to_home_never_asks_for_confirmation(self):
-        self.answers.append(False)
+    def test_header_close_button_directly_removes_the_current_page(self):
+        self.workspace.activate_page("p2")
 
+        self.workspace.close_button.click()
+
+        self.assertEqual(self.remaining(), ["home", "p1", "p4"])
+        self.assertEqual(self.workspace.current_page_id, "p1")
+        self.assertEqual(self.closed, ["p3", "p2"])
+
+    def test_reset_to_home_directly_removes_every_result_page(self):
         self.workspace.reset_to_home()
 
-        self.assertEqual(self.plans, [])
         self.assertEqual(self.remaining(), ["home"])
         self.assertEqual(self.workspace.current_page_id, HOME_ID)
         self.assertEqual(sorted(self.closed), ["p1", "p2", "p3", "p4"])
@@ -209,122 +194,165 @@ class PageDeleteFlowTests(_WorkspaceFixture):
         self.assertLess(self.closed.index("p2"), self.closed.index("p1"))
         self.assertLess(self.closed.index("p3"), self.closed.index("p2"))
 
-    def test_reset_to_home_keeps_working_without_any_handler(self):
-        self.workspace.set_delete_confirm_handler(None)
 
-        self.workspace.reset_to_home()
+class PageBatchDeleteTests(_WorkspaceFixture):
+    def test_parent_child_and_duplicate_choices_close_each_page_once(self):
+        self.assertTrue(self.workspace.delete_pages(["p1", "p2", "p1", "p3"]))
 
+        self.assertEqual(self.remaining(), ["home", "p4"])
+        self.assertEqual(self.closed, ["p3", "p2", "p1"])
+
+    def test_unrelated_branches_and_all_their_descendants_are_removed(self):
+        self.workspace.add_page(page_spec("p5", "E 组", source_page_id="p4"))
+
+        self.assertTrue(self.workspace.delete_pages(["p2", "p4"]))
+
+        self.assertEqual(self.remaining(), ["home", "p1"])
+        self.assertCountEqual(self.closed, ["p2", "p3", "p4", "p5"])
+        self.assertLess(self.closed.index("p3"), self.closed.index("p2"))
+        self.assertLess(self.closed.index("p5"), self.closed.index("p4"))
+
+    def test_a_surviving_current_page_is_not_reactivated(self):
+        self.workspace.activate_page("p1")
+        activated = []
+        self.workspace.page_activated.connect(activated.append)
+        surviving = {page_id: self.workspace.page_specs[page_id] for page_id in ("home", "p1", "p2")}
+
+        with patch.object(self.workspace, "_refresh_navigation_layout", wraps=self.workspace._refresh_navigation_layout) as refresh:
+            self.workspace.delete_pages(["p3", "p4"])
+
+        self.assertEqual(self.workspace.current_page_id, "p1")
+        self.assertEqual(activated, [])
+        refresh.assert_called_once()
+        for page_id, spec in surviving.items():
+            self.assertIs(self.workspace.page_specs[page_id], spec)
+
+    def test_a_deleted_current_page_activates_only_its_nearest_surviving_ancestor(self):
+        self.workspace.activate_page("p3")
+        activated = []
+        self.workspace.page_activated.connect(activated.append)
+
+        with patch.object(self.workspace, "_refresh_navigation_layout", wraps=self.workspace._refresh_navigation_layout) as refresh:
+            self.workspace.delete_pages(["p2", "p4"])
+
+        self.assertEqual(self.workspace.current_page_id, "p1")
+        self.assertEqual(activated, ["p1"])
+        refresh.assert_called_once()
+        self.assertEqual(self.remaining(), ["home", "p1"])
+
+    def test_selected_ancestors_are_skipped_when_finding_the_fallback(self):
+        self.workspace.activate_page("p3")
+        activated = []
+        self.workspace.page_activated.connect(activated.append)
+
+        self.workspace.delete_pages(["p2", "p1", "p4"])
+
+        self.assertEqual(self.workspace.current_page_id, HOME_ID)
+        self.assertEqual(activated, [HOME_ID])
         self.assertEqual(self.remaining(), ["home"])
 
-
-class _FakeButton:
-    def __init__(self, role, box):
-        self.role = role
-        self.box = box
-
-    def setText(self, text):
-        self.box.labels[self.role] = text
-
-
-class _MessageBoxStub:
-    """替身消息框：记下 ``_create_message_box`` 落下来的文案与按钮。"""
-
-    instances = []
-    answer = QMessageBox.No
-
-    def __init__(self, parent=None):
-        type(self).instances.append(self)
-        self.parent = parent
-        self.title = ""
-        self.text = ""
-        self.icon = None
-        self.buttons = None
-        self.default_button = None
-        self.escape_button = None
-        self.labels = {}
-
-    def setWindowTitle(self, title):
-        self.title = title
-
-    def setIcon(self, icon):
-        self.icon = icon
-
-    def setText(self, text):
-        self.text = text
-
-    def setStandardButtons(self, buttons):
-        self.buttons = buttons
-
-    def setDefaultButton(self, button):
-        self.default_button = button
-
-    def setEscapeButton(self, button):
-        self.escape_button = button
-
-    def button(self, role):
-        return _FakeButton(role, self)
-
-    def exec_(self):
-        return type(self).answer
-
-
-class PageDeleteConfirmationTests(unittest.TestCase):
-    """主窗口的确认弹窗：文案、默认按钮与受保护分支的提示。"""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
-    def setUp(self):
-        _MessageBoxStub.instances = []
-        _MessageBoxStub.answer = QMessageBox.No
-        self.boxes = patch(
-            "bandscope.app.refactored_app.QuickCloseMessageBox", _MessageBoxStub
-        )
-        self.boxes.start()
-        self.addCleanup(self.boxes.stop)
-        self.analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
-        self.analyzer._show_message = Mock()
-
-    def last_box(self):
-        return _MessageBoxStub.instances[-1]
-
-    def test_the_question_names_the_target_and_the_total(self):
-        self.analyzer._confirm_page_delete(
-            {"title": "A 组", "count": 3, "blocked": None}
+    def test_protected_choices_do_not_block_other_valid_choices(self):
+        self.workspace.add_pinned_page(
+            page_spec("tools", "工具页", "control_panel", source_page_id="p1")
         )
 
-        box = self.last_box()
-        self.assertEqual(box.title, "删除页面")
-        self.assertIn("A 组", box.text)
-        self.assertIn("3", box.text)
-        self.assertEqual(box.default_button, QMessageBox.No)
-        self.assertEqual(box.escape_button, QMessageBox.No)
-        self.assertEqual(box.labels[QMessageBox.Yes], "删除")
-        self.assertEqual(box.labels[QMessageBox.No], "取消")
+        self.assertTrue(self.workspace.delete_pages([HOME_ID, "tools", "p1", "p4"]))
 
-    def test_cancelling_returns_false_and_confirming_returns_true(self):
-        plan = {"title": "A 组", "count": 3, "blocked": None}
+        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3", "tools"])
+        self.assertEqual(self.closed, ["p4"])
 
-        self.assertFalse(self.analyzer._confirm_page_delete(plan))
+    def test_only_protected_or_missing_choices_do_nothing(self):
+        self.assertFalse(self.workspace.delete_pages([HOME_ID, "missing"]))
+        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3", "p4"])
+        self.assertEqual(self.closed, [])
 
-        _MessageBoxStub.answer = QMessageBox.Yes
-        self.assertTrue(self.analyzer._confirm_page_delete(plan))
+    def test_missing_and_repeated_ids_are_ignored(self):
+        self.assertTrue(self.workspace.delete_pages(["missing", "p4", "p4"]))
+        self.assertFalse(self.workspace.delete_pages(["p4", "missing"]))
+        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3"])
+        self.assertEqual(self.closed, ["p4"])
 
-    def test_a_single_page_says_nothing_about_derived_pages(self):
-        self.analyzer._confirm_page_delete({"title": "D 组", "count": 1, "blocked": None})
+    def test_empty_selection_does_nothing(self):
+        activated = []
+        self.workspace.page_activated.connect(activated.append)
 
-        self.assertIn("D 组", self.last_box().text)
-        self.assertNotIn("派生页面", self.last_box().text)
+        self.assertFalse(self.workspace.delete_pages([]))
 
-    def test_a_blocked_branch_is_reported_instead_of_asked(self):
-        answer = self.analyzer._confirm_page_delete(
-            {"title": "A 组", "count": 2, "blocked": "protected_descendant"}
-        )
+        self.assertEqual(self.remaining(), ["home", "p1", "p2", "p3", "p4"])
+        self.assertEqual(self.closed, [])
+        self.assertEqual(activated, [])
 
-        self.assertFalse(answer)
-        self.assertEqual(_MessageBoxStub.instances, [])
-        self.analyzer._show_message.assert_called_once()
+    def test_search_hidden_descendants_are_still_removed(self):
+        self.workspace.page_tree.search_edit.setText("A 组")
+        self.assertTrue(self.workspace.page_tree._items["p3"].isHidden())
+
+        self.workspace.delete_pages(["p1", "p4"])
+
+        self.assertEqual(self.remaining(), ["home"])
+        self.assertCountEqual(self.closed, ["p1", "p2", "p3", "p4"])
+
+    def test_tree_batch_delete_signal_reaches_the_workspace(self):
+        self.workspace.page_tree.pages_delete_requested.emit(["p2", "p4"])
+
+        self.assertEqual(self.remaining(), ["home", "p1"])
+        self.assertCountEqual(self.closed, ["p2", "p3", "p4"])
+        self.assertNotIn("p2", self.workspace._tab_order)
+        self.assertNotIn("p3", self.workspace.activation_history)
+        self.assertNotIn("p4", self.workspace.page_tree._items)
+
+
+class PageDeleteHostCleanupTests(_WorkspaceFixture):
+    def test_close_handlers_see_all_removed_records_and_clean_each_page_once(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.left_workspace = self.workspace
+        record_snapshots = []
+
+        def observe_records(_page_id=None):
+            record_snapshots.append(set(self.workspace.page_specs))
+
+        analyzer.crop_controller = SimpleNamespace(remove_page=Mock(side_effect=observe_records))
+        analyzer.refresh_coordinator = SimpleNamespace(cancel_page=Mock(side_effect=observe_records))
+        analyzer.plugin_session = SimpleNamespace(cancel_page_analysis=Mock(side_effect=observe_records))
+        analyzer._publication_dialog = SimpleNamespace(forget_page=Mock(side_effect=observe_records))
+        analyzer._rotation_cache = {"rotation": object()}
+        analyzer._computed_volume_cache = {"volume": object()}
+        analyzer._second_derivative_volume_cache = object()
+        analyzer._axis_prefix_cache = {"page_id": "p2", "prefix": object()}
+        analyzer.axis_title_state = AxisTitleState()
+        analyzer.active_page_spec = None
+        analyzer.last_visual_page_id = "p3"
+        analyzer._discard_unreferenced_roi_scopes = Mock(side_effect=observe_records)
+        presentation = publication_session(analyzer)
+        keys = {}
+        for page_id in self.workspace.page_specs:
+            presentation.pages[page_id] = object()
+            keys[page_id] = axis_title_key(page_id, "2d", ("X", "Y"))
+            analyzer.axis_title_state.set_text(keys[page_id], "x", page_id)
+        # 主窗口替身未初始化 QObject，通过普通 Python 槽调用真实宿主处理器。
+        self.workspace.page_closed.connect(lambda page_id: analyzer.on_result_page_closed(page_id))
+
+        self.workspace.delete_pages(["p2", "p4"])
+
+        self.assertEqual(self.remaining(), ["home", "p1"])
+        self.assertTrue(record_snapshots)
+        self.assertTrue(all(snapshot == {"home", "p1"} for snapshot in record_snapshots))
+        expected_calls = [call(page_id) for page_id in self.closed]
+        for handler in (
+            analyzer.crop_controller.remove_page,
+            analyzer.refresh_coordinator.cancel_page,
+            analyzer.plugin_session.cancel_page_analysis,
+            analyzer._publication_dialog.forget_page,
+        ):
+            self.assertEqual(handler.call_args_list, expected_calls)
+        self.assertEqual(set(presentation.pages), {"home", "p1"})
+        for page_id in ("p2", "p3", "p4"):
+            self.assertEqual(analyzer.axis_title_state.texts(keys[page_id]), {})
+        self.assertEqual(analyzer.axis_title_state.texts(keys["p1"]), {"x": "p1"})
+        self.assertEqual(analyzer._rotation_cache, {})
+        self.assertEqual(analyzer._computed_volume_cache, {})
+        self.assertIsNone(analyzer._axis_prefix_cache)
+        self.assertIsNone(analyzer._second_derivative_volume_cache)
+        self.assertNotIn(analyzer.last_visual_page_id, {"p2", "p3", "p4"})
 
 
 class PageShortcutFocusTests(unittest.TestCase):

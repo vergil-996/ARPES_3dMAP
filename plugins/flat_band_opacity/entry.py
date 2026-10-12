@@ -17,7 +17,11 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Mapping, Optional
 
-from PyQt5.QtWidgets import QFileDialog, QWidget
+from PyQt5.QtWidgets import QWidget
+try:
+    from bandscope.extensions.ui import RememberingFileDialog as QFileDialog
+except ImportError:  # Older hosts do not expose directory history yet.
+    from PyQt5.QtWidgets import QFileDialog
 
 from bandscope.extensions.api import (
     CAPABILITY_OPACITY_MULTIPLIER,

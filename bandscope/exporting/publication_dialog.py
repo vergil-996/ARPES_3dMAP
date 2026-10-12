@@ -27,7 +27,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
-    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -41,6 +40,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from bandscope.ui.file_dialogs import RememberingFileDialog as QFileDialog
 import bandscope.ui.theme as theme
 from bandscope.exporting.publication_export import (
     ExportError,

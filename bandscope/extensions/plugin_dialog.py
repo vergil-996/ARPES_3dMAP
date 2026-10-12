@@ -22,7 +22,6 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -35,6 +34,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from bandscope.ui.file_dialogs import RememberingFileDialog as QFileDialog
 import bandscope.ui.theme as theme
 from bandscope.extensions.catalog import (
     STATUS_INCOMPATIBLE,

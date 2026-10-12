@@ -7,10 +7,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def arguments(description, *, data=True, dynamic=False, two_datasets=False):
+def arguments(description, *, data=True, dynamic=False, two_datasets=False, default_data=None):
     parser = argparse.ArgumentParser(description=description)
     if data:
-        parser.add_argument("data", type=Path, help="Input NPZ file")
+        if default_data is None:
+            parser.add_argument("data", type=Path, help="Input NPZ file")
+        else:
+            parser.add_argument("data", type=Path, nargs="?", default=Path(default_data),
+                                help=f"Input NPZ file (default: {default_data})")
     if two_datasets:
         parser.add_argument("static_data", type=Path, help="Static NPZ file")
     parser.add_argument("--output-dir", type=Path,

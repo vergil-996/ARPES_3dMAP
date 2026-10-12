@@ -248,6 +248,9 @@ jobs:
     needs: [build, plugin]
     runs-on: ubuntu-latest
     steps:
+      - name: Check out release notes
+        uses: actions/checkout@v6
+
       # 扩展包与两种基础安装包挂在同一个 Release 上，扩展不单独建版本 tag。
       - name: Download installers and extension packages
         uses: actions/download-artifact@v5
@@ -259,10 +262,12 @@ jobs:
       - name: Publish immutable release payload
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          release/*
-          --repo "${GITHUB_REPOSITORY}"
-          --verify-tag
-          --generate-notes
-          --title "BandScope ${GITHUB_REF_NAME}"
+        run: |
+          notes_file="docs/archive/releases/${GITHUB_REF_NAME}.md"
+          notes_args=()
+          if [[ -f "$notes_file" ]]; then
+            notes_args=(--notes-file "$notes_file")
+          fi
+          gh release create "${GITHUB_REF_NAME}" release/* \
+            --repo "${GITHUB_REPOSITORY}" --verify-tag --generate-notes \
+            --title "BandScope ${GITHUB_REF_NAME}" "${notes_args[@]}"
