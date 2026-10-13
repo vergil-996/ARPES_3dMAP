@@ -312,7 +312,10 @@ class PageDeleteHostCleanupTests(_WorkspaceFixture):
 
         analyzer.crop_controller = SimpleNamespace(remove_page=Mock(side_effect=observe_records))
         analyzer.refresh_coordinator = SimpleNamespace(cancel_page=Mock(side_effect=observe_records))
-        analyzer.plugin_session = SimpleNamespace(cancel_page_analysis=Mock(side_effect=observe_records))
+        analyzer.plugin_session = SimpleNamespace(
+            cancel_page_analysis=Mock(side_effect=observe_records),
+            invalidate_derived_page=Mock(side_effect=observe_records),
+        )
         analyzer._publication_dialog = SimpleNamespace(forget_page=Mock(side_effect=observe_records))
         analyzer._rotation_cache = {"rotation": object()}
         analyzer._computed_volume_cache = {"volume": object()}
@@ -341,6 +344,7 @@ class PageDeleteHostCleanupTests(_WorkspaceFixture):
             analyzer.crop_controller.remove_page,
             analyzer.refresh_coordinator.cancel_page,
             analyzer.plugin_session.cancel_page_analysis,
+            analyzer.plugin_session.invalidate_derived_page,
             analyzer._publication_dialog.forget_page,
         ):
             self.assertEqual(handler.call_args_list, expected_calls)

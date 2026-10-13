@@ -17,7 +17,7 @@ from bandscope.processing.denoise_config import (
 from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
-from bandscope.ui.settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from bandscope.ui.settings_popups import DenoiseSettingsPopup
 from bandscope.ui.timeline_bar import TimelineBar
 
 
@@ -101,17 +101,12 @@ class ControlPageStateTests(unittest.TestCase):
         bar.restore_state(saved)
         self.assertAlmostEqual(bar.get_rotation_angle(), angle, places=10)
 
-    def test_waterfall_popup_forwards_one_edit_to_the_shared_control(self):
+    def test_waterfall_step_controls_moved_out_of_the_shared_page(self):
+        # 瀑布图步长已随插件迁移：空白控制页不再保留步长控件与状态，
+        # 相关编辑与默认值由「插件管理 → 插件设置」里的插件面板负责。
         blank = BlankControlPage()
-        popup = WaterfallSettingsPopup(blank)
-        received = []
-        blank.waterfall_step_box.editingFinished.connect(lambda: received.append(True))
-        popup.waterfall_step_box.setValue(0.25)
-
-        popup._on_step_changed()
-
-        self.assertAlmostEqual(blank.get_waterfall_step(), 0.25)
-        self.assertEqual(received, [True])
+        self.assertFalse(hasattr(blank, "waterfall_step_box"))
+        self.assertNotIn("waterfall", blank.export_state())
 
     def test_denoise_pages_share_defaults_and_options(self):
         blank = BlankControlPage()

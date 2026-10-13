@@ -32,8 +32,12 @@ from bandscope.extensions.compat import (  # noqa: F401
     API_VERSION,
     CAPABILITY_ANALYSIS_TASK,
     CAPABILITY_DATA_SNAPSHOT_2D,
+    CAPABILITY_INTEGRATION_ACTION,
+    CAPABILITY_DERIVED_RESULT,
     CAPABILITY_OPACITY_MULTIPLIER,
+    CAPABILITY_PLUGIN_SETTINGS,
     CAPABILITY_RESULT_CURVE_1D,
+    DERIVED_CAPABILITIES,
     SUPPORTED_API_VERSIONS,
     SUPPORTED_CAPABILITIES,
     evaluate_compatibility,
@@ -350,6 +354,40 @@ class Plugin(abc.ABC):
         ``failed``、``cancelled``。
         """
 
+    # -- API 3：集成动作与派生结果（默认空实现） ---------------------------
+    def integration_actions(self) -> Sequence["IntegrationAction"]:
+        """向「其他积分」下拉注册动作；默认不注册。
+
+        只对声明了派生能力（``DERIVED_CAPABILITIES``）的插件生效。动作键会以
+        ``插件 ID:动作 ID`` 存进下拉状态，动作 ID 必须跨版本稳定。
+        """
+        return ()
+
+    def compute_derived_result(self, source: "DerivedInput2D") -> "DerivedWaterfallResult":
+        """冻结来源 → 派生结果；采样、归一化、参数校验与自动标题都在这里完成。
+
+        失败时抛 ``ValueError``（消息可直接展示）或 :class:`PluginError`；宿主
+        会先验证结果再提交页面状态。默认实现视为「未提供派生计算」。
+        """
+        raise PluginError(
+            f"插件 {self.plugin_id or '（未命名）'} 未实现派生计算。"
+        )
+
+    def create_settings_panel(self, host):
+        """创建插件设置界面（``QWidget``）；返回 None 表示不提供设置。
+
+        面板在「插件管理 → 插件设置」里挂载，用宿主句柄读写默认值；控件生命周期
+        由宿主管理，插件不得缓存控件实例。
+        """
+        return None
+
+    def export_settings(self) -> Mapping[str, Any]:
+        """当前设置状态；「保存为新建默认值」与「应用到当前页」都用它。"""
+        return {}
+
+    def restore_settings(self, state: Mapping[str, Any]) -> None:
+        """恢复设置状态；实现必须容忍缺失与多余字段。"""
+
     def reset_for_new_data(self) -> None:
         """加载新数据文件时清空与旧数据绑定的峰位。"""
 
@@ -638,3 +676,395 @@ class PluginHostV2(PluginHost):
     @abc.abstractmethod
     def cancel_analysis(self, handle: Optional[AnalysisTaskHandle]) -> None:
         """请求取消；协作取消，未退出前不会启动该插件的下一个任务。"""
+
+
+# ---------------------------------------------------------------------------
+# 派生结果与集成动作（API 3）
+# ---------------------------------------------------------------------------
+#
+# 这一类插件把「其他积分」下拉里的一项换成宿主托管的派生结果页（当前用于
+# EDC 瀑布图）：
+#
+# 1. **注册动作**：插件用 :meth:`Plugin.integration_actions` 报出动作键与展示
+#    文本，宿主把它们并入下拉，以 ``插件 ID:动作 ID`` 稳定分派。
+# 2. **冻结来源**：用户执行动作时，宿主把当前 X/Y 积分页及其矩形裁剪结果冻结
+#    成 :class:`DerivedSource2D`（时间帧或时间积分区间、积分范围、裁剪范围与
+#    数据域都在创建时固定），存进结果页参数。
+# 3. **插件计算**：宿主把冻结来源还原成只读的 :class:`DerivedInput2D`，调用
+#    :meth:`Plugin.compute_derived_result`；采样、归一化、参数校验与自动标题都
+#    由插件负责。V3 输入与结果一律使用**原始坐标排列**，E 翻转只由宿主在显示、
+#    出版与数值导出的统一出口处理一次。
+# 4. **宿主建页展示**：宿主校验结果后建 ``plugin_derived`` 结果页，负责绘图、
+#    裁剪、出版与数值导出；插件不建页、不写文件、不碰主窗口。
+# 5. **设置与默认值**：插件提供设置界面（:meth:`Plugin.create_settings_panel`），
+#    宿主按插件 ID 把默认值存进 QSettings，与逐页参数分离；「应用当前页」先
+#    验证计算结果再提交页面状态，失败时保留上次成功结果。
+
+#: 派生结果中的曲线偏移步长默认值，与旧瀑布图行为一致。
+DEFAULT_WATERFALL_OFFSET_STEP = 1.2
+
+#: 「其他积分」下拉里插件动作的默认排序权重；内置项按 0/10/20/30/40 排布。
+INTEGRATION_ACTION_DEFAULT_ORDER = 50.0
+
+
+class DerivedSourceUnavailable(PluginError):
+    """当前页面不能作为派生来源。
+
+    消息直接面向用户：不是 X/Y 积分页、带擦除区域、裁剪范围内没有有效数据等
+    情况都归这里，逐条说明为什么现在不能创建。
+    """
+
+
+class DerivedResultError(PluginError):
+    """插件交回的派生结果不符合契约（形状、坐标或采样身份不一致）。"""
+
+
+@dataclass(frozen=True)
+class IntegrationAction:
+    """插件注册到「其他积分」下拉的一个动作。
+
+    ``action_id`` 是稳定键：跨版本保持不变，下拉状态按 ``插件 ID:动作 ID``
+    保存与恢复；``label`` 只用于展示，可以随版本改写。
+    """
+
+    action_id: str
+    label: str
+    order: float = INTEGRATION_ACTION_DEFAULT_ORDER
+
+    def key(self, plugin_id: str) -> str:
+        return f"{str(plugin_id)}:{self.action_id}"
+
+
+@dataclass(frozen=True)
+class DerivedAxis:
+    """一根轴的只读描述（原始坐标排列，不做显示翻转）。
+
+    单位只如实转述：没有单位元数据时保持空串，``display_unit`` 依次回退到
+    「坐标值」与 ``index``，绝不自动补成 ``eV`` / ``Å⁻¹``。
+    """
+
+    key: str
+    label: str
+    values: np.ndarray
+    unit: str = ""
+    source: str = SOURCE_INDEX
+
+    @property
+    def has_coordinates(self) -> bool:
+        return self.source == SOURCE_FILE
+
+    @property
+    def display_unit(self) -> str:
+        if not self.has_coordinates:
+            return UNIT_TEXT_INDEX
+        unit = str(self.unit or "").strip()
+        return unit or UNIT_TEXT_NO_METADATA
+
+    @property
+    def axis_label(self) -> str:
+        return f"{str(self.label)} ({self.display_unit})"
+
+    def sample_spacing(self) -> float:
+        """相邻采样点的中位间距；不足以计算时返回 0.0。"""
+        values = np.asarray(self.values, dtype=np.float64).reshape(-1)
+        if values.size < 2:
+            return 0.0
+        diffs = np.abs(np.diff(values))
+        diffs = diffs[np.isfinite(diffs) & (diffs > 1e-12)]
+        return float(np.median(diffs)) if diffs.size else 0.0
+
+
+@dataclass(frozen=True)
+class DerivedSource2D:
+    """宿主在创建时冻结的派生来源（可序列化，随结果页参数保存）。
+
+    冻结之后页面只依赖这份记录重算：之后切换时间帧、改动积分区间或重新裁剪
+    来源页都不会影响已有结果页。
+    """
+
+    plugin_id: str
+    action_id: str
+    source_page_id: str
+    source_page_kind: str
+    axis_index: int
+    integral_low: int
+    integral_up: int
+    integral_mid: int
+    source_mode: str = "frame"
+    frame_index: int = 0
+    time_low: int = 0
+    time_up: int = 0
+    scope_id: str = "full"
+    crop_rect: Optional[Tuple[int, int, int, int]] = None
+    source_title: str = ""
+    data_generation: int = 0
+
+    def to_mapping(self) -> Dict[str, Any]:
+        payload = {
+            "plugin_id": self.plugin_id,
+            "action_id": self.action_id,
+            "source_page_id": self.source_page_id,
+            "source_page_kind": self.source_page_kind,
+            "axis_index": int(self.axis_index),
+            "integral_low": int(self.integral_low),
+            "integral_up": int(self.integral_up),
+            "integral_mid": int(self.integral_mid),
+            "source_mode": str(self.source_mode),
+            "frame_index": int(self.frame_index),
+            "time_low": int(self.time_low),
+            "time_up": int(self.time_up),
+            "scope_id": str(self.scope_id),
+            "crop_rect": None if self.crop_rect is None else [int(v) for v in self.crop_rect],
+            "source_title": str(self.source_title),
+            "data_generation": int(self.data_generation),
+        }
+        return payload
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "DerivedSource2D":
+        crop = value.get("crop_rect")
+        return cls(
+            plugin_id=str(value.get("plugin_id") or ""),
+            action_id=str(value.get("action_id") or ""),
+            source_page_id=str(value.get("source_page_id") or ""),
+            source_page_kind=str(value.get("source_page_kind") or ""),
+            axis_index=int(value.get("axis_index") or 0),
+            integral_low=int(value.get("integral_low") or 0),
+            integral_up=int(value.get("integral_up") or 0),
+            integral_mid=int(value.get("integral_mid") or 0),
+            source_mode=str(value.get("source_mode") or "frame"),
+            frame_index=int(value.get("frame_index") or 0),
+            time_low=int(value.get("time_low") or 0),
+            time_up=int(value.get("time_up") or 0),
+            scope_id=str(value.get("scope_id") or "full"),
+            crop_rect=None if crop is None else tuple(int(v) for v in crop),
+            source_title=str(value.get("source_title") or ""),
+            data_generation=int(value.get("data_generation") or 0),
+        )
+
+    def describe(self) -> str:
+        parts = [
+            self.source_title or self.source_page_id,
+            f"积分轴 {'XY'[int(self.axis_index)] if int(self.axis_index) in (0, 1) else self.axis_index}",
+            f"{int(self.integral_low)}~{int(self.integral_up)}",
+        ]
+        if self.source_mode == "time_integral":
+            parts.append(f"时间积分 {int(self.time_low)}~{int(self.time_up)}")
+        else:
+            parts.append(f"帧 {int(self.frame_index)}")
+        if self.crop_rect is not None:
+            parts.append("矩形裁剪")
+        return " · ".join(str(part) for part in parts if part)
+
+
+@dataclass(frozen=True)
+class DerivedInput2D:
+    """传给 :meth:`Plugin.compute_derived_result` 的只读输入。
+
+    ``data`` 的顺序是 ``[采样轴, 曲线轴]``（当前为 ``[k, E]``），与 ``k_axis`` /
+    ``e_axis`` 一一对应，**原始坐标排列**：宿主不在输入里做 E 翻转。完整轴
+    （``k_axis_full`` / ``e_axis_full`` / ``integrated_axis``）保留未裁剪的坐标，
+    供自动步长与标题使用。所有数组都是任务独占的只读缓冲区。
+    """
+
+    plugin_id: str
+    source: DerivedSource2D
+    params: Mapping[str, Any]
+    data: np.ndarray
+    k_axis: DerivedAxis
+    e_axis: DerivedAxis
+    k_axis_full: DerivedAxis
+    e_axis_full: DerivedAxis
+    integrated_axis: DerivedAxis
+    source_title: str = ""
+    frame_label: str = ""
+    roi_label: str = ""
+    data_generation: int = 0
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        return (int(self.data.shape[0]), int(self.data.shape[1]))
+
+    def describe(self) -> str:
+        parts = [self.source_title or self.source.source_page_id, f"{self.shape[0]}×{self.shape[1]}"]
+        if self.frame_label:
+            parts.append(self.frame_label)
+        if self.roi_label:
+            parts.append(self.roi_label)
+        return " · ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
+class DerivedWaterfallResult:
+    """插件交回的瀑布类派生结果：宿主负责建页、展示与导出。
+
+    - ``k`` / ``sample_indices``：抽样后的物理动量坐标与它们在**完整未裁剪**动量
+      轴上的下标（物理 k 升序）；采样身份由 ``sample_indices`` 唯一确定。
+    - ``energy``：原始坐标排列的能量轴；``curves`` / ``raw_curves`` 的第二维与
+      它一一对应。
+    - ``curve_offsets`` 为 None 时宿主按 ``offset_step`` 生成均匀偏移。
+    - ``title`` 是自动标题（含裁剪后缀），宿主只读展示，不识别具体插件；
+      ``plot_title`` 是绘图/出版用的 ASCII 安全标题，为空时回退 ``title``
+      （宿主画布不含中文字形，中文标题会出方框）。
+    - ``params`` 记录解析后的参数（例如自动步长实际取到的值），供回显与复现。
+    """
+
+    k: Sequence[float]
+    sample_indices: Sequence[int]
+    energy: Sequence[float]
+    raw_curves: np.ndarray
+    curves: np.ndarray
+    curve_offsets: Optional[Sequence[float]] = None
+    offset_step: float = DEFAULT_WATERFALL_OFFSET_STEP
+    title: str = ""
+    plot_title: str = ""
+    xlabel: str = "Intensity (normalized, arb. u.)"
+    ylabel: str = "Energy"
+    k_label: str = "k"
+    integrated_label: str = ""
+    integrated_range: Optional[Tuple[float, float]] = None
+    integrated_center: Optional[float] = None
+    params: Mapping[str, Any] = field(default_factory=dict)
+
+
+def validate_derived_waterfall(
+    result: DerivedWaterfallResult,
+    source: Optional[DerivedInput2D] = None,
+) -> DerivedWaterfallResult:
+    """校验插件派生结果并转成宿主拥有的只读数值缓冲区。
+
+    - 必须是 :class:`DerivedWaterfallResult`；
+    - ``k`` / ``sample_indices`` / ``energy`` 必须一维、非空、等长；
+    - ``curves`` / ``raw_curves`` 必须是 ``[len(k), len(energy)]`` 的二维数组；
+    - ``k`` 与 ``energy`` 必须有限且严格排序（物理 k 升序、能量原始方向单调）；
+    - 曲线允许 NaN 表示缺测，但拒绝正负无穷；
+    - ``sample_indices`` 必须整数、非负，并落在完整动量轴范围内（有输入时）。
+    """
+    if not isinstance(result, DerivedWaterfallResult):
+        raise DerivedResultError(
+            f"派生结果必须是 DerivedWaterfallResult，收到 {type(result).__name__}。"
+        )
+    try:
+        k = np.asarray(result.k, dtype=np.float64).reshape(-1)
+        sample_indices = np.asarray(result.sample_indices)
+        energy = np.asarray(result.energy, dtype=np.float64).reshape(-1)
+        raw_curves = np.asarray(result.raw_curves, dtype=np.float64)
+        curves = np.asarray(result.curves, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise DerivedResultError(f"派生结果不是数值数组：{exc}") from exc
+    if k.size == 0 or energy.size == 0:
+        raise DerivedResultError("派生结果为空：至少需要一条曲线和一根能量轴。")
+    if k.size != sample_indices.size:
+        raise DerivedResultError("采样身份（sample_indices）与 k 坐标长度不一致。")
+    if raw_curves.shape != curves.shape:
+        raise DerivedResultError("归一化曲线与原始曲线形状不一致。")
+    if curves.ndim != 2 or curves.shape != (k.size, energy.size):
+        raise DerivedResultError(
+            f"曲线形状 {curves.shape} 与坐标（{k.size} 条 × {energy.size} 点）不一致。"
+        )
+    if not np.all(np.isfinite(k)):
+        raise DerivedResultError("动量坐标含缺测或非有限值，坐标必须完整。")
+    if not np.all(np.isfinite(energy)):
+        raise DerivedResultError("能量坐标含缺测或非有限值，坐标必须完整。")
+    if k.size > 1 and np.any(np.diff(k) < 0):
+        raise DerivedResultError("动量坐标必须按物理 k 升序排列。")
+    if energy.size > 1 and np.any(np.diff(energy) == 0):
+        raise DerivedResultError("能量坐标出现重复采样点。")
+    if np.any(np.isinf(raw_curves)) or np.any(np.isinf(curves)):
+        raise DerivedResultError("曲线含无穷值；缺测请用 NaN 表示。")
+    if np.issubdtype(sample_indices.dtype, np.floating):
+        if not np.all(sample_indices == np.floor(sample_indices)):
+            raise DerivedResultError("采样身份（sample_indices）必须是整数下标。")
+    sample_indices = sample_indices.astype(np.int64, copy=False)
+    if np.any(sample_indices < 0):
+        raise DerivedResultError("采样身份（sample_indices）不能为负数。")
+    if source is not None:
+        limit = int(np.asarray(source.k_axis_full.values).size)
+        if limit and np.any(sample_indices >= limit):
+            raise DerivedResultError(
+                f"采样身份超出完整动量轴范围（0~{limit - 1}）。"
+            )
+
+    offsets = result.curve_offsets
+    if offsets is not None:
+        offsets = np.asarray(offsets, dtype=np.float64).reshape(-1)
+        if offsets.size != k.size:
+            raise DerivedResultError("曲线偏移与曲线数量不一致。")
+        if not np.all(np.isfinite(offsets)):
+            raise DerivedResultError("曲线偏移含非有限值。")
+    offset_step = float(result.offset_step)
+    if not np.isfinite(offset_step) or offset_step <= 0:
+        raise DerivedResultError("偏移步长必须是有限正数。")
+
+    def _frozen(values: np.ndarray) -> np.ndarray:
+        array = np.array(values, dtype=np.float64, copy=True)
+        array.setflags(write=False)
+        return array
+
+    integrated_range = result.integrated_range
+    if integrated_range is not None:
+        integrated_range = tuple(float(v) for v in integrated_range)
+    integrated_center = (
+        None if result.integrated_center is None else float(result.integrated_center)
+    )
+    return DerivedWaterfallResult(
+        k=_frozen(k),
+        sample_indices=np.array(sample_indices, dtype=np.int64, copy=True),
+        energy=_frozen(energy),
+        raw_curves=_frozen(raw_curves),
+        curves=_frozen(curves),
+        curve_offsets=None if offsets is None else _frozen(offsets),
+        offset_step=offset_step,
+        title=str(result.title or ""),
+        plot_title=str(result.plot_title or ""),
+        xlabel=str(result.xlabel or "Intensity (normalized, arb. u.)"),
+        ylabel=str(result.ylabel or "Energy"),
+        k_label=str(result.k_label or "k"),
+        integrated_label=str(result.integrated_label or ""),
+        integrated_range=integrated_range,
+        integrated_center=integrated_center,
+        params=dict(result.params or {}),
+    )
+
+
+@dataclass(frozen=True)
+class DerivedPage:
+    """当前派生结果页的只读描述（插件查询用）。"""
+
+    plugin_id: str
+    action_id: str
+    page_id: str
+    title: str
+    params: Mapping[str, Any]
+    source: DerivedSource2D
+
+
+class PluginHostV3(PluginHostV2):
+    """API 3 宿主：在 v2 的分析能力之外增加派生结果与设置。
+
+    v1 / v2 插件拿到的仍是各自版本的接口；实现由主程序提供，图形操作一律由
+    宿主在主线程完成。
+    """
+
+    api_version = 3
+
+    # -- 默认值（宿主按插件 ID 保存，与逐页参数分离） ----------------------
+    @abc.abstractmethod
+    def defaults(self) -> Mapping[str, Any]:
+        """该插件保存为「新建默认值」的参数；没有保存过时返回空字典。"""
+
+    @abc.abstractmethod
+    def set_defaults(self, values: Mapping[str, Any]) -> None:
+        """保存默认值；只影响之后新建的派生页，已有页保持各自参数。"""
+
+    # -- 当前派生结果页 ----------------------------------------------------
+    @abc.abstractmethod
+    def current_derived_page(self) -> Optional[DerivedPage]:
+        """当前页是本插件创建的派生结果页时返回描述，否则返回 None。"""
+
+    @abc.abstractmethod
+    def update_current_derived_page(self, params: Mapping[str, Any]) -> bool:
+        """把参数应用到当前派生页：先验证计算结果，通过后再提交。
+
+        失败时保留上次成功结果与原有参数，原因由宿主展示；返回是否提交成功。
+        """

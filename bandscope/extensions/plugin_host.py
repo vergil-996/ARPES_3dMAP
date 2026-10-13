@@ -35,10 +35,12 @@ from bandscope.extensions.api import (
     EnergyAxisSpec,
     PluginContext,
     PluginHostV2,
+    PluginHostV3,
     align_multiplier_to_voxels,
     read_only_array,
     validate_analysis_curve,
 )
+from bandscope.extensions.derived_host import DerivedPageController
 from bandscope.extensions.plugin_manager import PluginManager
 
 #: 每页插件参数在 ``spec.params`` 里的键。
@@ -51,14 +53,14 @@ EFFECT_CAUSE_LABEL = "plugin"
 ANALYSIS_PARAMS_KEY = "plugin_analysis"
 
 
-class _HostBridge(PluginHostV2):
+class _HostBridge(PluginHostV3):
     """交给插件的宿主句柄；只暴露协议允许的动作。
 
     每个插件拿到的句柄绑定自己的 ``plugin_id``：分析任务的排队与限制是按插件
     计的，句柄必须知道它在替谁提交。
     """
 
-    api_version = 2
+    api_version = 3
 
     def __init__(self, session: "PluginSession", plugin_id: str = ""):
         self._session = session
@@ -85,6 +87,19 @@ class _HostBridge(PluginHostV2):
 
     def cancel_analysis(self, handle) -> None:
         self._session.cancel_analysis(handle)
+
+    # -- v3 -------------------------------------------------------------
+    def defaults(self):
+        return self._session.derived_defaults(self._plugin_id)
+
+    def set_defaults(self, values) -> None:
+        self._session.save_derived_defaults(self._plugin_id, values)
+
+    def current_derived_page(self):
+        return self._session.current_derived_page(self._plugin_id)
+
+    def update_current_derived_page(self, params) -> bool:
+        return self._session.update_current_derived_page(self._plugin_id, params)
 
 
 def _region_operation(region) -> str:
@@ -133,7 +148,10 @@ class PluginSession:
         self._context = PluginContext()
         self._cards: Dict[str, object] = {}
         self._analysis_cards: Dict[str, object] = {}
+        self._settings_panels: Dict[str, object] = {}
         self._failed: Dict[str, str] = {}
+        # 派生结果（API 3）：冻结来源、同步计算、默认值与结果页归属都由它协调。
+        self._derived = DerivedPageController(self)
         # 分析任务：快照只留在宿主手里，结果页也由宿主创建。
         self._snapshots: Dict[str, AnalysisInput2D] = {}
         self._analysis_runner = AnalysisTaskRunner()
@@ -154,6 +172,7 @@ class PluginSession:
         """实例释放只由 PluginManager 的统一入口执行，恰好一次。"""
         self._cards.clear()
         self._analysis_cards.clear()
+        self._settings_panels.clear()
         self._snapshots.clear()
         self._analysis_runner.shutdown()
         self.manager.shutdown()
@@ -352,6 +371,9 @@ class PluginSession:
                 # 声明了分析能力的插件走「处理分析」页的挂载点，面板只在二维
                 # 结果页显示；这里跳过，避免同一插件挂出两份面板。
                 continue
+            if self._derived.is_derived_plugin(record):
+                # 派生结果插件（API 3）的面板只出现在插件管理里，不挂 3D 卡片。
+                continue
             try:
                 panel = record.instance.create_panel(self.host_for(record.plugin_id))
             except Exception as exc:
@@ -425,6 +447,8 @@ class PluginSession:
         """加载新的数据文件：清空与旧数据绑定的峰位，并作废进行中的分析。"""
         # 先取消：正在跑的任务会在检查点退出，晚到的结果也会被数据代次核对丢弃。
         self._analysis_runner.cancel_all()
+        # 派生结果按冻结来源重算，新数据下旧来源与缓存一律作废。
+        self._derived.clear_cache()
         for record in self.manager.plugins():
             if record.instance is None:
                 continue
@@ -458,6 +482,38 @@ class PluginSession:
             # 擦除把数据打成 NaN 掩膜，形状还在但已经不是矩形结果；首版不支持。
             return "首版分析不支持带擦除区域的结果，请改用矩形裁剪后的二维结果。"
         return ""
+
+    @staticmethod
+    def _display_orientation(data, x_values, y_values, context, window):
+        """把二维快照对齐到画面方向，数组与坐标一起翻。
+
+        规则与 ``VisualEngine.render_2d_slice`` 完全一致：
+
+        - 落轴的坐标降序时，画面会把像素翻成升序标签；
+        - E 翻转开关生效时（落轴是 X/Y 切片，能量在纵轴），画面再镜像一次。
+
+        翻转之后 ``data[i, j]`` 仍然对应 ``(x[i], y[j])``：插件看到的就是画面
+        上那张图，且方向不靠猜。翻转是复制，不改动画面数组。
+        """
+        slice_info = context.get("slice_info") or {}
+        try:
+            slice_axis = int(slice_info.get("axis", -1))
+        except (TypeError, ValueError):
+            slice_axis = -1
+        flip_x = bool(np.asarray(x_values).size > 1 and float(x_values[0]) > float(x_values[-1]))
+        flip_y = bool(np.asarray(y_values).size > 1 and float(y_values[0]) > float(y_values[-1]))
+        if slice_axis in (0, 1) and PluginSession._e_flip(window):
+            flip_y = not flip_y
+        if not flip_x and not flip_y:
+            return data, x_values, y_values
+        result = np.array(data, dtype=np.float64, copy=True)
+        if flip_x:
+            result = np.flip(result, axis=0)
+            x_values = np.asarray(x_values, dtype=np.float64)[::-1]
+        if flip_y:
+            result = np.flip(result, axis=1)
+            y_values = np.asarray(y_values, dtype=np.float64)[::-1]
+        return result, x_values, y_values
 
     @staticmethod
     def _slice_axis(values, low, high, length: int):
@@ -527,6 +583,12 @@ class PluginSession:
         )
         if x_values is None or y_values is None:
             raise AnalysisUnavailable("坐标与结果维度不一致，无法生成可分析的快照。")
+        # 与画面一致：与 ``VisualEngine.render_2d_slice`` 相同的翻转规则。落轴
+        # 降序时画面会把像素翻成升序标签，E 翻转开关再叠加一次镜像；快照的数组
+        # 与坐标必须一起翻，``data[i, j]`` 才真正对应 ``(x[i], y[j])``。
+        data, x_values, y_values = self._display_orientation(
+            data, x_values, y_values, context, window,
+        )
 
         _, x_unit = self._coordinate_meta(window, x_key)
         _, y_unit = self._coordinate_meta(window, y_key)
@@ -678,6 +740,117 @@ class PluginSession:
         """
         current = int(getattr(self.window, "shared_denoise_version", 0) or 0)
         return current != int(snapshot.data_generation)
+
+    # ------------------------------------------------------------------
+    # 能力 6：派生结果与插件设置（API 3）
+    # ------------------------------------------------------------------
+    @property
+    def derived(self) -> DerivedPageController:
+        return self._derived
+
+    def integration_actions(self) -> List[tuple]:
+        """「其他积分」下拉里由插件注册的动作：``(稳定键, 展示文本, 权重)``。"""
+        return self._derived.integration_actions()
+
+    def invoke_integration_action(self, plugin_id: str, action_id: str):
+        """执行下拉动作；失败时宿主已提示用户并返回 None。"""
+        return self._derived.invoke_action(plugin_id, action_id)
+
+    def derived_render_context(self, spec):
+        """派生结果页的渲染上下文（同步计算 + 缓存 + 失败回退）。"""
+        return self._derived.derived_context(spec)
+
+    def invalidate_derived_page(self, page_id: str) -> None:
+        self._derived.invalidate_page(page_id)
+
+    def derived_plugin_owners(self):
+        """当前已加载、声明派生能力的插件：``[(plugin_id, 展示名)]``。"""
+        owners = []
+        for record in self.manager.ready_plugins():
+            if self._derived.is_derived_plugin(record):
+                owners.append(
+                    (record.plugin_id, str(getattr(record.manifest, "name", "") or record.plugin_id))
+                )
+        return owners
+
+    def derived_defaults(self, plugin_id: str) -> Dict[str, object]:
+        return dict(self._derived.defaults_store.load(str(plugin_id)))
+
+    def save_derived_defaults(self, plugin_id: str, values) -> None:
+        self._derived.defaults_store.save(str(plugin_id), dict(values or {}))
+
+    def current_derived_page(self, plugin_id: str):
+        return self._derived.current_derived_page(str(plugin_id))
+
+    def update_current_derived_page(self, plugin_id: str, params) -> bool:
+        ok, message = self._derived.apply_params_to_current_page(str(plugin_id), params)
+        self.notify(message, level="info" if ok else "warning")
+        return ok
+
+    # -- 插件设置（插件管理 → 插件设置） ---------------------------------
+    def settings_plugin_ids(self) -> List[str]:
+        """提供设置界面的已加载插件（按能力判定，不识别具体插件 ID）。"""
+        return [
+            record.plugin_id
+            for record in self.manager.ready_plugins()
+            if self._derived.is_settings_plugin(record)
+        ]
+
+    def create_settings_panel(self, plugin_id: str):
+        """创建（或复用）插件的设置面板；失败返回 None 并记录原因。"""
+        key = str(plugin_id)
+        existing = self._settings_panels.get(key)
+        if existing is not None:
+            return existing
+        record = self.manager.record(key)
+        instance = getattr(record, "instance", None) if record is not None else None
+        if instance is None:
+            return None
+        try:
+            panel = instance.create_settings_panel(self.host_for(key))
+        except Exception as exc:
+            self._failed[key] = f"设置面板创建失败：{type(exc).__name__}: {exc}"
+            return None
+        if panel is not None:
+            self._settings_panels[key] = panel
+        return panel
+
+    def release_settings_panel(self, plugin_id: str) -> None:
+        self._settings_panels.pop(str(plugin_id), None)
+
+    def plugin_settings_state(self, plugin_id: str) -> Dict[str, object]:
+        """插件当前设置状态；面板未创建或插件未加载时返回空字典。"""
+        record = self.manager.record(str(plugin_id))
+        instance = getattr(record, "instance", None) if record is not None else None
+        if instance is None:
+            return {}
+        try:
+            state = instance.export_settings()
+        except Exception as exc:
+            self._failed[str(plugin_id)] = f"读取设置失败：{type(exc).__name__}: {exc}"
+            return {}
+        return dict(state or {})
+
+    def restore_plugin_settings(self, plugin_id: str) -> None:
+        """把保存的默认值灌回插件实例；面板在 create_settings_panel 时按它构建。"""
+        key = str(plugin_id)
+        record = self.manager.record(key)
+        instance = getattr(record, "instance", None) if record is not None else None
+        if instance is None:
+            return
+        try:
+            instance.restore_settings(dict(self.derived_defaults(key)))
+        except Exception as exc:
+            self._failed[key] = f"恢复设置失败：{type(exc).__name__}: {exc}"
+
+    def apply_settings_to_current_page(self, plugin_id: str):
+        """「应用当前瀑布图」：把插件当前设置提交到当前派生页（先验证后提交）。
+
+        返回 ``(是否提交, 可展示的消息)``；其他页面保留各自参数。
+        """
+        key = str(plugin_id)
+        state = self.plugin_settings_state(key)
+        return self._derived.apply_params_to_current_page(key, state)
 
     # ------------------------------------------------------------------
     # 能力 2b：分析面板（只在二维结果页显示）

@@ -35,6 +35,12 @@ CAPABILITY_DATA_SNAPSHOT_2D = "data_snapshot_2d"
 CAPABILITY_ANALYSIS_TASK = "analysis_task"
 #: 能力标识：插件可以交回一维曲线结果，由宿主建结果页。
 CAPABILITY_RESULT_CURVE_1D = "result_curve_1d"
+#: 能力标识：插件向「其他积分」下拉注册动作，由宿主按插件 ID / 动作 ID 分派。
+CAPABILITY_INTEGRATION_ACTION = "integration_action"
+#: 能力标识：插件基于宿主冻结的来源做派生计算，结果由宿主建页与展示。
+CAPABILITY_DERIVED_RESULT = "derived_result"
+#: 能力标识：插件在插件管理里提供设置界面，默认值由宿主按插件 ID 保存。
+CAPABILITY_PLUGIN_SETTINGS = "plugin_settings"
 
 #: 分析插件（API 2）必须同时声明这三项能力，缺一不可。
 ANALYSIS_CAPABILITIES = (
@@ -43,13 +49,25 @@ ANALYSIS_CAPABILITIES = (
     CAPABILITY_RESULT_CURVE_1D,
 )
 
+#: 派生结果插件（API 3）必须同时声明这三项能力，缺一不可：
+#: 注册下拉动作、提供派生计算、提供设置界面。
+DERIVED_CAPABILITIES = (
+    CAPABILITY_INTEGRATION_ACTION,
+    CAPABILITY_DERIVED_RESULT,
+    CAPABILITY_PLUGIN_SETTINGS,
+)
+
 #: 宿主声明支持的插件接口版本集合。插件清单里的 ``api_version`` 必须是其中
 #: 之一才会被加载；新增接口版本时在这里追加，而不是让旧判断“近似通过”。
-SUPPORTED_API_VERSIONS = frozenset({1, 2})
+SUPPORTED_API_VERSIONS = frozenset({1, 2, 3})
 
 #: 宿主声明支持的能力集合。插件声明的能力必须全部在这里。
 SUPPORTED_CAPABILITIES = frozenset(
-    {CAPABILITY_OPACITY_MULTIPLIER, *ANALYSIS_CAPABILITIES}
+    {
+        CAPABILITY_OPACITY_MULTIPLIER,
+        *ANALYSIS_CAPABILITIES,
+        *DERIVED_CAPABILITIES,
+    }
 )
 
 #: 当前宿主接口版本（支持集合里最高的一个），供插件与构建脚本引用。

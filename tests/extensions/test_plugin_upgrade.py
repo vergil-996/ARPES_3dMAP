@@ -11,6 +11,7 @@ import tempfile
 
 from bandscope.app_metadata import APP_VERSION
 from bandscope.extensions.catalog import parse_catalog
+from bandscope.extensions.compat import API_VERSION, SUPPORTED_API_VERSIONS
 from bandscope.extensions.plugin_manager import PluginManager, install_package
 from bandscope.extensions.upgrade import (
     IMPACT_OK,
@@ -29,10 +30,15 @@ from tests.support.plugins import (
     synthetic_source,
 )
 
+#: 目录声明的目标宿主接口集合默认跟随当前宿主：只有显式缩窄的用例才构造不兼容。
+_CURRENT_API_VERSIONS = tuple(sorted(SUPPORTED_API_VERSIONS))
 
-def catalog_with(entries, *, revision=1, host_version="1.12.0", api_versions=(1, 2)):
+
+def catalog_with(entries, *, revision=1, host_version="1.12.0", api_versions=None):
     import json
 
+    if api_versions is None:
+        api_versions = _CURRENT_API_VERSIONS
     return parse_catalog(
         json.dumps(
             {
@@ -47,7 +53,7 @@ def catalog_with(entries, *, revision=1, host_version="1.12.0", api_versions=(1,
     )
 
 
-def catalog_entry(version="1.0.1", *, requires_app=APP_VERSION, api_version=1, sha="a" * 64):
+def catalog_entry(version="1.0.1", *, requires_app=APP_VERSION, api_version=API_VERSION, sha="a" * 64):
     name = f"BandScope-{PLUGIN_ID}-{version}.bsplugin"
     return {
         "id": PLUGIN_ID,

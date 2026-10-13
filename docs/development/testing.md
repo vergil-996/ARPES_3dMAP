@@ -39,9 +39,10 @@ python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.n
 python scripts/validation/verify_flat_band_alpha.py --bands 5
 python scripts/validation/verify_plugin_management.py
 python scripts/validation/verify_plugin_release_flow.py
+python scripts/validation/verify_derived_waterfall.py .local/data/<数据>.npz
 ```
 
-`verify_plugin_management.py` 用真实构建的插件包驱动完整窗口（需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`。
+`verify_plugin_management.py` 用真实构建的插件包驱动完整窗口（需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`。`verify_derived_waterfall.py` 会把真实构建的 `edc_waterfall` 插件装进隔离扩展根，再用真实窗口验证下拉动作、冻结来源、采样复算、E 翻转前后屏幕/出版图/数值导出一致以及「插件设置」的两个操作。
 
 使用 `--output-dir <目录>` 指定输出。冒烟脚本另支持 `--size 1280x800`、`--hold`。数据探查和指定控件截图分别使用 `scripts/diagnostics/probe_frame_ranges.py` 与 `scripts/diagnostics/_verify_settled_grab.py`，同样传入 NPZ 路径。
 

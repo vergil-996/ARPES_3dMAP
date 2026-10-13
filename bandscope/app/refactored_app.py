@@ -75,6 +75,14 @@ from bandscope.core.data_scope import (
     ScopedSpatialArray,
     scoped_descriptor_from_array,
 )
+from bandscope.extensions.derived_host import (
+    DERIVED_ACTION_KEY,
+    DERIVED_PAGE_KIND,
+    DERIVED_PARAMS_KEY,
+    DERIVED_PLUGIN_KEY,
+    DERIVED_SOURCE_KEY,
+    synthetic_source_spec_from_params,
+)
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.rendering.refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RefreshCoordinator, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
@@ -84,7 +92,7 @@ from bandscope.ui.result_workspace import (
     ResultWorkspace,
     unique_title_among,
 )
-from bandscope.ui.settings_popups import DenoiseSettingsPopup, WaterfallSettingsPopup
+from bandscope.ui.settings_popups import DenoiseSettingsPopup
 from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.ui.toast import ToastManager
 from bandscope.app_metadata import APP_NAME, APP_VERSION
@@ -114,6 +122,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     LOG_1D_PAGE_KIND = "log_curve"
     #: 插件分析结果页：数据完全来自结果快照，不重算、不参与体积后台计算。
     PLUGIN_CURVE_PAGE_KIND = "plugin_curve"
+    #: 插件派生结果页（API 3）：冻结来源 + 插件同步计算，宿主负责绘图与导出。
+    PLUGIN_DERIVED_PAGE_KIND = DERIVED_PAGE_KIND
     GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
     FULL_SCOPE_ID = "full"
@@ -164,8 +174,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.axis_interval_controller = AxisIntervalController(self)
         self.axis_source_mode = "frame"
         self.loaded_npz_stem = "data"
-        self.global_waterfall_step = BlankControlPage.DEFAULT_WATERFALL_STEP
-        self.global_waterfall_step_custom = False
         self._preserve_control_tab_on_next_page_sync = False
         self.curve_clipboard = None
         self._orig_volume_opacity = None
@@ -259,15 +267,15 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             traceback.print_exc()
         # 工具栏先于本段构造：会话就绪（或失败）后刷新插件管理按钮状态。
         self._update_plugin_button_state()
+        # 「其他积分」下拉并入插件注册的动作；插件未加载时保持内置项。
+        self._sync_integration_actions()
         # 提示要等窗口显示之后再弹，构造期 Toast 还没有可用的落点。
         QTimer.singleShot(0, self._notify_plugin_load_issues)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
         self.bind_all_events()
         self._initialize_result_workspace()
         self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
-        self.waterfall_popup = WaterfallSettingsPopup(self.page_control_blank)
         self._install_page_keyboard_shortcuts()
-        self._sync_global_waterfall_step_from_ui()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
         self.update_controller = UpdateController(
@@ -1263,7 +1271,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         elif spec.page_kind in {
             "axis_integral",
             "axis_integral_crop",
-            "waterfall_edc",
+            self.PLUGIN_DERIVED_PAGE_KIND,
             "edc_curve",
             "second_derivative",
         }:
@@ -1294,16 +1302,25 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             payload["scope_bounds"] = descriptor.spatial_bounds
             payload["full_shape"] = descriptor.full_shape
 
-        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            resolved = self._resolved_axis_integral_params(spec)
-            prefix_key = self._axis_prefix_cache_key(spec, resolved, raw_data)
+        # 派生结果页的动量前缀按冻结来源重建：与渲染路径用同一份合成规格，
+        # 缓存键（含固定页名）必须逐字一致，否则每一帧都会重算整段前缀。
+        prefix_spec = spec
+        if spec.page_kind == self.PLUGIN_DERIVED_PAGE_KIND:
+            prefix_spec = synthetic_source_spec_from_params(params)
+        if prefix_spec is not None and spec.page_kind in {
+            "axis_integral",
+            "axis_integral_crop",
+            self.PLUGIN_DERIVED_PAGE_KIND,
+        }:
+            resolved = self._resolved_axis_integral_params(prefix_spec)
+            prefix_key = self._axis_prefix_cache_key(prefix_spec, resolved, raw_data)
             if self._axis_prefix_cache is None or self._axis_prefix_cache.get("key") != prefix_key:
                 operation = "prepare_axis_prefix"
                 payload["axis"] = int(resolved["axis_index"])
                 extra_metadata.update(
                     {
                         "axis_prefix_key": prefix_key,
-                        "axis_prefix_page_id": spec.page_id,
+                        "axis_prefix_page_id": prefix_spec.page_id,
                         "axis_prefix_axis": int(resolved["axis_index"]),
                     }
                 )
@@ -1706,6 +1723,60 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._toast_success("分析完成", f"{spec.title}（在左侧页面树中查看）")
         return spec
 
+    def add_plugin_derived_page(self, *, title, plugin_id, action_id, source, params):
+        """插件派生结果页：冻结来源 + 逐页参数；创建后进入该页。
+
+        调用方（``DerivedPageController``）已经用插件算过一次并校验通过，这里
+        只落地页面状态。来源页、数据域、时间帧/积分区间与裁剪范围都取自冻结
+        来源，之后不再跟随来源页变化。
+        """
+        spec_params = {
+            "source_page_id": str(source.source_page_id),
+            "source_page_kind": str(source.source_page_kind),
+            "source_mode": str(source.source_mode or "frame"),
+            "source_t_index": int(source.frame_index),
+            "source_t_low": int(source.time_low),
+            "source_t_up": int(source.time_up),
+            DERIVED_SOURCE_KEY: source.to_mapping(),
+            DERIVED_PLUGIN_KEY: str(plugin_id),
+            DERIVED_ACTION_KEY: str(action_id),
+            DERIVED_PARAMS_KEY: dict(params or {}),
+        }
+        spec = AnalysisPageSpec(
+            page_id=self._make_page_id(),
+            title=self._make_unique_page_title(title),
+            page_kind=self.PLUGIN_DERIVED_PAGE_KIND,
+            source_module="plugin_derived",
+            source_page_id=str(source.source_page_id),
+            source_title=str(source.source_title or ""),
+            data_scope_id=str(source.scope_id or self.FULL_SCOPE_ID),
+            params=spec_params,
+        )
+        self._seed_control_state_for_spec(spec)
+        self.left_workspace.add_page(spec)
+        return spec.page_id
+
+    def commit_derived_page_params(self, spec, *, params, title):
+        """提交一次派生页参数更新：写回参数、刷新自动标题并重算。
+
+        自动标题只更新底层默认值，用户改过名时保留显示名（``_apply_auto_page_title``）；
+        其他页面保留各自参数。
+        """
+        if spec is None:
+            return
+        spec.params[DERIVED_PARAMS_KEY] = dict(params or {})
+        if title:
+            self._apply_auto_page_title(spec, str(title))
+        self.left_workspace.update_page(
+            spec.page_id,
+            params=spec.params,
+            source_page_id=spec.source_page_id,
+        )
+        session = self._plugin_session()
+        if session is not None:
+            session.invalidate_derived_page(spec.page_id)
+        self.global_refresh()
+
     def _notify_plugin_load_issues(self):
         """把加载失败与启动说明告诉用户；不重复弹同一错误。
 
@@ -1802,12 +1873,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.page_render.combo_backend.currentTextChanged.connect(self.on_backend_mode_changed)
         self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
         self.page_render.camera_view_reset_requested.connect(self.on_camera_view_reset)
-
-        self.page_control_blank.waterfall_step_box.editingFinished.connect(self.on_waterfall_step_changed)
-        for button_name in ("button_increase", "button_decrease"):
-            button = getattr(self.page_control_blank.waterfall_step_box, button_name, None)
-            if button is not None:
-                button.clicked.connect(self.on_waterfall_step_changed)
 
         self.page_data.combo_ax.currentIndexChanged.connect(self.on_axis_selection_changed)
         self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
@@ -2032,7 +2097,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return self._current_visual_spec()
 
     def _capture_control_state(self):
-        self._sync_global_waterfall_step_from_ui()
         return {
             "active_control_tab": int(self.page_container.currentIndex()),
             "axis_source_mode": self.axis_source_mode,
@@ -2070,22 +2134,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return
         spec.params["control_state"] = self._copy_state(control_state)
 
-    def _sync_global_waterfall_step_from_ui(self):
-        self.global_waterfall_step = float(self.page_control_blank.get_waterfall_step())
-        self.global_waterfall_step_custom = bool(self.page_control_blank.is_waterfall_step_custom())
-
-    def _apply_global_waterfall_step_to_ui(self):
-        self.page_control_blank.set_waterfall_step(
-            float(self.global_waterfall_step),
-            custom=self.global_waterfall_step_custom,
-        )
-
-    def _apply_waterfall_step_for_spec_to_ui(self, spec):
-        if spec is not None and spec.page_kind == "waterfall_edc" and "k_step" in spec.params:
-            self.page_control_blank.set_waterfall_step(float(spec.params["k_step"]), custom=True)
-            return
-        self._apply_global_waterfall_step_to_ui()
-
     def _seed_control_state_for_spec(self, spec):
         if spec is None:
             return
@@ -2099,7 +2147,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return "frame"
         if spec.page_kind == "time_integral":
             return "time_integral"
-        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc", "edc_curve", "second_derivative"}:
+        if spec.page_kind in {
+            "axis_integral",
+            "axis_integral_crop",
+            self.PLUGIN_DERIVED_PAGE_KIND,
+            "edc_curve",
+            "second_derivative",
+        }:
             return self._normalize_axis_source_mode(
                 spec.params.get(
                     "source_mode",
@@ -2134,8 +2188,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._persist_axis_integral_page_state(spec)
         elif spec.page_kind == "second_derivative":
             self._persist_second_derivative_page_state(spec)
-        elif spec.page_kind == "waterfall_edc":
-            self._persist_waterfall_page_state(spec)
         elif spec.page_kind == "energy_dos":
             if spec.params.get("source_page_kind") != "time_integral":
                 spec.params["t_index"] = int(self.timeline_bar.slider_time.value())
@@ -2200,7 +2252,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 tab_index = int(control_state.get("active_control_tab", self.page_container.currentIndex()))
             tab_index = max(0, min(self.page_container.count() - 1, tab_index))
             self._select_control_page(tab_index)
-            self._apply_waterfall_step_for_spec_to_ui(owner_spec)
         finally:
             self._syncing_controls = False
 
@@ -2255,57 +2306,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         spec.params["low"] = int(low)
         spec.params["up"] = int(up)
         spec.params["mid"] = int(mid)
-
-    def _waterfall_title_from_params(self, params, k_step=None, *, ascii_only=False):
-        axis_info = self._resolve_waterfall_axis_info(int(params.get("axis_index", -1)))
-        if axis_info is None:
-            return None
-
-        low_idx = int(params.get("integral_low", params.get("low", 0)))
-        up_idx = int(params.get("integral_up", params.get("up", low_idx)))
-        mid_idx = int(params.get("integral_mid", round((low_idx + up_idx) / 2)))
-        center_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], mid_idx)
-        step_value = float(k_step if k_step is not None else params.get("k_step", BlankControlPage.DEFAULT_WATERFALL_STEP))
-        return self._waterfall_title_summary(
-            axis_info["k_axis_label"],
-            axis_info["integrated_axis_label"],
-            center_physical,
-            step_value,
-            ascii_only=ascii_only,
-        ) + self._waterfall_crop_suffix(params)
-
-    def _persist_waterfall_page_state(self, spec=None):
-        target_spec = spec or self.left_workspace.current_spec()
-        if target_spec is None or target_spec.page_kind != "waterfall_edc":
-            return
-
-        k_step = float(self.page_control_blank.get_waterfall_step())
-        target_spec.params["k_step"] = k_step
-
-        title = self._waterfall_title_from_params(target_spec.params, k_step)
-        if title is None:
-            return
-
-        self._apply_auto_page_title(target_spec, title)
-        self.left_workspace.update_page(
-            target_spec.page_id,
-            params=target_spec.params,
-            source_page_id=target_spec.source_page_id,
-        )
-
-    def on_waterfall_step_changed(self):
-        if self._syncing_controls:
-            return
-
-        k_step = float(self.page_control_blank.get_waterfall_step())
-        self.page_control_blank.set_waterfall_step(k_step, custom=True)
-        self.global_waterfall_step = k_step
-        self.global_waterfall_step_custom = True
-
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and current_spec.page_kind == "waterfall_edc":
-            self._persist_waterfall_page_state(current_spec)
-            self.global_refresh()
 
     def flush_render_levels_refresh(self):
         if self._syncing_controls:
@@ -3053,10 +3053,17 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return render_context
 
         if view == "waterfall":
+            # 瀑布图的 E 翻转是一次真正的定向翻转：能量轴与采样一起反序，因此
+            # 同一个 E 坐标在翻转前后对应同一份强度，屏幕、出版图与数值导出
+            # 在相同 E 坐标下保持一致（绘制时按升序重排，观感与翻转前相同）。
             render_context = dict(context)
             render_context["curves"] = np.flip(np.asarray(render_context["curves"]), axis=1)
             if render_context.get("raw_curves") is not None:
                 render_context["raw_curves"] = np.flip(np.asarray(render_context["raw_curves"]), axis=1)
+            if render_context.get("energy_axis") is not None:
+                render_context["energy_axis"] = np.flip(
+                    np.asarray(render_context["energy_axis"]), axis=0
+                )
             return render_context
 
         if view == "1d_comparison":
@@ -3109,24 +3116,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return float(fallback)
 
         return float(max(np.median(diffs), 1e-4))
-
-    def _suggest_waterfall_step(self, spec=None):
-        axis_key = self._waterfall_step_reference_axis(spec or self.left_workspace.current_spec())
-        if axis_key is None:
-            return BlankControlPage.DEFAULT_WATERFALL_STEP
-
-        if self.core.raw_data is not None:
-            coords = self.core.coords
-        else:
-            coords = self.original_coords or {}
-        return self._compute_axis_spacing(coords.get(axis_key), BlankControlPage.DEFAULT_WATERFALL_STEP)
-
-    def _refresh_waterfall_step_default(self, spec=None):
-        if self.global_waterfall_step_custom:
-            return
-        self.global_waterfall_step = float(self._suggest_waterfall_step(spec))
-        self.global_waterfall_step_custom = False
-        self._apply_global_waterfall_step_to_ui()
 
     def _make_page_id(self):
         return uuid.uuid4().hex
@@ -3489,7 +3478,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         for label, popup in (
             ("去噪参数设置", self.denoise_popup),
-            ("瀑布图步长设置", self.waterfall_popup),
         ):
             action = menu.addAction(label)
             action.triggered.connect(
@@ -3836,7 +3824,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         ):
             return True
         return (
-            spec.page_kind in {"waterfall_edc", "edc_curve", "second_derivative"}
+            spec.page_kind in {self.PLUGIN_DERIVED_PAGE_KIND, "edc_curve", "second_derivative"}
             and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
         )
 
@@ -3978,17 +3966,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "x_up": x_up,
             "y_low": y_low,
             "y_up": y_up,
-        }
-
-    @staticmethod
-    def _copy_plot_rect(rect):
-        if rect is None:
-            return None
-        return {
-            "x_low": int(rect["x_low"]),
-            "x_up": int(rect["x_up"]),
-            "y_low": int(rect["y_low"]),
-            "y_up": int(rect["y_up"]),
         }
 
     @staticmethod
@@ -4415,35 +4392,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return {"export_data": export_data, "default_name": default_name}
 
     @staticmethod
-    def _safe_curve_normalize(curve):
-        curve = np.asarray(curve, dtype=np.float64)
-        max_value = np.max(curve) if curve.size else 0.0
-        if not np.isfinite(max_value) or abs(max_value) < 1e-12:
-            return np.zeros_like(curve, dtype=np.float64)
-        return curve / max_value
-
-    @staticmethod
-    def _nearest_axis_indices(axis_values, step):
-        values = np.asarray(axis_values, dtype=np.float64).flatten()
-        if values.size == 0:
-            return np.array([], dtype=np.int32)
-        if values.size == 1:
-            return np.array([0], dtype=np.int32)
-
-        safe_step = max(float(step), 1e-4)
-        axis_min = float(np.min(values))
-        axis_max = float(np.max(values))
-        sampled_positions = list(np.arange(axis_min, axis_max + safe_step * 0.5, safe_step))
-        sampled_positions.extend([axis_min, axis_max])
-
-        indices = {
-            int(np.argmin(np.abs(values - position)))
-            for position in sampled_positions
-        }
-        sorted_indices = sorted(indices, key=lambda idx: float(values[idx]))
-        return np.asarray(sorted_indices, dtype=np.int32)
-
-    def _resolve_waterfall_axis_info(self, axis_index):
+    def _integral_momentum_axis_info(axis_index):
+        """X/Y 积分页的动量轴与被积轴：``0`` 是 X 积分（ky 轴），``1`` 是 Y 积分。"""
         axis_index = int(axis_index)
         if axis_index == 0:
             return {
@@ -4458,17 +4408,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 "integrated_axis_label": "Y",
             }
         return None
-
-    def _waterfall_title_summary(self, axis_label, integrated_axis_label, center_value, k_step, *, ascii_only=False):
-        center_text = self._format_filename_number(center_value)
-        step_text = f"{float(k_step):.3f}"
-        if ascii_only:
-            return f"EDC Waterfall [{axis_label}, {integrated_axis_label} center {center_text}, step {step_text}]"
-        return f"EDC瀑布图 [{axis_label}, {integrated_axis_label}中心 {center_text}, 步长 {step_text}]"
-
-
-    def _get_waterfall_edc_context(self, spec, raw_data, coords):
-        return self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
 
     def _extract_slice_data(self, data_3d, axis_idx, index):
         descriptor = scoped_descriptor_from_array(data_3d)
@@ -4714,7 +4653,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             y_up = int(plot_bounds["y_up"])
             energy_axis = np.asarray(coords[plot_axes["y_key"]], dtype=np.float64)[y_low:y_up + 1]
             axis_label = {0: "X-integral", 1: "Y-integral"}.get(int(spec.params.get("axis_index", -1)), "Axis-integral")
-            crop_suffix = self._waterfall_crop_suffix(spec.params)
+            crop_suffix = self._crop_rect_title_suffix(spec.params)
             return {
                 "view": "1d",
                 "x_data": energy_axis,
@@ -5396,13 +5335,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 else self._axis_crop_rect_from_params(spec.params))
         return self._apply_axis_crop_to_context(context, rect)
 
-    def _waterfall_crop_suffix(self, params):
+    def _crop_rect_title_suffix(self, params):
+        """矩形裁剪的标题后缀：``, kx a~b, E c~d``；无裁剪时为空串。
+
+        原先只服务于 EDC 瀑布图，现在能量 DOS、二阶导等复用同一份逻辑；
+        具体显示文本由插件自己的自动标题决定，这里只覆盖宿主内的页面标题。
+        """
         crop_rect = self._axis_crop_rect_from_params(params)
         if crop_rect is None:
             return ""
 
         axis_index = int(params.get("axis_index", -1))
-        axis_info = self._resolve_waterfall_axis_info(axis_index)
+        axis_info = self._integral_momentum_axis_info(axis_index)
         if axis_info is None:
             return ""
 
@@ -5412,106 +5356,18 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         e_up = self._format_filename_number(self.core.logical_to_physical("E", crop_rect["y_up"]))
         return f", {axis_info['k_axis_label']} {k_low}~{k_up}, E {e_low}~{e_up}"
 
-    def _build_waterfall_context_from_axis_params(self, raw_data, coords, params):
-        if raw_data is None or coords is None:
-            return None
-
-        axis_index = int(params.get("axis_index", -1))
-        if axis_index not in (0, 1):
-            return None
-
-        source_spec = AnalysisPageSpec(
-            page_id="waterfall_source",
-            title="waterfall_source",
-            page_kind="axis_integral",
-            source_module="data_process",
-            params={
-                "axis_index": int(params["axis_index"]),
-                "low": int(params["integral_low"]),
-                "up": int(params["integral_up"]),
-                "mid": int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
-                "source_mode": params.get("source_mode", "frame"),
-                **self._source_time_params(params),
-            },
-        )
-        context = self._build_axis_integral_base_context(source_spec, raw_data, coords)
-        crop_rect = self._axis_crop_rect_from_params(params)
-        if crop_rect is not None:
-            context = self._apply_axis_crop_to_context(context, crop_rect)
-        if context is None:
-            return None
-
-        axis_info = self._resolve_waterfall_axis_info(axis_index)
-        if axis_info is None:
-            return None
-
-        plot_bounds = context["plot_logical_bounds"]
-        x_low = int(plot_bounds["x_low"])
-        x_up = int(plot_bounds["x_up"])
-        y_low = int(plot_bounds["y_low"])
-        y_up = int(plot_bounds["y_up"])
-
-        data_2d = np.asarray(context["data"], dtype=np.float64)
-        k_coords = np.asarray(coords[axis_info["k_axis_key"]], dtype=np.float64)[x_low:x_up + 1]
-        energy_axis = np.asarray(coords["E"], dtype=np.float64)[y_low:y_up + 1]
-
-        k_step = max(float(params["k_step"]), 1e-4)
-        sampled_indices = self._nearest_axis_indices(k_coords, k_step)
-        if sampled_indices.size < 2:
-            raise ValueError("Current k step is too large to generate at least two EDC curves.")
-
-        valid_indices = sampled_indices[(sampled_indices >= 0) & (sampled_indices < data_2d.shape[0])]
-        valid_indices = np.unique(valid_indices)
-        if valid_indices.size < 2:
-            raise ValueError("Current k step is too large to generate at least two EDC curves.")
-
-        k_values = k_coords[valid_indices]
-        curves = np.asarray(data_2d[valid_indices, :], dtype=np.float64)
-        normalized = np.asarray([self._safe_curve_normalize(curve) for curve in curves], dtype=np.float64)
-
-        low_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_low"]))
-        up_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], int(params["integral_up"]))
-        center_physical = self.core.logical_to_physical(
-            axis_info["integrated_axis_label"],
-            int(params.get("integral_mid", round((int(params["integral_low"]) + int(params["integral_up"])) / 2))),
-        )
-        title = self._waterfall_title_summary(
-            axis_info["k_axis_label"],
-            axis_info["integrated_axis_label"],
-            center_physical,
-            k_step,
-            ascii_only=True,
-        ) + self._waterfall_crop_suffix(params)
-
-        return {
-            "view": "waterfall",
-            "title": title,
-            "energy_axis": energy_axis,
-            "k_values": np.asarray(k_values, dtype=np.float64),
-            "k_axis_key": axis_info["k_axis_key"],
-            "sample_indices": x_low + valid_indices,
-            "curves": normalized,
-            "raw_curves": curves,
-            "offset_step": 1.2,
-            "xlabel": "Intensity (normalized, arb. u.)",
-            "ylabel": "Energy (eV)",
-            "k_axis_label": axis_info["k_axis_label"],
-            "integrated_axis_label": axis_info["integrated_axis_label"],
-            "integrated_range": (float(low_physical), float(up_physical)),
-            "integrated_center": float(center_physical),
-            "k_step": float(k_step),
-            "crop_rect": self._copy_plot_rect(crop_rect),
-            "energy_range": (
-                float(energy_axis[0]),
-                float(energy_axis[-1]),
-            ),
-        }
-
     def _compute_render_context(self, spec):
         context = self._compute_base_render_context(spec)
         if context is None:
             return None
         return apply_crop_regions(context, spec.params.get("crop_regions", ()))
+
+    def _get_derived_render_context(self, spec):
+        """派生结果页的渲染上下文：由插件同步计算，宿主负责缓存与回退。"""
+        session = self._plugin_session()
+        if session is None:
+            raise ValueError("插件系统未初始化，无法计算派生结果。")
+        return session.derived_render_context(spec)
 
     def _compute_base_render_context(self, spec):
         if spec.page_kind == "control_panel":
@@ -5539,8 +5395,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._get_slice_dos_context(spec, raw_data, coords)
         if spec.page_kind == "energy_dos":
             return self._get_energy_dos_context(spec, raw_data, coords)
-        if spec.page_kind == "waterfall_edc":
-            return self._get_waterfall_edc_context(spec, raw_data, coords)
+        if spec.page_kind == self.PLUGIN_DERIVED_PAGE_KIND:
+            return self._get_derived_render_context(spec)
         if spec.page_kind == "edc_curve":
             return self._get_edc_curve_context(spec, raw_data, coords)
         if spec.page_kind == "second_derivative":
@@ -5686,7 +5542,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 clip_on=False,
             )
 
-        self.ax_2d.set_title(context["title"], color="white", pad=28)
+        title = str(context["title"])
+        if context.get("stale_error"):
+            # 参数无效时保留上次成功结果，并在标题上明确标注，不静默换成空图。
+            title = f"{title}  ⚠ 当前参数无法计算，显示上次成功结果"
+        self.ax_2d.set_title(title, color="white", pad=28)
         VisualEngine.reset_2d_axis_labels(self.ax_2d)
         self.ax_2d.set_xlabel(context["xlabel"], color="white")
         self.ax_2d.set_ylabel(context["ylabel"], color="white")
@@ -6803,7 +6663,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                         "crop_e_up": int(crop_rect["y_up"]),
                     }
                 )
-            title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._waterfall_crop_suffix(spec_params)}]"
+            title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._crop_rect_title_suffix(spec_params)}]"
         elif current_spec.page_kind == "time_integral":
             t_low = int(current_spec.params.get("t_low", int(self.page_data.s_t_low.value())))
             t_up = int(current_spec.params.get("t_up", int(self.page_data.s_t_up.value())))
@@ -6885,90 +6745,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         raw_data, coords = self._get_display_state_for_spec(current_spec)
         if self._build_edc_curve_context_from_params(raw_data, coords, spec.params) is None:
             self._show_edc_curve_source_error()
-            return None
-        self._seed_control_state_for_spec(spec)
-        return spec
-
-    def _build_waterfall_edc_spec(self):
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is None or current_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
-            self._show_message(
-                "Cannot create waterfall",
-                "EDC waterfall is only available from X-Integral / Y-Integral result pages.",
-                QMessageBox.Warning,
-            )
-            return None
-
-        if self._is_current_page(current_spec) and current_spec.page_kind == "axis_integral":
-            self._persist_axis_integral_page_state(current_spec)
-
-        params = self._resolved_axis_integral_params(current_spec)
-        if params is None:
-            return None
-
-        axis_index = int(params["axis_index"])
-        axis_info = self._resolve_waterfall_axis_info(axis_index)
-        if axis_info is None:
-            self._show_message(
-                "Cannot create waterfall",
-                "EDC waterfall is only available from X-Integral / Y-Integral result pages.",
-                QMessageBox.Warning,
-            )
-            return None
-
-        k_step = self.page_control_blank.get_waterfall_step()
-        if k_step <= 0:
-            self._show_message("Cannot create waterfall", "k step must be greater than 0.", QMessageBox.Warning)
-            return None
-
-        low_idx, up_idx = sorted((int(params["low"]), int(params["up"])))
-        mid_idx = int(np.clip(int(params["mid"]), low_idx, up_idx))
-        center_physical = self.core.logical_to_physical(axis_info["integrated_axis_label"], mid_idx)
-        title = self._waterfall_title_summary(
-            axis_info["k_axis_label"],
-            axis_info["integrated_axis_label"],
-            center_physical,
-            k_step,
-        ) + self._waterfall_crop_suffix(current_spec.params)
-
-        spec_params = {
-            "source_page_id": current_spec.page_id,
-            "source_page_kind": "axis_integral",
-            "axis_index": int(axis_index),
-            "integral_low": int(low_idx),
-            "integral_up": int(up_idx),
-            "integral_mid": int(mid_idx),
-            "source_mode": params.get("source_mode", "frame"),
-            "source_t_index": int(params["source_t_index"]),
-            "source_t_low": int(params["source_t_low"]),
-            "source_t_up": int(params["source_t_up"]),
-            "k_axis_label": axis_info["k_axis_label"],
-            "k_step": float(k_step),
-        }
-        crop_rect = self._axis_crop_rect_from_params(current_spec.params)
-        if crop_rect is not None:
-            spec_params.update(
-                {
-                    "crop_k_low": int(crop_rect["x_low"]),
-                    "crop_k_up": int(crop_rect["x_up"]),
-                    "crop_e_low": int(crop_rect["y_low"]),
-                    "crop_e_up": int(crop_rect["y_up"]),
-                }
-            )
-
-        spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=title,
-            page_kind="waterfall_edc",
-            source_module="data_process",
-            source_page_id=current_spec.page_id,
-            params=spec_params,
-        )
-        raw_data, coords = self._get_display_state_for_spec(current_spec)
-        try:
-            self._build_waterfall_context_from_axis_params(raw_data, coords, spec.params)
-        except ValueError as exc:
-            self._show_message("Cannot create waterfall", str(exc), QMessageBox.Warning)
             return None
         self._seed_control_state_for_spec(spec)
         return spec
@@ -7318,13 +7094,31 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             immediate=True,
         )
 
+    def _sync_integration_actions(self):
+        """把插件注册的「其他积分」动作并入下拉。
+
+        插件未加载（或加载失败）时下拉只剩内置项；动作键里的插件 ID 保证旧状态
+        不会被下标映射到别的功能。
+        """
+        actions = []
+        session = self._plugin_session()
+        if session is not None:
+            try:
+                actions = session.integration_actions()
+            except Exception as exc:
+                print(f"Integration action discovery failed: {type(exc).__name__}: {exc}")
+        page_data = self.__dict__.get("page_data")
+        if page_data is not None and hasattr(page_data, "set_integration_actions"):
+            page_data.set_integration_actions(actions)
+
     def on_apply_other_integral(self):
         if self.core.raw_data is None:
             return
 
-        # 下拉项会随时间轴有无动态过滤，必须按文本分派而非固定下标。
-        selected_text = self.page_data.combo_other.currentText()
-        if selected_text == "切片内强度积分":
+        # 下拉项按稳定动作键分派：内置项与插件动作同一条路径，插件未加载时
+        # 恢复出来的旧状态不会被下标误映射到其他功能。
+        key = self.page_data.current_other_key() if hasattr(self.page_data, "current_other_key") else ""
+        if key == "builtin:slice_dos":
             if not self.core.has_time_axis:
                 self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
                 return
@@ -7332,14 +7126,25 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 self._show_message("未进行切片设置", "请使用顶部“裁剪”按钮设置范围并裁剪。", QMessageBox.Warning)
                 return
             spec = self._build_slice_dos_spec()
-        elif selected_text == "能级态密度":
+        elif key == "builtin:energy_dos":
             spec = self._build_energy_dos_spec()
-        elif selected_text == "EDC瀑布图":
-            spec = self._build_waterfall_edc_spec()
-        elif selected_text == "单条 EDC 曲线":
+        elif key == "builtin:edc_curve":
             spec = self._build_edc_curve_spec()
-        else:
+        elif key == "builtin:second_derivative":
             spec = self._build_second_derivative_spec()
+        elif ":" in key:
+            # 插件动作：插件只负责计算，宿主负责冻结来源、建页与切换。
+            plugin_id, _, action_id = key.partition(":")
+            session = self._plugin_session()
+            if session is None:
+                self._show_message("插件不可用", "插件系统未初始化，无法执行该积分。", QMessageBox.Warning)
+                return
+            session.invoke_integration_action(plugin_id, action_id)
+            self._update_export_button_states()
+            return
+        else:
+            self._show_message("未知积分类型", "当前下拉项对应的功能不可用，请重新选择。", QMessageBox.Warning)
+            return
 
         if spec is not None:
             spec.title = self._make_unique_page_title(spec.title)
@@ -7350,18 +7155,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return
         self._update_export_button_states()
 
-
-    def _waterfall_step_reference_axis(self, spec):
-        if spec is None:
-            return None
-
-        if spec.page_kind in {"axis_integral", "axis_integral_crop", "waterfall_edc"}:
-            axis_index = int(spec.params.get("axis_index", -1))
-            if axis_index == 0:
-                return "Y"
-            if axis_index == 1:
-                return "X"
-        return None
 
     def _clear_axis_crop_selector(self):
         if self.axis_crop_selector is None:
@@ -7868,6 +7661,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         session = self._plugin_session()
         if session is not None:
             session.cancel_page_analysis(page_id)
+            session.invalidate_derived_page(page_id)
         self._clear_axis_prefix_cache(page_id)
         self._axis_titles().forget_page(page_id)
         self._rotation_cache.clear()
@@ -8048,48 +7842,65 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             )
         return "Save EDC curve result", "edc_curve.mat", export_data
 
-    def _build_waterfall_export_payload(self, spec, raw_data, coords):
+    def _build_derived_export_payload(self, spec, raw_data, coords):
+        """派生结果页的数值导出：原始坐标排列的曲线族 + 来源元数据。
+
+        与画面一致：屏幕上按 E 翻转显示的那一份不是导出的真值，导出始终写
+        原始坐标排列的数据（E 翻转只影响显示与出版图）。
+        """
         try:
-            context = self._get_waterfall_edc_context(spec, raw_data, coords)
+            context = self._get_derived_render_context(spec)
         except ValueError as exc:
             self._show_message("Save failed", str(exc), QMessageBox.Warning)
             return None
         if context is None:
             return None
 
-        descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
+        descriptor = self._scope_for_spec(spec)
+        if descriptor is not None and descriptor.is_full:
+            descriptor = None
+        k_axis_key = str(context.get("k_axis_key") or "")
+        k_axis_index = {"X": 0, "Y": 1}.get(k_axis_key)
+        k_values = np.asarray(context["k_values"], dtype=np.float64)
+        energy = np.asarray(context["energy_axis"], dtype=np.float64)
+        raw_curves = np.asarray(context["raw_curves"], dtype=np.float64)
+        normalized = np.asarray(context["curves"], dtype=np.float64)
+        k_slice = slice(None)
+        e_slice = slice(None)
         if descriptor is not None:
-            k_axis = 1 if int(spec.params.get("axis_index", 0)) == 0 else 0
-            k_slice = (
-                descriptor.spatial_slices[k_axis]
-                if len(context["k_values"]) == descriptor.full_shape[k_axis]
-                else slice(None)
-            )
-            e_slice = (
-                descriptor.spatial_slices[2]
-                if len(context["energy_axis"]) == descriptor.full_shape[2]
-                else slice(None)
-            )
-        else:
-            k_slice = slice(None)
-            e_slice = slice(None)
+            if k_axis_index is not None and k_values.size == descriptor.full_shape[k_axis_index]:
+                k_slice = descriptor.spatial_slices[k_axis_index]
+            if energy.size == descriptor.full_shape[2]:
+                e_slice = descriptor.spatial_slices[2]
 
         export_data = {
-            "k": np.asarray(context["k_values"][k_slice], dtype=np.float32),
-            "E": np.asarray(context["energy_axis"][e_slice], dtype=np.float32),
-            "intensity": np.asarray(
-                context["raw_curves"][k_slice, e_slice], dtype=np.float32
-            ),
-            "integrated_axis": np.asarray([context["integrated_axis_label"]]),
-            "integrated_range": np.asarray(
-                context["integrated_range"], dtype=np.float32
+            "k": np.asarray(k_values[k_slice], dtype=np.float32),
+            "E": np.asarray(energy[e_slice], dtype=np.float32),
+            "intensity": np.asarray(raw_curves[k_slice, e_slice], dtype=np.float32),
+            "normalized_intensity": np.asarray(
+                normalized[k_slice, e_slice], dtype=np.float32
             ),
         }
-        if context.get("crop_rect") is not None:
-            export_data["crop_rect"] = self._crop_rect_export_array(
-                context["crop_rect"]
+        if context.get("integrated_axis_label"):
+            export_data["integrated_axis"] = np.asarray(
+                [str(context["integrated_axis_label"])]
             )
-        return "Save EDC waterfall result", "waterfall_edc.mat", export_data
+        if context.get("integrated_range") is not None:
+            export_data["integrated_range"] = np.asarray(
+                context["integrated_range"], dtype=np.float32
+            )
+        if context.get("integrated_center") is not None:
+            export_data["integrated_center"] = np.asarray(
+                [float(context["integrated_center"])], dtype=np.float32
+            )
+        crop_rect = context.get("crop_rect")
+        if crop_rect is not None:
+            export_data["crop_rect"] = self._crop_rect_export_array(crop_rect)
+        export_data["derived_plugin_id"] = np.asarray(
+            [str(spec.params.get(DERIVED_PLUGIN_KEY) or "")]
+        )
+        default_name = self._sanitize_filename_component(str(spec.title)) + ".mat"
+        return "Save derived result", default_name, export_data
 
     def _build_second_derivative_3d_export_payload(self, context, coords):
         derivative_axis = int(context["derivative_axis"])
@@ -8340,8 +8151,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return self._build_slice_dos_export_payload(spec, raw_data, coords)
         elif spec.page_kind == "edc_curve":
             return self._build_edc_export_payload(spec, raw_data, coords)
-        elif spec.page_kind == "waterfall_edc":
-            return self._build_waterfall_export_payload(spec, raw_data, coords)
+        elif spec.page_kind == self.PLUGIN_DERIVED_PAGE_KIND:
+            return self._build_derived_export_payload(spec, raw_data, coords)
         elif spec.page_kind == "second_derivative":
             return self._build_second_derivative_export_payload(spec, raw_data, coords)
         elif spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:

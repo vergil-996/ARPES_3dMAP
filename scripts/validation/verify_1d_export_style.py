@@ -14,6 +14,40 @@ import time
 import traceback
 
 
+def install_edc_waterfall_plugin() -> bool:
+    """把真实构建的 EDC 瀑布图插件装进隔离扩展根（瀑布页由插件计算）。"""
+    import tempfile
+    from pathlib import Path
+
+    try:
+        from bandscope.app_metadata import APP_VERSION
+        from bandscope.extensions.plugin_manager import (
+            InstallSource,
+            PluginManager,
+            install_package,
+        )
+        from bandscope.extensions.trust import SOURCE_LOCAL
+        from scripts.release.build_plugin import build as build_package
+
+        manager = PluginManager()
+        if manager.record("edc_waterfall") is not None:
+            return True
+        staging = tempfile.TemporaryDirectory(prefix="bandscope-edc-plugin-")
+        try:
+            archive = build_package("edc_waterfall", Path(staging.name), APP_VERSION)
+            install_package(
+                archive,
+                root=Path(manager.root),
+                source=InstallSource(kind=SOURCE_LOCAL, accepted_unverified=True),
+            )
+        finally:
+            staging.cleanup()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 安装 edc_waterfall 失败：{type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
 def main():
     root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -29,6 +63,8 @@ def main():
     configure_qt_plugin_path()
     from tests.support.environment import isolate_runtime
     isolate_runtime()
+    if not install_edc_waterfall_plugin():
+        print("[warn] edc_waterfall 插件安装失败：瀑布图样例将按 UNTESTED 跳过。", flush=True)
     from PyQt5.QtCore import QTimer
     from PyQt5.QtWidgets import QApplication
     import numpy as np
@@ -184,12 +220,45 @@ def main():
                  lambda: export_current("log", waterfall), "log 结果")
 
     def waterfall():
+        # 瀑布页由插件计算：页面带冻结来源与逐页参数（步长模式 + 值），
+        # 与下拉动作创建的页面结构一致；渲染、出版与导出仍走宿主路径。
+        from bandscope.extensions.api import DerivedSource2D
+        from bandscope.extensions.derived_host import (
+            DERIVED_ACTION_KEY,
+            DERIVED_PARAMS_KEY,
+            DERIVED_PLUGIN_KEY,
+            DERIVED_SOURCE_KEY,
+        )
+
         coords = window.core.coords["Y"]
         length = window.core.raw_data.shape[0]
-        spec = AnalysisPageSpec(window._make_page_id(), "实测瀑布图", "waterfall_edc", "validation",
-                                params={"axis_index": 0, "integral_low": length // 3, "integral_up": 2 * length // 3,
-                                        "integral_mid": length // 2, "source_mode": "frame", "source_t_index": 0,
-                                        "k_step": max(float(np.ptp(coords)) / 28, 0.0001)})
+        step = max(float(np.ptp(coords)) / 28, 0.0001)
+        source = DerivedSource2D(
+            plugin_id="edc_waterfall",
+            action_id="create",
+            source_page_id="validation",
+            source_page_kind="axis_integral",
+            axis_index=0,
+            integral_low=length // 3,
+            integral_up=2 * length // 3,
+            integral_mid=length // 2,
+            source_mode="frame",
+            frame_index=int(window.timeline_bar.slider_time.value()),
+            time_low=0,
+            time_up=0,
+            scope_id="full",
+            crop_rect=None,
+            source_title="实测瀑布图来源",
+            data_generation=int(window.shared_denoise_version),
+        )
+        spec = AnalysisPageSpec(window._make_page_id(), "实测瀑布图", window.PLUGIN_DERIVED_PAGE_KIND, "plugin_derived",
+                                params={"source_mode": "frame",
+                                        "source_t_index": int(window.timeline_bar.slider_time.value()),
+                                        "source_t_low": 0, "source_t_up": 0,
+                                        DERIVED_SOURCE_KEY: source.to_mapping(),
+                                        DERIVED_PLUGIN_KEY: "edc_waterfall",
+                                        DERIVED_ACTION_KEY: "create",
+                                        DERIVED_PARAMS_KEY: {"k_step_mode": "manual", "k_step": step}})
         activate(spec, lambda: export_current("waterfall", lambda: finish()))
 
     def load():

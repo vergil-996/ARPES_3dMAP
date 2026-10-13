@@ -1,0 +1,15 @@
+{
+  "id": "edc_waterfall",
+  "name": "EDC 瀑布图",
+  "version": "1.0.0",
+  "api_version": 3,
+  "requires_app": ">=1.13.0,<2.0.0",
+  "entry_point": "entry:EdcWaterfallPlugin",
+  "capabilities": [
+    "integration_action",
+    "derived_result",
+    "plugin_settings"
+  ],
+  "description": "从 X 积分 / Y 积分结果页（含矩形裁剪）创建 EDC 瀑布图：冻结创建时的来源，按 k 步长最近邻抽样、逐曲线归一化并自动命名。抽样与归一化在本插件内完成，绘图、裁剪、出版与数值导出仍由宿主负责。",
+  "author": "BandScope"
+}

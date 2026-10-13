@@ -4,11 +4,8 @@ from PyQt5.QtWidgets import QVBoxLayout, QWidget
 import bandscope.ui.theme as theme
 from bandscope.ui.control_layout_utils import combo_index_for_text
 from bandscope.ui.denoise_control_utils import (
-    create_double_spin_box,
-    create_parameter_group,
     create_savgol_control_group,
     create_wavelet_control_group,
-    finish_parameter_group,
 )
 
 
@@ -150,51 +147,3 @@ class DenoiseSettingsPopup(_NonModalPopup):
         self._blank.wavelet_strength_box.setValue(value)
         self._blank._sync_wavelet_constraints()
         self._sync_from_blank()
-
-
-class WaterfallSettingsPopup(_NonModalPopup):
-    POPUP_WIDTH = 400
-
-    def __init__(self, page_control_blank, parent=None):
-        super().__init__(parent)
-        self._blank = page_control_blank
-        self.setWindowTitle("瀑布图步长设置")
-        self.setMinimumWidth(self.POPUP_WIDTH)
-        self._build_ui()
-
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
-
-        group, card = create_parameter_group(self, "瀑布图参数", self.POPUP_WIDTH - 60)
-
-        self.waterfall_step_box = create_double_spin_box(
-            parent=card,
-            width=self.POPUP_WIDTH - 100,
-            title="k步长 (1/Å)",
-            value=0.01,
-            minimum=0.0001,
-            maximum=10.0,
-            single_step=0.01,
-        )
-        self.waterfall_step_box.editingFinished.connect(self._on_step_changed)
-
-        finish_parameter_group(group, card, (self.waterfall_step_box,))
-        root.addWidget(group)
-        root.addStretch()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._sync_from_blank()
-
-    def _sync_from_blank(self):
-        blank = self._blank
-        self.waterfall_step_box.setValue(blank.waterfall_step_box.value())
-
-    def _on_step_changed(self):
-        value = float(self.waterfall_step_box.value())
-        self._blank.waterfall_step_box.setValue(value)
-        self._blank._sync_waterfall_constraints()
-        self._blank._waterfall_step_custom = True
-        self._blank.waterfall_step_box.editingFinished.emit()

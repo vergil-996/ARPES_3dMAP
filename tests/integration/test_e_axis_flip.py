@@ -130,6 +130,9 @@ class EAxisFlipTests(unittest.TestCase):
                 "raw_curves": np.asarray([[10.0, 20.0, 30.0]]),
             }
         )
+        # 瀑布图的 E 翻转是定向翻转：能量轴与采样一起反序，同一 E 坐标对应同一
+        # 强度，屏幕／出版图／数值导出因此保持一致。
+        np.testing.assert_array_equal(waterfall["energy_axis"], [0.0, -0.1, -0.2])
         np.testing.assert_array_equal(waterfall["curves"], [[3.0, 2.0, 1.0], [6.0, 5.0, 4.0]])
         np.testing.assert_array_equal(waterfall["raw_curves"], [[30.0, 20.0, 10.0]])
 

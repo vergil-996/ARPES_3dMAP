@@ -2,12 +2,13 @@
 
 ## 接口与目录
 
-插件源码放 `plugins/<id>/`，包含 `plugin.json`、`README.md`、入口模块和功能资源；测试放 `tests/plugins/<id>/`。现有平带插件（渲染效果）与二维积分演示插件（分析任务）分别作为两类示例。
+插件源码放 `plugins/<id>/`，包含 `plugin.json`、`README.md`、入口模块和功能资源；测试放 `tests/plugins/<id>/`。现有平带插件（渲染效果）、二维积分演示插件（分析任务）与 EDC 瀑布图插件（派生结果与集成动作）分别作为三类示例。
 
 ```python
 from bandscope.extensions.api import (
     Plugin, PluginContext, PluginHost,        # API 1：上下文、刷新、提示
     PluginHostV2, AnalysisInput2D, AnalysisCurve1D,  # API 2：分析任务
+    PluginHostV3, DerivedInput2D, DerivedWaterfallResult, IntegrationAction,  # API 3：派生结果
 )
 from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwitch
 ```
@@ -18,7 +19,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 
 ## 版本与兼容声明
 
-- `api_version` 是整数。宿主声明**支持集合**，当前为 `{1, 2}`；插件声明的版本必须落在集合里，不能因为主程序小版本接近就认定兼容。
+- `api_version` 是整数。宿主声明**支持集合**，当前为 `{1, 2, 3}`；插件声明的版本必须落在集合里，不能因为主程序小版本接近就认定兼容。
 - `requires_app` 是裸版本（如 `1.12.2`）时按精确版本匹配，旧清单原样解释、不自动放宽；带运算符时按 [PEP 440 范围](https://packaging.pypa.io/en/stable/specifiers.html)解析，例如 `>=1.9.0,<2.0.0`。范围写法只有 1.12.2 起的主程序能解析：更早的主程序仍按精确匹配比较，看到范围声明会直接判为不兼容，因此放宽范围要配合新版主程序发布。
 - `capabilities` 里每一项都必须由宿主支持，缺一不可：
 
@@ -28,6 +29,9 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 | `data_snapshot_2d` | 抓取已完成二维结果的只读快照（API 2） |
 | `analysis_task` | 提交后台分析任务（API 2） |
 | `result_curve_1d` | 交回一维曲线，由宿主建结果页（API 2） |
+| `integration_action` | 向「其他积分」下拉注册动作（API 3） |
+| `derived_result` | 基于宿主冻结的来源做派生计算（API 3） |
+| `plugin_settings` | 在插件管理里提供设置界面与默认值（API 3） |
 
 安装、启动加载、构建脚本、官方目录筛选与主程序升级评估共用同一套判定函数（`bandscope.extensions.compat`），同一份声明到哪儿都是同一个结论和同一句原因。构建脚本会在打包前用当前宿主核对一遍：不通过就不出包。
 
@@ -69,13 +73,49 @@ host.cancel_analysis(handle)
 - `Plugin.on_analysis_finished(handle, status, detail)` 是可选回调（`succeeded` / `failed` / `cancelled`），默认什么都不做；API 1 插件不会因为这个钩子被迫实现新方法。
 - 加载新数据、关闭来源页、用户取消或退出应用都会请求取消；完成回调会再核对数据代次，过期结果直接丢弃。
 
+### 派生结果与集成动作（API 3）
+
+最小能力范围固定为「下拉动作 → 宿主冻结来源 → 插件同步计算 → 宿主建派生结果页」，
+当前用于把 EDC 瀑布图这类「来源页 + 参数 → 曲线族」的功能移出主程序：
+
+```python
+class Plugin(Plugin):
+    def integration_actions(self):
+        return (IntegrationAction("create", "EDC瀑布图", order=20.0),)
+
+    def compute_derived_result(self, source: DerivedInput2D):   # 纯数值，宿主线程内同步执行
+        ...                                                     # 失败抛 ValueError（消息可直接展示）
+        return DerivedWaterfallResult(k=..., sample_indices=..., energy=...,
+                                      raw_curves=..., curves=..., title=...,
+                                      plot_title=..., params={"k_step": 0.02})
+
+    def create_settings_panel(self, host):        # 「插件管理 → 插件设置」里的 QWidget
+        return MySettingsPanel(host)
+
+    def export_settings(self): ...                # 当前设置状态
+    def restore_settings(self, state): ...        # 恢复保存的默认值（容忍缺失字段）
+```
+
+约定：
+
+- `integration_actions()` 报出的动作键以 `插件ID:动作ID` 进入「其他积分」下拉并随页面状态保存；动作 ID 必须跨版本稳定，展示文本可以改。`order` 决定与内置项的排序（内置项按 0/10/30/40 排布）。
+- 执行动作时宿主冻结当前 **X/Y 积分页**（或其矩形裁剪结果）为 `DerivedSource2D`：时间帧或时间积分区间、积分范围、裁剪范围与数据域在创建时固定，之后来源页怎么变都不影响已有结果。带**擦除区域**的来源按分析插件同样的契约拒绝。
+- `DerivedInput2D` 给出只读的二维数组 `[采样轴, 曲线轴]`、坐标、单位、完整未裁剪轴（自动步长与裁剪后缀的依据）与来源元数据。**V3 的输入与结果一律使用原始坐标排列**：E 翻转只由宿主在显示、出版与数值导出的统一出口处理一次。
+- 结果由宿主校验：`k` / `sample_indices` / `energy` 一维等长且有限，曲线形状与坐标一致，采样身份必须落在完整动量轴内，曲线允许 `NaN` 但拒绝无穷值。`curves` 是显示用归一化曲线，`raw_curves` 是导出用原始强度，`title` 用于页面名，`plot_title` 是绘图/出版用的 ASCII 安全标题（为空时回退 `title`）。
+- 创建与参数更新都**先验证计算结果再提交页面状态**：失败时创建不建页、更新保留上次成功结果并在图上标注；自动标题只更新底层默认名，用户改过名时保留显示名。
+- 二维采样与归一化在体数据就绪后同步执行，结果按（来源、数据修订、旋转、逐页参数）缓存；其他页激活后回来重算。
+- `host.defaults()` / `host.set_defaults(values)` 读写按插件 ID 保存的「新建默认值」，与逐页参数分离，保存立即对之后新建的页面生效；`host.current_derived_page()` / `host.update_current_derived_page(params)` 供插件查询与更新当前派生页。
+- 插件无法创建页面、不绘图、不导出：绘图、裁剪、出版与数值导出都由宿主按自己的路径产生。
+
 ## 构建和验证
 
 ```powershell
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 python scripts/release/build_plugin.py integral_demo --output-dir release
+python scripts/release/build_plugin.py edc_waterfall --output-dir release
 python -m unittest discover -s tests/extensions -t . -v
 python -m unittest discover -s tests/plugins -t . -v
+python -m unittest tests.integration.test_plugin_derived_flow -v
 ```
 
 `.bsplugin` 单独发布；基础安装包不得包含具体插件源码（两套 spec 都检查 `plugins` 模块名与源目录泄漏），宿主依赖也不重复打入插件包。

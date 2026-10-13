@@ -84,12 +84,12 @@ def main():
         check("启动时“对时间轴积分”卡片隐藏", page_data.grp_t.isHidden())
         check("启动时“其他积分”无时间相关项", "切片内强度积分" not in combo_items(combo))
 
-        # —— 单元级：过滤不丢普通选中项 ——
+        # —— 单元级：过滤不丢普通选中项（EDC 瀑布图迁移后是插件动作，这里用内置项） ——
         page_data.set_time_axis_available(True, animate=False)
-        combo.setCurrentIndex(combo_items(combo).index("EDC瀑布图"))
+        combo.setCurrentIndex(combo_items(combo).index("单条 EDC 曲线"))
         page_data.set_time_axis_available(False, animate=False)
-        check("过滤后普通选中项保留（EDC瀑布图）", combo.currentText() == "EDC瀑布图")
-        check("过滤后下拉剩 4 项", combo.count() == 4)
+        check("过滤后普通选中项保留（单条 EDC 曲线）", combo.currentText() == "单条 EDC 曲线")
+        check("过滤后下拉剩 3 项", combo.count() == 3)
 
         # —— 单元级：被过滤掉的选中项恢复后能选回 ——
         page_data.set_time_axis_available(True, animate=False)
@@ -98,7 +98,7 @@ def main():
         check("选中项被过滤时回退到就近项", combo.currentText() == "能级态密度")
         page_data.set_time_axis_available(True, animate=False)
         check("恢复后选回被过滤的选中项", combo.currentText() == "切片内强度积分")
-        check("恢复后下拉回到 5 项", combo.count() == 5)
+        check("恢复后下拉回到 4 项", combo.count() == 4)
         page_data.set_time_axis_available(False, animate=False)
 
         # —— 真实加载：动态数据 ——
@@ -127,7 +127,8 @@ def main():
         check("静态数据加载后底条与视图控件仍在", bar.isVisible() and bar.view_controls.isVisible())
         check("静态数据加载后“对时间轴积分”卡片隐藏", page_data.grp_t.isHidden())
         items = combo_items(combo)
-        check("静态数据加载后“其他积分”剩余 4 项", len(items) == 4)
+        # 未安装 EDC 瀑布图插件时“其他积分”只有 4 个内置项，静态数据再过滤掉一项。
+        check("静态数据加载后“其他积分”剩余 3 项", len(items) == 3)
         check("静态数据加载后“切片内强度积分”已移除", "切片内强度积分" not in items)
         check("静态数据加载后时间积分控件禁用", not page_data.btn_t_apply.isEnabled())
         window.load_data(DYNAMIC_NPZ)

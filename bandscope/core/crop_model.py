@@ -169,9 +169,13 @@ def _orient(context, flip):
     elif view == "1d_comparison" and context.get("comparison_kind") in {"energy_dos", "edc_curve"}:
         result["curves"] = [dict(c, y_data=np.flip(c["y_data"])) for c in context["curves"]]
     elif view == "waterfall":
+        # 瀑布图的 E 翻转是一次真正的定向翻转：能量轴与采样一起反序，翻转前后
+        # 同一个 E 坐标仍对应同一份强度（显示、出版、导出据此保持一致）。
         for key in ("curves", "raw_curves"):
             if context.get(key) is not None:
                 result[key] = np.flip(context[key], axis=1)
+        if context.get("energy_axis") is not None:
+            result["energy_axis"] = np.flip(np.asarray(context["energy_axis"]), axis=0)
     return result
 
 

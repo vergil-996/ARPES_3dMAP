@@ -83,6 +83,11 @@ jobs:
         shell: pwsh
         run: python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 
+      # EDC 瀑布图（API 3）与宿主同版发布：下拉动作、默认值都由这个包提供。
+      - name: Build EDC waterfall extension
+        shell: pwsh
+        run: python scripts/release/build_plugin.py edc_waterfall --output-dir release
+
       # 正式发布要求签名密钥与宿主内置公钥匹配；缺 Secret 或对不上就在这里失败，
       # 而不是先发一个客户端必然拒收的包。
       - name: Check the plugin signing key

@@ -22,11 +22,13 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -171,6 +173,8 @@ class PluginManagerDialog(QDialog):
         self._catalog_rows = []
         self._catalog_requested = False
         self._catalog_tab_index = 1
+        self._settings_tab_index = 2
+        self._settings_sections = {}
         self._catalog_thread = None
         self._download_thread = None
         self._download_dir = None
@@ -208,6 +212,7 @@ class PluginManagerDialog(QDialog):
         )
         self.tabs.addTab(self._build_installed_tab(), "已安装")
         self._catalog_tab_index = self.tabs.addTab(self._build_catalog_tab(), "官方插件")
+        self._settings_tab_index = self.tabs.addTab(self._build_settings_tab(), "插件设置")
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
 
@@ -322,6 +327,170 @@ class PluginManagerDialog(QDialog):
         theme.style_push_button(button, kind)
         button.clicked.connect(slot)
         return button
+
+    # ------------------------------------------------------------------ 插件设置
+    def _build_settings_tab(self):
+        """插件设置页（可滚动）：按能力列出设置面板与两个通用操作。
+
+        面板由插件提供（``create_settings_panel``），宿主只负责挂载与显隐；
+        「保存为新建默认值」与「应用当前瀑布图」都由这里发起，不识别具体插件。
+        """
+        page = QWidget(self)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(10)
+
+        self.settings_status = QLabel("")
+        self.settings_status.setWordWrap(True)
+        self.settings_status.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
+        layout.addWidget(self.settings_status)
+
+        self.settings_scroll = QScrollArea(self)
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setFrameShape(QFrame.NoFrame)
+        # 滚动区的视口默认用系统浅色底：不显式上底色，深色卡片上会出现一块白。
+        self.settings_scroll.setStyleSheet(
+            f"QScrollArea {{ background: transparent; border: none; }}"
+            f"QScrollArea > QWidget > QWidget {{ background-color: {theme.BG_1}; }}"
+        )
+        self.settings_container = QWidget(self.settings_scroll)
+        self.settings_container.setStyleSheet(f"background-color: {theme.BG_1};")
+        self.settings_layout = QVBoxLayout(self.settings_container)
+        self.settings_layout.setContentsMargins(8, 8, 8, 8)
+        self.settings_layout.setSpacing(12)
+        self.settings_scroll.setWidget(self.settings_container)
+        layout.addWidget(self.settings_scroll, 1)
+        return page
+
+    def _clear_settings_tab(self):
+        """清空设置页并释放面板引用；面板控件随本页销毁。"""
+        for plugin_id in list(self._settings_sections):
+            try:
+                self.session.release_settings_panel(plugin_id)
+            except Exception:
+                pass
+        self._settings_sections = {}
+        layout = getattr(self, "settings_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def refresh_settings_tab(self):
+        """重建插件设置页：插件集合与默认值都可能在别处变化。"""
+        if getattr(self, "settings_layout", None) is None:
+            return
+        self._clear_settings_tab()
+        try:
+            plugin_ids = list(self.session.settings_plugin_ids())
+        except Exception as exc:
+            plugin_ids = []
+            self.settings_status.setText(f"读取插件设置失败：{type(exc).__name__}: {exc}")
+        if not plugin_ids:
+            hint = QLabel(
+                "当前没有提供设置界面的插件。安装并加载声明了 plugin_settings 能力的插件后，"
+                "这里会列出它自己的设置。"
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 12px;")
+            self.settings_layout.addWidget(hint)
+        else:
+            for plugin_id in plugin_ids:
+                section = self._build_settings_section(plugin_id)
+                if section is not None:
+                    self.settings_layout.addWidget(section)
+        self.settings_layout.addStretch(1)
+        if plugin_ids:
+            self.settings_status.setText(
+                "「保存为新建默认值」写进本机设置，对之后新建的结果页立即生效；"
+                "「应用当前瀑布图」只更新当前打开的派生结果页，其他页面保留各自参数。"
+                "安装与启停仍然重启后生效。"
+            )
+
+    def _build_settings_section(self, plugin_id):
+        record = self.manager.record(plugin_id)
+        title = plugin_id
+        if record is not None and record.manifest is not None:
+            title = str(record.manifest.name or plugin_id)
+        try:
+            # 先按保存的默认值复位插件内部状态，面板按它构建。
+            self.session.restore_plugin_settings(plugin_id)
+            panel = self.session.create_settings_panel(plugin_id)
+        except Exception:
+            panel = None
+        if panel is None:
+            # 创建失败的原因已经记在会话诊断里（见 session.errors()）。
+            return None
+
+        frame = QFrame(self.settings_container)
+        frame.setObjectName("SettingsCard")
+        frame.setStyleSheet(
+            f"QFrame#SettingsCard {{ background-color: {theme.BG_3};"
+            f" border: 1px solid {theme.BORDER_HEX}; border-radius: 6px; }}"
+            "QFrame#SettingsCard QLabel, QFrame#SettingsCard QWidget { background: transparent; }"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        heading = QLabel(f"{title}（{plugin_id}）", frame)
+        heading.setStyleSheet(f"color: {theme.TEXT_1}; font-size: 13px; font-weight: 600;")
+        layout.addWidget(heading)
+        layout.addWidget(panel)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        btn_save = self._button(
+            "保存为新建默认值", "primary", lambda _checked=False: self.on_settings_save(plugin_id)
+        )
+        btn_apply = self._button(
+            "应用当前瀑布图", "secondary", lambda _checked=False: self.on_settings_apply(plugin_id)
+        )
+        row.addWidget(btn_save)
+        row.addWidget(btn_apply)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        status = QLabel("", frame)
+        status.setWordWrap(True)
+        status.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
+        layout.addWidget(status)
+        self._settings_sections[plugin_id] = {
+            "panel": panel,
+            "status": status,
+            "save": btn_save,
+            "apply": btn_apply,
+        }
+        return frame
+
+    def _settings_section(self, plugin_id):
+        return self._settings_sections.get(str(plugin_id))
+
+    def on_settings_save(self, plugin_id):
+        """「保存为新建默认值」：插件当前设置 → 宿主 QSettings（按插件 ID）。"""
+        state = self.session.plugin_settings_state(plugin_id)
+        self.session.save_derived_defaults(plugin_id, state)
+        text = "已保存为新建默认值；之后新建的结果页立即使用它。已打开的页面保留各自参数。"
+        self._set_section_status(plugin_id, text)
+        self._report("已保存", text, warning=False)
+
+    def on_settings_apply(self, plugin_id):
+        """「应用当前瀑布图」：先用当前设置算一遍，通过后才提交到当前页。"""
+        ok, message = self.session.apply_settings_to_current_page(plugin_id)
+        self._set_section_status(plugin_id, message)
+        self._report("已应用" if ok else "未应用", message, warning=not ok)
+
+    def _set_section_status(self, plugin_id, text):
+        section = self._settings_section(plugin_id)
+        if section is None:
+            return
+        label = section.get("status")
+        if label is not None:
+            label.setText(str(text))
 
     # ------------------------------------------------------------------ 数据
     def refresh(self, *, select=None):
@@ -689,7 +858,10 @@ class PluginManagerDialog(QDialog):
         self._render_catalog()
 
     def _on_tab_changed(self, index):
-        """打开官方页时后台取一次目录；不弹窗、不自动下载安装。"""
+        """打开官方页时后台取一次目录；打开设置页时按当前插件重建面板。"""
+        if index == self._settings_tab_index:
+            self.refresh_settings_tab()
+            return
         if index != self._catalog_tab_index or self._catalog_requested:
             return
         self._catalog_requested = True
@@ -961,6 +1133,8 @@ class PluginManagerDialog(QDialog):
     # ------------------------------------------------------------------ 事件
     def showEvent(self, event):
         self.refresh()
+        if self.tabs.currentIndex() == self._settings_tab_index:
+            self.refresh_settings_tab()
         super().showEvent(event)
 
     def changeEvent(self, event):

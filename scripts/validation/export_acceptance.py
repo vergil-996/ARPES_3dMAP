@@ -72,6 +72,39 @@ def wait_for(desc, predicate, next_step, timeout_ms=45000):
     poll()
 
 
+def install_edc_waterfall_plugin():
+    """把真实构建的 EDC 瀑布图插件装进隔离扩展根：下拉动作由插件注册。
+
+    「EDC瀑布图」在迁移后不再是内置项；未安装插件时该验收项按 UNTESTED 记录。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from bandscope.app_metadata import APP_VERSION
+    from bandscope.extensions.plugin_manager import (
+        InstallSource,
+        PluginManager,
+        install_package,
+    )
+    from bandscope.extensions.trust import SOURCE_LOCAL
+    from scripts.release.build_plugin import build as build_package
+
+    manager = PluginManager()
+    if manager.record("edc_waterfall") is not None:
+        return True
+    staging = tempfile.TemporaryDirectory(prefix="bandscope-edc-plugin-")
+    try:
+        archive = build_package("edc_waterfall", Path(staging.name), APP_VERSION)
+        install_package(
+            archive,
+            root=Path(manager.root),
+            source=InstallSource(kind=SOURCE_LOCAL, accepted_unverified=True),
+        )
+    finally:
+        staging.cleanup()
+    return True
+
+
 def main():
     global NPZ, OUT_DIR, _fh
     from scripts.validation._common import arguments
@@ -80,6 +113,10 @@ def main():
     _fh = open(args.output_dir / "faulthandler.log", "w", encoding="utf-8")
     faulthandler.enable(_fh)
     os.makedirs(OUT_DIR, exist_ok=True)
+    try:
+        install_edc_waterfall_plugin()
+    except Exception as exc:  # noqa: BLE001
+        record("edc_waterfall 插件安装", "FAIL", str(exc))
     app = QApplication(sys.argv)
 
     import bandscope.app.refactored_app as refactored_app
@@ -213,9 +250,12 @@ def main():
 
     def _select_other(text):
         combo = window.page_data.combo_other
-        if combo.findText(text) < 0:
+        index = combo.findText(text)
+        if index < 0:
             return False
-        combo.setCurrentText(text)
+        # 非可编辑下拉框的 setCurrentText 在 Qt5 会改写当前项文本而不是选择
+        # （宿主按稳定键读的是下标映射），这里必须显式按下标切换。
+        combo.setCurrentIndex(index)
         return True
 
     def step_energy_dos():
@@ -256,31 +296,37 @@ def main():
         # 瀑布图只能从 axis_integral 类页面创建：先切回该页
         axis_page = pages.get("axis_integral")
         if axis_page is None:
-            record("waterfall_edc 页创建", "UNTESTED", "axis_integral 页不可用")
+            record("plugin_derived 瀑布页创建", "UNTESTED", "axis_integral 页不可用")
             step_edc()
             return
         window.left_workspace.activate_page(axis_page)
 
         def _apply():
-            if not _select_other("EDC瀑布图"):
-                record("waterfall_edc 页创建", "UNTESTED", "下拉项不存在")
-                step_edc()
-                return
-            # 用可读步长（约 20 条曲线）；默认建议步长对该数据过密
-            window.page_control_blank.set_waterfall_step(0.1, custom=True)
+            if not window.page_data.current_other_key().startswith("edc_waterfall:"):
+                if not _select_other("EDC瀑布图"):
+                    record("plugin_derived 瀑布页创建", "UNTESTED", "下拉项不存在")
+                    step_edc()
+                    return
+            # 用可读步长（约 20 条曲线）；默认自动步长对该数据过密。
+            # 步长与模式由插件设置提供，保存后立即对新建页生效。
+            session = window.plugin_session
+            if session is not None:
+                session.save_derived_defaults(
+                    "edc_waterfall", {"k_step_mode": "manual", "k_step": 0.1}
+                )
             try:
                 window.on_apply_other_integral()
             except Exception as exc:  # noqa: BLE001
-                record("waterfall_edc 页创建", "FAIL", str(exc))
+                record("plugin_derived 瀑布页创建", "FAIL", str(exc))
                 step_edc()
                 return
             wait_for(
-                "waterfall_edc 页渲染",
+                "plugin_derived 瀑布页渲染",
                 lambda: window.current_render_context is not None
                 and window.current_render_context.get("view") == "waterfall"
                 and window.left_workspace.current_spec() is not None
-                and window.left_workspace.current_spec().page_kind == "waterfall_edc",
-                lambda: (do_export("waterfall_edc 页导出", "1d_open", "png",
+                and window.left_workspace.current_spec().page_kind == "plugin_derived",
+                lambda: (do_export("plugin_derived 瀑布页导出", "1d_open", "png",
                                    "page_waterfall.png", expect_family="1d"),
                          QTimer.singleShot(300, step_edc))[1],
                 timeout_ms=30000,

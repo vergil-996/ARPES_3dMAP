@@ -16,20 +16,29 @@ from bandscope.ui.control_page_base import ControlPageBase
 class DataProcessPage(ControlPageBase):
     COMBO_TEXT_ALIASES = {"切片态密度": "切片内强度积分"}
 
-    # “其他积分”下拉的完整选项；其中时间相关项只在数据含时间轴时保留。
-    OTHER_INTEGRAL_ITEMS = [
-        "切片内强度积分",
-        "能级态密度",
-        "EDC瀑布图",
-        "单条 EDC 曲线",
-        "二阶导",
-    ]
+    # 内置动作：稳定键、展示文本、排序权重。插件注册的动作以
+    # ``插件ID:动作ID`` 并入同一列表，按 ``(权重, 文本)`` 排序；EDC 瀑布图权重
+    # 留出的位置正好是它迁移前所在的位置。
+    BUILTIN_OTHER_ACTIONS = (
+        ("builtin:slice_dos", "切片内强度积分", 0.0),
+        ("builtin:energy_dos", "能级态密度", 10.0),
+        ("builtin:edc_curve", "单条 EDC 曲线", 30.0),
+        ("builtin:second_derivative", "二阶导", 40.0),
+    )
+    # “其他积分”下拉的完整内置选项；其中时间相关项只在数据含时间轴时保留。
+    OTHER_INTEGRAL_ITEMS = [item[1] for item in BUILTIN_OTHER_ACTIONS]
     TIME_DEPENDENT_OTHER_ITEMS = ("切片内强度积分",)
+    #: 插件动作缺失时的兜底项：回退到第一个可用内置项而不是旧下标。
+    OTHER_FALLBACK_KEY = "builtin:slice_dos"
 
     def __init__(self, parent=None):
         self._is_updating = False
         self._time_axis_available = True
         self._filtered_out_other_selection = None
+        #: 已进入下拉的插件动作：``[(稳定键, 展示文本, 权重)]``。
+        self._plugin_other_actions = []
+        #: 当前下拉每一项对应的稳定键，按显示顺序排列。
+        self._other_keys = []
         super().__init__(parent)
 
     def _create_combo(self, title, items, registry):
@@ -132,7 +141,11 @@ class DataProcessPage(ControlPageBase):
 
         grp_other, v_other = self._create_group("其他积分")
 
-        self.combo_other = self._create_combo("积分类型", list(self.OTHER_INTEGRAL_ITEMS), self._adaptive_row_controls)
+        entries = self._available_other_entries()
+        self.combo_other = self._create_combo(
+            "积分类型", [text for _key, text, _order in entries], self._adaptive_row_controls
+        )
+        self._other_keys = [key for key, _text, _order in entries]
         self.btn_other_apply = self._create_btn("应用", "primary")
 
         v_other.addLayout(centered_widget_row(self.combo_other, self.MIN_COMBO_WIDTH))
@@ -231,40 +244,118 @@ class DataProcessPage(ControlPageBase):
             set_widget_visibility_instant(self.grp_t, available)
             self.relayout_scroll_content()
 
+    # ------------------------------------------------------------------
+    # 「其他积分」的动作列表（内置项 + 插件注册项）
+    # ------------------------------------------------------------------
+    def _available_other_entries(self):
+        """当前可用的完整动作列表：``[(稳定键, 展示文本, 权重)]``，按权重排序。"""
+        entries = []
+        for key, text, order in self.BUILTIN_OTHER_ACTIONS:
+            if text in self.TIME_DEPENDENT_OTHER_ITEMS and not self._time_axis_available:
+                continue
+            entries.append((key, text, float(order)))
+        entries.extend(self._plugin_other_actions)
+        entries.sort(key=lambda item: (item[2], item[1]))
+        return entries
+
+    def current_other_key(self):
+        """当前选中项的稳定键；列表为空时返回空串。"""
+        index = int(self.combo_other.currentIndex())
+        if 0 <= index < len(self._other_keys):
+            return str(self._other_keys[index])
+        return ""
+
+    def set_integration_actions(self, actions):
+        """并入插件注册的动作（``(稳定键, 展示文本, 权重)``）；保持当前选择。"""
+        normalized = []
+        for item in actions or ():
+            try:
+                key, label, order = item[0], item[1], float(item[2])
+            except (IndexError, TypeError, ValueError):
+                continue
+            key = str(key)
+            label = str(label)
+            if not key or not label:
+                continue
+            normalized.append((key, label, order))
+        if normalized == self._plugin_other_actions:
+            return
+        self._plugin_other_actions = normalized
+        self._rebuild_other_items()
+
+    def _rebuild_other_items(self):
+        """按最新动作集合重建下拉，尽量保持当前选择（先按键、再按文本）。"""
+        combo = self.combo_other
+        previous_key = self.current_other_key()
+        entries = self._available_other_entries()
+        blocker = QSignalBlocker(combo)
+        try:
+            combo.clear()
+            for _key, text, _order in entries:
+                combo.addItem(text)
+            self._other_keys = [key for key, _text, _order in entries]
+            combo.setCurrentIndex(self._other_restore_index(entries, previous_key))
+        finally:
+            del blocker
+
+    def _other_restore_index(self, entries, key=None, text=""):
+        """恢复选中项：稳定键 → 展示文本 → 可用内置项。
+
+        旧状态没有稳定键时按展示文本恢复；键与文本都找不到（例如插件动作缺失）
+        时回退到第一个可用内置项——旧下标会随着下拉项增删指向别的功能，一律
+        不采用。
+        """
+        keys = [key_ for key_, _text, _order in entries]
+        if key and key in keys:
+            return keys.index(key)
+        if text:
+            for index, (_key, label, _order) in enumerate(entries):
+                if label == str(text):
+                    return index
+        return next(
+            (
+                index
+                for index, (key_, _text, _order) in enumerate(entries)
+                if key_ == self.OTHER_FALLBACK_KEY
+            ),
+            0 if entries else -1,
+        )
+
     def _filter_time_dependent_other_items(self, available):
-        """无时间轴时从“其他积分”下拉移除时间相关项，恢复时插回原始位置。"""
+        """无时间轴时从“其他积分”下拉移除时间相关项，恢复时插回原位置。
+
+        过滤按稳定键整表重建：插件动作与内置项共用一份顺序，移除过的时间相关
+        选中项在恢复后优先选回。
+        """
         combo = self.combo_other
         blocker = QSignalBlocker(combo)
         try:
+            current_key = self.current_other_key()
             current_text = combo.currentText()
             if available:
-                for index, text in enumerate(self.OTHER_INTEGRAL_ITEMS):
-                    if (
-                        text in self.TIME_DEPENDENT_OTHER_ITEMS
-                        and combo_index_for_text(combo, text) < 0
-                    ):
-                        combo.insertItem(index, text)
-                # 上次过滤时被移除的选中项，恢复后优先选回。
                 if self._filtered_out_other_selection is not None:
-                    current_text = self._filtered_out_other_selection
+                    current_key = self._filtered_out_other_selection
                     self._filtered_out_other_selection = None
             else:
-                if current_text in self.TIME_DEPENDENT_OTHER_ITEMS:
-                    self._filtered_out_other_selection = current_text
-                for text in self.TIME_DEPENDENT_OTHER_ITEMS:
-                    index = combo_index_for_text(combo, text)
-                    if index >= 0:
-                        combo.removeItem(index)
+                removed_key = self._key_for_time_dependent_text(current_text)
+                if removed_key is not None:
+                    self._filtered_out_other_selection = removed_key
 
-            # 过滤后按文本恢复选中；选中的项被移除时回退到就近项。
-            restore_index = combo_index_for_text(
-                combo, current_text, aliases=self.COMBO_TEXT_ALIASES
-            )
-            if restore_index < 0:
-                restore_index = min(max(combo.currentIndex(), 0), combo.count() - 1)
-            combo.setCurrentIndex(restore_index)
+            entries = self._available_other_entries()
+            combo.clear()
+            for _key, text, _order in entries:
+                combo.addItem(text)
+            self._other_keys = [key for key, _text, _order in entries]
+            restore = self._other_restore_index(entries, current_key)
+            combo.setCurrentIndex(restore if entries else -1)
         finally:
             del blocker
+
+    def _key_for_time_dependent_text(self, text):
+        for key, label, _order in self.BUILTIN_OTHER_ACTIONS:
+            if label in self.TIME_DEPENDENT_OTHER_ITEMS and label == str(text):
+                return key
+        return None
 
     def _on_t_low_changed(self, value):
         if value > self.s_t_up.value():
@@ -304,8 +395,10 @@ class DataProcessPage(ControlPageBase):
                 "text": self.combo_ax.currentText(),
             },
             # 积分区间的真值放在页面参数的 axis_interval 里；本页只保存
-            # 轴向选择和「其他积分」下拉，避免同一份状态存两份。
+            # 轴向选择和「其他积分」下拉，避免同一份状态存两份。下拉状态以稳定
+            # 动作键为主：展示文本与下标都可能随插件加载变化。
             "combo_other": {
+                "key": self.current_other_key(),
                 "index": int(self.combo_other.currentIndex()),
                 "text": self.combo_other.currentText(),
             },
@@ -360,20 +453,16 @@ class DataProcessPage(ControlPageBase):
                 self.combo_ax.setCurrentIndex(int(combo_ax_index))
 
             combo_other_state = state.get("combo_other") or {}
-            # 下拉项会随时间轴有无动态过滤，文本比下标更可靠，优先按文本恢复。
-            combo_other_index = None
-            if "text" in combo_other_state:
-                combo_other_index = combo_index_for_text(
-                    self.combo_other,
-                    combo_other_state["text"],
-                    aliases=self.COMBO_TEXT_ALIASES,
-                )
-                if combo_other_index is not None and combo_other_index < 0:
-                    combo_other_index = None
-            if combo_other_index is None:
-                combo_other_index = combo_other_state.get("index")
-            if combo_other_index is not None and 0 <= int(combo_other_index) < self.combo_other.count():
-                self.combo_other.setCurrentIndex(int(combo_other_index))
+            # 下拉项会随时间轴有无与插件加载动态变化：先按稳定键恢复，其次按
+            # 展示文本（含旧别名）。两者都找不到时回退到可用内置项——旧下标可能
+            # 已经指向别的功能（例如插件未加载时原本的瀑布图项不存在）。
+            saved_key = str(combo_other_state.get("key") or "")
+            saved_text = str(combo_other_state.get("text") or "")
+            saved_text = self.COMBO_TEXT_ALIASES.get(saved_text, saved_text)
+            entries = self._available_other_entries()
+            restore = self._other_restore_index(entries, saved_key, saved_text)
+            if restore >= 0 and entries:
+                self.combo_other.setCurrentIndex(restore)
         finally:
             self._is_updating = previous_updating
             del blockers
