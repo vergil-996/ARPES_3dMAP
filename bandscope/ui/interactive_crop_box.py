@@ -80,7 +80,9 @@ class InteractiveCropBox(RectangleSelector):
         if self._active_handle != "C":
             return super()._onmove(event)
         x0, x1, y0, y1 = self._extents_on_press
-        x, y = self._get_data_coords(event)
+        # onmove has already cleaned the event into this axes' data coordinates.
+        # AxesWidget._get_data_coords was removed in Matplotlib 3.11.
+        x, y = event.xdata, event.ydata
         dx, dy = x - self._eventpress.xdata, y - self._eventpress.ydata
         shifts = []
         for delta, low, high, limits in (

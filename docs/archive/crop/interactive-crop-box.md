@@ -117,3 +117,10 @@ Windows 本机 `.venv`（Python 3.12、Matplotlib 3.10.8）。新增 17 项 UI/�
 - 23 项既有测试通过，进程退出码为 0。
 - 退出时 `TemporaryDirectory.cleanup` 出现 `PermissionError: [WinError 5]`，涉及测试临时目录清理。实施验收时应在正常临时目录权限的环境复核并记录，不能把该环境问题隐去。
 - 本轮未运行全量回归，未验证新增活动框行为，也未执行真实窗口视觉验收。
+
+## Matplotlib 3.11 兼容修复（2026-10-13）
+
+- `update`（`b601ea0`）已推送成功；GitHub Actions 回归失败，是因为 Matplotlib 3.11.2 已移除 `AxesWidget._get_data_coords`，内部平移回调报 `AttributeError`，四个平移用例失败。
+- `bandscope/ui/interactive_crop_box.py` 的平移回调改用已由 `onmove` / `_clean_event` 转换到本坐标轴的 `event.xdata`、`event.ydata`，不再调用已删除的私有方法；边界限制与缩放逻辑保持原样。
+- 验证环境：Windows、Python 3.12.10、Matplotlib 3.10.8。`python -m unittest tests.ui.test_interactive_crop_box -v` 的 11 项交互测试通过；`python -m unittest discover -s tests -t . -v` 的 1213 项全量测试通过；编译与 diff 空白检查通过。完整日志在 `.local/logs/crop_mpl_compat_full.log`。
+- 尝试在 `.local/outputs/` 隔离安装 Matplotlib 3.11.2，但下载未完成，已停止安装，现有虚拟环境未修改。未执行：3.11.2 本机运行、修复后的 GitHub CI、真实窗口视觉验收及发行包重建。
