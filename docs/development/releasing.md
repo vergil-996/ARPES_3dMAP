@@ -52,6 +52,7 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 - 发布先检查标签与源码版本一致，再运行完整测试，构建 CPU / NVIDIA 安装包和独立插件包。
 - 插件任务按顺序执行：打包 → 校验签名密钥与内置公钥匹配 → 签名插件包 → 聚合上一版目录并生成 `plugins-index.json` → 签名目录。任一环节失败都不发布。构建脚本会打印本次针对的宿主版本与支持接口集合，兼容声明只覆盖真正验证过的组合；只改声明上限不算验证过。
 - 打包**必须可复现**：`.bsplugin` 的 zip 条目使用固定时间戳，摘要只由文件内容决定。历史版本沿用源文件 mtime，CI 的 checkout 又把它设成运行时刻，同一份源码每次发布会得到不同摘要，聚合上一版目录时会被「同 id/version 内容必须一致」判成内容被替换而失败——发生在标签推上去之后，只能再发一个补丁版本。插件源码没变时不要顺手改包内文件的编码或行尾，行尾差异同样会改变摘要。
+- **本机与线上的摘要口径**（v1.13.0 实测）：`.bsplugin` 的压缩字节取决于打包环境的 zlib/Python 版本。同一份源码，CI（Python 3.12，CRLF checkout）与本机（Python 3.14）打出的包**逐条目内容一致**（CRC、解压尺寸、行尾、条目顺序相同），但压缩后字节不同，sha256 因此不同。跨版本聚合依赖的是 CI 每次重建摘要稳定（例如 `flat_band_opacity 1.2.2` 在 v1.12.5 与 v1.13.0 两次 CI 打包中摘要相同，聚合通过）；本机重建的摘要**不能**与线上目录逐字比对，只能用来核对内容（条目 CRC/大小）与本地回归。
 - Windows 安装器签名脚本位于 `scripts/release/sign_windows.ps1`；所需 Secrets 沿用 `WINDOWS_SIGNING_PFX_BASE64`、`WINDOWS_SIGNING_PFX_PASSWORD`，时间戳变量为 `WINDOWS_TIMESTAMP_URL`。
 - GitHub Release 包含两个安装器、插件包及对应 `.sha256`、`.bsplugin.sig`，以及目录 `plugins-index.json` 与 `.sig`。发布动作仍由维护者推送标签触发，本次整理不创建或推送标签。
 - 历史目录用 `--merge` 带进来：同一 id/version 一旦发布就不能换成不同内容，脚本会直接拒绝；有签名 sidecar 的上一版目录会先验签再聚合。

@@ -75,8 +75,9 @@ DOS / 单条 EDC 曲线）与 3D 图片导出的同类问题不在本轮范围�
   `tests/integration/test_plugin_derived_flow.py`（11 项，含真实构建/安装事务）。
 - 插件构建：`python scripts/release/build_plugin.py edc_waterfall --output-dir
   .local/outputs/v1.13.0` → `BandScope-edc_waterfall-1.0.0.bsplugin`
-  （sha256 `367dd96a…`，CRLF 工作区与 CI 的 checkout 一致；`requires_app` 随 1.13.0
-  定为 `>=1.13.0,<2.0.0`）。
+  （本机 sha256 `367dd96a…`；线上目录由 CI 打包，sha256 `43ade902…`——两份包
+  内容逐条目一致，压缩字节随 Python/zlib 版本不同，见发布交接）。
+  `requires_app` 随 1.13.0 定为 `>=1.13.0,<2.0.0`。
 
 真实数据（`D:\ARPES_3Dmap\npzfiles\mose2.npz`，200×200×800 静态谱；本机默认的
 `.local/data/WSe2_step.npz` 缺失，验收按用户指定的数据执行）：
