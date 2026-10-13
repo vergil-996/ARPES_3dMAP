@@ -1,0 +1,32 @@
+{
+  "data": "D:\\ARPES_3dmap\\ARPES_3dMAP\\.local\\data\\WSe2_step.npz",
+  "checks": [
+    "3D source ready",
+    "region dropdown visible",
+    "3D editor widget present",
+    "3D VTK interaction updates canonical region",
+    "two independent 3D regions",
+    "second region has neutral own gamma",
+    "first gamma restored",
+    "opacity mode leaves color positions unchanged",
+    "opacity mode updates alpha",
+    "3d_publication snapshot has scientific data and separate display channels",
+    "3d_publication publication file created",
+    "locked region range survives time frame change",
+    "deleted 3D region participates in background normalization",
+    "last deletion removes dropdown",
+    "last deletion restores original volume path",
+    "2D integral ready",
+    "2D interactive handles visible",
+    "2D Qt gesture moves active region",
+    "two 2D regions share one view",
+    "E flip preserves canonical sample bounds",
+    "2d_publication snapshot has scientific data and separate display channels",
+    "2d_publication publication file created",
+    "intensity comparison uses common region range",
+    "dropdown row action deletes region",
+    "2D last deletion removes dropdown",
+    "2D returns to scalar image",
+    "science samples remain unchanged"
+  ]
+}

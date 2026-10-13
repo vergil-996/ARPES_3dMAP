@@ -1,0 +1,28 @@
+{
+  "data": "D:\\ARPES_3dmap\\ARPES_3dMAP\\.local\\data\\WSe2_step.npz",
+  "checks": [
+    "3D shows only selected second box",
+    "3D dropdown switches visible box",
+    "right-click action is checkable",
+    "outline toggle reuses enhancement channels",
+    "3D menu shows both boxes",
+    "3D all boxes remain visible on background selection",
+    "3D background selection removes editable widget",
+    "right-click action is checkable",
+    "outline toggle reuses enhancement channels",
+    "3D background selection with all off hides all annotations",
+    "3D enhanced volume survives outline changes",
+    "2D inherits both enhancement effects",
+    "2D shows only selected inherited rectangle",
+    "2D dropdown switches visible rectangle",
+    "right-click action is checkable",
+    "outline toggle reuses enhancement channels",
+    "2D menu shows both rectangles",
+    "2D background selection removes handles while all rectangles remain",
+    "right-click action is checkable",
+    "outline toggle reuses enhancement channels",
+    "2D background selection with all off hides all annotations",
+    "2D enhanced colors and opacity survive outline changes",
+    "scientific data unchanged"
+  ]
+}

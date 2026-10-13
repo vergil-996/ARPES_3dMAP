@@ -8,14 +8,13 @@ from dataclasses import replace
 
 import numpy as np
 from PyQt5.QtCore import QEvent, Qt, QTimer
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import RectangleSelector
 
 import bandscope.ui.theme as theme
 from bandscope.core.axis_interval import nearest_index
-from bandscope.core.crop_model import apply_selection, spatial_bounds
+from bandscope.core.crop_model import apply_selection
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.ui.result_workspace import AnalysisPageSpec
+from bandscope.ui.interactive_crop_box import InteractiveCropBox
 from bandscope.rendering.render_core import VisualEngine
 
 
@@ -141,6 +140,9 @@ class CropInteractionMixin:
 
     def _toggle_region_mode(self, operation, checked):
         if checked:
+            clear_enhancement = getattr(self, "_clear_enhancement_interaction", None)
+            if clear_enhancement is not None:
+                clear_enhancement()
             other = self.btn_tb_crop if operation == "erase" else self.btn_tb_erase
             other.blockSignals(True)
             other.setChecked(False)
@@ -171,7 +173,7 @@ class CropInteractionMixin:
             return None
         result = []
         for i, key in enumerate(selection.axes):
-            indices = [self.core.physical_to_logical(key, v) for v in selection.bounds[2*i:2*i+2]]
+            indices = [self.core.physical_to_logical(key, v, clamp=False) for v in selection.bounds[2*i:2*i+2]]
             if key == "E" and selection.e_flip:
                 indices = [len(self.core.coords["E"]) - 1 - v for v in indices]
             result.extend(sorted(indices))
@@ -184,12 +186,9 @@ class CropInteractionMixin:
         bounds = logical_bounds if logical_bounds is not None else self._crop_logical_bounds()
         if bounds is None:
             return None
-        domain = spatial_bounds(self.current_render_context)
-        bounded = []
-        for i in range(3):
-            a, b = np.clip(bounds[2*i:2*i+2], domain[2*i], domain[2*i+1])
-            bounded.extend((a, b))
-        return self.core.logical_to_render_bounds(bounded, shape)
+        # Keep draft geometry outside the data. apply_selection intersects the
+        # range with available samples only when the user applies the action.
+        return self.core.logical_to_render_bounds(bounds, shape, clamp=False)
 
     def _sync_slice_edits_from_logical_bounds(self, logical_bounds=None):
         if self.core.raw_data is None:
@@ -202,7 +201,7 @@ class CropInteractionMixin:
         coordinate_bounds = list(bounds)
         if flipped:
             coordinate_bounds[4:6] = [len(self.core.coords["E"]) - 1 - v for v in bounds[4:6]]
-        physical = self.core.logical_bounds_to_physical_bounds(coordinate_bounds)
+        physical = self.core.logical_bounds_to_physical_bounds(coordinate_bounds, clamp=False)
         physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
         self.last_synced_slice_texts = self._logical_bounds_to_texts(bounds)
         controller = self.__dict__.get("crop_controller")
@@ -218,9 +217,7 @@ class CropInteractionMixin:
         shape = self._full_domain_spatial_shape()
         if shape is None:
             return
-        bounds = self.core.render_to_logical_bounds(render_bounds, shape)
-        domain = spatial_bounds(self.current_render_context)
-        bounds = [float(np.clip(v, domain[2*(i//2)], domain[2*(i//2)+1])) for i, v in enumerate(bounds)]
+        bounds = self.core.render_to_logical_bounds(render_bounds, shape, clamp=False)
         self._sync_slice_edits_from_logical_bounds(bounds)
 
     def _update_slice_source_range(self, spec, *, axis_index=None):
@@ -320,26 +317,24 @@ class CropInteractionMixin:
         return bool(spec and context and context.get("view") in {"2d", "1d", "1d_comparison", "waterfall"}
                     and not context.get("crop_empty"))
 
-    def _draw_axis_crop_overlay(self, spec, context):
+    def _refresh_axis_crop_interaction(self, spec, context):
         self._clear_axis_crop_overlay(redraw=False)
         selection = self.crop_controller.selection
-        if selection is None or selection.view == "3d":
-            return
-        x0, x1, y0, y1 = selection.bounds
-        self.axis_crop_overlay = Rectangle((x0, y0), x1-x0, y1-y0, fill=False,
-                                          edgecolor=theme.ACCENT, linewidth=1.4, linestyle="--", alpha=0.9)
-        self.ax_2d.add_patch(self.axis_crop_overlay)
-
-    def _refresh_axis_crop_interaction(self, spec, context):
-        self._clear_axis_crop_selector()
-        self._clear_axis_crop_overlay(redraw=False)
-        if self._crop_enabled() and self._supports_axis_crop_context(spec, context):
-            self._draw_axis_crop_overlay(spec, context)
-            self.axis_crop_selector = RectangleSelector(
-                self.ax_2d, self._on_axis_crop_selected, useblit=True, button=[1],
-                minspanx=1e-12, minspany=1e-12, spancoords="data", interactive=False,
-                props={"facecolor": theme.ACCENT, "edgecolor": theme.ACCENT, "alpha": 0.12, "fill": True},
-            )
+        if (self._crop_enabled() and self._supports_axis_crop_context(spec, context)
+                and selection is not None):
+            selector = self.axis_crop_selector
+            # A full axes.clear() detaches artists even if the selector still
+            # exists (e.g. a preview render that could not use the fast path).
+            if selector is not None and selector.artists[0] not in self.ax_2d.patches:
+                self._clear_axis_crop_selector()
+                selector = None
+            if selector is None:
+                self.axis_crop_selector = InteractiveCropBox(
+                    self.ax_2d, self._on_axis_crop_selected, selection.bounds)
+            else:
+                selector.sync_bounds(selection.bounds)
+        else:
+            self._clear_axis_crop_selector()
         if self.left_display_stack.currentIndex() == 1:
             self.canvas_2d.draw_idle()
 
@@ -408,7 +403,7 @@ class CropInteractionMixin:
             if selection.view == "3d" and selection.e_flip:
                 # Persist canonical physical coordinates so slice-position
                 # controls and subsequent pages use the original axis domain.
-                physical = self.core.logical_bounds_to_physical_bounds(self._crop_logical_bounds())
+                physical = self.core.logical_bounds_to_physical_bounds(self._crop_logical_bounds(), clamp=False)
                 physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
                 selection = replace(selection, bounds=physical, e_flip=False)
             regions.append(selection.to_dict())

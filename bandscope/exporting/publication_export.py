@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import datetime
+import copy
 import os
 import re
 import uuid
@@ -200,7 +201,46 @@ def capture_snapshot(window) -> PublicationSnapshot:
         _freeze_waterfall(window, snapshot, render_context)
     else:
         raise ExportError(f"暂不支持导出的视图类型：{view}")
+    _freeze_enhancement(window, snapshot, spec, context, render_context)
     return snapshot
+
+
+def _freeze_enhancement(window, snapshot, spec, context, render_context):
+    getter = getattr(window, "_enhancement_display", None)
+    fields = getter(context, spec) if getter is not None else None
+    if fields is None:
+        return
+    from bandscope.core.local_enhancement import physical_bounds
+    from bandscope.processing.local_enhancement import orient_2d
+
+    frozen = {"color": np.array(fields["color"], copy=True),
+              "alpha": np.array(fields["alpha"], copy=True),
+              "background_level_info": dict(fields["background_level_info"]),
+              "common": fields["common"], "active": fields["active"],
+              "revision": fields["revision"], "regions": []}
+    frozen["color_rules"] = copy.deepcopy(fields.get("color_rules"))
+    for region in fields["regions"]:
+        record = copy.deepcopy({key: value for key, value in region.items() if key != "slices"})
+        if snapshot.view == "2d":
+            record["display_bounds"] = physical_bounds(context, region["bounds"],
+                e_flip=bool(render_context["slice_info"].get("display_e_flip")))
+        else:
+            record["render_bounds"] = window.core.logical_to_render_bounds(region["bounds"], snapshot.payload["full_shape"], clamp=False)
+        frozen["regions"].append(record)
+    if snapshot.view == "2d":
+        from bandscope.rendering.local_enhancement import region_layers_2d
+        frozen["layers"] = copy.deepcopy(region_layers_2d(fields, context["data"],
+                                                        render_context["slice_info"], context["coords"]))
+        info = render_context["slice_info"]
+        idx = int(info["axis"])
+        keys = [("Y", "E"), ("X", "E"), ("X", "Y")][idx]
+        extent = info.get("extent_override") or [float(context["coords"][k][j]) for k in keys for j in (0, -1)]
+        frozen["color"] = orient_2d(frozen["color"], info, extent).copy()
+        frozen["alpha"] = orient_2d(frozen["alpha"], info, extent).copy()
+    snapshot.payload["enhancement"] = frozen
+    snapshot.payload["level_info"] = frozen["background_level_info"]
+    if frozen["active"]:
+        snapshot.payload["intensity_label"] = "Background intensity (a.u.)"
 
 
 def _build_source_desc(window, spec, render_context) -> str:
@@ -282,7 +322,9 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         ),
         "clip_render_bounds": clip_render,
         "include_zero": include_zero,
-        "opacity_mode": str(window.page_render.combo_map.currentText()),
+        "opacity_mode": (window._enhancement_background_style()["opacity_mode"]
+                         if hasattr(window, "_enhancement_background_style")
+                         else str(window.page_render.combo_map.currentText())),
         "opacity_multiplier": opacity_multiplier,
         "show_axes": bool(window.timeline_bar.switch_axes.isChecked()),
         "viewport_aspect": float(viewport_aspect),

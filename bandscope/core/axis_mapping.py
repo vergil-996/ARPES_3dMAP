@@ -3,6 +3,26 @@ import numpy as np
 
 AXIS_MAPPING_VERSION = "mat_keyed_v2"
 
+
+def interpolate_axis(values, xp, fp, *, extrapolate=False):
+    """Interpolate coordinates, optionally extending the endpoint spacing.
+
+    Unbounded positions are selection drafts, never array indices. Repeated
+    endpoint coordinates use the nearest distinct coordinate for extension.
+    """
+    xp, fp = np.asarray(xp, dtype=float), np.asarray(fp, dtype=float)
+    values = np.asarray(values, dtype=float)
+    result = np.interp(values, xp, fp)
+    if extrapolate and len(xp) > 1:
+        distinct = np.flatnonzero(np.diff(xp) > 0)
+        if distinct.size:
+            left, right = int(distinct[0]) + 1, int(distinct[-1])
+            result = np.where(values < xp[0],
+                              fp[0] + (values - xp[0]) * (fp[left] - fp[0]) / (xp[left] - xp[0]), result)
+            result = np.where(values > xp[-1],
+                              fp[-1] + (values - xp[-1]) * (fp[-1] - fp[right]) / (xp[-1] - xp[right]), result)
+    return result
+
 NPZ_COORD_CANDIDATES = {
     "X": ("kx", "x", "X"),
     "Y": ("ky", "y", "Y"),

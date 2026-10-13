@@ -15,12 +15,14 @@ class PlotCoordinateTooltip:
         context_provider,
         active_provider=None,
         external_blit_provider=None,
+        overlay_artists_provider=None,
     ):
         self.canvas = canvas
         self.axes = axes
         self.context_provider = context_provider
         self.active_provider = active_provider
         self.external_blit_provider = external_blit_provider
+        self.overlay_artists_provider = overlay_artists_provider
         self.annotation = None
         self._background = None
         self.motion_cid = canvas.mpl_connect("motion_notify_event", self._on_motion)
@@ -139,8 +141,15 @@ class PlotCoordinateTooltip:
 
         try:
             self.canvas.restore_region(self._background)
-            if annotation is not None and annotation.get_visible():
-                self.axes.draw_artist(annotation)
+            # The cached background excludes animated crop artists. Every
+            # tooltip-only refresh must repaint them too, including hide/leave.
+            artists = list(self.overlay_artists_provider() if self.overlay_artists_provider else ())
+            if annotation is not None:
+                artists.append(annotation)
+            artists = {id(artist): artist for artist in artists if artist is not None
+                       and artist.axes is self.axes and artist.get_visible()}
+            for artist in sorted(artists.values(), key=lambda a: a.get_zorder()):
+                self.axes.draw_artist(artist)
             self.canvas.blit(self.axes.bbox)
             return True
         except (AttributeError, RuntimeError):

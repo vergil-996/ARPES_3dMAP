@@ -24,6 +24,8 @@ from bandscope.core.crop_model import (
     waterfall_offsets,
 )
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.data_scope import DataScopeDescriptor, ScopedDataVolume
+from bandscope.rendering.refresh_pipeline import RefreshCause
 from bandscope.ui.result_workspace import AnalysisPageSpec
 
 
@@ -340,6 +342,281 @@ class DerivativePropagationTests(unittest.TestCase):
         self.assertEqual(result.params["crop_k_low"], 1)
         self.assertEqual(result.params["crop_e_up"], 6)
         self.assertNotIn("crop_regions", result.params)
+
+
+class CropTimeFrameTests(unittest.TestCase):
+    def _analyzer(self, spec):
+        analyzer = _stub_analyzer(spec)
+        # Exercise the real state persistence and numerical rendering paths.
+        del analyzer._persist_axis_integral_page_state
+        analyzer._persist_axis_interval_state = lambda _spec: None
+        analyzer._syncing_controls = False
+        analyzer.axis_source_mode = spec.params["source_mode"]
+        analyzer.rotation_angle = 0.0
+        analyzer._axis_prefix_cache = None
+        analyzer._rotation_cache = {}
+        analyzer.shared_denoise_version = 0
+        analyzer._get_spec_denoise_methods = lambda _spec: []
+        analyzer.request_refresh = Mock()
+        analyzer.page_data.combo_ax = SimpleNamespace(currentIndex=lambda: 0)
+        frame = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
+        raw_data = np.stack([frame, frame * 3, frame * 7], axis=-1)
+        coords = {"X": np.arange(4.0), "Y": np.arange(5.0),
+                  "E": np.arange(6.0), "delay": np.array([0.0, 0.4, 1.5])}
+        analyzer.core.raw_data = raw_data
+        analyzer.core.coords = coords
+        analyzer._get_display_state_for_spec = lambda _spec: (raw_data, coords)
+        return analyzer
+
+    def _spec(self, *, source_mode="frame", regions=True):
+        params = {
+            "axis_index": 0, "low": 1, "up": 2, "mid": 1,
+            "source_mode": source_mode, "source_t_index": 0,
+            "source_t_low": 0, "source_t_up": 2,
+            "crop_k_low": 2, "crop_k_up": 3, "crop_e_low": 2, "crop_e_up": 4,
+        }
+        if regions:
+            params["crop_base_rect"] = None
+            params["crop_regions"] = [
+                CropSelection("2d", ("Y", "E"), (1, 4, 1, 5)).to_dict(),
+                CropSelection("2d", ("Y", "E"), (2, 3, 2, 4)).to_dict(),
+            ]
+        return AnalysisPageSpec("crop", "二次裁剪", "axis_integral_crop",
+                                "data_process", params=params)
+
+    def test_slider_changes_repeated_crop_data_and_export(self):
+        spec = self._spec()
+        source_params = copy.deepcopy(spec.params)
+        analyzer = self._analyzer(spec)
+        before = analyzer._compute_render_context(spec)
+        analyzer.timeline_bar.slider_time.value = lambda: 2
+
+        analyzer.on_time_slider_changed(2)
+
+        self.assertEqual(spec.params["source_t_index"], 2)
+        analyzer.request_refresh.assert_called_once_with(RefreshCause.DATA_SOURCE, interactive=True)
+        after = analyzer._compute_render_context(spec)
+        expected = analyzer.core.raw_data[1:3, 2:4, 2:5, 2].sum(axis=0)
+        np.testing.assert_array_equal(after["data"], expected)
+        self.assertFalse(np.array_equal(before["data"], after["data"]))
+        self.assertEqual(after["plot_logical_bounds"], before["plot_logical_bounds"])
+        self.assertEqual(spec.params["crop_regions"], source_params["crop_regions"])
+        _, _, payload = analyzer._build_export_payload(spec, analyzer.core.raw_data, analyzer.core.coords)
+        np.testing.assert_array_equal(payload["sample"], expected)
+        np.testing.assert_array_equal(payload["source_t_index"], [2])
+        np.testing.assert_allclose(payload["time"], [1.5])
+
+    def test_active_crop_render_resolves_current_frame_without_slider_signal(self):
+        for regions in (False, True):
+            with self.subTest(regions=regions):
+                spec = self._spec(regions=regions)
+                analyzer = self._analyzer(spec)
+                analyzer.timeline_bar.slider_time.value = lambda: 1
+                context = analyzer._compute_render_context(spec)
+                np.testing.assert_array_equal(
+                    context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, 1].sum(axis=0))
+                self.assertEqual(spec.params["source_t_index"], 1)
+
+    def test_inactive_crop_keeps_its_saved_frame(self):
+        spec = self._spec()
+        analyzer = self._analyzer(spec)
+        analyzer.left_workspace.current_spec = lambda: AnalysisPageSpec("other", "其他", "home", "system")
+        analyzer.timeline_bar.slider_time.value = lambda: 2
+        context = analyzer._compute_render_context(spec)
+        np.testing.assert_array_equal(
+            context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, 0].sum(axis=0))
+        self.assertEqual(spec.params["source_t_index"], 0)
+
+    def test_time_integrated_crop_stays_time_integrated_when_rendered(self):
+        spec = self._spec(source_mode="time_integral")
+        analyzer = self._analyzer(spec)
+        self.assertTrue(analyzer._is_time_locked_page(spec))
+        analyzer.timeline_bar.slider_time.value = lambda: 1
+        context = analyzer._compute_render_context(spec)
+        np.testing.assert_array_equal(
+            context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, :].sum(axis=(0, 3)))
+        self.assertEqual(spec.params["source_mode"], "time_integral")
+
+
+class CroppedSliceIntensityTests(unittest.TestCase):
+    def _analyzer(self, spec, raw_data=None, coords=None):
+        analyzer = _stub_analyzer(spec)
+        frame = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6) + 1
+        raw_data = (np.stack([frame, frame * 3, frame * 7], axis=-1)
+                    if raw_data is None else raw_data)
+        coords = coords or {"X": np.arange(4.0), "Y": np.arange(5.0),
+                            "E": np.arange(6.0), "delay": np.array([0.0, 0.4, 1.5])}
+        analyzer.core.raw_data = raw_data
+        analyzer.core.coords = coords
+        analyzer._get_display_state_for_spec = lambda _spec: (raw_data, coords)
+        analyzer.rotation_angle = 0.0
+        analyzer._axis_prefix_cache = None
+        analyzer._rotation_cache = {}
+        analyzer.shared_denoise_version = 0
+        analyzer._get_spec_denoise_methods = lambda _spec: []
+        analyzer.left_workspace.home_spec = lambda: spec
+        analyzer._seed_control_state_for_spec = lambda result: setattr(result, "data_scope_id", spec.data_scope_id)
+        # A stale 3D range must never override the active 2D crop.
+        analyzer.clip_ranges = [0, 3, 0, 4, 0, 5]
+        return analyzer
+
+    def _axis_spec(self, axis=0, regions=True):
+        keys = [key for i, key in enumerate(("X", "Y", "E")) if i != axis]
+        params = {"axis_index": axis, "low": 1, "up": 2, "mid": 1,
+                  "source_mode": "frame", "source_t_index": 0,
+                  "crop_k_low": 2, "crop_k_up": 3, "crop_e_low": 2, "crop_e_up": 4}
+        if regions:
+            params.update(crop_base_rect=None, crop_regions=[
+                CropSelection("2d", tuple(keys), (0, 3, 0, 4)).to_dict(),
+                CropSelection("2d", tuple(keys), (1, 2, 1, 3)).to_dict(),
+            ])
+        return AnalysisPageSpec("source", "裁剪页", "axis_integral_crop", "data_process", params=params)
+
+    def _assert_curve_and_export(self, analyzer, result, expected):
+        raw_data, coords = analyzer._get_display_state_for_spec(result)
+        context = analyzer._get_slice_dos_context(result, raw_data, coords)
+        np.testing.assert_array_equal(context["y_data"], expected)
+        np.testing.assert_array_equal(context["x_data"], coords["delay"])
+        _, _, payload = analyzer._build_slice_dos_export_payload(result, raw_data, coords)
+        np.testing.assert_allclose(payload["intensity"], expected)
+        np.testing.assert_allclose(payload["time"], coords["delay"])
+
+    def test_repeated_axis_crops_use_only_retained_samples_for_all_axes(self):
+        for axis in range(3):
+            with self.subTest(axis=axis):
+                source = self._axis_spec(axis)
+                analyzer = self._analyzer(source)
+                analyzer.clip_ranges = None
+                result = analyzer._build_slice_dos_spec()
+                self.assertEqual(result.source_page_id, source.page_id)
+                slices = [slice(1, 3), slice(1, 4)]
+                slices.insert(axis, slice(1, 3))
+                expected = analyzer.core.raw_data[(*slices, slice(None))].sum(axis=(0, 1, 2))
+                self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_legacy_rectangle_uses_its_own_range(self):
+        analyzer = self._analyzer(self._axis_spec(regions=False))
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[1:3, 2:4, 2:5, :].sum(axis=(0, 1, 2))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_apply_action_accepts_2d_crop_without_old_3d_clip(self):
+        source = self._axis_spec()
+        analyzer = self._analyzer(source)
+        analyzer.clip_ranges = None
+        analyzer.page_data.current_other_key = lambda: "builtin:slice_dos"
+        analyzer.left_workspace.add_page = Mock()
+        analyzer.on_apply_other_integral()
+        result = analyzer.left_workspace.add_page.call_args.args[0]
+        expected = analyzer.core.raw_data[1:3, 1:3, 1:4, :].sum(axis=(0, 1, 2))
+        self._assert_curve_and_export(analyzer, result, expected)
+        analyzer._show_message.assert_not_called()
+
+    def test_empty_crop_cannot_fall_back_to_old_3d_range(self):
+        source = self._axis_spec()
+        source.params["crop_regions"] = [CropSelection(
+            "2d", ("Y", "E"), (100, 200, 100, 200)).to_dict()]
+        analyzer = self._analyzer(source)
+        self.assertIsNone(analyzer._build_slice_dos_spec())
+        analyzer._show_message.assert_called_once()
+
+    def test_time_integrated_source_uses_frozen_spatial_region_per_delay(self):
+        source = self._axis_spec()
+        source.params.update(source_mode="time_integral", source_t_low=0, source_t_up=1)
+        analyzer = self._analyzer(source)
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[1:3, 1:3, 1:4, :].sum(axis=(0, 1, 2))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_rotated_source_matches_visible_crop_at_each_delay(self):
+        source = self._axis_spec()
+        analyzer = self._analyzer(source)
+        analyzer.rotation_angle = 30.0
+        analyzer.backend_manager = SimpleNamespace(cpu=SimpleNamespace(
+            rotate_volume=lambda frame, _angle: np.roll(frame, 1, axis=0)))
+        result = analyzer._build_slice_dos_spec()
+        expected = []
+        for t in range(3):
+            source.params["source_t_index"] = t
+            expected.append(analyzer._compute_render_context(source)["data"].sum())
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_home_collapse_then_repeated_crop(self):
+        source = AnalysisPageSpec("source", "切片裁剪", "home", "system", params={"crop_regions": [
+            CropSelection("3d", ("X", "Y", "E"), (0, 3, 0, 4, 2, 2)).to_dict(),
+            CropSelection("2d", ("X", "Y"), (0, 3, 1, 4)).to_dict(),
+            CropSelection("2d", ("X", "Y"), (1, 2, 2, 3)).to_dict(),
+        ]})
+        analyzer = self._analyzer(source)
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[1:3, 2:4, 2, :].sum(axis=(0, 1))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_direct_home_slice_preserves_single_layer(self):
+        source = AnalysisPageSpec("source", "切片", "home", "system", params={"crop_regions": [
+            CropSelection("2d", ("Y", "E"), (1, 3, 2, 4)).to_dict(),
+        ]})
+        analyzer = self._analyzer(source)
+        analyzer.home_slice_info = {"axis": 0, "index": 2}
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[2, 1:4, 2:5, :].sum(axis=(0, 1))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_source_edits_and_frame_changes_do_not_change_saved_region(self):
+        source = self._axis_spec()
+        analyzer = self._analyzer(source)
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[1:3, 1:3, 1:4, :].sum(axis=(0, 1, 2))
+        source.params["low"] = 0
+        source.params["crop_regions"].clear()
+        analyzer.timeline_bar.slider_time.value = lambda: 2
+        analyzer.home_slice_info = {"axis": 2, "index": 5}
+        analyzer.clip_ranges = [0, 0, 0, 0, 0, 0]
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_nonuniform_descending_axes_and_energy_flip_match_each_2d_frame(self):
+        source = self._axis_spec()
+        source.params["crop_regions"] = [CropSelection(
+            "2d", ("Y", "E"), (0.4, 2.8, 0.3, 2.0), True).to_dict()]
+        coords = {"X": np.arange(4.0), "Y": np.array([4, 3, 1, 0, -2]),
+                  "E": np.array([0, 0.2, 0.6, 1.1, 2.2, 4]), "delay": np.arange(3.0)}
+        analyzer = self._analyzer(source, coords=coords)
+        result = analyzer._build_slice_dos_spec()
+        expected = []
+        for t in range(3):
+            source.params["source_t_index"] = t
+            expected.append(analyzer._compute_render_context(source)["data"].sum())
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_roi_scope_is_preserved_and_outside_values_never_contribute(self):
+        source = self._axis_spec()
+        source.data_scope_id = "roi-1"
+        full = self._analyzer(source).core.raw_data
+        descriptor = DataScopeDescriptor("roi-1", full.shape, (1, 2, 2, 4, 2, 5))
+        raw_data = ScopedDataVolume(descriptor, descriptor.extract(full))
+        analyzer = self._analyzer(source, raw_data=raw_data)
+        result = analyzer._build_slice_dos_spec()
+        self.assertEqual(result.data_scope_id, "roi-1")
+        expected = full[1:3, 2:3, 2:4, :].sum(axis=(0, 1, 2))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_erased_samples_do_not_contribute(self):
+        source = self._axis_spec()
+        source.params["crop_regions"].append(CropSelection(
+            "2d", ("Y", "E"), (1, 2, 1, 2), operation="erase").to_dict())
+        analyzer = self._analyzer(source)
+        result = analyzer._build_slice_dos_spec()
+        expected = analyzer.core.raw_data[1:3, 1:3, 3, :].sum(axis=(0, 1))
+        self._assert_curve_and_export(analyzer, result, expected)
+
+    def test_existing_3d_range_and_legacy_results_remain_supported(self):
+        source = AnalysisPageSpec("home", "体数据", "home", "system")
+        analyzer = self._analyzer(source)
+        analyzer.clip_ranges = [1, 2, 2, 3, 2, 4]
+        result = analyzer._build_slice_dos_spec()
+        self.assertNotIn("slice_source", result.params)
+        expected = analyzer.core.raw_data[1:3, 2:4, 2:5, :].sum(axis=(0, 1, 2))
+        self._assert_curve_and_export(analyzer, result, expected)
 
 
 class CropExportMetadataTests(unittest.TestCase):

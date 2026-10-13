@@ -8,6 +8,7 @@ from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
 import bandscope.ui.theme as theme
+from bandscope.processing import display_transfer
 
 
 def build_volume_grid(shape, data_bounds, spacing, *, masked=False):
@@ -69,19 +70,7 @@ def configure_volume_mask(volume, grid, data):
 
 def opacity_ramp_points(opac_mode, level_info):
     """现有“强度 → 不透明度”折线的采样点，供一维查表和逐体素求值共用。"""
-    values = VolumeRenderSession.OPACITY_MAPS.get(
-        str(opac_mode), VolumeRenderSession.OPACITY_MAPS["linear"]
-    )
-    opacities = np.asarray(
-        VisualEngine._mapped_opacity(values, level_info), dtype=np.float64
-    )
-    low = float(level_info["black_value"])
-    high = float(level_info["white_value"])
-    if high <= low:
-        high = low + 1.0
-    divisor = max(len(opacities) - 1, 1)
-    sample_values = low + (high - low) * np.arange(len(opacities)) / divisor
-    return sample_values, opacities
+    return display_transfer.opacity_ramp_points(opac_mode, level_info)
 
 
 def normalize_opacity_multiplier(multiplier, energy_length):
@@ -292,42 +281,11 @@ class VisualEngine:
                 d_max = max(d_max, 0.0)
             VisualEngine._last_data_range = (d_min, d_max)
 
-        span = d_max - d_min
-        if span <= 0:
-            span = 1.0
-            d_max = d_min + span
-
-        black_pos = float(np.clip(black / 100.0, 0.0, 1.0))
-        white_pos = float(np.clip(white / 100.0, 0.0, 1.0))
-        if white_pos <= black_pos:
-            white_pos = min(1.0, black_pos + 0.01)
-        if white_pos <= black_pos:
-            black_pos = max(0.0, white_pos - 0.01)
-
-        gamma_power = float(np.power(10, (50 - gamma) / 50.0))
-        gamma_power = max(gamma_power, 1e-6)
-        gray_pos = black_pos + (white_pos - black_pos) * np.power(0.5, 1.0 / gamma_power)
-
-        return {
-            "data_min": d_min,
-            "data_max": d_max,
-            "span": span,
-            "black_pos": black_pos,
-            "gray_pos": float(gray_pos),
-            "white_pos": white_pos,
-            "black_value": d_min + black_pos * span,
-            "gray_value": d_min + float(gray_pos) * span,
-            "white_value": d_min + white_pos * span,
-            "gamma_power": gamma_power,
-        }
+        return display_transfer.level_info((d_min, d_max), levels_params)
 
     @staticmethod
     def _level_mapped_positions(level_info, samples):
-        samples = np.asarray(samples, dtype=np.float64)
-        mapped = np.power(np.clip(samples, 0.0, 1.0), level_info["gamma_power"])
-        return level_info["black_pos"] + (
-            level_info["white_pos"] - level_info["black_pos"]
-        ) * mapped
+        return display_transfer.mapped_positions(level_info, samples)
 
     @staticmethod
     def _leveled_cmap(cmap, level_info):
@@ -339,13 +297,7 @@ class VisualEngine:
 
     @staticmethod
     def _mapped_opacity(opacity, level_info):
-        values = np.asarray(opacity, dtype=np.float64)
-        if values.size <= 1:
-            return opacity
-
-        x = np.linspace(0.0, 1.0, values.size)
-        mapped_x = np.power(x, level_info["gamma_power"])
-        return np.interp(mapped_x, x, values).tolist()
+        return display_transfer.mapped_opacity(opacity, level_info)
 
     @staticmethod
     def _level_ticks(level_info):
@@ -846,6 +798,7 @@ class VisualEngine:
         overlay_artists=(),
         axis_titles=None,
         axis_title_positions=None,
+        display_fields=None,
     ):
         """画 2D 图像；``axis_titles`` 是 ``{"x": ..., "y": ...}`` 轴标题。
 
@@ -857,6 +810,10 @@ class VisualEngine:
         """
         try:
             VisualEngine._ensure_2d_preview_cache(ax, canvas)
+            for overlay in getattr(ax, "_arpes_enhancement_images", ()):
+                if overlay.axes is not None:
+                    overlay.remove()
+            ax._arpes_enhancement_images = []
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
@@ -884,7 +841,8 @@ class VisualEngine:
             if slice_info.get("display_e_flip") and idx in (0, 1):
                 img = np.flip(img, axis=0)
 
-            level_info = VisualEngine._level_info(img, (b, g, w))
+            level_info = (display_fields["background_level_info"] if display_fields is not None
+                          else VisualEngine._level_info(img, (b, g, w)))
             cmap_name = getattr(cmap, "name", str(cmap))
             transfer_signature = (
                 str(cmap_name),
@@ -914,6 +872,7 @@ class VisualEngine:
                 int(idx),
                 tuple(img.shape),
                 VisualEngine._2d_title_signature(axis_titles),
+                display_fields is not None,
             )
             image = getattr(ax, "_arpes_image", None)
             can_update = (
@@ -932,7 +891,7 @@ class VisualEngine:
                     atol=1e-12,
                 )
             )
-            if is_preview and can_update and same_extent:
+            if is_preview and can_update and same_extent and display_fields is None:
                 preview_img = img
                 if getattr(image, "_arpes_transfer_signature", None) == transfer_signature:
                     display_cmap = image.get_cmap()
@@ -1004,6 +963,18 @@ class VisualEngine:
                 VisualEngine._apply_2d_axis_titles(
                     ax, axis_titles, axis_title_positions
                 )
+            if display_fields is not None:
+                from bandscope.rendering.local_enhancement import draw_region_layers_2d, region_layers_2d
+                layers = region_layers_2d(display_fields, data, slice_info, coords)
+                ax._arpes_enhancement_images = draw_region_layers_2d(ax, layers, cmap)
+                ax.set_xlim(ext[0], ext[1])
+                ax.set_ylim(ext[2], ext[3])
+                colorbar = getattr(ax, "_arpes_colorbar", None)
+                if colorbar is not None:
+                    colorbar.set_label("Background intensity", color='white')
+            elif hasattr(ax, "_arpes_enhancement_facecolor"):
+                ax.set_facecolor(ax._arpes_enhancement_facecolor)
+                del ax._arpes_enhancement_facecolor
             canvas.draw_idle()
 
         except Exception as e:
@@ -1012,15 +983,7 @@ class VisualEngine:
 class VolumeRenderSession:
     """Persistent VTK volume scene backed by retained NumPy buffers."""
 
-    OPACITY_MAPS = {
-        "linear": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        "线性": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-        "log": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
-        "对数": [0.000, 0.157, 0.249, 0.320, 0.383, 0.441, 0.494, 0.544, 0.591, 0.636, 1.000],
-        "power": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
-        "幂函数": [0.000, 0.188, 0.266, 0.327, 0.378, 0.424, 0.467, 0.507, 0.545, 0.583, 1.000],
-        "sigmoid": [0.006, 0.018, 0.049, 0.118, 0.268, 0.500, 0.732, 0.882, 0.951, 0.982, 0.994],
-    }
+    OPACITY_MAPS = display_transfer.OPACITY_MAPS
 
     def __init__(self, plotter):
         self.plotter = plotter
@@ -1039,6 +1002,7 @@ class VolumeRenderSession:
         self._domain_signature = None
         self.opacity_multiplier = None
         self.alpha_channel = None
+        self.display_channel = None
         self.finite_flat = None
         self._alpha_state = None
         self.rebuild_count = 0
@@ -1075,6 +1039,7 @@ class VolumeRenderSession:
         self._axes_signature = None
         self._domain_signature = None
         self.alpha_channel = None
+        self.display_channel = None
         self.finite_flat = None
         self._alpha_state = None
         if render:
@@ -1189,6 +1154,7 @@ class VolumeRenderSession:
         include_zero=False,
         opacity_multiplier=None,
         axis_titles=None,
+        display_fields=None,
     ):
         source = np.asarray(data, dtype=np.float32)
         if source.ndim != 3:
@@ -1260,9 +1226,39 @@ class VolumeRenderSession:
         # 倍率与数据同行，长度按数据的能量轴校验；None 表示不使用插件效果。
         self.set_opacity_multiplier(opacity_multiplier, int(source.shape[2]))
         # 先建通道、再定样式、最后填值：三步的顺序都不能换，见各自文档。
-        self._attach_alpha_channel()
-        self._update_style(levels_params, opac_mode, cmap, include_zero=bool(include_zero))
-        self._fill_alpha_channel(levels_params, opac_mode, bool(include_zero))
+        if display_fields is not None:
+            from bandscope.rendering.local_enhancement import apply_volume_display
+            self._release_alpha_channel()
+            if self.display_channel is None:
+                self.display_channel = VolumeAlphaChannel(self.volume, self.grid, display_fields["color"], self.finite_flat)
+            apply_volume_display(self.display_channel, display_fields["color"],
+                                 display_fields["alpha"], cmap, self.opacity_multiplier,
+                                 color_rules=display_fields.get("color_rules"))
+            self.level_info = display_fields["background_level_info"]
+            self._style_signature = None
+            try:
+                scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+                lut = pv.LookupTable(cmap=VisualEngine._leveled_cmap(cmap, self.level_info),
+                                     scalar_range=(self.level_info["black_value"], self.level_info["white_value"]))
+                scalar_bar.SetLookupTable(lut)
+                scalar_bar.SetTitle("Background intensity")
+                VisualEngine._apply_3d_colorbar_ticks(self.plotter, self.level_info)
+            except (KeyError, AttributeError):
+                pass
+        else:
+            if self.display_channel is not None:
+                self.display_channel.detach()
+                self.display_channel = None
+                self._style_signature = None
+            self._attach_alpha_channel()
+            self._update_style(levels_params, opac_mode, cmap, include_zero=bool(include_zero))
+            self._fill_alpha_channel(levels_params, opac_mode, bool(include_zero))
+            try:
+                scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+                scalar_bar.SetLookupTable(self.volume.mapper.lookup_table)
+                scalar_bar.SetTitle(VisualEngine.COLORBAR_TITLE)
+            except (KeyError, AttributeError):
+                pass
         self._update_clipping(clip_ranges)
         self._update_axes(bool(show_axes), core_coords, axis_titles)
         self._set_interactive_quality(quality)

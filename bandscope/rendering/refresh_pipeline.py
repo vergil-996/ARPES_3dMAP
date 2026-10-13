@@ -19,6 +19,7 @@ class RefreshCause(Enum):
     ANALYSIS = auto()
     ROTATION = auto()
     TRANSFER_FUNCTION = auto()
+    DISPLAY_MAPPING = auto()
     GEOMETRY = auto()
     OVERLAY = auto()
     PAGE_ACTIVATION = auto()

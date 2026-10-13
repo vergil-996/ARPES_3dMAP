@@ -1,0 +1,27 @@
+{
+  "data": "D:\\ARPES_3dmap\\ARPES_3dMAP\\.local\\data\\WSe2_step.npz",
+  "checks": [
+    "3D source ready",
+    "Y integral inherits both 3D regions",
+    "2D image has separate RGBA channels",
+    "dropdown contains background and inherited regions",
+    "inherited rectangle has interactive handles",
+    "first region retains its independent style",
+    "projection retains X and E bounds",
+    "R1 normalizes original 2D samples",
+    "R2 normalizes original 2D samples",
+    "2D scientific result remains the raw volume sum",
+    "E flip preserves inherited sample bounds",
+    "publication includes both inherited regions",
+    "projected edit survives refresh",
+    "editing 2D does not change source volume regions",
+    "deleted projection joins background normalization",
+    "last projected deletion hides dropdown",
+    "last projected deletion restores scalar image",
+    "2D deletions leave both 3D source regions intact",
+    "returning to 3D restores both volume regions",
+    "X integral projects Y and E bounds",
+    "E integral projects X and Y bounds",
+    "source data remain unchanged"
+  ]
+}

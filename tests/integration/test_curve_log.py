@@ -231,6 +231,16 @@ class _FakeAction:
     def __init__(self, text):
         self.text = text
         self.triggered = _FakeSignal()
+        self.toggled = _FakeSignal()
+
+    def setCheckable(self, value):
+        self.checkable = bool(value)
+
+    def setChecked(self, value):
+        self.checked = bool(value)
+
+    def setEnabled(self, value):
+        self.enabled = bool(value)
 
 
 class _FakeMenu:

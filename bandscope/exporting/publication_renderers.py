@@ -760,6 +760,18 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
         vmin=float(level_info["black_value"]),
         vmax=float(level_info["white_value"]),
     )
+    enhancement = snapshot.payload.get("enhancement")
+    if enhancement is not None:
+        from matplotlib.patches import Rectangle
+        from bandscope.rendering.local_enhancement import draw_region_layers_2d, enhancement_legend
+        if enhancement["active"]:
+            draw_region_layers_2d(ax, enhancement["layers"], snapshot.cmap_name)
+        for region in enhancement["regions"]:
+            x0, x1, y0, y1 = region["display_bounds"]
+            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0, fill=False, edgecolor="#45b9d5", linewidth=.7))
+            ax.text(x0, y1, region.get("label", "ROI"), fontsize=7, color="#2389a5", clip_on=True)
+        ax.text(.01, .01, enhancement_legend(enhancement), transform=ax.transAxes, fontsize=6,
+                color="#2389a5", va="bottom")
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
 
@@ -1298,6 +1310,20 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
                 snapshot.payload["opacity_mode"],
                 level_info,
             )
+        enhancement = snapshot.payload.get("enhancement")
+        if enhancement is not None and enhancement["active"]:
+            from bandscope.rendering.render_core import VolumeAlphaChannel
+            from bandscope.rendering.local_enhancement import apply_volume_display
+            if alpha_channel is not None:
+                alpha_channel.detach()
+            alpha_channel = VolumeAlphaChannel(volume_actor, grid, enhancement["color"])
+            apply_volume_display(alpha_channel, enhancement["color"], enhancement["alpha"], snapshot.cmap_name, opacity_multiplier,
+                                 color_rules=enhancement.get("color_rules"))
+            for region in enhancement["regions"]:
+                bounds = region["render_bounds"]
+                plotter.add_mesh(pv.Box(bounds=bounds).outline(), color="#45b9d5", render=False)
+                plotter.add_point_labels([[(bounds[0]+bounds[1])/2, (bounds[2]+bounds[3])/2, bounds[5]]],
+                    [region.get("label", "ROI")], show_points=False, font_size=10, always_visible=True, render=False)
         clip = snapshot.payload.get("clip_render_bounds")
         if clip is not None:
             _apply_clipping_planes(plotter, clip)
@@ -1386,6 +1412,10 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         plotter.close()
 
     # 3D 注释叠加在图像坐标系（像素）；边距仍做一遍实测防裁切
+    if snapshot.payload.get("enhancement") is not None:
+        from bandscope.rendering.local_enhancement import enhancement_legend
+        ax_img.text(.01, .01, enhancement_legend(snapshot.payload["enhancement"]), transform=ax_img.transAxes,
+                    fontsize=6, color="#2389a5", va="bottom")
     overflow = _fit_layout_3d(
         fig, ax_img, cbar_ax, width_mm, height_mm, margins, cbar_layout,
         scale=body_factor, title_plan=title_plan,

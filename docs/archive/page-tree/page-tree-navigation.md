@@ -8,7 +8,7 @@
 - 共享文件：`bandscope/ui/result_workspace.py`、`bandscope/app/refactored_app.py`；
   新增 `bandscope/ui/page_tree.py`。未改动插件公开 API、依赖列表与打包配置。
 - 相关工作：[轴标题编辑与页面重命名](../axis-titles/axis-title-editing.md)（改名规则
-  已落地并复用）；[活动裁剪框](../../plans/interactive-crop-box.md) 仍未实施，与本次
+  已落地并复用）；[活动裁剪框](../crop/interactive-crop-box.md) 在本记录完成时仍未实施，与本次
   改动共用主窗口和裁剪接入。
 - 验收状态：679 条自动化测试通过；`verify_page_tree.py` 真实窗口 54 项检查全部通过；
   `verify_axis_titles.py`、`verify_page_shortcuts.py` 回归全部通过。

@@ -92,8 +92,8 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.core = SimpleNamespace(
             raw_data=np.zeros((4, 5, 6, 1), dtype=np.float32),
-            logical_to_render_bounds=lambda bounds, _shape: list(bounds),
-            physical_to_logical=lambda _key, value: value,
+            logical_to_render_bounds=lambda bounds, _shape, **_kwargs: list(bounds),
+            physical_to_logical=lambda _key, value, **_kwargs: value,
         )
         analyzer.precise_logical_bounds = [1, 2, 1, 3, 2, 4]
         analyzer.crop_controller = SimpleNamespace(selection=CropSelection("3d", ("X", "Y", "E"), (1, 2, 1, 3, 2, 4)))

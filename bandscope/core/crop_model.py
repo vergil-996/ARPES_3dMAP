@@ -3,6 +3,8 @@ from dataclasses import dataclass, asdict, replace
 
 import numpy as np
 
+from bandscope.core.axis_mapping import interpolate_axis
+
 
 SPATIAL_KEYS = ("X", "Y", "E")
 SPATIAL_LABELS = {"X": "kx", "Y": "ky", "E": "E"}
@@ -143,8 +145,8 @@ def reorient_volume_selection(context, selection, e_flip):
     target = coords[::-1] if e_flip else coords
     indices = np.arange(len(coords), dtype=float)
     xp, fp = (source[::-1], indices[::-1]) if source[0] > source[-1] else (source, indices)
-    positions = np.interp(selection.bounds[4:6], xp, fp)
-    bounds = (*selection.bounds[:4], *sorted(np.interp(positions, indices, target)))
+    positions = interpolate_axis(selection.bounds[4:6], xp, fp, extrapolate=True)
+    bounds = (*selection.bounds[:4], *sorted(interpolate_axis(positions, indices, target, extrapolate=True)))
     return replace(selection, bounds=bounds, e_flip=e_flip)
 
 

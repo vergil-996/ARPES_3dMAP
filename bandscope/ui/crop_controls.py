@@ -229,6 +229,14 @@ class CropController(QObject):
         saved = self.selections.get(page_id)
         if default and saved and (saved.view, saved.axes) == (default.view, default.axes):
             default = reorient_volume_selection(context, saved, e_flip)
+        elif default and default.view == "2d":
+            # Leave room around all nine handles on a new 2D page. Saved and
+            # manually entered ranges are restored exactly, including overflow.
+            bounds = []
+            for low, high in zip(default.bounds[::2], default.bounds[1::2]):
+                inset = (high - low) * .1
+                bounds.extend((low + inset, high - inset))
+            default = replace(default, bounds=tuple(bounds))
         self.set_selection(replace(default, operation=self.operation) if default else None, notify=False)
 
     def set_operation(self, operation):

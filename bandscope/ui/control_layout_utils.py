@@ -268,6 +268,9 @@ def sync_slider_visual(slider):
     minimum = int(slider.minimum())
     maximum = int(slider.maximum())
     value = int(slider.value())
+    label = getattr(slider, "_value_label", None)
+    if label is not None:
+        label.setText(str(value))
     progress = 0.0 if maximum == minimum else (value - minimum) / (maximum - minimum)
 
     try:

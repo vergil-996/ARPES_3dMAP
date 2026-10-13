@@ -58,6 +58,7 @@ from bandscope.ui.camera_view_controls import (
 )
 from bandscope.ui.crop_controls import CropController
 from bandscope.app.crop_integration import CropInteractionMixin
+from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval, AxisSpace, nearest_index
@@ -116,7 +117,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(CropInteractionMixin, QWidget):
+class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
@@ -231,6 +232,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.crop_controller = CropController(self)
         self.toast_manager = ToastManager(self)
         self.volume_session = VolumeRenderSession(self.plotter)
+        self._init_enhancement()
         try:
             self._camera_observer_id = self.plotter.iren.add_observer(
                 "EndInteractionEvent",
@@ -371,6 +373,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return True
 
     def eventFilter(self, watched, event):
+        if self._enhancement_event_filter(watched, event):
+            return True
         if self._crop_event_filter(watched, event):
             return True
         if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
@@ -557,6 +561,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             context_provider=lambda: self.current_render_context,
             active_provider=lambda: self._reads_2d_canvas() and not self._axis_title_dragging(),
             external_blit_provider=self._axis_crop_selector_will_blit,
+            overlay_artists_provider=self._active_2d_blit_artists,
         )
         self.axis_title_controller = AxisTitleController(
             self.canvas_2d,
@@ -1401,7 +1406,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             if request.quality == RenderQuality.EXACT and signature == self._last_ui_transfer_signature:
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
-        if request.cause in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}:
+        if request.cause in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.DISPLAY_MAPPING, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}:
             self._render_active_page(request.quality, request.cause)
             self._finish_ui_refresh(request, self._last_compute_backend)
             return
@@ -1644,6 +1649,11 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._update_export_button_states()
 
     def _current_transfer_signature(self):
+        effect_signature = self._plugin_effect_signature()
+        enhancement_getter = getattr(self, "_enhancement_state", None)
+        enhancement = enhancement_getter() if enhancement_getter is not None else None
+        if enhancement:
+            effect_signature = (effect_signature, repr(enhancement))
         return (
             tuple(self._get_display_levels()),
             str(self.page_render.combo_map.currentText()),
@@ -1651,7 +1661,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             VisualEngine.locked_data_range(),
             # 插件参数只改变不透明度，不改数据；不把它算进签名的话，改一条平带
             # 会被判成“传输函数没变”而整帧跳过。
-            self._plugin_effect_signature(),
+            effect_signature,
         )
 
     # ------------------------------------------------------------------
@@ -1867,7 +1877,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.page_render.s_gamma.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.btn_apply_map.clicked.connect(
-            lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
+            self.flush_render_levels_refresh
         )
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
         self.page_render.combo_backend.currentTextChanged.connect(self.on_backend_mode_changed)
@@ -2101,7 +2111,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             "active_control_tab": int(self.page_container.currentIndex()),
             "axis_source_mode": self.axis_source_mode,
             "image": self.timeline_bar.export_state(),
-            "render": self.page_render.export_state(),
+            "render": self._enhancement_export_render_state(self.page_render.export_state()),
             "denoise_detail": self.page_control_blank.export_state(),
             "data_process": self.page_data.export_state(),
         }
@@ -2141,6 +2151,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         control_state = self._capture_control_state()
         control_state["axis_source_mode"] = self._page_axis_source_mode(spec)
         self._store_control_state(spec, control_state)
+
+        self._inherit_enhancement_state(spec)
 
     def _page_axis_source_mode(self, spec):
         if spec is None:
@@ -2310,8 +2322,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def flush_render_levels_refresh(self):
         if self._syncing_controls:
             return
+        local = self._commit_enhancement_controls()
         self.request_refresh(
-            RefreshCause.TRANSFER_FUNCTION,
+            RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION,
             RenderQuality.EXACT,
             immediate=True,
         )
@@ -2319,7 +2332,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
     def schedule_render_levels_refresh(self, _value):
         if self._syncing_controls:
             return
-        self.request_refresh(RefreshCause.TRANSFER_FUNCTION, interactive=True)
+        local = self._commit_enhancement_controls()
+        self.request_refresh(RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION, interactive=True)
 
     def on_time_slider_changed(self, value):
         self.on_image_time_changed(value)
@@ -2973,10 +2987,19 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         )
         box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
         box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
+        self._crop_box_widget = box_widget
         self._box_bounds_signature = signature
 
     def _clear_interactive_box(self):
-        self.plotter.clear_box_widgets()
+        if self.__dict__.get("_enhancement_box_widget") is None:
+            self.plotter.clear_box_widgets()
+        else:
+            widget = self.__dict__.get("_crop_box_widget")
+            if widget is not None:
+                widget.Off()
+                if widget in self.plotter.box_widgets:
+                    self.plotter.box_widgets.remove(widget)
+        self._crop_box_widget = None
         self._box_bounds_signature = None
 
     def _find_main_volume(self):
@@ -3022,11 +3045,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._on_box_interaction_end(None, None)
 
     def _get_display_levels(self):
-        return (
-            self.page_render.s_low.value(),
-            self.page_render.s_gamma.value(),
-            self.page_render.s_up.value(),
-        )
+        return tuple(self._enhancement_background_style()["levels"])
 
     def _map_visual_flip_logical_bounds(self, bounds, shape):
         # The 3D E reversal is camera-driven.  Camera.Elevation(180) already
@@ -3507,6 +3526,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
+        self._append_enhancement_actions(menu)
         self._append_axis_title_actions(menu, self.canvas_2d, global_pos)
 
         if can_copy or can_paste or show_curve_actions:
@@ -3529,6 +3549,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._show_axis_title_menu(self.plotter, global_pos)
             return
         menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
+        self._append_enhancement_actions(menu)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
         menu.exec_(global_pos)
 
@@ -4016,7 +4037,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if spec is None:
             return None
 
-        if self._is_current_page(spec) and spec.page_kind == "axis_integral":
+        if self._is_current_page(spec) and spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(spec)
 
         params = spec.params
@@ -4588,10 +4609,49 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return {
             "view": "1d",
             "x_data": coords["delay"],
-            "y_data": self._compute_slice_dos(raw_data, spec.params["clip_ranges"]),
+            "y_data": self._compute_slice_dos_for_spec(spec, raw_data, coords),
             "title": "Slice Integrated Intensity vs Time",
             "xlabel": "Delay (ps)",
         }
+
+    def _compute_slice_dos_for_spec(self, spec, raw_data, coords):
+        source = spec.params.get("slice_source")
+        if source is None:
+            return self._compute_slice_dos(raw_data, spec.params["clip_ranges"])
+
+        # Rebuild the frozen spatial source for each delay, then replay the
+        # same crop chain as the 2D view. Never read the live source page here.
+        template = source["context"]
+        regions = source["crop_regions"]
+        has_erasure = any(region.get("operation") == "erase" for region in regions)
+        intensities = []
+        for t_index in range(raw_data.shape[3]):
+            frame = self._get_rotated_frame(raw_data, t_index)
+            context = dict(template, coords=coords)
+            if template["view"] == "3d":
+                context["data"] = frame
+            else:
+                info = template["slice_info"]
+                axis = int(info["axis"])
+                if info.get("mode") == "integral":
+                    low, up = info["range"]
+                    data = self._get_axis_integrated_data_from_raw(frame, axis, low, up)
+                else:
+                    data = self._extract_slice_data(frame, axis, info["index"])
+                rect = template["plot_logical_bounds"]
+                context["data"] = data[
+                    int(rect["x_low"]):int(rect["x_up"]) + 1,
+                    int(rect["y_low"]):int(rect["y_up"]) + 1,
+                ]
+            context = apply_crop_regions(context, regions)
+            if context.get("crop_empty"):
+                intensities.append(np.nan)
+            elif has_erasure:
+                # Erased samples are NaNs and contribute no intensity.
+                intensities.append(np.nansum(context["data"], dtype=np.float64))
+            else:
+                intensities.append(np.sum(context["data"], dtype=np.float64))
+        return np.asarray(intensities)
 
     def _build_axis_source_spec_from_params(self, params, *, page_id="axis_source", title="axis_source"):
         axis_index = int(params.get("axis_index", -1))
@@ -5559,6 +5619,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.request_refresh(RefreshCause.PAGE_ACTIVATION, RenderQuality.EXACT, immediate=True)
 
     def on_result_page_activated(self, page_id):
+        self._clear_enhancement_interaction()
         self.crop_controller.popup.hide()
         self._clear_axis_crop_interaction(redraw=False)
         self._reset_axis_title_interaction()
@@ -5586,16 +5647,23 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
 
     def _sync_controls_from_page(self, spec):
         self._restore_page_ui_state(spec)
+        self._restore_enhancement_target_style()
 
     def on_toggle_e_flip(self, checked):
         if self.base_raw_data is None:
             return
 
+        # Axis controls describe a slab, while the crop draft can be an
+        # arbitrary box. Reorient its labels without replacing its geometry.
+        draft_bounds = self._crop_logical_bounds()
         self._refresh_core_display_state()
         self.update_ax_slider_range()
-        self.sync_ax_sliders_to_box()
+        if draft_bounds is None:
+            self.sync_ax_sliders_to_box()
         self._persist_axis_interval_for_current_page()
-        self._sync_slice_edits_from_logical_bounds(self.precise_logical_bounds or self.clip_ranges)
+        self._sync_slice_edits_from_logical_bounds(
+            draft_bounds if draft_bounds is not None else self.precise_logical_bounds or self.clip_ranges
+        )
         self.global_refresh()
 
     def on_rotation_angle_changed(self):
@@ -5809,6 +5877,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return path
 
     def _reset_loaded_data_state(self, target_path):
+        self._reset_enhancement_for_new_data()
         from bandscope.exporting.curve_presentation import publication_session
         publication_session(self).clear()
         dialog = self.__dict__.get("_publication_dialog")
@@ -6598,8 +6667,46 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         return spec
 
     def _build_slice_dos_spec(self):
+        current = self.left_workspace.current_spec()
+        if current is None or current.page_kind == "control_panel":
+            current = self._current_visual_spec()
+        if current is not None and current.page_kind in {"home", "axis_integral", "axis_integral_crop"}:
+            base = self._compute_base_render_context(current)
+            context = (apply_crop_regions(base, current.params.get("crop_regions", ()))
+                       if base is not None else None)
+            if context is not None and context.get("view") == "2d":
+                if context.get("crop_empty"):
+                    self._show_message("无法积分", "当前裁剪范围内没有有效数据。", QMessageBox.Warning)
+                    return None
+                # Only geometry is frozen; data is recomputed for every delay.
+                # A 3D template covers a crop chain that collapses to a slice.
+                template = {key: copy.deepcopy(base[key]) for key in (
+                    "view", "slice_info", "plot_axes", "plot_logical_bounds",
+                    "data_bounds", "full_shape",
+                ) if key in base}
+                if base["view"] == "2d" and "plot_logical_bounds" not in template:
+                    axes = [key for i, key in enumerate(("X", "Y", "E"))
+                            if i != int(base["slice_info"]["axis"])]
+                    template["plot_logical_bounds"] = {
+                        "x_low": 0, "x_up": len(base["coords"][axes[0]]) - 1,
+                        "y_low": 0, "y_up": len(base["coords"][axes[1]]) - 1,
+                    }
+                spec = AnalysisPageSpec(
+                    page_id=self._make_page_id(),
+                    title=f"切片内强度积分 - {current.title}",
+                    page_kind="slice_dos", source_module="data_process",
+                    source_page_id=current.page_id,
+                    params={"slice_source": {
+                        "context": template,
+                        "crop_regions": copy.deepcopy(current.params.get("crop_regions", [])),
+                    }},
+                )
+                self._seed_control_state_for_spec(spec)
+                return spec
+
         clip_info = self._get_clip_slices(self.clip_ranges)
         if clip_info is None:
+            self._show_message("未进行切片设置", "请使用顶部“裁剪”按钮设置范围并裁剪。", QMessageBox.Warning)
             return None
 
         _, index_bounds = clip_info
@@ -6985,7 +7092,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return
 
         self.axis_source_mode = "frame"
-        if current_spec is not None and current_spec.page_kind == "axis_integral":
+        if current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(current_spec)
 
     def sync_ax_sliders_to_box(self):
@@ -7122,9 +7229,6 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             if not self.core.has_time_axis:
                 self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
                 return
-            if self.clip_ranges is None:
-                self._show_message("未进行切片设置", "请使用顶部“裁剪”按钮设置范围并裁剪。", QMessageBox.Warning)
-                return
             spec = self._build_slice_dos_spec()
         elif key == "builtin:energy_dos":
             spec = self._build_energy_dos_spec()
@@ -7160,9 +7264,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         if self.axis_crop_selector is None:
             return
         try:
-            self.axis_crop_selector.set_active(False)
-            self.axis_crop_selector.set_visible(False)
-            self.axis_crop_selector.disconnect_events()
+            self.axis_crop_selector.dispose()
         except Exception:
             pass
         self.axis_crop_selector = None
@@ -7192,7 +7294,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         )
 
     def _active_2d_blit_artists(self):
-        artists = []
+        artists = self._enhancement_blit_artists()
         overlay = self.axis_crop_overlay
         if overlay is not None:
             artists.append(overlay)
@@ -7216,6 +7318,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         selector = self.axis_crop_selector
         if selector is not None:
             selector.background = background
+        enhancement = self.__dict__.get("_enhancement_selector")
+        if enhancement is not None:
+            enhancement.background = background
 
     # ------------------------------------------------------------------
     # 轴标题
@@ -7458,7 +7563,9 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         menu = QMenu(owner)
         menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         try:
-            if not self._append_axis_title_actions(menu, owner, global_pos):
+            has_titles = self._append_axis_title_actions(menu, owner, global_pos)
+            has_enhancement = self._append_enhancement_actions(menu)
+            if not has_titles and not has_enhancement:
                 return False
             menu.exec_(global_pos)
         finally:
@@ -7483,6 +7590,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._reset_axis_title_interaction()
 
         if spec.page_kind == "control_panel":
+            self._clear_enhancement_interaction()
+            self._sync_enhancement_controls(spec)
             self._activate_crop_context(spec, None)
             self.left_display_stack.setCurrentIndex(2)
             self._clear_interactive_box()
@@ -7491,6 +7600,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             return
 
         if self.core.raw_data is None:
+            self._clear_enhancement_interaction()
+            self._sync_enhancement_controls(spec)
             self._activate_crop_context(spec, None)
             self.left_display_stack.setCurrentIndex(0)
             self.volume_session.clear(render=False)
@@ -7514,17 +7625,23 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self.current_render_context = context
         self._activate_crop_context(spec, context)
         if context.get("crop_empty"):
+            self._clear_enhancement_interaction()
+            self._sync_enhancement_controls(spec)
             self._render_empty_crop()
             self._set_camera_view_visible(False)
             return
         render_context = self._render_context_for_visual_flip(context)
+        display_fields = self._enhancement_display(context, spec, freeze_pending=quality == RenderQuality.EXACT)
+        active_display_fields = display_fields if display_fields and display_fields["active"] else None
         self.ax_2d.set_axis_on()
         if preserve_2d_interaction and render_context.get("view") != "2d":
             preserve_2d_interaction = False
             self.plot_coordinate_tooltip.hide(redraw=False)
             self._clear_axis_crop_interaction(redraw=False)
         levels = self._get_display_levels()
-        mapping_mode = self.page_render.combo_map.currentText()
+        enhancement = self._enhancement_state(spec)
+        mapping_mode = (enhancement["background"]["opacity_mode"] if enhancement
+                        else self.page_render.combo_map.currentText())
         current_cmap = self.page_render.get_selected_cmap()
         # 必须与 _current_transfer_signature() 同构：这是 EXACT 刷新时判断“传输
         # 函数没变、可以整帧跳过”的依据，结构不一致会让判等永远失败。
@@ -7548,6 +7665,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             # scene on release. Interactive mapper sampling still limits cost.
             if (
                 quality == RenderQuality.PREVIEW
+                and active_display_fields is None
                 and cause not in {RefreshCause.DATA_SOURCE, RefreshCause.TRANSFER_FUNCTION, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}
                 and render_context.get("data_bounds") is None
                 and int(np.prod(volume_data.shape, dtype=np.int64)) > 2_500_000
@@ -7581,6 +7699,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 include_zero=bool(render_context.get("include_zero", False)),
                 opacity_multiplier=opacity_multiplier,
                 axis_titles=self._three_d_axis_titles(spec),
+                display_fields=active_display_fields,
             )
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
@@ -7607,6 +7726,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
                 overlay_artists=self._active_2d_blit_artists(),
                 axis_titles=axis_titles,
                 axis_title_positions=axis_title_positions,
+                display_fields=active_display_fields,
             )
             if quality == RenderQuality.PREVIEW and preview_blitted:
                 self._sync_active_2d_blit_background()
@@ -7631,10 +7751,13 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             self._restore_volume_opacity_if_dimmed()
             self._clear_interactive_box()
 
-        if not (preserve_2d_interaction and render_context["view"] == "2d"):
+        if not (preserve_2d_interaction and render_context["view"] == "2d"
+                and preview_blitted):
             self._refresh_axis_crop_interaction(spec, context)
 
         # 「相机视角」只在真正显示 3D 场景时展开：目标状态不变时不会重播动画，
+        self._sync_enhancement_controls(spec, context)
+        self._draw_enhancement_regions(context, display_fields)
         # 因此时间轴拖动、色带调整等普通 3D 重绘不会让面板反复出现。
         is_3d_view = render_context["view"] == "3d"
         self._set_camera_view_visible(is_3d_view)
@@ -7668,6 +7791,8 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._computed_volume_cache.clear()
         self._second_derivative_volume_cache = None
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
+            self._clear_enhancement_interaction()
+            self._enhancement_cache = None
             self.current_render_context = None
             self._clear_axis_crop_interaction(redraw=False)
             self._reset_axis_title_interaction()
@@ -7684,6 +7809,10 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
         self._discard_unreferenced_roi_scopes()
 
     def closeEvent(self, event):
+        self._clear_enhancement_interaction()
+        render_page = self.__dict__.get("page_render")
+        if render_page is not None and hasattr(render_page, "stop_enhancement_animation"):
+            render_page.stop_enhancement_animation()
         self._save_splitter_sizes()
         workspace = self.__dict__.get("left_workspace")
         if workspace is not None:
@@ -7801,7 +7930,7 @@ class My3DAnalyzer(CropInteractionMixin, QWidget):
             {
                 "time": np.asarray(coords["delay"], dtype=np.float32),
                 "intensity": np.asarray(
-                    self._compute_slice_dos(raw_data, spec.params["clip_ranges"]),
+                    self._compute_slice_dos_for_spec(spec, raw_data, coords),
                     dtype=np.float32,
                 ),
             },

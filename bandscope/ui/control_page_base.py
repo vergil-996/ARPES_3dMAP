@@ -192,6 +192,7 @@ class ControlPageBase(QWidget):
         if value_box is None:
             value_label = QLabel(str(int(slider.value())), container)
             value_label.setStyleSheet(theme.slider_value_qss())
+            slider._value_label = value_label
             slider.valueChanged.connect(
                 lambda v, lbl=value_label: lbl.setText(str(int(v)))
             )

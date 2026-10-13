@@ -6,6 +6,7 @@ from bandscope.core.axis_mapping import (
     canonicalize_array,
     find_first_key,
     infer_axis_roles,
+    interpolate_axis,
     legacy_hdf5_axis_roles,
     metadata_axis_roles,
     role_order_for_shape,
@@ -183,7 +184,7 @@ class AnalyzerCore(QObject):
 
         return np.asarray(coords, dtype=np.float64).flatten()
 
-    def logical_to_physical(self, axis_ref, logical_value):
+    def logical_to_physical(self, axis_ref, logical_value, *, clamp=True):
         coords = self._get_axis_coords(axis_ref)
         if coords.size == 0:
             return float(logical_value)
@@ -191,11 +192,10 @@ class AnalyzerCore(QObject):
         if coords.size == 1:
             return float(coords[0])
 
-        logical_value = float(np.clip(logical_value, 0, coords.size - 1))
         logical_axis = np.arange(coords.size, dtype=np.float64)
-        return float(np.interp(logical_value, logical_axis, coords))
+        return float(interpolate_axis(logical_value, logical_axis, coords, extrapolate=not clamp))
 
-    def physical_to_logical(self, axis_ref, physical_value):
+    def physical_to_logical(self, axis_ref, physical_value, *, clamp=True):
         coords = self._get_axis_coords(axis_ref)
         if coords.size <= 1:
             return 0.0
@@ -214,16 +214,15 @@ class AnalyzerCore(QObject):
             nearest_idx = int(np.argmin(np.abs(coords - physical_value)))
             return float(nearest_idx)
 
-        clipped_value = float(np.clip(physical_value, np.min(x_axis), np.max(x_axis)))
-        return float(np.interp(clipped_value, x_axis, y_axis))
+        return float(interpolate_axis(physical_value, x_axis, y_axis, extrapolate=not clamp))
 
-    def logical_bounds_to_physical_bounds(self, bounds):
+    def logical_bounds_to_physical_bounds(self, bounds, *, clamp=True):
         if bounds is None:
             return None
 
         physical_bounds = list(bounds)
         for label, (_, idx) in self.DISPLAY_LABEL_MAP.items():
-            physical_bounds[idx] = self.logical_to_physical(label, bounds[idx])
+            physical_bounds[idx] = self.logical_to_physical(label, bounds[idx], clamp=clamp)
         return physical_bounds
 
     def physical_texts_to_logical_texts(self, texts):
@@ -243,7 +242,7 @@ class AnalyzerCore(QObject):
         return logical_texts
 
     @staticmethod
-    def logical_to_render_bounds(bounds, shape, target_size=200.0):
+    def logical_to_render_bounds(bounds, shape, target_size=200.0, *, clamp=True):
         if bounds is None:
             return None
 
@@ -253,15 +252,16 @@ class AnalyzerCore(QObject):
             axis_max = max(axis_size - 1, 0)
             scale = target_size / axis_max if axis_max > 0 else 0.0
 
-            low = float(np.clip(bounds[axis_idx * 2], 0, axis_max))
-            up = float(np.clip(bounds[axis_idx * 2 + 1], 0, axis_max))
+            low, up = bounds[axis_idx * 2:axis_idx * 2 + 2]
+            if clamp:
+                low, up = np.clip([low, up], 0, axis_max)
 
             render_bounds.extend([low * scale, up * scale])
 
         return render_bounds
 
     @staticmethod
-    def render_to_logical_bounds(bounds, shape, target_size=200.0):
+    def render_to_logical_bounds(bounds, shape, target_size=200.0, *, clamp=True):
         logical_bounds = []
         for axis_idx in range(3):
             axis_size = shape[axis_idx]
@@ -275,10 +275,10 @@ class AnalyzerCore(QObject):
                 logical_bounds.extend([0.0, 0.0])
                 continue
 
-            logical_bounds.extend([
-                float(np.clip(low / scale, 0, axis_max)),
-                float(np.clip(up / scale, 0, axis_max)),
-            ])
+            low, up = low / scale, up / scale
+            if clamp:
+                low, up = np.clip([low, up], 0, axis_max)
+            logical_bounds.extend([float(low), float(up)])
 
         return logical_bounds
 

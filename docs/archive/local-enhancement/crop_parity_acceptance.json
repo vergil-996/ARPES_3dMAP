@@ -1,0 +1,28 @@
+{
+  "data": "D:\\ARPES_3dmap\\ARPES_3dMAP\\.local\\data\\WSe2_step.npz",
+  "checks": [
+    "new region inherits current crop settings",
+    "adding 3D region keeps background lock",
+    "adding 3D region keeps original background range",
+    "adding 3D region retains volume actor",
+    "3D background color transfer unchanged",
+    "3D background opacity transfer unchanged",
+    "actual 3D crop has identical level range and thresholds",
+    "3D sample 1 crop color equals enhancement",
+    "3D sample 1 crop attenuation equals enhancement",
+    "3D sample 2 crop color equals enhancement",
+    "3D sample 2 crop attenuation equals enhancement",
+    "3D sample 3 crop color equals enhancement",
+    "3D sample 3 crop attenuation equals enhancement",
+    "adding 2D region preserves full background range",
+    "adding 2D region preserves background pixels exactly",
+    "2D uses scalar crop layer",
+    "2D enhancement data equal same-range crop",
+    "2D crop and enhancement colors and alpha match",
+    "2D valid samples are opaque",
+    "publication freezes scalar crop layer",
+    "deletion restores original background pixels",
+    "last deletion removes scalar layers and dropdown",
+    "scientific data unchanged"
+  ]
+}
