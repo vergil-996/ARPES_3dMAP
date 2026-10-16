@@ -745,21 +745,13 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             "开启裁空：打开可拖动的裁空范围窗口，在画布上拖动选区；\n"
             "关闭按钮收起窗口；Esc 退出裁空模式。"
         )
-        self.btn_tb_lock = _make_tb_btn("锁定色带", "secondary", 104)
-        self.btn_tb_lock.setCheckable(True)
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
         self._update_screenshot_tooltip()
-        self.btn_tb_lock.setToolTip(
-            "锁定当前色带：开启后，拖动时间轴或生成新结果页时\n"
-            "都按锁定时刻的强度范围分配颜色，便于逐帧对比；\n"
-            "再次点击恢复按每帧数据自动分配。"
-        )
         row.addWidget(self.btn_tb_load)
         row.addWidget(self.btn_tb_shot)
         row.addWidget(self.btn_tb_export)
         row.addWidget(self.btn_tb_crop)
         row.addWidget(self.btn_tb_erase)
-        row.addWidget(self.btn_tb_lock)
 
         row.addStretch(1)
 
@@ -781,7 +773,6 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.btn_tb_load.clicked.connect(self.on_load)
         self.btn_tb_shot.clicked.connect(self.open_publication_dialog)
         self.btn_tb_export.clicked.connect(self.export_current_result)
-        self.btn_tb_lock.toggled.connect(self.on_toggle_color_lock)
 
     def _build_statusbar(self):
         """底部状态栏：运行状态 / 当前页 / 光标坐标 / 数据与后端信息。"""
@@ -2342,15 +2333,19 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
 
     def on_toggle_color_lock(self, checked):
-        """顶部栏「锁定色带」开关：冻结/恢复色带的数据范围归一化。"""
+        """「色阶调整」里「锁定色带」开关：按下拉框当前选中的对象冻结/恢复归一化范围。"""
         if self._syncing_controls:
+            return
+        if self._enhancement_selected() is not None:
+            # 选中增强区域：锁定/解锁该区域（统一模式下为全部区域共享）的范围。
+            if not self._set_enhancement_locked(checked):
+                self._restore_color_lock_button(False)
+            self._update_color_lock_button_style()
             return
         if checked:
             if not VisualEngine.lock_data_range():
                 # 还没有任何渲染结果可捕获，还原开关状态。
-                self.btn_tb_lock.blockSignals(True)
-                self.btn_tb_lock.setChecked(False)
-                self.btn_tb_lock.blockSignals(False)
+                self._restore_color_lock_button(False)
                 self._update_color_lock_button_style()
                 self._show_message(
                     "无法锁定色带",
@@ -2369,8 +2364,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             )
 
     def _update_color_lock_button_style(self):
-        """按锁定状态切换顶部栏色带锁按钮的文案与配色。"""
-        btn = getattr(self, "btn_tb_lock", None)
+        """按锁定状态切换「色阶调整」里锁定按钮的文案与配色。"""
+        page = getattr(self, "page_render", None)
+        btn = getattr(page, "btn_lock", None) if page is not None else None
         if btn is None:
             return
         if btn.isChecked():
@@ -7810,9 +7806,6 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def closeEvent(self, event):
         self._clear_enhancement_interaction()
-        render_page = self.__dict__.get("page_render")
-        if render_page is not None and hasattr(render_page, "stop_enhancement_animation"):
-            render_page.stop_enhancement_animation()
         self._save_splitter_sizes()
         workspace = self.__dict__.get("left_workspace")
         if workspace is not None:

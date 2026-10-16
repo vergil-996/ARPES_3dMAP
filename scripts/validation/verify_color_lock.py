@@ -3,7 +3,7 @@
 
 验证点（3D 主页 + 2D 切片结果页各验一遍）：
 1. 未锁定时拖动时间轴，色带范围随当前帧数据重新归一化；
-2. 点下顶部栏「锁定色带」后，VisualEngine 捕获当前数据范围，按钮文案/样式切换；
+2. 点下「色阶调整」模块的「锁定色带」（下拉框选中「全局（背景）」）后，VisualEngine 捕获当前数据范围，按钮文案/样式切换；
 3. 锁定状态拖动时间轴，clim / level_info 保持不变；
 4. 解锁后再次拖动时间轴，恢复按每帧数据自动归一化。
 
@@ -107,10 +107,10 @@ def main():
         assert bw is not None and state["bw0"] is not None
         assert bw != state["bw0"], "未锁定时换帧后色带范围未变化，无法验证锁定效果"
         # 锁定
-        window.btn_tb_lock.click()
-        assert window.btn_tb_lock.isChecked(), "锁定按钮未进入选中态"
+        window.page_render.btn_lock.click()
+        assert window.page_render.btn_lock.isChecked(), "锁定按钮未进入选中态"
         assert VisualEngine.locked_data_range() is not None, "锁定后未记录范围"
-        assert window.btn_tb_lock.attachment().text() == "色带已锁定", "按钮文案未切换"
+        assert window.page_render.btn_lock.attachment().text() == "色带已锁定", "按钮文案未切换"
         log(f"[verify] locked range: {VisualEngine.locked_data_range()}")
         QTimer.singleShot(6000, step_3d_locked_a)
 
@@ -127,10 +127,10 @@ def main():
         )
         log("[verify] PASS: 3D locked colorband fixed across frames")
         # 解锁（停留在第 0 帧，切换按钮会立即触发一次自动归一化刷新）
-        window.btn_tb_lock.click()
-        assert not window.btn_tb_lock.isChecked()
+        window.page_render.btn_lock.click()
+        assert not window.page_render.btn_lock.isChecked()
         assert VisualEngine.locked_data_range() is None
-        assert window.btn_tb_lock.attachment().text() == "锁定色带"
+        assert window.page_render.btn_lock.attachment().text() == "锁定色带"
         QTimer.singleShot(6000, step_3d_unlocked)
 
     def step_3d_unlocked():
@@ -175,8 +175,8 @@ def main():
         assert clim is not None and clim != state["clim0"], (
             "未锁定时换帧后 2D clim 未变化，无法验证锁定效果"
         )
-        window.btn_tb_lock.click()
-        assert window.btn_tb_lock.isChecked()
+        window.page_render.btn_lock.click()
+        assert window.page_render.btn_lock.isChecked()
         assert VisualEngine.locked_data_range() is not None
         log(f"[verify] locked range (2d): {VisualEngine.locked_data_range()}")
         QTimer.singleShot(6000, step_2d_locked_a)
@@ -196,8 +196,8 @@ def main():
         p = os.path.join(out_dir, "verify_locked_2d.png")
         window.grab().save(p)
         log(f"[verify] locked 2d window grab -> {p}")
-        window.btn_tb_lock.click()
-        assert not window.btn_tb_lock.isChecked()
+        window.page_render.btn_lock.click()
+        assert not window.page_render.btn_lock.isChecked()
         assert VisualEngine.locked_data_range() is None
         QTimer.singleShot(6000, step_2d_unlocked)
 

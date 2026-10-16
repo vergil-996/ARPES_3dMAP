@@ -4,7 +4,6 @@ import uuid
 
 import numpy as np
 from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt
-from PyQt5.QtWidgets import QInputDialog
 from matplotlib.patches import Rectangle
 
 from bandscope.core.local_enhancement import (
@@ -13,12 +12,13 @@ from bandscope.core.local_enhancement import (
 )
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.processing.local_enhancement import resolve_display
-from bandscope.rendering.local_enhancement import enhancement_legend
+from bandscope.rendering.local_enhancement import (
+    add_region_scalar_bars_3d, draw_region_colorbars_2d, enhancement_legend,
+)
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.control_layout_utils import combo_index_for_text, sync_slider_visual
-from bandscope.ui.enhancement_controls import EnhancementBoundsDialog
 from bandscope.ui.interactive_crop_box import InteractiveCropBox
 
 
@@ -28,18 +28,18 @@ class EnhancementInteractionMixin:
         self._enhancement_box_widget = None
         self._enhancement_artists = []
         self._enhancement_actors = []
+        self._enhancement_colorbars = []
+        self._enhancement_scalar_bars = []
         self._enhancement_cache = None
         self._enhancement_draw_key = None
         self._enhancement_dragging = False
         self._enhancement_actor_regions = {}
         self.plotter.iren.add_observer("LeftButtonPressEvent", self._pick_enhancement_box)
-        controls = self.page_render.enhancement_controls
-        controls.target_changed.connect(self._select_enhancement_target)
-        controls.delete_requested.connect(self._delete_enhancement_region)
-        controls.rename_requested.connect(self._rename_enhancement_region)
-        controls.bounds_requested.connect(self._edit_enhancement_bounds)
-        controls.common_changed.connect(self._set_enhancement_common)
-        controls.locked_changed.connect(self._set_enhancement_locked)
+        combo = self.page_render.region_combo
+        combo.target_changed.connect(self._select_enhancement_target)
+        combo.delete_requested.connect(self._delete_enhancement_region)
+        combo.rename_committed.connect(self._rename_enhancement_region)
+        self.page_render.btn_lock.toggled.connect(self.on_toggle_color_lock)
         self.canvas_2d.mpl_connect("button_press_event", self._pick_enhancement_region)
 
     def _enhancement_spec(self):
@@ -133,13 +133,39 @@ class EnhancementInteractionMixin:
                              interactive=interactive, immediate=not interactive)
 
     def _release_background_lock(self):
+        """删除区域会改变背景映射：解除全局锁定；按钮状态由目标同步负责。"""
         VisualEngine.unlock_data_range()
-        button = getattr(self, "btn_tb_lock", None)
-        if button is not None:
-            blocker = QSignalBlocker(button)
-            button.setChecked(False)
-            del blocker
+        if self._enhancement_selected() is None:
+            self._restore_color_lock_button(False)
             self._update_color_lock_button_style()
+
+    def _restore_color_lock_button(self, checked):
+        """不触发信号地把锁定按钮复位到给定状态。"""
+        page = getattr(self, "page_render", None)
+        btn = getattr(page, "btn_lock", None) if page is not None else None
+        if btn is None:
+            return
+        blocker = QSignalBlocker(btn)
+        btn.setChecked(bool(checked))
+        del blocker
+
+    def _sync_color_lock_button(self):
+        """让锁定按钮反映下拉框当前对象的锁定状态。"""
+        page = getattr(self, "page_render", None)
+        btn = getattr(page, "btn_lock", None) if page is not None else None
+        if btn is None:
+            return
+        state = self._enhancement_state()
+        region = self._enhancement_selected()
+        if state is not None and region is not None:
+            if state.get("common"):
+                locked = bool(state.get("common_locked_range") or state.get("common_lock_pending"))
+            else:
+                locked = bool(region.get("locked_range") or region.get("lock_pending"))
+        else:
+            locked = VisualEngine.locked_data_range() is not None
+        self._restore_color_lock_button(locked)
+        self._update_color_lock_button_style()
 
     def _select_enhancement_target(self, region_id):
         state = self._enhancement_state()
@@ -175,7 +201,7 @@ class EnhancementInteractionMixin:
             bounds.extend((center - half, center + half))
         number = state["next_label"]
         state["next_label"] += 1
-        region = EnhancementRegion(uuid.uuid4().hex, f"区域 {number}", context["view"], axes, tuple(bounds)).to_dict()
+        region = EnhancementRegion(uuid.uuid4().hex, f"R{number}", context["view"], axes, tuple(bounds)).to_dict()
         region.update(style=copy.deepcopy(self._enhancement_ui_style()), label=f"R{number}")
         state["regions"].append(region)
         state["selected_id"] = region["region_id"]
@@ -201,27 +227,21 @@ class EnhancementInteractionMixin:
         self._restore_enhancement_target_style()
         self._enhancement_refresh()
 
-    def _rename_enhancement_region(self):
+    def _rename_enhancement_region(self, name):
+        """下拉框内编辑提交即重命名：视图标注（label）与名称保持一致。"""
+        state = self._enhancement_state()
         region = self._enhancement_selected()
-        if region:
-            name, accepted = QInputDialog.getText(self, "重命名增强区域", "名称", text=region["name"])
-            if accepted and name.strip():
-                region["name"] = name.strip()
-                self._enhancement_state()["revision"] += 1
-                self._enhancement_refresh()
-
-    def _edit_enhancement_bounds(self):
-        region = self._enhancement_selected()
-        context = self.current_render_context
-        if not region or not context:
+        name = (name or "").strip()
+        if state is None:
             return
-        flip = self.timeline_bar.switch_flip.isChecked()
-        dialog = EnhancementBoundsDialog(region["axes"], physical_bounds(context, region["bounds"], e_flip=flip), self)
-        if dialog.exec_():
-            update_region_bounds(region, logical_bounds(context, dialog.bounds, e_flip=flip))
-            self._enhancement_state()["revision"] += 1
-            self._clear_enhancement_interaction()
+        if region is not None and name and name != region["name"]:
+            region["name"] = name
+            region["label"] = name
+            state["revision"] += 1
             self._enhancement_refresh()
+        else:
+            # 未生效的编辑（空名、未改名或选中了背景）：把下拉框文字拉回当前状态。
+            self._sync_enhancement_controls(self._enhancement_spec(), self.current_render_context)
 
     def _set_enhancement_common(self, enabled):
         state = self._enhancement_state()
@@ -235,21 +255,25 @@ class EnhancementInteractionMixin:
         self._enhancement_refresh()
 
     def _set_enhancement_locked(self, locked):
+        """锁定/解锁当前选中区域的归一化范围；返回是否生效。"""
         state, region = self._enhancement_state(), self._enhancement_selected()
         if not state or not region:
-            return
+            return False
         fields = self._enhancement_display(self.current_render_context)
         resolved = next((r for r in fields["regions"] if r["region_id"] == region["region_id"]), None) if fields else None
         target, key = (state, "common_locked_range") if state.get("common") else (region, "locked_range")
         pending = "common_lock_pending" if state.get("common") else "lock_pending"
         data_range = resolved["data_range"] if resolved is not None else None
+        applied = True
         if locked and (data_range is None or data_range[1] <= data_range[0]):
             self._show_message("局部增强", "当前区域没有可锁定的有效强度范围。")
+            applied = False
         else:
             target.pop(pending, None)
             target[key] = tuple(data_range) if locked else None
             state["revision"] += 1
         self._enhancement_refresh()
+        return applied
 
     def _enhancement_crop_data(self, context, spec, state, *, allow_compute):
         """Use the same raw ROI and denoise job as a first home-volume crop.
@@ -350,24 +374,12 @@ class EnhancementInteractionMixin:
         if "_enhancement_artists" not in self.__dict__:
             return
         state = self._enhancement_state(spec)
-        fields = self._enhancement_display(context, spec, freeze_pending=False)
         regions = matching_regions(context, state["regions"]) if state and context else []
         if state and context and state.get("selected_id") not in {r["region_id"] for r in regions}:
             state["selected_id"] = None
             self._restore_enhancement_target_style()
-        region = self._enhancement_selected() if state else None
-        resolved = next((r for r in fields["regions"] if region and r["region_id"] == region["region_id"]), None) if fields else None
-        summary = "后添加区域优先；背景保持原图映射，删除后恢复背景。"
-        if resolved:
-            status = {"empty": "没有有效样本", "constant": "无动态范围", "disabled": "已停用"}.get(resolved["status"])
-            data_range = resolved["data_range"]
-            summary = resolved.get("error") or status or f"强度范围：{data_range[0]:.4g} ～ {data_range[1]:.4g}"
-            if state.get("common"):
-                summary += "；当前色阶和透明度设置作用于全部增强区域。"
-        self.page_render.enhancement_controls.sync(regions, state.get("selected_id") if state else None,
-            common=bool(state and state.get("common")),
-            locked=bool(state and ((state.get("common_locked_range") or state.get("common_lock_pending")) if state.get("common") else region and (region.get("locked_range") or region.get("lock_pending")))), summary=summary)
-        self.page_render.set_enhancement_controls_visible(bool(regions))
+        self.page_render.region_combo.sync(regions, state.get("selected_id") if state else None)
+        self._sync_color_lock_button()
 
     def _append_enhancement_actions(self, menu):
         context = self.current_render_context
@@ -413,8 +425,8 @@ class EnhancementInteractionMixin:
         if spec is not None:
             spec.params.pop(STATE_KEY, None)
         page = self.__dict__.get("page_render")
-        if page is not None and hasattr(page, "set_enhancement_controls_visible"):
-            page.set_enhancement_controls_visible(False, animate=False)
+        if page is not None and hasattr(page, "region_combo"):
+            page.region_combo.sync([], None)
 
     def _clear_enhancement_interaction(self):
         selector = self.__dict__.get("_enhancement_selector")
@@ -431,6 +443,18 @@ class EnhancementInteractionMixin:
             if artist.axes is not None:
                 artist.remove()
         self._enhancement_artists = []
+        for colorbar in self.__dict__.get("_enhancement_colorbars", []):
+            try:
+                colorbar.remove()
+            except Exception:
+                pass
+        self._enhancement_colorbars = []
+        for title in self.__dict__.get("_enhancement_scalar_bars", []):
+            try:
+                self.plotter.remove_scalar_bar(title, render=False)
+            except Exception:
+                pass
+        self._enhancement_scalar_bars = []
         for name in self.__dict__.get("_enhancement_actors", []):
             self.plotter.remove_actor(name, render=False)
         self._enhancement_actors = []
@@ -478,6 +502,14 @@ class EnhancementInteractionMixin:
             note = self.ax_2d.text(.01, .01, enhancement_legend(fields), transform=self.ax_2d.transAxes,
                                   color=theme.TEXT_2, fontsize=8, zorder=90, va="bottom")
             self._enhancement_artists.append(note)
+        # 区域色带随每次绘制重建：刻度范围随数据/锁定状态变化，不能走上面的绘制键缓存。
+        for colorbar in self.__dict__.get("_enhancement_colorbars", []):
+            try:
+                colorbar.remove()
+            except Exception:
+                pass
+        self._enhancement_colorbars = draw_region_colorbars_2d(
+            self.ax_2d, fields["regions"], self.page_render.get_selected_cmap())
         if self._enhancement_selector is not None and active:
             self._enhancement_selector.sync_bounds(physical_bounds(context, active["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked()))
         self.canvas_2d.draw_idle()
@@ -509,6 +541,12 @@ class EnhancementInteractionMixin:
         for name in self._enhancement_actors:
             self.plotter.remove_actor(name, render=False)
         self._enhancement_actors = []
+        for title in self.__dict__.get("_enhancement_scalar_bars", []):
+            try:
+                self.plotter.remove_scalar_bar(title, render=False)
+            except Exception:
+                pass
+        self._enhancement_scalar_bars = []
         shape = context.get("full_shape", context["data"].shape)
         for region in fields["regions"]:
             bounds = self.core.logical_to_render_bounds(region["bounds"], shape, clamp=False)
@@ -523,6 +561,9 @@ class EnhancementInteractionMixin:
         if fields["regions"]:
             self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="lower_left", font_size=9, render=False)
             self._enhancement_actors.append("enhancement:legend")
+            # 每个可见区域一条自己的 scalar bar，范围用区域（可能已锁定）的归一化区间。
+            self._enhancement_scalar_bars = add_region_scalar_bars_3d(
+                self.plotter, fields["regions"], self.page_render.get_selected_cmap())
         key = (active and active["region_id"], active and tuple(active["bounds"]))
         if key != self._enhancement_draw_key and not self._enhancement_dragging:
             widget = self._enhancement_box_widget

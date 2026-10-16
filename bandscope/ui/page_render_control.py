@@ -1,11 +1,11 @@
-from PyQt5.QtCore import QPoint, QSignalBlocker, Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout
+from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
+from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.widgets import SiLabel
 
 import bandscope.ui.theme as theme
 from bandscope.ui.camera_view_controls import CameraViewPanel
-from bandscope.ui.enhancement_controls import EnhancementControls
+from bandscope.ui.enhancement_controls import RegionComboBox
 from bandscope.ui.control_layout_utils import (
     animate_widget_visibility,
     centered_widget_row,
@@ -73,6 +73,26 @@ class RenderControlPage(ControlPageBase):
         # 色阶调整
         grp_exp, v_exp = self._create_group("色阶调整")
 
+        # 调整对象 + 锁定色带：下拉框选中谁，色阶滑条与锁定就作用于谁；
+        # 下拉框固定显示，可直接编辑文字重命名当前区域。
+        self.region_combo = RegionComboBox(self)
+        self.region_combo.sync([], None)
+        self.btn_lock = self._create_btn("锁定色带", "secondary", height=30)
+        self.btn_lock.setCheckable(True)
+        self.btn_lock.setToolTip(
+            "锁定当前色带：开启后，拖动时间轴或生成新结果页时\n"
+            "都按锁定时刻的强度范围分配颜色，便于逐帧对比；\n"
+            "再次点击恢复按每帧数据自动分配。"
+        )
+        target_row = QWidget(self)
+        target_row_layout = QHBoxLayout(target_row)
+        target_row_layout.setContentsMargins(0, 0, 0, 0)
+        target_row_layout.setSpacing(8)
+        target_row_layout.addWidget(self.region_combo, 1)
+        target_row_layout.addWidget(self.btn_lock)
+        self._adaptive_row_controls.append(target_row)
+        v_exp.addLayout(centered_widget_row(target_row, self.MIN_CONTROL_ROW_WIDTH))
+
         self.s_up = self._create_accent_slider()
         self.s_up.setRange(0, 100)
         self.s_up.setValue(100)  # 默认不截断高光
@@ -96,10 +116,6 @@ class RenderControlPage(ControlPageBase):
         v_exp.addLayout(centered_widget_row(self.btn_apply_map, self.BUTTON_WIDTH))
 
         self.vbox.addLayout(centered_widget_row(grp_exp, self.MIN_GROUP_WIDTH))
-
-        self.enhancement_controls = EnhancementControls(self)
-        self._enhancement_controls_visible = False
-        self.vbox.addLayout(centered_widget_row(self.enhancement_controls, self.MIN_CONTROL_ROW_WIDTH))
 
         # 去噪处理
         grp_noise, v_noise = self._create_group("去噪处理")
@@ -234,44 +250,10 @@ class RenderControlPage(ControlPageBase):
     def get_selected_cmap(self):
         return self.combo_cmap.currentText()
 
-    def set_enhancement_controls_visible(self, visible, *, animate=True):
-        visible = bool(visible)
-        if visible == self._enhancement_controls_visible:
-            return
-        self._enhancement_controls_visible = visible
-        if animate:
-            animate_widget_visibility(self.enhancement_controls, visible,
-                                      on_update=self.relayout_scroll_content,
-                                      on_settled=lambda: self._settle_enhancement_controls(visible))
-        else:
-            set_widget_visibility_instant(self.enhancement_controls, visible)
-            self.relayout_scroll_content()
-
-    def _settle_enhancement_controls(self, visible):
-        self.relayout_scroll_content()
-        if not visible:
-            return
-        bottom = self.enhancement_controls.mapTo(self.container, QPoint(0, self.enhancement_controls.height())).y()
-        if bottom + self.container.y() <= self.scroll.height() - 12:
-            return
-        target = max(self.scroll.height() - self.container.height(), min(0, self.scroll.height() - bottom - 12))
-        animation = self.scroll.widget_scroll_animation
-        animation.setTarget([self.container.x(), target])
-        animation.try_to_start()
-        span = max(1, self.container.height() - self.scroll.height())
-        travel = max(0, self.scroll.height() - self.scroll.scroll_bar_vertical.height())
-        self.scroll.scroll_bar_vertical.moveTo(0, int(-target / span * travel))
-
     def closeEvent(self, event):
-        # A height animation calls back into the scrolling page on every tick.
-        # Stop it before Qt destroys the page or its graphics effect.
-        set_widget_visibility_instant(self.enhancement_controls, False)
+        # 高度动画会回调滚动页；先停掉再交给 Qt 析构页面与图形效果。
         self.scroll.widget_scroll_animation.stop()
         super().closeEvent(event)
-
-    def stop_enhancement_animation(self):
-        set_widget_visibility_instant(self.enhancement_controls, self._enhancement_controls_visible)
-        self.scroll.widget_scroll_animation.stop()
 
     def get_denoise_settings(self):
         """ 获取当前选中的三级去噪配置 """

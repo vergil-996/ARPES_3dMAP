@@ -85,7 +85,7 @@ def main():
                 window._add_enhancement_region()
                 set_bounds(window._enhancement_selected(), ((.05, .28), (.25, .55), (.1, .4)))
             elif step == 1:
-                check("region dropdown visible", window.page_render._enhancement_controls_visible)
+                check("region dropdown lists the new region", window.page_render.region_combo.count() == 2)
                 check("3D editor widget present", window._enhancement_box_widget is not None)
                 import vtk
                 widget = window._enhancement_box_widget
@@ -137,7 +137,7 @@ def main():
                 screenshot("3d_deleted_one")
                 window._delete_enhancement_region(window._enhancement_selected()["region_id"])
             elif step == 6:
-                check("last deletion removes dropdown", window.page_render.enhancement_controls.isHidden())
+                check("last deletion leaves background-only dropdown", window.page_render.region_combo.count() == 1)
                 check("last deletion restores original volume path", window.volume_session.display_channel is None)
                 screenshot("3d_restored")
                 window.page_data.combo_ax.setCurrentIndex(1)
@@ -174,9 +174,9 @@ def main():
                 fields = window._enhancement_display(window.current_render_context)
                 check("intensity comparison uses common region range", fields["regions"][0]["data_range"] == fields["regions"][1]["data_range"])
                 screenshot("2d_common")
-                window.page_render.enhancement_controls.combo.showPopup()
+                window.page_render.region_combo.showPopup()
             elif step == 13:
-                combo = window.page_render.enhancement_controls.combo
+                combo = window.page_render.region_combo
                 screenshot("dropdown_delete")
                 combo.view().window().grab().save(str(args.output_dir / "dropdown_popup.png"))
                 index = combo.model().index(1, 0)
@@ -189,7 +189,7 @@ def main():
                 check("dropdown row action deletes region", len(window._enhancement_state()["regions"]) == 1)
                 window._delete_enhancement_region(window._enhancement_state()["regions"][0]["region_id"])
             else:
-                check("2D last deletion removes dropdown", window.page_render.enhancement_controls.isHidden())
+                check("2D last deletion leaves background-only dropdown", window.page_render.region_combo.count() == 1)
                 check("2D returns to scalar image", window.ax_2d._arpes_image.get_array().ndim == 2)
                 check("science samples remain unchanged", np.array_equal(window.core.raw_data[::25, ::25, ::25, :], progress["source_sample"], equal_nan=True))
                 screenshot("2d_restored")

@@ -80,7 +80,7 @@ def main():
                 fields = window._enhancement_display(context)
                 check("Y integral inherits both 3D regions", fields is not None and len(fields["regions"]) == 2 and fields["active"])
                 check("2D enhancement uses two scalar crop layers", len(window.ax_2d._arpes_enhancement_images) == 2)
-                check("dropdown contains background and inherited regions", window.page_render.enhancement_controls.combo.count() == 3)
+                check("dropdown contains background and inherited regions", window.page_render.region_combo.count() == 3)
                 check("inherited rectangle has interactive handles", window._enhancement_selector is not None and window._enhancement_selector.get_visible())
                 check("first region retains its independent style", fields["regions"][0]["style"] == progress["state"]["regions"][0]["style"])
                 check("projection retains X and E bounds", fields["regions"][0]["bounds"] == (10, 50, 30, 80))
@@ -111,7 +111,7 @@ def main():
                 check("deleted projection restores full-source background normalization", finite_range(context["data"]) == (info["data_min"], info["data_max"]))
                 window._delete_enhancement_region(window._enhancement_selected()["region_id"])
             elif step == 6:
-                check("last projected deletion hides dropdown", window.page_render.enhancement_controls.isHidden())
+                check("last projected deletion leaves background-only dropdown", window.page_render.region_combo.count() == 1)
                 check("last projected deletion restores scalar image", window.ax_2d._arpes_image.get_array().ndim == 2)
                 check("2D deletions leave both 3D source regions intact", progress["source"].params[STATE_KEY] == progress["state"])
                 window.left_workspace.activate_page(progress["source"].page_id)

@@ -7,7 +7,6 @@ import numpy as np
 
 from PyQt5.QtCore import QEvent, QPointF, Qt
 from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QMenu, QPushButton
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
@@ -31,14 +30,12 @@ class Host(EnhancementInteractionMixin):
         self._enhancement_actors = []
         self._enhancement_box_widget = None
         self.plotter = Mock(box_widgets=[])
-        self.btn_tb_lock = QPushButton()
-        self.btn_tb_lock.setCheckable(True)
         self._update_color_lock_button_style = Mock()
         self.request_refresh = Mock()
         self._draw_enhancement_regions = Mock()
-        controls = self.page_render.enhancement_controls
-        controls.target_changed.connect(self._select_enhancement_target)
-        controls.delete_requested.connect(self._delete_enhancement_region)
+        combo = self.page_render.region_combo
+        combo.target_changed.connect(self._select_enhancement_target)
+        combo.delete_requested.connect(self._delete_enhancement_region)
         self._restore_enhancement_target_style()
         self._sync_enhancement_controls(self.active_page_spec, self.current_render_context)
 
@@ -95,15 +92,16 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(host.page_render.s_low.value(), 13)
         self.assertEqual(host._enhancement_display(host.current_render_context)["background_level_info"]["data_min"], 0)
 
-    def test_last_deletion_restores_background_and_hides_panel_after_animation(self):
+    def test_last_deletion_restores_background_and_combo_keeps_background_only(self):
         host = self.host
         state = host._enhancement_state()
         state["background"]["levels"] = (9, 44, 95)
         host._delete_enhancement_region("1")
         host._delete_enhancement_region("2")
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
-        QTest.qWait(260)
-        self.assertTrue(host.page_render.enhancement_controls.isHidden())
+        combo = host.page_render.region_combo
+        self.assertEqual(combo.count(), 1)
+        self.assertEqual(combo.itemData(0), "")
         self.assertEqual(host.page_render.s_low.value(), 9)
         self.assertEqual(host.page_render.s_gamma.value(), 44)
         self.assertIsNone(host._enhancement_display(host.current_render_context))
@@ -112,11 +110,11 @@ class RegionControlTests(unittest.TestCase):
         VisualEngine._locked_data_range = (24, 35)
         self.host._delete_enhancement_region("1")
         self.assertIsNone(VisualEngine.locked_data_range())
-        self.assertFalse(self.host.btn_tb_lock.isChecked())
+        self.assertFalse(self.host.page_render.btn_lock.isChecked())
 
     def test_dropdown_delete_is_a_row_action_and_background_cannot_be_deleted(self):
         host = self.host
-        combo = host.page_render.enhancement_controls.combo
+        combo = host.page_render.region_combo
         combo.show()
         combo.showPopup()
         self.app.processEvents()
@@ -131,6 +129,20 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(combo.itemData(0), "")
         self.assertEqual(combo.count(), 2)
         combo.hidePopup()
+
+    def test_combo_edit_renames_region_and_syncs_view_label(self):
+        host = self.host
+        host._rename_enhancement_region("主峰")
+        region = host._enhancement_selected()
+        self.assertEqual(region["name"], "主峰")
+        self.assertEqual(region["label"], "主峰")
+        host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
+        combo = host.page_render.region_combo
+        self.assertEqual(combo.itemText(1), "主峰")
+        # 空名不生效，下拉框文字回到当前名称。
+        host._rename_enhancement_region("  ")
+        self.assertEqual(host._enhancement_selected()["name"], "主峰")
+        self.assertEqual(combo.lineEdit().text(), "主峰")
 
     def test_common_style_does_not_destroy_independent_styles(self):
         host = self.host
@@ -164,7 +176,8 @@ class RegionControlTests(unittest.TestCase):
         host._reset_enhancement_for_new_data()
         self.assertNotIn(STATE_KEY, host.active_page_spec.params)
         self.assertIsNone(host._enhancement_cache)
-        self.assertTrue(host.page_render.enhancement_controls.isHidden())
+        self.assertEqual(host.page_render.region_combo.count(), 1)
+        self.assertEqual(host.page_render.region_combo.itemData(0), "")
 
     def _volume_source(self, *, locked=False):
         host = self.host
@@ -199,7 +212,7 @@ class RegionControlTests(unittest.TestCase):
         fields = host._enhancement_display(result)
         host._sync_enhancement_controls(derived, result)
         self.assertTrue(fields["active"])
-        self.assertEqual(host.page_render.enhancement_controls.combo.count(), 2)
+        self.assertEqual(host.page_render.region_combo.count(), 2)
         self.assertEqual(host._enhancement_selected()["bounds"], (1, 4, 1, 3))
         self.assertEqual(fields["regions"][0]["style"], original["regions"][0]["style"])
         samples = result["data"][1:5, 1:4]
@@ -355,11 +368,10 @@ class RegionControlTests(unittest.TestCase):
         host.btn_tb_crop, host.btn_tb_erase = QPushButton(), QPushButton()
         host._select_control_page = Mock()
         VisualEngine._locked_data_range = (0., 35.)
-        host.btn_tb_lock.setChecked(True)
         host._add_enhancement_region()
         self.assertTrue(host._enhancement_selected()["enabled"])
         self.assertEqual(VisualEngine.locked_data_range(), (0., 35.))
-        self.assertTrue(host.btn_tb_lock.isChecked())
+        self.assertEqual(host._enhancement_selected()["name"], "R1")
         self.assertEqual(host._enhancement_selected()["style"], host._enhancement_state()["background"])
         self.assertEqual(host._enhancement_selected()["style"], dict(levels=(14., 67., 83.), opacity_mode="sigmoid"))
         host._add_enhancement_region()
