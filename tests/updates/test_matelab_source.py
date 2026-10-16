@@ -344,6 +344,37 @@ class MatelabUploadTests(unittest.TestCase):
         self.assertEqual(self._field(uploads[0], "eln"), "BandScope发布")
         self.assertEqual(progress[-1], (len(content), len(content)))
 
+    def test_chunked_upload_exact_multiple_returns_payload(self):
+        from bandscope.updates.matelab_source import upload_file
+
+        content = b"0123456789AB"  # 12 字节 = 2 个 6 字节整片
+        server = FakeMatelabServer()
+        uploads = []
+
+        original_opener = server.opener
+
+        def opener(request, timeout):
+            if urlparse(request.full_url).path == "/eln_api/upload":
+                uploads.append(request.data)
+                return FakeResponse(
+                    json.dumps({"code": 0, "id": 7, "size": len(content), "hash": "x"}).encode(),
+                    request.full_url,
+                )
+            return original_opener(request, timeout)
+
+        server.opener = opener
+        session = self._session(server)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "payload.bin"
+            path.write_bytes(content)
+            result = upload_file(session, path, name="bs-test", chunk_size=6)
+
+        self.assertIsNotNone(result)  # 整倍数时末片也必须返回服务器反馈
+        self.assertEqual(result.get("id"), 7)
+        self.assertEqual(len(uploads), 2)
+        self.assertEqual([self._field(body, "last") for body in uploads], ["0", "1"])
+        self.assertEqual(self._field(uploads[1], "hash"), hashlib.sha256(content).hexdigest())
+
     def test_upload_retries_chunk_after_token_refresh(self):
         from bandscope.updates.matelab_source import upload_file
 

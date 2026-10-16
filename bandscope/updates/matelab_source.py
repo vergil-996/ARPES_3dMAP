@@ -257,7 +257,9 @@ def upload_file(
             chunk = stream.read(chunk_size)
             if not chunk and total:
                 break
-            last = len(chunk) < chunk_size
+            # 末片判定要看累计字节数：文件恰好是分片整数倍时，最后一片
+            # len(chunk) == chunk_size，按长度判末片会漏掉整包 hash 且返回 None。
+            last = sent + len(chunk) >= total
             fields = [("uid", uid), ("name", name), ("last", "1" if last else "0")]
             if eln:
                 fields.append(("eln", eln))
