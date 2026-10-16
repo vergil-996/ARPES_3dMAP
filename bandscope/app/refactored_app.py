@@ -3503,6 +3503,10 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         update_action.triggered.connect(
             lambda: self.update_controller.check_for_updates(manual=True)
         )
+        # 更新源切换由 UpdateController 提供；旧测试替身没有该接口时跳过。
+        add_source_menu = getattr(self.update_controller, "add_source_menu", None)
+        if callable(add_source_menu):
+            add_source_menu(menu)
         return menu, global_pos
 
     def _show_curve_context_menu(self, pos):

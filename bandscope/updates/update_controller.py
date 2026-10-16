@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 
 from PyQt5.QtCore import QObject, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices
-from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
+from PyQt5.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QProgressDialog,
+)
 
 from bandscope.app_metadata import (
     APP_NAME,
@@ -18,6 +29,15 @@ from bandscope.app_metadata import (
 )
 from bandscope.extensions.catalog import CatalogClient
 from bandscope.extensions.upgrade import evaluate_upgrade, format_impact
+from bandscope.updates.matelab_source import MatelabCredentials, MatelabReleaseClient
+from bandscope.updates.sources import (
+    DEFAULT_SOURCE,
+    SOURCE_GITHUB,
+    SOURCE_LABELS,
+    SOURCE_MATELAB,
+    SOURCE_SETTING,
+    normalize_source,
+)
 from bandscope.updates.update_service import (
     GitHubReleaseClient,
     InstallerVerification,
@@ -36,6 +56,9 @@ LAST_CHECK_SETTING = "updates/last_check_utc"
 SKIPPED_VERSION_SETTING = "updates/skipped_version"
 FAILURE_SNOOZE_SETTING = "updates/failure_snooze_until_utc"
 NEW_VERSION_SNOOZE_SETTING = "updates/new_version_snooze_until_utc"
+MATELAB_USERNAME_SETTING = "updates/matelab_username"
+#: 密码仅做 base64 混淆存储，界面会明确告知；token 不落盘。
+MATELAB_PASSWORD_SETTING = "updates/matelab_password_b64"
 
 
 class ReleaseCheckThread(QThread):
@@ -102,6 +125,40 @@ class InstallerDownloadThread(QThread):
         self.completed.emit(path, verification)
 
 
+class MatelabLoginDialog(QDialog):
+    """MatElab 账号登录对话框；凭证仅保存在本机设置中（密码做基本混淆）。"""
+
+    def __init__(self, parent=None, username=""):
+        super().__init__(parent)
+        self.setWindowTitle("登录 MatElab")
+        layout = QFormLayout(self)
+        layout.addRow(
+            QLabel(
+                "MatElab 更新源需要使用你的物质科学电子实验室账号。\n"
+                "账号密码仅保存在本机（密码做基本混淆存储），用于获取 API 令牌。"
+            )
+        )
+        self.username_edit = QLineEdit(str(username or ""))
+        self.username_edit.setPlaceholderText("中文姓名或电子邮箱")
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.Password)
+        layout.addRow("用户名", self.username_edit)
+        layout.addRow("密码", self.password_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("登录并保存")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def credentials(self):
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text()
+        if not username or not password:
+            return None
+        return MatelabCredentials(username=username, password=password)
+
+
 class UpdateController(QObject):
     def __init__(self, window, settings, version_button=None, parent=None):
         super().__init__(parent or window)
@@ -109,8 +166,11 @@ class UpdateController(QObject):
         self.settings = settings
         self.version_button = version_button
         self.flavor = current_build_flavor()
-        self.client = GitHubReleaseClient()
-        self.catalog_client = CatalogClient(self.client)
+        self._github_client = GitHubReleaseClient()
+        # 插件目录固定从 GitHub Release 获取；MatElab 发布记录不含插件目录，
+        # 源切换不影响目录来源，目录取不到时沿用“无法确认”降级。
+        self.catalog_client = CatalogClient(self._github_client)
+        self.client = self._active_client()
         self._check_thread = None
         self._download_thread = None
         self._progress_dialog = None
@@ -126,6 +186,73 @@ class UpdateController(QObject):
         except OSError:
             # Cache cleanup must never prevent the application from starting.
             pass
+
+    # -- 更新源管理 -----------------------------------------------------------
+
+    def current_source(self):
+        return normalize_source(self.settings.value(SOURCE_SETTING, DEFAULT_SOURCE))
+
+    def available_sources(self):
+        return tuple(SOURCE_LABELS.items())
+
+    def _active_client(self):
+        if self.current_source() == SOURCE_MATELAB:
+            return MatelabReleaseClient(self._stored_matelab_credentials)
+        return self._github_client
+
+    def set_source(self, source):
+        source = normalize_source(source)
+        if source == self.current_source():
+            return
+        self.settings.setValue(SOURCE_SETTING, source)
+        self.client = self._active_client()
+        if source == SOURCE_MATELAB and self._stored_matelab_credentials() is None:
+            self._prompt_matelab_login()
+
+    def add_source_menu(self, menu):
+        """在设置菜单里挂「更新源」子菜单，两个源互斥勾选。"""
+        submenu = menu.addMenu("更新源")
+        current = self.current_source()
+        for source_id, label in self.available_sources():
+            action = submenu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(source_id == current)
+            action.triggered.connect(
+                lambda _checked=False, target=source_id: self.set_source(target)
+            )
+        return submenu
+
+    # -- MatElab 凭证 -----------------------------------------------------------
+
+    def _stored_matelab_credentials(self):
+        username = str(self.settings.value(MATELAB_USERNAME_SETTING, "") or "")
+        encoded = str(self.settings.value(MATELAB_PASSWORD_SETTING, "") or "")
+        if not username or not encoded:
+            return None
+        try:
+            password = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return MatelabCredentials(username=username, password=password)
+
+    def _store_matelab_credentials(self, credentials):
+        self.settings.setValue(MATELAB_USERNAME_SETTING, credentials.username)
+        encoded = base64.b64encode(credentials.password.encode("utf-8")).decode("ascii")
+        self.settings.setValue(MATELAB_PASSWORD_SETTING, encoded)
+
+    def _prompt_matelab_login(self):
+        dialog = MatelabLoginDialog(
+            self.window,
+            username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        credentials = dialog.credentials()
+        if credentials is None:
+            self._show_message("登录 MatElab", "用户名和密码不能为空。", QMessageBox.Warning)
+            return None
+        self._store_matelab_credentials(credentials)
+        return credentials
 
     def _read_timestamp(self, key):
         value = self.settings.value(key, "", type=str)
@@ -162,12 +289,23 @@ class UpdateController(QObject):
     def check_for_updates(self, manual=True):
         if self._check_thread is not None and self._check_thread.isRunning():
             if manual:
-                self._show_message("检查更新", "正在检查 GitHub Release，请稍候。")
+                self._show_message("检查更新", "正在检查更新，请稍候。")
             return
         if self._download_thread is not None and self._download_thread.isRunning():
             if manual:
                 self._show_message("更新进行中", "新版安装包正在下载。")
             return
+
+        if self.current_source() == SOURCE_MATELAB:
+            if self._stored_matelab_credentials() is None:
+                if not manual:
+                    # 自动检查不弹登录框；等用户手动检查时再请求登录。
+                    return
+                if self._prompt_matelab_login() is None:
+                    return
+            self.client = self._active_client()
+        else:
+            self.client = self._github_client
 
         self._manual_check = bool(manual)
         self._set_checking_state(True)
@@ -191,6 +329,17 @@ class UpdateController(QObject):
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         self.settings.setValue(LAST_CHECK_SETTING, timestamp)
 
+    def _source_failure_hint(self):
+        if self.current_source() == SOURCE_MATELAB:
+            return (
+                "请确认 MatElab 账号可以正常登录，且当前网络能够访问所内服务器 "
+                "eln.iphy.ac.cn；如需修改账号或切换更新源，请使用右键菜单中的「更新源」。"
+            )
+        return (
+            "如果当前网络无法直接访问 GitHub，请先开启 VPN 或网络代理，"
+            f"再点击工具栏右侧的 v{APP_VERSION} 按钮手动检查更新。"
+        )
+
     def _on_check_failed(self, message):
         self._record_check_time()
         if self._manual_check:
@@ -199,12 +348,10 @@ class UpdateController(QObject):
         if self._snooze_active(FAILURE_SNOOZE_SETTING):
             return
         # The background check runs without user intent, so it must explain what
-        # to do instead of failing silently when GitHub is unreachable.
+        # to do instead of failing silently when the update source is unreachable.
         snoozed = self._show_message(
             "自动检查更新失败",
-            f"{message}\n\n"
-            "如果当前网络无法直接访问 GitHub，请先开启 VPN 或网络代理，"
-            f"再点击工具栏右侧的 v{APP_VERSION} 按钮手动检查更新。",
+            f"{message}\n\n" + self._source_failure_hint(),
             QMessageBox.Warning,
             extra_button="三天内不再提示",
         )
@@ -223,9 +370,12 @@ class UpdateController(QObject):
 
         if not result.update_available:
             if self._manual_check:
+                source_label = (
+                    "MatElab" if self.current_source() == SOURCE_MATELAB else "GitHub"
+                )
                 self._show_message(
                     "已经是最新版本",
-                    f"当前版本：v{APP_VERSION}\nGitHub 最新正式版：v{result.release.version}",
+                    f"当前版本：v{APP_VERSION}\n{source_label} 最新正式版：v{result.release.version}",
                 )
             return
 
@@ -395,7 +545,8 @@ class UpdateController(QObject):
         box = QMessageBox(self.window)
         box.setWindowTitle("安装 BandScope 更新")
         box.setIcon(icon)
-        box.setText("安装包下载完成，GitHub SHA-256 校验已通过。")
+        source_label = "MatElab" if self.current_source() == SOURCE_MATELAB else "GitHub"
+        box.setText(f"安装包下载完成，{source_label} 记录的 SHA-256 校验已通过。")
         box.setInformativeText(
             f"{signature_text}\n\n启动安装程序后 BandScope 将退出；安装器会在原目录覆盖升级，不会删除用户设置。"
         )

@@ -5,7 +5,7 @@
 ## 发布前检查
 
 ```powershell
-python scripts/release/check_release_version.py v1.13.0
+python scripts/release/check_release_version.py v1.14.0
 python -m unittest discover -s tests -t . -v
 python scripts/validation/verify_plugin_release_flow.py
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
@@ -37,7 +37,7 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 ```powershell
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm packaging/pyinstaller/ARPES_3dMAP.spec
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.13.0 /DBuildFlavor=CPU packaging\windows\BandScope.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.14.0 /DBuildFlavor=CPU packaging\windows\BandScope.iss
 ```
 
 NVIDIA 环境安装 `requirements-gpu-cu13.txt`，使用 `packaging/pyinstaller/ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。CPU 与 NVIDIA 依赖建议使用独立虚拟环境。
@@ -56,3 +56,25 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 - Windows 安装器签名脚本位于 `scripts/release/sign_windows.ps1`；所需 Secrets 沿用 `WINDOWS_SIGNING_PFX_BASE64`、`WINDOWS_SIGNING_PFX_PASSWORD`，时间戳变量为 `WINDOWS_TIMESTAMP_URL`。
 - GitHub Release 包含两个安装器、插件包及对应 `.sha256`、`.bsplugin.sig`，以及目录 `plugins-index.json` 与 `.sig`。发布动作仍由维护者推送标签触发，本次整理不创建或推送标签。
 - 历史目录用 `--merge` 带进来：同一 id/version 一旦发布就不能换成不同内容，脚本会直接拒绝；有签名 sidecar 的上一版目录会先验签再聚合。
+
+## MatElab 更新源发布
+
+除 GitHub 外，正式版还可发布到 MatElab（物质科学电子实验室）更新源，供所内用户在软件内切换使用。发布约定与客户端解析逻辑见 `bandscope/updates/matelab_source.py` 顶部 docstring。
+
+一次性准备：
+
+1. 在 MatElab 上创建发布记录本（默认 `BandScope发布`）；
+2. 在其中建模板 `BandScope Release`，包含三个模块：「发布说明」（富文本）、「manifest」（富文本）、「安装包」（文件集）。
+
+发布命令：
+
+```powershell
+python scripts/release/publish_matelab.py --version 1.14.0 `
+    --installer CPU=release/BandScope-1.14.0-Windows-x64-CPU-Setup.exe `
+    --installer NVIDIA=release/BandScope-1.14.0-Windows-x64-NVIDIA-Setup.exe `
+    --notes release-notes.txt
+```
+
+凭证取 `--username/--password`、`MATELAB_USER`/`MATELAB_PASSWORD` 环境变量或交互输入。安装包按官方分片接口上传（单片 8 MiB，带整包 SHA-256），随后以 `#file{name}` 引用创建发布记录；同一版本重复发布会因记录 uid 冲突被拒绝，需先在网页端删除旧记录。
+
+用户侧：软件右键菜单「更新源」切换为 MatElab 后首次检查需登录 MatElab 账号；凭证仅存本机（密码基本混淆），token 不落盘。插件目录仍固定来自 GitHub Release。

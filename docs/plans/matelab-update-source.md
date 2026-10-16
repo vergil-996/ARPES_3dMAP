@@ -1,7 +1,7 @@
 # MatElab 更新源接入（可切换更新源）
 
 - 日期：2026-10-16
-- 状态：方案已提出并保存，待用户确认后实施；本次仅保存计划。
+- 状态：已实现并通过自动化回归；真实账号端到端验收未执行。
 - 负责范围：主程序更新模块与发布工具，由实施任务负责集成。
 - 共享文件：`bandscope/updates/update_service.py`、`bandscope/updates/update_controller.py`、`bandscope/updates/net.py`、`bandscope/app/refactored_app.py`（版本按钮接线）、`bandscope/extensions/catalog.py`（仅确认耦合面，第一阶段不改行为）。
 - 交付物：更新源抽象与 MatElab 源实现、切换入口与登录对话框、发布脚本、自动化测试、文档更新；完成后将本计划连同材料归档并更新计划索引。
@@ -63,7 +63,8 @@
 
 ## 当前验收结果与下一步
 
-- 功能实现：未开始。
-- 规划阶段已完成：现有更新机制只读核对；MatElab 登录/记录列表/数据导出/文件下载/文件上传接口已从官方文档实测读取。
-- 全量回归、真实账号端到端验证：均未执行，不能视为通过。
-- 下一步：用户确认方案（含「用户在 BandScope 内登录 MatElab」的凭证方案）后，按实施顺序第 1 步开始。
+- 功能实现：已完成（2026-10-16）。更新源抽象（`bandscope/updates/sources.py`）、MatElab 源客户端与分片上传（`bandscope/updates/matelab_source.py`）、控制器源切换与 MatElab 登录对话框（`bandscope/updates/update_controller.py`）、右键菜单「更新源」入口（`bandscope/app/refactored_app.py`）、发布脚本（`scripts/release/publish_matelab.py`）。
+- 自动化测试：新增 `tests/updates/test_matelab_source.py`、`tests/updates/test_update_sources.py`；全量回归 1237 项通过（2026-10-16）。
+- 连通性验证：已用真实 MatElab 会话做只读验证——记录本列表/记录列表接口可按预期解析，业务错误提示正常（2026-10-16）。
+- 未执行的检查：真实账号端到端验证（登录、发现版本、下载校验、安装启动）未执行，不能视为通过；发布脚本对真实服务器的上传与建记录未执行；界面视觉验收未执行。
+- 下一步：在 MatElab 建好「BandScope发布」记录本与「BandScope Release」模板后，用发布脚本推一个测试版本做端到端验收；验收完成后归档本计划。

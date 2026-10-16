@@ -11,7 +11,7 @@
 | `bandscope/ui/` | 控制页面、相机与裁剪控件、时间轴、结果工作区、主题、弹层与提示 |
 | `bandscope/exporting/` | `publication_models` 数据契约；`publication_export` 快照；`publication_renderers` 出图；`publication_dialog` 导出交互 |
 | `bandscope/extensions/` | `api` 插件协议；`ui` 公共界面组件；`plugin_manager` 安装加载；`plugin_host` 宿主接入；`derived_host` 派生结果协调；`plugin_dialog` 管理界面 |
-| `bandscope/updates/` | `update_service` 网络及安装包校验；`update_controller` 更新交互 |
+| `bandscope/updates/` | `update_service` 网络及安装包校验；`update_controller` 更新交互；`sources` 更新源抽象；`matelab_source` MatElab 更新源 |
 | `bandscope/app_metadata.py` | 应用名称、版本、构建类型与更新元信息 |
 
 本轮保留原有实现和主要模块名。导出对话框与插件管理对话框跟随各自功能模块；其余通用控件放 `ui`。主窗口仍负责跨模块集成，进一步拆分另开任务。

@@ -8,13 +8,22 @@ from pathlib import Path
 
 
 APP_NAME = "BandScope"
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 APP_PUBLISHER = "vergil-996"
 
 GITHUB_OWNER = "vergil-996"
 GITHUB_REPOSITORY = "ARPES_3dMAP"
 GITHUB_REPOSITORY_SLUG = f"{GITHUB_OWNER}/{GITHUB_REPOSITORY}"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPOSITORY_SLUG}/releases"
+
+# MatElab（物质科学电子实验室）更新源：API 基址、网页入口与发布约定。
+# 发布记录本中每个 Release 一条记录，关键词带 MATELAB_RELEASE_KEYWORD，
+# 记录内含名为 "manifest" 的 JSON 字段（version/notes/published_at）和
+# 按 installer_asset_name() 命名的安装包文件。
+MATELAB_API_BASE = "https://eln.iphy.ac.cn:61262"
+MATELAB_WEB_URL = "https://matelab.iphy.ac.cn/eln/"
+MATELAB_RELEASE_NOTEBOOK = "BandScope发布"
+MATELAB_RELEASE_KEYWORD = "bandscope-release"
 
 CPU_BUILD = "CPU"
 NVIDIA_BUILD = "NVIDIA"

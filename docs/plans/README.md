@@ -3,7 +3,7 @@
 本索引只列尚待设计或实施的工作；按任务选择对应计划，不批量读取本目录。
 
 - [单条 EDC 曲线的悬停说明](single-edc-help.md)：方案已确认，待实施；在类型选择框旁显示仅用于单条 EDC 的悬停帮助。
-- [MatElab 更新源接入](matelab-update-source.md)：方案待确认；在 GitHub 之外新增 MatElab 实验记录本更新源，用户可切换，首次使用需在软件内登录 MatElab 账号。
+- [MatElab 更新源接入](matelab-update-source.md)：已实现，自动化回归通过；待真实账号端到端验收。在 GitHub 之外新增 MatElab 实验记录本更新源，用户可切换，首次使用需在软件内登录 MatElab 账号。
 - [局部增强控件简化与锁定色带整合](enhancement-controls-simplify.md)：已实施、1214 项测试通过；待真实窗口视觉验收（布局、可编辑重命名、2D/3D 区域色带、五个 validation 脚本重跑）。
 
 已实施功能的剩余修复、人工验收和发布跟进从 [当前交接](../handoffs/README.md) 接续。EDC 瀑布图、插件管理和平带增强的详细方案由该入口按需链接。

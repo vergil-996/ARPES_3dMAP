@@ -31,6 +31,12 @@ ALLOWED_DOWNLOAD_HOSTS = {
     "release-assets.githubusercontent.com",
 }
 
+
+def _normalize_hosts(allowed_hosts) -> set:
+    if allowed_hosts is None:
+        return ALLOWED_DOWNLOAD_HOSTS
+    return {str(host).strip().lower() for host in allowed_hosts if str(host).strip()}
+
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
@@ -54,10 +60,14 @@ def normalize_sha256(value) -> str:
     return digest if _SHA256_PATTERN.fullmatch(digest) else ""
 
 
-def ensure_https_download_url(url: str) -> None:
-    """下载地址必须是受信任主机的 HTTPS 地址；否则拒绝。"""
+def ensure_https_download_url(url: str, allowed_hosts=None) -> None:
+    """下载地址必须是受信任主机的 HTTPS 地址；否则拒绝。
+
+    ``allowed_hosts`` 为空时使用 GitHub 主机白名单；MatElab 等其他更新源
+    传入自己的主机集合。比较只按主机名，端口不在此处限制。
+    """
     parsed = urlparse(str(url or ""))
-    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in ALLOWED_DOWNLOAD_HOSTS:
+    if parsed.scheme.lower() != "https" or (parsed.hostname or "").lower() not in _normalize_hosts(allowed_hosts):
         raise UntrustedHostError(f"资源使用了不受信任的下载地址：{url}")
 
 
@@ -78,9 +88,10 @@ def open_stream(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     accept: str = "",
     user_agent: str = "",
+    allowed_hosts=None,
 ):
     """打开一个受信任主机的 HTTPS 流；网络失败转成可展示的 :class:`NetworkError`。"""
-    ensure_https_download_url(url)
+    ensure_https_download_url(url, allowed_hosts=allowed_hosts)
     open_function = opener or urllib.request.urlopen
     try:
         return open_function(request(url, accept=accept, user_agent=user_agent), timeout=timeout)

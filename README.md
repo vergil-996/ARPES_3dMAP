@@ -1,12 +1,19 @@
 # BandScope
 
-BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.13.0**。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.14.0**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
 ---
 
 ## 界面概览
+
+### v1.14.0 更新
+
+- **更新源可以在 GitHub 与 MatElab 之间切换**：右键菜单新增「更新源」子菜单，默认仍为 GitHub；所内用户可切换到 MatElab 实验记录本源，首次使用需在软件内登录 MatElab 账号（凭证仅存本机、密码做基本混淆，API token 不落盘），之后检查、下载、校验全自动，安装包完整性与 GitHub 源一样按 SHA-256 校验。
+- **发布侧新增 MatElab 发布脚本**：`scripts/release/publish_matelab.py` 按官方分片接口上传安装包（带整包 SHA-256）并创建发布记录；发布约定见 `docs/development/releasing.md`。
+- 插件目录仍固定来自 GitHub Release，切换更新源不影响插件在线安装与升级评估。
+- MatElab 源的真实账号端到端验收（下载安装闭环）尚未执行，见 [MatElab 更新源接入](docs/plans/matelab-update-source.md)。
 
 ### v1.13.0 更新
 
