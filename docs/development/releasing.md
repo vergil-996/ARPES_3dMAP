@@ -61,10 +61,7 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 
 除 GitHub 外，正式版还可发布到 MatElab（物质科学电子实验室）更新源，供所内用户在软件内切换使用。发布约定与客户端解析逻辑见 `bandscope/updates/matelab_source.py` 顶部 docstring。
 
-一次性准备：
-
-1. 在 MatElab 上创建发布记录本（默认 `BandScope发布`）；
-2. 在其中建模板 `BandScope Release`，包含三个模块：「发布说明」（富文本）、「manifest」（富文本）、「安装包」（文件集）。
+一次性准备：在 MatElab 上创建发布记录本（默认 `BandScope发布`）。发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构（「发布说明」「manifest」「安装包」三个模块），不需要预先建模板。
 
 发布命令：
 

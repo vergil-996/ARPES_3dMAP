@@ -12,14 +12,14 @@
 
 前置条件（一次性手工准备）：
 
-1. 在 MatElab 上创建发布记录本（默认「BandScope发布」，可用 --notebook 改）；
-2. 在该记录本里建一个模板（默认「BandScope Release」，可用 --template 改），
-   包含三个模块：「发布说明」（富文本）、「manifest」（富文本）、「安装包」（文件集）。
+在 MatElab 上创建发布记录本（默认「BandScope发布」，可用 --notebook 改）。
+发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构，不需要模板。
 
-发布内容：每个版本一条记录，关键词含 bandscope-release；manifest 模块写入
-JSON {"version", "notes", "published_at"}；安装包通过官方分片上传接口上传后
-以 #file{name} 引用挂到「安装包」模块。客户端（MatelabReleaseClient）按此约定
-发现版本、取 SHA-256 并构造下载地址。
+发布内容：每个版本一条记录，标题为「BandScope vX.Y.Z」；记录含三个模块：
+「发布说明」（富文本）、「manifest」（富文本，内容为 JSON {"version", "notes",
+"published_at"}）、「安装包」（文件集，安装包经官方分片上传接口上传后以
+#file{name} 引用挂入）。客户端（MatelabReleaseClient）按此约定发现版本、
+取 SHA-256 并构造下载地址。
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from bandscope.app_metadata import (
     APP_NAME,
     MATELAB_API_BASE,
-    MATELAB_RELEASE_KEYWORD,
     MATELAB_RELEASE_NOTEBOOK,
     installer_asset_name,
 )
@@ -49,8 +48,6 @@ from bandscope.updates.matelab_source import (
     upload_file,
 )
 from bandscope.updates.update_service import SemanticVersion
-
-DEFAULT_TEMPLATE = "BandScope Release"
 
 
 def _resolve_credentials(args) -> MatelabCredentials:
@@ -101,36 +98,36 @@ def _upload_installers(session, notebook, version, installers) -> list:
     return uploaded
 
 
-def _create_release_record(session, notebook, template, version, notes, uploaded) -> dict:
+def _create_release_record(session, notebook, version, notes, uploaded) -> None:
+    """创建空记录后用数据更新接口搭结构：不依赖记录本模板。"""
+    uid = f"bandscope-release-{version}"
+    session.api("eln_api/create", {"eln": notebook, "title": f"{APP_NAME} v{version}", "uid": uid})
+
     manifest = {
         "version": version,
         "notes": notes,
         "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     notes_html = "".join(f"<p>{line}</p>" for line in notes.splitlines() if line.strip())
-    files = [
-        {"file": "#file{%s}" % item["name"], "text": "%s 安装包" % item["flavor"]}
+    manifest_html = "<p>" + json.dumps(manifest, ensure_ascii=False) + "</p>"
+    adds = [
+        {"module": "安装包", "data": {"file": "#file{%s}" % item["name"], "text": "%s 安装包" % item["flavor"]}}
         for item in uploaded
     ]
-    payload = {
-        "eln": notebook,
-        "template": template,
-        "dataset": [
-            {
-                "uid": f"bandscope-release-{version}",
-                "title": f"{APP_NAME} v{version}",
-                "keyword": f"{MATELAB_RELEASE_KEYWORD};v{version}",
-                "data": {
-                    "发布说明": notes_html or "<p>本次发布未填写更新说明。</p>",
-                    "manifest": json.dumps(manifest, ensure_ascii=False),
-                    "安装包": files,
-                },
-            }
-        ],
-    }
-    result = session.api("eln_api/import", payload)
-    print(f"发布记录已创建：{json.dumps(result, ensure_ascii=False)}")
-    return result
+    session.api(
+        "eln_api/update",
+        {
+            "eln": notebook,
+            "uid": uid,
+            "addModule": [
+                {"name": "发布说明", "type": "richtext", "data": notes_html or "<p>本次发布未填写更新说明。</p>"},
+                {"name": "manifest", "type": "richtext", "data": manifest_html},
+                {"name": "安装包", "type": "files"},
+            ],
+            "add": adds,
+        },
+    )
+    print(f"发布记录已创建：{APP_NAME} v{version}（uid {uid}）")
 
 
 def main(argv=None) -> int:
@@ -145,7 +142,6 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--notes", default="", help="更新说明文本文件（可选）")
     parser.add_argument("--notebook", default=MATELAB_RELEASE_NOTEBOOK)
-    parser.add_argument("--template", default=DEFAULT_TEMPLATE)
     parser.add_argument("--base-url", default=MATELAB_API_BASE)
     parser.add_argument("--username", default="")
     parser.add_argument("--password", default="")
@@ -170,7 +166,7 @@ def main(argv=None) -> int:
     print("MatElab 登录成功。")
     _find_notebook(session, args.notebook)
     uploaded = _upload_installers(session, args.notebook, version, installers)
-    _create_release_record(session, args.notebook, args.template, version, notes, uploaded)
+    _create_release_record(session, args.notebook, version, notes, uploaded)
     print(f"BandScope v{version} 已发布到 MatElab 记录本「{args.notebook}」。")
     return 0
 
