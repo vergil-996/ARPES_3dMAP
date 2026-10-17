@@ -35,7 +35,7 @@
    - 下载：拼接 `eln_url` 下载 URL，仍走 `net.save_stream` 的大小 + SHA-256 校验与 2 GiB 上限。
    - Token 生命周期：内存缓存 access token；收到 `'refresh'` 自动刷新；refresh 过期重新登录。凭证首次使用时弹窗询问，存 QSettings（基本混淆并在界面明示），token 不写盘。
    - 主机白名单：`net.py` 的 `ensure_https_download_url` 增加 `allowed_hosts` 参数（默认仍为 GitHub 集合）；MatElab 源放行 `eln.iphy.ac.cn` 及记录 `server` 字段指明的服务器主机。
-3. **切换入口**：QSettings 新增 `updates/source`（`github`/`matelab`，默认 `github`）；版本按钮右键菜单加「更新源」子项切换；选 MatElab 且无凭证时弹出登录对话框。`UpdateController` 按当前源构造客户端，弹窗文案与失败提示按源区分。
+3. **切换入口**：QSettings 新增 `updates/source`（`github`/`matelab`，默认 `github`）；画布与版本按钮右键菜单统一使用「更新设置…」，可切换更新源、查看已保存账号、更换或清除 MatElab 账号。对话框只维护草稿，保存后统一生效；取消保留原设置。选 MatElab 但未设置账号时，首次手动检查更新会提示填写；切到 GitHub 保留 MatElab 账号。`UpdateController` 按当前源构造客户端，弹窗文案与失败提示按源区分；检查或下载期间禁止修改源与账号。
 4. **插件目录**：第一阶段 `CatalogClient` 仍走 GitHub，取不到时沿用现有「无法确认」降级；第二阶段再评估把目录镜像到 MatElab 记录。
 5. **发布工具**：新增 `scripts/release/publish_matelab.py`，登录 → 分片上传安装包 → 创建/更新发布记录（manifest + 说明）。
 
@@ -69,5 +69,7 @@
 - 真实发布验证（2026-10-16，v1.14.0）：发布脚本链路对真实服务器跑通——两个安装包经分片接口上传，服务器组装后 sha256 与 CI 边车值一致（CPU `227d1efd…`，NVIDIA `0557c6d6…`）；发布记录「BandScope v1.14.0」（uid `bandscope-release-1.14.0`）建于「BandScope发布」记录本（id 5514），含 manifest / 安装包两个模块（2026-10-17 起去掉「发布说明」模块，说明文字并入 manifest 的 notes 字段）。客户端只读验证：从 1.13.0 检查更新，两个 flavor 均发现 1.14.0，文件名 / 大小 / SHA-256 与 CI 发布值完全一致。CPU 安装包经客户端 `download_installer` 完整下载并校验通过（145 MiB，sha256 一致）；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。
 - 过程中修复：分片上传在文件大小恰为分片整数倍时末片判定错误（漏发整包 hash、返回 `None`），已修复并补回归测试；发布改用「创建空记录 + 数据更新」接口搭建记录，不再需要预先建模板；文件项文件名用 `#hash{filename,sha256}` 引用改写保证客户端可识别。
 - 真实发布验证（2026-10-17，v1.14.1）：发布链路再次跑通——CPU 安装包（145 MiB）直传 134s 完成；NVIDIA 安装包（1143 MiB）慢网环境下用自写分步续传驱动 `scripts/release/publish_matelab_driver.py` 分 10 轮逐片追加（同一 uid 续传，state 存 `release/.matelab-publish-1.14.1.json`），服务器组装后整包 hash 校验通过。发布记录「BandScope v1.14.1」（uid `bandscope-release-1.14.1`）建于「BandScope发布」记录本，含 manifest / 安装包两个模块。客户端只读验证（脚本 `scripts/validation/verify_matelab_release.py`，按 APP_VERSION 参数化）三项全部通过：从 1.14.0 检查更新，两个 flavor 均发现 1.14.1，文件名 / 大小 / SHA-256 与 CI 发布值一致；CPU 安装包经客户端 `download_installer` 完整下载并校验通过（sha256 `f49342454b08bde5…` 与 CI 边车一致）；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。发布前全量回归 1239 项通过（2026-10-17）。
+- 更新设置补齐（2026-10-17，尚未发布）：新增 `bandscope/updates/update_settings_dialog.py`，账号编辑与更新源统一由设置窗口提交，替换画布右键的旧「更新源」子菜单，并补上版本按钮右键入口。更换账号不预填密码，空用户名或密码在原窗口提示；保存后重建客户端并清除旧源的更新结果，取消不写设置。设置窗口打开期间不启动自动检查，检查与下载期间暂时禁止编辑。相关用例位于 `tests/updates/test_update_settings_dialog.py`、`tests/updates/test_update_sources.py` 和 `tests/integration/test_update_context_menu.py`。Windows 原生 Qt 平台、125% 缩放下的 GitHub / MatElab / 空账号 / 账号编辑与空值提示截图已复核，未发现文字遮挡（合成账号，不联网；本机材料 `.local/outputs/update-settings/`）。
+- 本次验证（2026-10-17）：`.venv/Scripts/python.exe -m unittest discover -s tests -t . -v`，1257 项全部通过；覆盖正在运行与已结束但结果尚未处理的线程、设置期间自动检查阻断、同源换号、清除与取消。真实主窗口验证版本按钮左键检查与右键设置入口、设置弹窗打开与取消均通过（隔离设置与扩展目录，自动联网检查已替换为测试桩）。记录与截图在 `.local/outputs/update-settings/`；未使用真实账号，也未构建或发布新安装包。
 - 未执行的检查：界面视觉与登录对话框人工验收、非 frozen 运行行为、下载后安装启动未执行，不能视为通过（执行环境无 MatElab 账号密码，发布与验证用浏览器会话 token 注入完成）。
 - 下一步：在做界面人工验收（两源切换、登录失败提示、断网降级）后归档本计划。

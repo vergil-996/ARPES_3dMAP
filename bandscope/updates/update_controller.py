@@ -10,11 +10,6 @@ from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QLabel,
-    QLineEdit,
-    QMenu,
     QMessageBox,
     QProgressDialog,
 )
@@ -30,9 +25,9 @@ from bandscope.app_metadata import (
 from bandscope.extensions.catalog import CatalogClient
 from bandscope.extensions.upgrade import evaluate_upgrade, format_impact
 from bandscope.updates.matelab_source import MatelabCredentials, MatelabReleaseClient
+from bandscope.updates.update_settings_dialog import MatelabLoginDialog, UpdateSettingsDialog
 from bandscope.updates.sources import (
     DEFAULT_SOURCE,
-    SOURCE_GITHUB,
     SOURCE_LABELS,
     SOURCE_MATELAB,
     SOURCE_SETTING,
@@ -125,40 +120,6 @@ class InstallerDownloadThread(QThread):
         self.completed.emit(path, verification)
 
 
-class MatelabLoginDialog(QDialog):
-    """MatElab 账号登录对话框；凭证仅保存在本机设置中（密码做基本混淆）。"""
-
-    def __init__(self, parent=None, username=""):
-        super().__init__(parent)
-        self.setWindowTitle("登录 MatElab")
-        layout = QFormLayout(self)
-        layout.addRow(
-            QLabel(
-                "MatElab 更新源需要使用你的物质科学电子实验室账号。\n"
-                "账号密码仅保存在本机（密码做基本混淆存储），用于获取 API 令牌。"
-            )
-        )
-        self.username_edit = QLineEdit(str(username or ""))
-        self.username_edit.setPlaceholderText("中文姓名或电子邮箱")
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.Password)
-        layout.addRow("用户名", self.username_edit)
-        layout.addRow("密码", self.password_edit)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("登录并保存")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-    def credentials(self):
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text()
-        if not username or not password:
-            return None
-        return MatelabCredentials(username=username, password=password)
-
-
 class UpdateController(QObject):
     def __init__(self, window, settings, version_button=None, parent=None):
         super().__init__(parent or window)
@@ -173,6 +134,7 @@ class UpdateController(QObject):
         self.client = self._active_client()
         self._check_thread = None
         self._download_thread = None
+        self._settings_dialog = None
         self._progress_dialog = None
         self._manual_check = False
         self._active_release = None
@@ -204,23 +166,63 @@ class UpdateController(QObject):
         source = normalize_source(source)
         if source == self.current_source():
             return
+        if self._updates_busy():
+            self._show_settings_busy_message()
+            return
         self.settings.setValue(SOURCE_SETTING, source)
-        self.client = self._active_client()
+        self._reset_source_state()
         if source == SOURCE_MATELAB and self._stored_matelab_credentials() is None:
             self._prompt_matelab_login()
 
-    def add_source_menu(self, menu):
-        """在设置菜单里挂「更新源」子菜单，两个源互斥勾选。"""
-        submenu = menu.addMenu("更新源")
-        current = self.current_source()
-        for source_id, label in self.available_sources():
-            action = submenu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(source_id == current)
-            action.triggered.connect(
-                lambda _checked=False, target=source_id: self.set_source(target)
-            )
-        return submenu
+    def _updates_busy(self):
+        # run() 返回后，结果与 finished 信号仍可能排队；等主线程处理完再放行。
+        return self._check_thread is not None or self._download_thread is not None
+
+    def _show_settings_busy_message(self):
+        self._show_message("更新设置", "正在检查或下载更新，请结束后再修改更新源或账号。")
+
+    def _reset_source_state(self):
+        self.client = self._active_client()
+        self._active_release = None
+        self._plugin_catalog = None
+        self._plugin_catalog_error = ""
+        self._plugin_impact = None
+
+    def add_settings_action(self, menu):
+        action = menu.addAction("更新设置…")
+        action.triggered.connect(lambda _checked=False: self.open_settings())
+        return action
+
+    def open_settings(self):
+        if self._settings_dialog is not None:
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return False
+        if self._updates_busy():
+            self._show_settings_busy_message()
+            return False
+        dialog = UpdateSettingsDialog(
+            self.window,
+            source=self.current_source(),
+            credentials=self._stored_matelab_credentials(),
+            username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
+        )
+        self._settings_dialog = dialog
+        try:
+            if dialog.exec_() != QDialog.Accepted:
+                return False
+            self.settings.setValue(SOURCE_SETTING, dialog.selected_source())
+            credentials = dialog.credentials()
+            if credentials is None:
+                self.settings.remove(MATELAB_USERNAME_SETTING)
+                self.settings.remove(MATELAB_PASSWORD_SETTING)
+            else:
+                self._store_matelab_credentials(credentials)
+            self._reset_source_state()
+            return True
+        finally:
+            self._settings_dialog = None
+            dialog.deleteLater()
 
     # -- MatElab 凭证 -----------------------------------------------------------
 
@@ -245,14 +247,16 @@ class UpdateController(QObject):
             self.window,
             username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
         )
-        if dialog.exec_() != QDialog.Accepted:
-            return None
-        credentials = dialog.credentials()
-        if credentials is None:
-            self._show_message("登录 MatElab", "用户名和密码不能为空。", QMessageBox.Warning)
-            return None
-        self._store_matelab_credentials(credentials)
-        return credentials
+        try:
+            if dialog.exec_() != QDialog.Accepted:
+                return None
+            credentials = dialog.credentials()
+            if credentials is None:
+                return None
+            self._store_matelab_credentials(credentials)
+            return credentials
+        finally:
+            dialog.deleteLater()
 
     def _read_timestamp(self, key):
         value = self.settings.value(key, "", type=str)
@@ -287,6 +291,9 @@ class UpdateController(QObject):
             self.check_for_updates(manual=False)
 
     def check_for_updates(self, manual=True):
+        # 模态设置窗口仍会处理计时器事件；编辑期间不启动后台检查。
+        if self._settings_dialog is not None:
+            return
         if self._check_thread is not None and self._check_thread.isRunning():
             if manual:
                 self._show_message("检查更新", "正在检查更新，请稍候。")
@@ -333,7 +340,7 @@ class UpdateController(QObject):
         if self.current_source() == SOURCE_MATELAB:
             return (
                 "请确认 MatElab 账号可以正常登录，且当前网络能够访问所内服务器 "
-                "eln.iphy.ac.cn；如需修改账号或切换更新源，请使用右键菜单中的「更新源」。"
+                "eln.iphy.ac.cn；如需修改账号或切换更新源，请使用右键菜单中的「更新设置…」。"
             )
         return (
             "如果当前网络无法直接访问 GitHub，请先开启 VPN 或网络代理，"

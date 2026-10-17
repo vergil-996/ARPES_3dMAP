@@ -288,6 +288,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.btn_tb_version.clicked.connect(
             lambda: self.update_controller.check_for_updates(manual=True)
         )
+        self.btn_tb_version.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.btn_tb_version.customContextMenuRequested.connect(self._show_update_settings_menu)
         QTimer.singleShot(5000, self.update_controller.check_automatically)
 
     def _apply_feedback_styles(self):
@@ -767,7 +769,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.btn_tb_version.setFixedWidth(96)
         self.btn_tb_version.attachment().setText(f"v{APP_VERSION}")
         theme.style_push_button(self.btn_tb_version, "secondary")
-        self.btn_tb_version.setToolTip("点击检查更新")
+        self.btn_tb_version.setToolTip("点击检查更新；右键打开更新设置")
         row.addWidget(self.btn_tb_version)
 
         self.btn_tb_load.clicked.connect(self.on_load)
@@ -3500,11 +3502,15 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         update_action.triggered.connect(
             lambda: self.update_controller.check_for_updates(manual=True)
         )
-        # 更新源切换由 UpdateController 提供；旧测试替身没有该接口时跳过。
-        add_source_menu = getattr(self.update_controller, "add_source_menu", None)
-        if callable(add_source_menu):
-            add_source_menu(menu)
+        self.update_controller.add_settings_action(menu)
         return menu, global_pos
+
+    def _show_update_settings_menu(self, pos):
+        menu = QMenu(self.btn_tb_version)
+        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
+        self.update_controller.add_settings_action(menu)
+        menu.exec_(self.btn_tb_version.mapToGlobal(pos))
+        menu.deleteLater()
 
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
