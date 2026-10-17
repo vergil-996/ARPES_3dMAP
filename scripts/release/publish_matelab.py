@@ -15,11 +15,10 @@
 在 MatElab 上创建发布记录本（默认「BandScope发布」，可用 --notebook 改）。
 发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构，不需要模板。
 
-发布内容：每个版本一条记录，标题为「BandScope vX.Y.Z」；记录含三个模块：
-「发布说明」（富文本）、「manifest」（富文本，内容为 JSON {"version", "notes",
-"published_at"}）、「安装包」（文件集，安装包经官方分片上传接口上传后以
-#file{name} 引用挂入）。客户端（MatelabReleaseClient）按此约定发现版本、
-取 SHA-256 并构造下载地址。
+发布内容：每个版本一条记录，标题为「BandScope vX.Y.Z」；记录含两个模块：
+「manifest」（富文本，内容为 JSON {"version", "notes", "published_at"}）、
+「安装包」（文件集，安装包经官方分片上传接口上传后以 #file{name} 引用挂入）。
+客户端（MatelabReleaseClient）按此约定发现版本、取 SHA-256 并构造下载地址。
 """
 
 from __future__ import annotations
@@ -108,7 +107,6 @@ def _create_release_record(session, notebook, version, notes, uploaded) -> None:
         "notes": notes,
         "published_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    notes_html = "".join(f"<p>{line}</p>" for line in notes.splitlines() if line.strip())
     manifest_html = "<p>" + json.dumps(manifest, ensure_ascii=False) + "</p>"
     adds = [
         {"module": "安装包", "data": {"file": "#file{%s}" % item["name"], "text": "%s 安装包" % item["flavor"]}}
@@ -120,7 +118,6 @@ def _create_release_record(session, notebook, version, notes, uploaded) -> None:
             "eln": notebook,
             "uid": uid,
             "addModule": [
-                {"name": "发布说明", "type": "richtext", "data": notes_html or "<p>本次发布未填写更新说明。</p>"},
                 {"name": "manifest", "type": "richtext", "data": manifest_html},
                 {"name": "安装包", "type": "files"},
             ],

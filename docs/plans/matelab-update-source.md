@@ -66,7 +66,7 @@
 - 功能实现：已完成（2026-10-16）。更新源抽象（`bandscope/updates/sources.py`）、MatElab 源客户端与分片上传（`bandscope/updates/matelab_source.py`）、控制器源切换与 MatElab 登录对话框（`bandscope/updates/update_controller.py`）、右键菜单「更新源」入口（`bandscope/app/refactored_app.py`）、发布脚本（`scripts/release/publish_matelab.py`）。
 - 自动化测试：新增 `tests/updates/test_matelab_source.py`、`tests/updates/test_update_sources.py`；全量回归 1237 项通过（2026-10-16）。
 - 连通性验证：已用真实 MatElab 会话做只读验证——记录本列表/记录列表接口可按预期解析，业务错误提示正常（2026-10-16）。
-- 真实发布验证（2026-10-16，v1.14.0）：发布脚本链路对真实服务器跑通——两个安装包经分片接口上传，服务器组装后 sha256 与 CI 边车值一致（CPU `227d1efd…`，NVIDIA `0557c6d6…`）；发布记录「BandScope v1.14.0」（uid `bandscope-release-1.14.0`）建于「BandScope发布」记录本（id 5514），含发布说明 / manifest / 安装包三模块。客户端只读验证：从 1.13.0 检查更新，两个 flavor 均发现 1.14.0，文件名 / 大小 / SHA-256 与 CI 发布值完全一致。CPU 安装包经客户端 `download_installer` 完整下载并校验通过（145 MiB，sha256 一致）；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。
+- 真实发布验证（2026-10-16，v1.14.0）：发布脚本链路对真实服务器跑通——两个安装包经分片接口上传，服务器组装后 sha256 与 CI 边车值一致（CPU `227d1efd…`，NVIDIA `0557c6d6…`）；发布记录「BandScope v1.14.0」（uid `bandscope-release-1.14.0`）建于「BandScope发布」记录本（id 5514），含 manifest / 安装包两个模块（2026-10-17 起去掉「发布说明」模块，说明文字并入 manifest 的 notes 字段）。客户端只读验证：从 1.13.0 检查更新，两个 flavor 均发现 1.14.0，文件名 / 大小 / SHA-256 与 CI 发布值完全一致。CPU 安装包经客户端 `download_installer` 完整下载并校验通过（145 MiB，sha256 一致）；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。
 - 过程中修复：分片上传在文件大小恰为分片整数倍时末片判定错误（漏发整包 hash、返回 `None`），已修复并补回归测试；发布改用「创建空记录 + 数据更新」接口搭建记录，不再需要预先建模板；文件项文件名用 `#hash{filename,sha256}` 引用改写保证客户端可识别。
 - 未执行的检查：界面视觉与登录对话框人工验收、非 frozen 运行行为、下载后安装启动未执行，不能视为通过（执行环境无 MatElab 账号密码，发布与验证用浏览器会话 token 注入完成）。
 - 下一步：在做界面人工验收（两源切换、登录失败提示、断网降级）后归档本计划。

@@ -61,7 +61,7 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 
 除 GitHub 外，正式版还可发布到 MatElab（物质科学电子实验室）更新源，供所内用户在软件内切换使用。发布约定与客户端解析逻辑见 `bandscope/updates/matelab_source.py` 顶部 docstring。
 
-一次性准备：在 MatElab 上创建发布记录本（默认 `BandScope发布`）。发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构（「发布说明」「manifest」「安装包」三个模块），不需要预先建模板。
+一次性准备：在 MatElab 上创建发布记录本（默认 `BandScope发布`）。发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构（「manifest」「安装包」两个模块），不需要预先建模板。
 
 发布命令：
 
@@ -73,5 +73,11 @@ python scripts/release/publish_matelab.py --version 1.14.0 `
 ```
 
 凭证取 `--username/--password`、`MATELAB_USER`/`MATELAB_PASSWORD` 环境变量或交互输入。安装包按官方分片接口上传（单片 8 MiB，带整包 SHA-256），随后以 `#file{name}` 引用创建发布记录；同一版本重复发布会因记录 uid 冲突被拒绝，需先在网页端删除旧记录。
+
+实测注意（2026-10-16 首次实发）：
+
+- 文件项的 `filename` 取上传时 multipart 里的文件名；若传错，可用 `eln_api/update` 的 `modify` 命令以 `#hash{文件名,sha256}` 引用改写，无需重传。
+- `delModule` 命令的 `name` 是字符串（官方文档误写为数组）。
+- 客户端按记录标题或关键词识别发布记录，标题固定为 `BandScope vX.Y.Z`。
 
 用户侧：软件右键菜单「更新源」切换为 MatElab 后首次检查需登录 MatElab 账号；凭证仅存本机（密码基本混淆），token 不落盘。插件目录仍固定来自 GitHub Release。

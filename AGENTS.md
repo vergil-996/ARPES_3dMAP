@@ -27,6 +27,15 @@
 4. 每个开放事项只维护一份状态主记录，注明目标、当前状态、负责范围、已验收内容和下一步；索引只维护事项路由，不复制实现流水与回归计数。完成后连同附件归档；源码完成但人工或发行包验收未完成时，保留对应开放事项。
 5. 目录迁移和全局导入调整由集成任务统一完成，不与同一批文件上的功能改动并行。
 
+## 发布流程
+
+1. 改版本号（引用点见 [构建与发布](docs/development/releasing.md)）、写 README 更新段落，跑全量回归后提交；推送 `vX.Y.Z` 标签触发 CI。
+2. CI（test → 插件 → 构建 → release）产出两个签名安装包及 `.sha256`、插件包和 `plugins-index.json`。**对外发布只用 CI 产物**，本机打包（无签名、哈希不一致）仅限开发验证；GitHub 与 MatElab 两个源发同一份文件。
+3. 下载安装包并按 `.sha256` 边车校验后再分发。
+4. MatElab 发布：`python scripts/release/publish_matelab.py --version X.Y.Z --installer CPU=… --installer NVIDIA=… --notes …`。脚本走「分片上传 → 创建空记录 → update 搭模块」，记录含「manifest」（富文本 JSON：version/notes/published_at）与「安装包」（文件集）两个模块，标题固定 `BandScope vX.Y.Z`；不需要模板，不需要手工建记录结构。实测细节（文件名改写、delModule 参数形式、慢网断点续传）见 releasing.md「实测注意」。
+5. 发布后用客户端逻辑只读验证：`check_for_update` 从上一版本能发现新版本，文件名/大小/SHA-256 与 CI 一致；抽样或完整下载校验通过才算发出。
+6. 收尾：更新计划/交接文档的验收记录（如实标注未执行项），README 与 releasing.md 同步，提交推送。
+
 ## 交付检查
 
 - 新代码使用 `bandscope.*` 导入；不要通过添加功能目录到 `sys.path` 解决包依赖。
