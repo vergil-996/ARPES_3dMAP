@@ -19,6 +19,7 @@ from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.control_layout_utils import combo_index_for_text, sync_slider_visual
+from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.interactive_crop_box import InteractiveCropBox
 
 
@@ -89,15 +90,23 @@ class EnhancementInteractionMixin:
         return next((r for r in state["regions"] if r["region_id"] == state.get("selected_id")), None) if state else None
 
     def _commit_enhancement_controls(self):
+        """色阶与强度映射是全局控件：把当前控件值写入背景与全部区域。
+
+        所有区域共享同一份 levels/映射设置，但各自保留自己的归一化范围。
+        """
         state = self._enhancement_state()
         if state is None or getattr(self, "_syncing_controls", False):
             return False
-        region = self._enhancement_selected()
-        target = state if region and state.get("common") else region or state
-        key = "common_style" if region and state.get("common") else "style" if region else "background"
         style = self._enhancement_ui_style()
-        if target.get(key) != style:
-            target[key] = style
+        changed = False
+        if state.get("background") != style:
+            state["background"] = copy.deepcopy(style)
+            changed = True
+        for region in state["regions"]:
+            if region.get("style") != style:
+                region["style"] = copy.deepcopy(style)
+                changed = True
+        if changed:
             state["revision"] += 1
         return True
 
@@ -111,12 +120,12 @@ class EnhancementInteractionMixin:
             render_state["combo_map"] = style["opacity_mode"]
         return render_state
 
-    def _restore_enhancement_target_style(self):
+    def _restore_enhancement_style(self):
+        """全局样式不随下拉框目标变化：始终从背景（全局）样式恢复控件。"""
         state = self._enhancement_state()
         if not state:
             return
-        region = self._enhancement_selected()
-        style = state.get("common_style", DEFAULT_STYLE) if region and state.get("common") else region.get("style", DEFAULT_STYLE) if region else state["background"]
+        style = state.get("background", DEFAULT_STYLE)
         widgets = (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up, self.page_render.combo_map)
         blockers = [QSignalBlocker(w) for w in widgets]
         for slider, value in zip(widgets[:3], style["levels"]):
@@ -132,12 +141,16 @@ class EnhancementInteractionMixin:
         self.request_refresh(RefreshCause.DISPLAY_MAPPING, RenderQuality.EXACT,
                              interactive=interactive, immediate=not interactive)
 
-    def _release_background_lock(self):
-        """删除区域会改变背景映射：解除全局锁定；按钮状态由目标同步负责。"""
+    def _release_global_lock(self):
+        """删除区域会改变背景映射：解除全局锁定（背景与全部区域）；按钮状态随控件同步。"""
         VisualEngine.unlock_data_range()
-        if self._enhancement_selected() is None:
-            self._restore_color_lock_button(False)
-            self._update_color_lock_button_style()
+        state = self._enhancement_state()
+        if state:
+            for region in state["regions"]:
+                region.pop("locked_range", None)
+                region.pop("lock_pending", None)
+        self._restore_color_lock_button(False)
+        self._update_color_lock_button_style()
 
     def _restore_color_lock_button(self, checked):
         """不触发信号地把锁定按钮复位到给定状态。"""
@@ -150,30 +163,32 @@ class EnhancementInteractionMixin:
         del blocker
 
     def _sync_color_lock_button(self):
-        """让锁定按钮反映下拉框当前对象的锁定状态。"""
+        """锁定按钮反映全局锁定状态：背景或任一区域有锁定即视为锁定。"""
         page = getattr(self, "page_render", None)
         btn = getattr(page, "btn_lock", None) if page is not None else None
         if btn is None:
             return
         state = self._enhancement_state()
-        region = self._enhancement_selected()
-        if state is not None and region is not None:
-            if state.get("common"):
-                locked = bool(state.get("common_locked_range") or state.get("common_lock_pending"))
-            else:
-                locked = bool(region.get("locked_range") or region.get("lock_pending"))
-        else:
-            locked = VisualEngine.locked_data_range() is not None
+        locked = VisualEngine.locked_data_range() is not None
+        if state is not None:
+            locked = locked or any(
+                region.get("locked_range") or region.get("lock_pending")
+                for region in state["regions"]
+            )
         self._restore_color_lock_button(locked)
         self._update_color_lock_button_style()
 
     def _select_enhancement_target(self, region_id):
+        """下拉框切换查看对象：「全部显示」展示所有区域色带与轮廓，其余只显示选中区域。"""
         state = self._enhancement_state()
         if state is None:
             return
         self._commit_enhancement_controls()
-        state["selected_id"] = region_id or None
-        self._restore_enhancement_target_style()
+        if region_id == SHOW_ALL_REGIONS_ID:
+            state["show_all_regions"] = True
+        else:
+            state["show_all_regions"] = False
+            state["selected_id"] = region_id or None
         self._clear_enhancement_interaction()
         self._sync_enhancement_controls(self._enhancement_spec(), self.current_render_context)
         self._draw_enhancement_regions(self.current_render_context, self._enhancement_display(self.current_render_context))
@@ -205,9 +220,12 @@ class EnhancementInteractionMixin:
         region.update(style=copy.deepcopy(self._enhancement_ui_style()), label=f"R{number}")
         state["regions"].append(region)
         state["selected_id"] = region["region_id"]
+        state["show_all_regions"] = False
         state["revision"] += 1
-        self._restore_enhancement_target_style()
         self._enhancement_refresh()
+        # 全局锁定开启时，新增区域立即锁定自己当前的强度范围。
+        if VisualEngine.locked_data_range() is not None:
+            self._set_all_regions_locked(True)
         self._select_control_page(0)
 
     def _delete_enhancement_region(self, region_id):
@@ -222,9 +240,8 @@ class EnhancementInteractionMixin:
         if state.get("selected_id") == region_id:
             state["selected_id"] = state["regions"][min(index, len(state["regions"]) - 1)]["region_id"] if state["regions"] else None
         state["revision"] += 1
-        self._release_background_lock()
+        self._release_global_lock()
         self._clear_enhancement_interaction()
-        self._restore_enhancement_target_style()
         self._enhancement_refresh()
 
     def _rename_enhancement_region(self, name):
@@ -243,37 +260,26 @@ class EnhancementInteractionMixin:
             # 未生效的编辑（空名、未改名或选中了背景）：把下拉框文字拉回当前状态。
             self._sync_enhancement_controls(self._enhancement_spec(), self.current_render_context)
 
-    def _set_enhancement_common(self, enabled):
+    def _set_all_regions_locked(self, locked):
+        """全局锁定/解锁：每个区域锁定自己实测的强度范围（不共用同一归一化）。"""
         state = self._enhancement_state()
         if not state:
             return
-        self._commit_enhancement_controls()
-        state["common"] = bool(enabled)
-        state.setdefault("common_style", copy.deepcopy(self._enhancement_selected().get("style", DEFAULT_STYLE) if self._enhancement_selected() else DEFAULT_STYLE))
-        state["revision"] += 1
-        self._restore_enhancement_target_style()
-        self._enhancement_refresh()
-
-    def _set_enhancement_locked(self, locked):
-        """锁定/解锁当前选中区域的归一化范围；返回是否生效。"""
-        state, region = self._enhancement_state(), self._enhancement_selected()
-        if not state or not region:
-            return False
-        fields = self._enhancement_display(self.current_render_context)
-        resolved = next((r for r in fields["regions"] if r["region_id"] == region["region_id"]), None) if fields else None
-        target, key = (state, "common_locked_range") if state.get("common") else (region, "locked_range")
-        pending = "common_lock_pending" if state.get("common") else "lock_pending"
-        data_range = resolved["data_range"] if resolved is not None else None
-        applied = True
-        if locked and (data_range is None or data_range[1] <= data_range[0]):
-            self._show_message("局部增强", "当前区域没有可锁定的有效强度范围。")
-            applied = False
+        if locked:
+            fields = self._enhancement_display(self.current_render_context)
+            resolved = {r["region_id"]: r for r in fields["regions"]} if fields else {}
+            for region in state["regions"]:
+                record = resolved.get(region["region_id"])
+                data_range = record["data_range"] if record is not None else None
+                region.pop("lock_pending", None)
+                region["locked_range"] = (
+                    tuple(data_range) if data_range is not None and data_range[1] > data_range[0] else None
+                )
         else:
-            target.pop(pending, None)
-            target[key] = tuple(data_range) if locked else None
-            state["revision"] += 1
-        self._enhancement_refresh()
-        return applied
+            for region in state["regions"]:
+                region.pop("locked_range", None)
+                region.pop("lock_pending", None)
+        state["revision"] += 1
 
     def _enhancement_crop_data(self, context, spec, state, *, allow_compute):
         """Use the same raw ROI and denoise job as a first home-volume crop.
@@ -377,8 +383,13 @@ class EnhancementInteractionMixin:
         regions = matching_regions(context, state["regions"]) if state and context else []
         if state and context and state.get("selected_id") not in {r["region_id"] for r in regions}:
             state["selected_id"] = None
-            self._restore_enhancement_target_style()
-        self.page_render.region_combo.sync(regions, state.get("selected_id") if state else None)
+        if state and context and not regions:
+            state["show_all_regions"] = False
+        self.page_render.region_combo.sync(
+            regions,
+            state.get("selected_id") if state else None,
+            show_all=bool(state and state.get("show_all_regions")),
+        )
         self._sync_color_lock_button()
 
     def _append_enhancement_actions(self, menu):
@@ -402,6 +413,7 @@ class EnhancementInteractionMixin:
             return
         state["show_all_regions"] = bool(enabled)
         context = self.current_render_context
+        self._sync_enhancement_controls(self._enhancement_spec(), context)
         self._draw_enhancement_regions(context, self._enhancement_display(context))
 
     def _enhancement_outline_regions(self, regions):
@@ -426,7 +438,7 @@ class EnhancementInteractionMixin:
             spec.params.pop(STATE_KEY, None)
         page = self.__dict__.get("page_render")
         if page is not None and hasattr(page, "region_combo"):
-            page.region_combo.sync([], None)
+            page.region_combo.sync([], None, show_all=False)
 
     def _clear_enhancement_interaction(self):
         selector = self.__dict__.get("_enhancement_selector")
@@ -499,8 +511,9 @@ class EnhancementInteractionMixin:
             label = self.ax_2d.text(x0, y1, region.get("label", region["name"]), color=theme.ACCENT, zorder=90, clip_on=True)
             self._enhancement_artists.extend((patch, label))
         if fields["regions"]:
-            note = self.ax_2d.text(.01, .01, enhancement_legend(fields), transform=self.ax_2d.transAxes,
-                                  color=theme.TEXT_2, fontsize=8, zorder=90, va="bottom")
+            # 左下角留给区域色带，摘要文字放在左上角。
+            note = self.ax_2d.text(.01, .99, enhancement_legend(fields), transform=self.ax_2d.transAxes,
+                                  color=theme.TEXT_2, fontsize=8, zorder=90, va="top")
             self._enhancement_artists.append(note)
         # 区域色带随每次绘制重建：刻度范围随数据/锁定状态变化，不能走上面的绘制键缓存。
         for colorbar in self.__dict__.get("_enhancement_colorbars", []):
@@ -559,7 +572,7 @@ class EnhancementInteractionMixin:
                                          font_size=12, always_visible=True, render=False)
             self._enhancement_actors.extend((name, name+":label"))
         if fields["regions"]:
-            self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="lower_left", font_size=9, render=False)
+            self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="upper_left", font_size=9, render=False)
             self._enhancement_actors.append("enhancement:legend")
             # 每个可见区域一条自己的 scalar bar，范围用区域（可能已锁定）的归一化区间。
             self._enhancement_scalar_bars = add_region_scalar_bars_3d(

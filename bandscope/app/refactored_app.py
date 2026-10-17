@@ -2333,14 +2333,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
 
     def on_toggle_color_lock(self, checked):
-        """「色阶调整」里「锁定色带」开关：按下拉框当前选中的对象冻结/恢复归一化范围。"""
+        """「色阶调整」里「锁定色带」开关：全局生效——同时冻结/恢复背景与全部增强区域
+        的归一化范围（每个区域锁定自己的强度范围，不共用同一归一化）。"""
         if self._syncing_controls:
-            return
-        if self._enhancement_selected() is not None:
-            # 选中增强区域：锁定/解锁该区域（统一模式下为全部区域共享）的范围。
-            if not self._set_enhancement_locked(checked):
-                self._restore_color_lock_button(False)
-            self._update_color_lock_button_style()
             return
         if checked:
             if not VisualEngine.lock_data_range():
@@ -2353,12 +2348,14 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
                     QMessageBox.Information,
                 )
                 return
+            self._set_all_regions_locked(True)
         else:
             VisualEngine.unlock_data_range()
+            self._set_all_regions_locked(False)
         self._update_color_lock_button_style()
         if self.core.raw_data is not None:
             self.request_refresh(
-                RefreshCause.TRANSFER_FUNCTION,
+                RefreshCause.DISPLAY_MAPPING if self._enhancement_state() else RefreshCause.TRANSFER_FUNCTION,
                 RenderQuality.EXACT,
                 immediate=True,
             )
@@ -5647,7 +5644,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def _sync_controls_from_page(self, spec):
         self._restore_page_ui_state(spec)
-        self._restore_enhancement_target_style()
+        self._restore_enhancement_style()
 
     def on_toggle_e_flip(self, checked):
         if self.base_raw_data is None:

@@ -1,4 +1,4 @@
-"""Native 2D/3D validation of selected-only enhancement outlines and menu toggle."""
+"""Native 2D/3D validation of dropdown-driven enhancement outline/colorbar visibility."""
 import sys
 from pathlib import Path
 
@@ -14,6 +14,7 @@ def main():
     from PyQt5.QtCore import QTimer
     from PyQt5.QtWidgets import QApplication, QMenu
     from bandscope.core.local_enhancement import update_region_bounds
+    from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
     import bandscope.app.refactored_app as app_module
 
     class NoUpdates:
@@ -59,6 +60,8 @@ def main():
         check("right-click action is checkable", action.isCheckable() and action.isEnabled())
         action.trigger()
         check("outline toggle reuses enhancement channels", window._enhancement_display(window.current_render_context) is before)
+        combo = window.page_render.region_combo
+        check("menu toggle selects dropdown show-all entry", combo.itemData(combo.currentIndex()) == SHOW_ALL_REGIONS_ID)
         menu.deleteLater()
 
     def tick():
@@ -79,40 +82,46 @@ def main():
                 progress["second"] = window._enhancement_selected()["region_id"]
                 progress["science"] = window.core.raw_data[::25, ::25, ::25, :].copy()
             elif progress["step"] == 1:
+                combo = window.page_render.region_combo
+                check("dropdown lists background, show-all and both regions", combo.count() == 4)
                 check("3D shows only selected second box", outlines() == {progress["second"]})
                 screenshot("3d_selected")
                 buffer = window.volume_session.display_channel.buffer.copy()
-                window.page_render.region_combo.setCurrentIndex(1)
+                combo.setCurrentIndex(2)
                 check("3D dropdown switches visible box", outlines() == {progress["first"]})
                 toggle_all()
-                check("3D menu shows both boxes", outlines() == {progress["first"], progress["second"]})
+                check("3D menu show-all displays both boxes", outlines() == {progress["first"], progress["second"]})
                 screenshot("3d_all")
-                window.page_render.region_combo.setCurrentIndex(0)
-                check("3D all boxes remain visible on background selection", len(outlines()) == 2)
+                combo.setCurrentIndex(2)
+                check("3D dropdown selection leaves show-all", outlines() == {progress["first"]})
+                combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
+                check("3D dropdown show-all entry displays both boxes", outlines() == {progress["first"], progress["second"]})
+                combo.setCurrentIndex(0)
+                check("3D background selection hides all annotations", outlines() == set() and not window._enhancement_actors)
                 check("3D background selection removes editable widget", window._enhancement_box_widget is None)
-                toggle_all()
-                check("3D background selection with all off hides all annotations", outlines() == set() and not window._enhancement_actors)
                 check("3D enhanced volume survives outline changes", np.array_equal(buffer, window.volume_session.display_channel.buffer))
                 screenshot("3d_hidden")
-                window.page_render.region_combo.setCurrentIndex(2)
+                combo.setCurrentIndex(3)
                 window.page_data.combo_ax.setCurrentIndex(1)
                 window.page_data.s_ax_low.setValue(0)
                 window.page_data.s_ax_up.setValue(window.page_data.s_ax_up.maximum())
                 window.on_apply_axis_integral()
             else:
+                combo = window.page_render.region_combo
                 check("2D inherits both enhancement effects", len(window._enhancement_display(window.current_render_context)["regions"]) == 2)
                 check("2D shows only selected inherited rectangle", outlines() == {"R2"})
                 screenshot("2d_selected")
                 rgba = np.array(window.ax_2d._arpes_image.get_array(), copy=True)
-                window.page_render.region_combo.setCurrentIndex(1)
+                combo.setCurrentIndex(2)
                 check("2D dropdown switches visible rectangle", outlines() == {"R1"})
                 toggle_all()
-                check("2D menu shows both rectangles", outlines() == {"R1", "R2"})
+                check("2D menu show-all displays both rectangles", outlines() == {"R1", "R2"})
                 screenshot("2d_all")
-                window.page_render.region_combo.setCurrentIndex(0)
-                check("2D background selection removes handles while all rectangles remain", window._enhancement_selector is None and outlines() == {"R1", "R2"})
-                toggle_all()
-                check("2D background selection with all off hides all annotations", outlines() == set() and not window._enhancement_artists)
+                combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
+                check("2D dropdown show-all entry displays both rectangles", outlines() == {"R1", "R2"})
+                combo.setCurrentIndex(0)
+                check("2D background selection hides all annotations", outlines() == set() and not window._enhancement_artists)
+                check("2D background selection removes handles", window._enhancement_selector is None)
                 check("2D enhanced colors and opacity survive outline changes", np.array_equal(rgba, window.ax_2d._arpes_image.get_array()))
                 screenshot("2d_hidden")
                 check("scientific data unchanged", np.array_equal(progress["science"], window.core.raw_data[::25, ::25, ::25, :], equal_nan=True))

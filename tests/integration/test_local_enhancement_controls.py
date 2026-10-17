@@ -15,6 +15,7 @@ from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.local_enhancement import STATE_KEY, update_region_bounds
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
+from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.page_render_control import RenderControlPage
 from tests.support.enhancement import context_2d, context_3d, region, state_2d
 
@@ -36,7 +37,7 @@ class Host(EnhancementInteractionMixin):
         combo = self.page_render.region_combo
         combo.target_changed.connect(self._select_enhancement_target)
         combo.delete_requested.connect(self._delete_enhancement_region)
-        self._restore_enhancement_target_style()
+        self._restore_enhancement_style()
         self._sync_enhancement_controls(self.active_page_spec, self.current_render_context)
 
 
@@ -57,68 +58,86 @@ class RegionControlTests(unittest.TestCase):
         self.app.processEvents()
         VisualEngine.unlock_data_range()
 
-    def test_switching_targets_preserves_independent_settings(self):
+    def test_switching_targets_keeps_global_style(self):
         host = self.host
         host.page_render.s_low.setValue(17)
         host.page_render.s_gamma.setValue(63)
         host._select_enhancement_target("2")
-        self.assertEqual(host.page_render.s_low.value(), 0)
-        host.page_render.s_up.setValue(74)
-        host._select_enhancement_target("1")
+        # 色阶是全局控件：切换查看对象不改变滑条，也不按对象分别保存。
         self.assertEqual(host.page_render.s_low.value(), 17)
         self.assertEqual(host.page_render.s_gamma.value(), 63)
-        self.assertEqual(host.page_render.s_gamma._value_label.text(), "63")
-        self.assertEqual(host.page_render.s_up.value(), 100)
-        host._select_enhancement_target("")
-        self.assertEqual(host.page_render.s_low.value(), 0)
-        self.assertEqual(host.page_render.s_low._value_label.text(), "0")
-        host._select_enhancement_target("2")
+        host.page_render.s_up.setValue(74)
+        host._select_enhancement_target("1")
         self.assertEqual(host.page_render.s_up.value(), 74)
+        self.assertEqual(host.page_render.s_low._value_label.text(), "17")
+        state = host._enhancement_state()
+        self.assertEqual(state["background"]["levels"], (17., 63., 74.))
+        for record in state["regions"]:
+            self.assertEqual(record["style"]["levels"], (17., 63., 74.))
+        host._select_enhancement_target("")
+        self.assertEqual(host.page_render.s_low.value(), 17)
 
-    def test_page_capture_stores_background_and_keeps_region_style_separate(self):
+    def test_page_capture_stores_global_style(self):
         host = self.host
         host.page_render.s_low.setValue(22)
         saved = host._enhancement_export_render_state(host.page_render.export_state())
-        self.assertEqual(saved["s_low"]["value"], 0)
-        self.assertEqual(host._enhancement_selected()["style"]["levels"][0], 22)
+        self.assertEqual(saved["s_low"]["value"], 22)
+        self.assertEqual(host._enhancement_state()["background"]["levels"][0], 22)
+        for record in host._enhancement_state()["regions"]:
+            self.assertEqual(record["style"]["levels"][0], 22)
 
-    def test_deletion_rejoins_background_and_preserves_other_settings(self):
+    def test_deletion_keeps_global_style_and_background_mapping(self):
         host = self.host
         state = host._enhancement_state()
-        state["regions"][1]["style"]["levels"] = (13, 52, 91)
+        host.page_render.s_low.setValue(13)
+        host._commit_enhancement_controls()
         self.assertEqual(host._enhancement_display(host.current_render_context)["background_level_info"]["data_min"], 0)
         host._delete_enhancement_region("1")
         self.assertEqual(state["selected_id"], "2")
         self.assertEqual(host.page_render.s_low.value(), 13)
         self.assertEqual(host._enhancement_display(host.current_render_context)["background_level_info"]["data_min"], 0)
 
-    def test_last_deletion_restores_background_and_combo_keeps_background_only(self):
+    def test_last_deletion_leaves_background_and_show_all_entries(self):
         host = self.host
         state = host._enhancement_state()
-        state["background"]["levels"] = (9, 44, 95)
+        host.page_render.s_low.setValue(9)
+        host.page_render.s_gamma.setValue(44)
+        host.page_render.s_up.setValue(95)
+        host._commit_enhancement_controls()
         host._delete_enhancement_region("1")
         host._delete_enhancement_region("2")
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         combo = host.page_render.region_combo
-        self.assertEqual(combo.count(), 1)
+        self.assertEqual(combo.count(), 2)
         self.assertEqual(combo.itemData(0), "")
-        self.assertEqual(host.page_render.s_low.value(), 9)
-        self.assertEqual(host.page_render.s_gamma.value(), 44)
+        self.assertEqual(combo.itemData(1), SHOW_ALL_REGIONS_ID)
+        self.assertEqual(state["background"]["levels"], (9., 44., 95.))
         self.assertIsNone(host._enhancement_display(host.current_render_context))
 
-    def test_deletion_invalidates_background_lock(self):
+    def test_deletion_releases_global_lock(self):
+        host = self.host
         VisualEngine._locked_data_range = (24, 35)
-        self.host._delete_enhancement_region("1")
+        host._set_all_regions_locked(True)
+        self.assertTrue(all(r.get("locked_range") for r in host._enhancement_state()["regions"]))
+        host._delete_enhancement_region("1")
         self.assertIsNone(VisualEngine.locked_data_range())
-        self.assertFalse(self.host.page_render.btn_lock.isChecked())
+        self.assertFalse(any("locked_range" in r for r in host._enhancement_state()["regions"]))
+        self.assertFalse(host.page_render.btn_lock.isChecked())
 
-    def test_dropdown_delete_is_a_row_action_and_background_cannot_be_deleted(self):
+    def test_dropdown_delete_is_a_row_action_and_fixed_entries_cannot_be_deleted(self):
         host = self.host
         combo = host.page_render.region_combo
         combo.show()
         combo.showPopup()
         self.app.processEvents()
-        index = combo.model().index(1, 0)
+        # 「全部显示」条目右侧没有删除入口，点击不消费事件。
+        show_all_index = combo.model().index(1, 0)
+        show_all_rect = combo.view().visualRect(show_all_index)
+        show_all_pos = QPointF(show_all_rect.right() - 8, show_all_rect.center().y())
+        event = QMouseEvent(QEvent.MouseButtonPress, show_all_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        self.assertFalse(combo.eventFilter(combo.view().viewport(), event))
+        self.assertEqual(len(host._enhancement_state()["regions"]), 2)
+        index = combo.model().index(2, 0)
         rect = combo.view().visualRect(index)
         position = QPointF(rect.right() - 8, rect.center().y())
         for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
@@ -127,7 +146,8 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual([r["region_id"] for r in host._enhancement_state()["regions"]], ["2"])
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         self.assertEqual(combo.itemData(0), "")
-        self.assertEqual(combo.count(), 2)
+        self.assertEqual(combo.itemData(1), SHOW_ALL_REGIONS_ID)
+        self.assertEqual(combo.count(), 3)
         combo.hidePopup()
 
     def test_combo_edit_renames_region_and_syncs_view_label(self):
@@ -138,35 +158,30 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(region["label"], "主峰")
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         combo = host.page_render.region_combo
-        self.assertEqual(combo.itemText(1), "主峰")
+        self.assertEqual(combo.itemText(2), "主峰")
         # 空名不生效，下拉框文字回到当前名称。
         host._rename_enhancement_region("  ")
         self.assertEqual(host._enhancement_selected()["name"], "主峰")
         self.assertEqual(combo.lineEdit().text(), "主峰")
+        # 「全部显示」不可重命名：编辑提交后恢复固定文字。
+        host._select_enhancement_target(SHOW_ALL_REGIONS_ID)
+        combo.lineEdit().setText("改名")
+        combo.lineEdit().editingFinished.emit()
+        self.assertEqual(combo.lineEdit().text(), "全部显示")
 
-    def test_common_style_does_not_destroy_independent_styles(self):
-        host = self.host
-        saved = copy.deepcopy(host._enhancement_state()["regions"])
-        host._set_enhancement_common(True)
-        host.page_render.s_gamma.setValue(71)
-        host._commit_enhancement_controls()
-        host._set_enhancement_common(False)
-        self.assertEqual(host.page_render.s_gamma.value(), 50)
-        self.assertEqual(host._enhancement_state()["regions"], saved)
-
-    def test_page_isolation_and_selected_style_restore(self):
+    def test_page_isolation_and_global_style_restore(self):
         host = self.host
         original = host.active_page_spec
         host.page_render.s_gamma.setValue(71)
         host._commit_enhancement_controls()
         host.active_page_spec = SimpleNamespace(page_id="p2", params={STATE_KEY: state_2d()})
         host.active_page_spec.params[STATE_KEY]["regions"][0]["enabled"] = False
-        host._restore_enhancement_target_style()
+        host._restore_enhancement_style()
         self.assertTrue(host._enhancement_selected()["enabled"])
         self.assertTrue(host._enhancement_display(host.current_render_context)["active"])
         self.assertEqual(host.page_render.s_gamma.value(), 50)
         host.active_page_spec = original
-        host._restore_enhancement_target_style()
+        host._restore_enhancement_style()
         self.assertEqual(host.page_render.s_gamma.value(), 71)
 
     def test_new_data_releases_regions_and_display_cache(self):
@@ -176,17 +191,21 @@ class RegionControlTests(unittest.TestCase):
         host._reset_enhancement_for_new_data()
         self.assertNotIn(STATE_KEY, host.active_page_spec.params)
         self.assertIsNone(host._enhancement_cache)
-        self.assertEqual(host.page_render.region_combo.count(), 1)
+        self.assertEqual(host.page_render.region_combo.count(), 2)
         self.assertEqual(host.page_render.region_combo.itemData(0), "")
+        self.assertEqual(host.page_render.region_combo.itemData(1), SHOW_ALL_REGIONS_ID)
 
     def _volume_source(self, *, locked=False):
         host = self.host
         state = host._enhancement_state()
+        style = dict(levels=(12., 63., 91.), opacity_mode="sigmoid")
         state["regions"] = [region(1, (1, 4, 1, 3, 1, 2), view="3d", axes=("X", "Y", "E"),
-                                   style=dict(levels=(12., 63., 91.), opacity_mode="sigmoid"))]
+                                   style=copy.deepcopy(style))]
+        # 全局样式：背景与区域共享同一份设置，滑条恢复后与二者一致。
+        state["background"] = copy.deepcopy(style)
         if locked:
             state["regions"][0]["locked_range"] = (29., 94.)
-        host._restore_enhancement_target_style()
+        host._restore_enhancement_style()
         return host.active_page_spec, copy.deepcopy(state)
 
     def test_actual_2d_page_creation_inherits_volume_regions_and_styles(self):
@@ -212,7 +231,7 @@ class RegionControlTests(unittest.TestCase):
         fields = host._enhancement_display(result)
         host._sync_enhancement_controls(derived, result)
         self.assertTrue(fields["active"])
-        self.assertEqual(host.page_render.region_combo.count(), 2)
+        self.assertEqual(host.page_render.region_combo.count(), 3)
         self.assertEqual(host._enhancement_selected()["bounds"], (1, 4, 1, 3))
         self.assertEqual(fields["regions"][0]["style"], original["regions"][0]["style"])
         samples = result["data"][1:5, 1:4]
@@ -296,16 +315,20 @@ class RegionControlTests(unittest.TestCase):
         host.ax_2d._arpes_image = host.ax_2d.imshow(np.zeros((6, 6)))
         fields = host._enhancement_display(host.current_render_context)
         host._draw_enhancement_regions(host.current_render_context, fields)
+        combo = host.page_render.region_combo
         self.assertEqual([t.get_text() for t in host.ax_2d.texts if t.get_text().startswith("R")], ["R1"])
         hidden_click = SimpleNamespace(inaxes=host.ax_2d, button=1, xdata=2.5, ydata=3.)
         host._pick_enhancement_region(hidden_click)
         self.app.processEvents()
         self.assertEqual(host._enhancement_state()["selected_id"], "1")
         host._set_enhancement_show_all(True)
+        self.assertEqual(combo.itemData(combo.currentIndex()), SHOW_ALL_REGIONS_ID)
         self.assertEqual([t.get_text() for t in host.ax_2d.texts if t.get_text().startswith("R")], ["R1", "R2"])
         host._pick_enhancement_region(hidden_click)
         self.app.processEvents()
         self.assertEqual(host._enhancement_state()["selected_id"], "2")
+        self.assertFalse(host._enhancement_state()["show_all_regions"])
+        self.assertEqual(combo.itemData(combo.currentIndex()), "2")
         host._set_enhancement_show_all(False)
         self.assertEqual([t.get_text() for t in host.ax_2d.texts if t.get_text().startswith("R")], ["R2"])
         host._select_enhancement_target("")
@@ -313,6 +336,48 @@ class RegionControlTests(unittest.TestCase):
         self.assertIsNone(host._enhancement_selector)
         self.assertEqual(len(fields["regions"]), 2)
         figure.clear()
+
+    def test_dropdown_show_all_entry_controls_colorbar_visibility(self):
+        host = self._use_real_outline_drawing()
+        figure = Figure()
+        host.canvas_2d = FigureCanvasAgg(figure)
+        host.ax_2d = figure.add_subplot()
+        host.ax_2d._arpes_image = host.ax_2d.imshow(np.zeros((6, 6)))
+        combo = host.page_render.region_combo
+        # 选中某区域：只画该区域的一条色带。
+        host._select_enhancement_target("2")
+        self.assertEqual([c.ax.get_xlabel() for c in host._enhancement_colorbars], ["R2"])
+        # 下拉框选「全部显示」：全部区域色带都显示。
+        host._select_enhancement_target(SHOW_ALL_REGIONS_ID)
+        self.assertTrue(host._enhancement_state()["show_all_regions"])
+        self.assertEqual(combo.itemData(combo.currentIndex()), SHOW_ALL_REGIONS_ID)
+        self.assertEqual([c.ax.get_xlabel() for c in host._enhancement_colorbars], ["R1", "R2"])
+        # 选回单个区域：只显示该区域的色带；选「全局（背景）」：不显示区域色带。
+        host._select_enhancement_target("1")
+        self.assertFalse(host._enhancement_state()["show_all_regions"])
+        self.assertEqual([c.ax.get_xlabel() for c in host._enhancement_colorbars], ["R1"])
+        host._select_enhancement_target("")
+        self.assertEqual(host._enhancement_colorbars, [])
+        figure.clear()
+
+    def test_global_lock_freezes_each_regions_own_range(self):
+        host = self.host
+        VisualEngine._last_data_range = (0., 35.)
+        host._set_all_regions_locked(True)
+        regions = host._enhancement_state()["regions"]
+        # 全局锁定统一作用于所有区域，但每个区域锁定自己实测的强度范围。
+        self.assertEqual(tuple(regions[0]["locked_range"]), (0., 11.))
+        self.assertEqual(tuple(regions[1]["locked_range"]), (12., 23.))
+        self.assertNotEqual(tuple(regions[0]["locked_range"]), tuple(regions[1]["locked_range"]))
+        fields = host._enhancement_display(host.current_render_context)
+        self.assertEqual([tuple(r["data_range"]) for r in fields["regions"]], [(0., 11.), (12., 23.)])
+        host._sync_color_lock_button()
+        self.assertTrue(host.page_render.btn_lock.isChecked())
+        host._set_all_regions_locked(False)
+        self.assertFalse(any("locked_range" in r for r in regions))
+        host._sync_color_lock_button()
+        self.assertFalse(host.page_render.btn_lock.isChecked())
+        VisualEngine.unlock_data_range()
 
     def test_3d_only_visible_boxes_have_actors_and_only_selected_has_editor(self):
         host = self._use_real_outline_drawing()
@@ -329,8 +394,13 @@ class RegionControlTests(unittest.TestCase):
         host._set_enhancement_show_all(True)
         self.assertEqual(set(host._enhancement_actor_regions.values()), {"1", "2"})
         host._select_enhancement_target("")
-        self.assertEqual(set(host._enhancement_actor_regions.values()), {"1", "2"})
+        # 下拉框即「全部显示」开关：选「全局（背景）」同时退出全部显示。
+        self.assertFalse(host._enhancement_state()["show_all_regions"])
+        self.assertEqual(host._enhancement_actors, [])
+        self.assertEqual(host._enhancement_actor_regions, {})
         self.assertIsNone(host._enhancement_box_widget)
+        host._set_enhancement_show_all(True)
+        self.assertEqual(set(host._enhancement_actor_regions.values()), {"1", "2"})
         host._set_enhancement_show_all(False)
         self.assertEqual(host._enhancement_actors, [])
         self.assertEqual(host._enhancement_actor_regions, {})

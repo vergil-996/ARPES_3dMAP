@@ -1,6 +1,44 @@
 # 局部增强控件简化与锁定色带整合
 
-日期：2026-10-16　状态：已实施（2026-10-16），待真实窗口视觉验收
+日期：2026-10-16　状态：已实施（2026-10-16；2026-10-17 二次调整），待真实窗口视觉验收
+
+## 二次调整（2026-10-17）：色带跟随下拉框 + 全局统一调控
+
+起因：视觉验收反馈新增增强区域后多条色带堆叠在视图角落；要求色带跟随右侧下拉框选择显示，
+「全部显示」成为下拉框选项，且锁定色带、黑白灰场滑条、强度映射改为全局统一调控
+（各区域不共用同一归一化，仍按自己的强度范围归一化）。
+
+已完成的改动：
+
+- `bandscope/ui/enhancement_controls.py`：`RegionComboBox` 新增固定条目「全部显示」
+  （`SHOW_ALL_REGIONS_ID`），位于「全局（背景）」之后；该条目不可重命名、无 × 删除；
+  `sync(regions, selected_id, show_all)` 按 `show_all` 选中该条目。
+- `bandscope/app/enhancement_integration.py`：
+  - `_select_enhancement_target`：选「全部显示」置 `show_all_regions=True`（保留 `selected_id`
+    供视图内点选回退），选其他项即关闭；下拉框成为全部显示的唯一入口，右键菜单动作保留但与下拉框双向同步。
+  - `_commit_enhancement_controls`：色阶滑条与强度映射提交到背景与全部区域（全局同一份样式）；
+    `_restore_enhancement_target_style` 更名 `_restore_enhancement_style`，始终从背景（全局）样式恢复，
+    切换下拉框目标不再变动滑条。
+  - `_set_all_regions_locked(locked)` 取代 `_set_enhancement_locked` / `_set_enhancement_common`：
+    每个区域锁定自己实测的强度范围；删除区域走 `_release_global_lock`（背景与全部区域一起解锁）；
+    全局锁定开启时新增区域立即锁定自己的当前范围。
+  - `_sync_color_lock_button`：背景或任一区域有锁定即显示锁定态。
+  - 2D 区域色带改为左下角向上堆叠，摘要文字移到左上角；3D 摘要文字移到 upper_left 避让 scalar bar。
+- `bandscope/app/refactored_app.py`：`on_toggle_color_lock` 不再按下拉框目标分发，
+  统一执行「背景（`VisualEngine.lock_data_range`）+ 全部区域各自范围」的全局锁定/解锁。
+- `bandscope/ui/page_render_control.py`：锁定按钮与下拉框的注释、tooltip 改为全局语义。
+- `bandscope/rendering/local_enhancement.py`：`draw_region_colorbars_2d` 槽位移到左下角。
+- UI 层不再能进入 common（共享归一化）模式；`resolve_display` 与核心层保留 common 兼容（旧页面状态），
+  处理层测试不变。
+- 测试：`tests/integration/test_local_enhancement_controls.py` 适配全局样式/全局锁定/「全部显示」条目，
+  新增下拉框色带可见性与全局锁定逐区域范围用例（22 项）；`scripts/validation/` 五个相关脚本
+  改走新下拉框布局（条目数 +1、索引顺延、「全部显示」步骤替换原 common 模式步骤）。
+
+已验证：`python -m unittest discover -s tests -t .` 1239 项全部通过。
+
+未执行：真实窗口视觉验收（本 shell 无 OpenGL）——除原「实施结果」末节列出的项目外，
+需额外确认：下拉框「全部显示」条目与 × 删除的交互；2D 左下角色带堆叠与左上角摘要文字的位置配色；
+全局锁定按钮在有/无区域、跨页面切换时的状态显示。
 
 ## 实施结果（2026-10-16）
 

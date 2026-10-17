@@ -16,6 +16,8 @@ def main():
     from PyQt5.QtWidgets import QApplication
     from bandscope.core.local_enhancement import geometry, region_slices
     from bandscope.processing.local_enhancement import finite_range
+    from bandscope.rendering.render_core import VisualEngine
+    from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
     from bandscope.exporting.publication_export import capture_snapshot, render_and_save
     from bandscope.exporting.publication_models import OutputOptions, resolve_style
     import bandscope.app.refactored_app as app_module
@@ -85,7 +87,7 @@ def main():
                 window._add_enhancement_region()
                 set_bounds(window._enhancement_selected(), ((.05, .28), (.25, .55), (.1, .4)))
             elif step == 1:
-                check("region dropdown lists the new region", window.page_render.region_combo.count() == 2)
+                check("region dropdown lists the new region", window.page_render.region_combo.count() == 3)
                 check("3D editor widget present", window._enhancement_box_widget is not None)
                 import vtk
                 widget = window._enhancement_box_widget
@@ -116,7 +118,12 @@ def main():
                 check("opacity mode updates alpha", not np.array_equal(progress["alphas"], window.volume_session.display_channel.buffer[:, 1]))
                 screenshot("3d_regions")
                 export("3d_publication")
-                window._set_enhancement_locked(True)
+                # 全局锁定：背景与所有区域同时锁定，每个区域锁定自己的强度范围。
+                window.page_render.btn_lock.setChecked(True)
+                check("global lock freezes background range", VisualEngine.locked_data_range() is not None)
+                ranges = [r.get("locked_range") for r in window._enhancement_state()["regions"]]
+                check("global lock freezes every region", all(ranges))
+                check("regions keep independent locked ranges", len({tuple(r) for r in ranges}) == len(ranges))
                 progress["locked_range"] = window._enhancement_selected()["locked_range"]
                 window.timeline_bar.slider_time.setValue(1)
                 window.flush_time_slider_refresh()
@@ -126,6 +133,7 @@ def main():
                 check("locked region range survives time frame change", tuple(first["data_range"]) == tuple(progress["locked_range"]))
                 window._delete_enhancement_region(progress["first_id"])
             elif step == 5:
+                check("deleting a region releases the global lock", VisualEngine.locked_data_range() is None and not window.page_render.btn_lock.isChecked())
                 context = window.current_render_context
                 fields = window._enhancement_display(context)
                 mask = np.ones(context["data"].shape, dtype=bool)
@@ -137,7 +145,7 @@ def main():
                 screenshot("3d_deleted_one")
                 window._delete_enhancement_region(window._enhancement_selected()["region_id"])
             elif step == 6:
-                check("last deletion leaves background-only dropdown", window.page_render.region_combo.count() == 1)
+                check("last deletion leaves background and show-all entries", window.page_render.region_combo.count() == 2)
                 check("last deletion restores original volume path", window.volume_session.display_channel is None)
                 screenshot("3d_restored")
                 window.page_data.combo_ax.setCurrentIndex(1)
@@ -169,17 +177,21 @@ def main():
                 check("E flip preserves canonical sample bounds", tuple(window._enhancement_selected()["bounds"]) == progress["canonical_bounds"])
                 screenshot("2d_flipped")
                 export("2d_publication")
-                window._set_enhancement_common(True)
+                combo = window.page_render.region_combo
+                combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
             elif step == 12:
-                fields = window._enhancement_display(window.current_render_context)
-                check("intensity comparison uses common region range", fields["regions"][0]["data_range"] == fields["regions"][1]["data_range"])
-                screenshot("2d_common")
+                # 下拉框「全部显示」：所有区域色带与轮廓同时显示。
+                check("show-all selects the dropdown entry", window._enhancement_state()["show_all_regions"])
+                check("show-all displays every region colorbar", len(window._enhancement_colorbars) == 2)
+                labels = sorted(t.get_text() for t in window.ax_2d.texts if t.get_text().startswith("R"))
+                check("show-all displays every region outline", labels == ["R1", "R2"])
+                screenshot("2d_show_all")
                 window.page_render.region_combo.showPopup()
             elif step == 13:
                 combo = window.page_render.region_combo
                 screenshot("dropdown_delete")
                 combo.view().window().grab().save(str(args.output_dir / "dropdown_popup.png"))
-                index = combo.model().index(1, 0)
+                index = combo.model().index(2, 0)
                 rect = combo.view().visualRect(index)
                 pos = QPointF(rect.right()-8, rect.center().y())
                 for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
@@ -189,7 +201,7 @@ def main():
                 check("dropdown row action deletes region", len(window._enhancement_state()["regions"]) == 1)
                 window._delete_enhancement_region(window._enhancement_state()["regions"][0]["region_id"])
             else:
-                check("2D last deletion leaves background-only dropdown", window.page_render.region_combo.count() == 1)
+                check("2D last deletion leaves background and show-all entries", window.page_render.region_combo.count() == 2)
                 check("2D returns to scalar image", window.ax_2d._arpes_image.get_array().ndim == 2)
                 check("science samples remain unchanged", np.array_equal(window.core.raw_data[::25, ::25, ::25, :], progress["source_sample"], equal_nan=True))
                 screenshot("2d_restored")

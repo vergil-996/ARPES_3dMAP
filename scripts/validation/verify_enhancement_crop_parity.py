@@ -106,8 +106,7 @@ def main():
                     samples.append(dict(value=float(context["data"][point]), rgb=rgb, alpha=float(fields["alpha"][point])))
                 progress["samples"] = samples
                 screenshot("3d_enhanced")
-                # 锁定按钮跟随下拉框目标：先切回「全局（背景）」再解除全局锁定。
-                window.page_render.region_combo.setCurrentIndex(0)
+                # 锁定是全局开关：直接解除即可同时释放背景与全部区域的锁定。
                 window.page_render.btn_lock.setChecked(False)
                 selection = CropSelection("3d", ("X", "Y", "E"), physical_bounds(context, bounds3d))
                 window.btn_tb_crop.setChecked(True)
@@ -171,7 +170,7 @@ def main():
                 window._delete_enhancement_region(region["region_id"])
             else:
                 check("deletion restores original background pixels", np.array_equal(pixels()[progress["patch"]], progress["before_pixels"]))
-                check("last deletion removes scalar layers and region entries", not window.ax_2d._arpes_enhancement_images and window.page_render.region_combo.count() == 1)
+                check("last deletion removes scalar layers and region entries", not window.ax_2d._arpes_enhancement_images and window.page_render.region_combo.count() == 2)
                 check("scientific data unchanged", np.array_equal(progress["science"], window.core.raw_data[::25, ::25, ::25, :], equal_nan=True))
                 screenshot("2d_restored")
                 (args.output_dir / "acceptance.json").write_text(json.dumps(dict(data=str(args.data.resolve()), checks=checks), ensure_ascii=False, indent=2), encoding="utf-8")

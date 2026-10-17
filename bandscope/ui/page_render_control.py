@@ -73,16 +73,18 @@ class RenderControlPage(ControlPageBase):
         # 色阶调整
         grp_exp, v_exp = self._create_group("色阶调整")
 
-        # 调整对象 + 锁定色带：下拉框选中谁，色阶滑条与锁定就作用于谁；
-        # 下拉框固定显示，可直接编辑文字重命名当前区域。
+        # 调整对象 + 锁定色带：下拉框选择查看/编辑哪个区域的色带（「全部显示」
+        # 展示所有区域）；色阶滑条、强度映射与锁定色带对背景和全部区域统一生效，
+        # 各区域仍按自己的强度范围归一化。下拉框固定显示，可直接编辑文字重命名当前区域。
         self.region_combo = RegionComboBox(self)
         self.region_combo.sync([], None)
         self.btn_lock = self._create_btn("锁定色带", "secondary", height=30)
         self.btn_lock.setCheckable(True)
         self.btn_lock.setToolTip(
-            "锁定当前色带：开启后，拖动时间轴或生成新结果页时\n"
-            "都按锁定时刻的强度范围分配颜色，便于逐帧对比；\n"
-            "再次点击恢复按每帧数据自动分配。"
+            "锁定全部色带：开启后，背景与所有增强区域各自按\n"
+            "当前强度范围锁定归一化，拖动时间轴或生成新结果页时\n"
+            "都按锁定时刻的范围分配颜色，便于逐帧对比；\n"
+            "再次点击全部恢复按每帧数据自动分配。"
         )
         target_row = QWidget(self)
         target_row_layout = QHBoxLayout(target_row)

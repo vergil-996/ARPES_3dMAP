@@ -107,10 +107,10 @@ def _colorbar_regions(regions):
 
 
 def draw_region_colorbars_2d(ax, regions, cmap):
-    """在 2D 视图左上角为每个区域叠一条小色带；返回 colorbar 列表（调用方负责移除）。
+    """在 2D 视图左下角为每个可见区域叠一条小色带；返回 colorbar 列表（调用方负责移除）。
 
     色带用区域自己的 level_info 做映射与刻度，与区域内图像的着色保持一致；
-    区域锁定时这里自然显示锁定的范围。
+    区域锁定时这里自然显示锁定的范围。可见区域由调用方按下拉框选择过滤。
     """
     from matplotlib import cm
     from matplotlib.colors import Normalize
@@ -124,8 +124,8 @@ def draw_region_colorbars_2d(ax, regions, cmap):
         return colorbars
     for i, region in enumerate(_colorbar_regions(regions)):
         info = region["level_info"]
-        # 每条色带占一个竖向槽位：标签在色带上方，刻度在下方。
-        cax = ax.inset_axes([0.03, 0.91 - i * 0.105, 0.30, 0.032])
+        # 每条色带占一个竖向槽位，从左下角向上堆叠：标签在色带上方，刻度在下方。
+        cax = ax.inset_axes([0.03, 0.05 + i * 0.105, 0.30, 0.032])
         mappable = cm.ScalarMappable(
             norm=Normalize(info["black_value"], info["white_value"]),
             cmap=VisualEngine._leveled_cmap(cmap, info),
