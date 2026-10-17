@@ -73,9 +73,9 @@ class RenderControlPage(ControlPageBase):
         # 色阶调整
         grp_exp, v_exp = self._create_group("色阶调整")
 
-        # 调整对象 + 锁定色带：下拉框选择查看/编辑哪个区域的色带（「全部显示」
-        # 展示所有区域）；色阶滑条、强度映射与锁定色带对背景和全部区域统一生效，
-        # 各区域仍按自己的强度范围归一化。下拉框固定显示，可直接编辑文字重命名当前区域。
+        # 下拉框选择色阶滑条与强度映射的调整对象；「全部显示」展示所有区域，
+        # 并在调节时同时调整背景与全部区域。锁定色带始终统一生效，
+        # 各对象仍按自己的强度范围归一化。下拉框内可直接编辑文字重命名区域。
         self.region_combo = RegionComboBox(self)
         self.region_combo.sync([], None)
         self.btn_lock = self._create_btn("锁定色带", "secondary", height=30)

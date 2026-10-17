@@ -89,25 +89,32 @@ class EnhancementInteractionMixin:
         state = self._enhancement_state()
         return next((r for r in state["regions"] if r["region_id"] == state.get("selected_id")), None) if state else None
 
-    def _commit_enhancement_controls(self):
-        """色阶与强度映射是全局控件：把当前控件值写入背景与全部区域。
-
-        所有区域共享同一份 levels/映射设置，但各自保留自己的归一化范围。
-        """
+    def _commit_enhancement_controls(self, *, apply_all=False):
+        """写入当前对象；「全部显示」下实际调节时统一写入背景和全部区域。"""
         state = self._enhancement_state()
         if state is None or getattr(self, "_syncing_controls", False):
             return False
         style = self._enhancement_ui_style()
+        if state.get("show_all_regions"):
+            # 查看全部色带、切页和保存本身不能抹平各对象原有的独立设置。
+            if not apply_all and style == self.__dict__.get("_enhancement_restored_style", style):
+                return True
+            targets = [(state, "background")] + [(r, "style") for r in state["regions"]]
+            if state.get("common"):
+                targets.append((state, "common_style"))
+        else:
+            region = self._enhancement_selected()
+            target = state if region and state.get("common") else region or state
+            key = "common_style" if region and state.get("common") else "style" if region else "background"
+            targets = [(target, key)]
         changed = False
-        if state.get("background") != style:
-            state["background"] = copy.deepcopy(style)
-            changed = True
-        for region in state["regions"]:
-            if region.get("style") != style:
-                region["style"] = copy.deepcopy(style)
+        for target, key in targets:
+            if target.get(key) != style:
+                target[key] = copy.deepcopy(style)
                 changed = True
         if changed:
             state["revision"] += 1
+        self._enhancement_restored_style = copy.deepcopy(style)
         return True
 
     def _enhancement_export_render_state(self, render_state):
@@ -121,11 +128,13 @@ class EnhancementInteractionMixin:
         return render_state
 
     def _restore_enhancement_style(self):
-        """全局样式不随下拉框目标变化：始终从背景（全局）样式恢复控件。"""
+        """回显当前调整对象的色阶与强度映射，不触发参数提交。"""
         state = self._enhancement_state()
         if not state:
             return
-        style = state.get("background", DEFAULT_STYLE)
+        region = None if state.get("show_all_regions") else self._enhancement_selected()
+        style = (state.get("common_style", DEFAULT_STYLE) if region and state.get("common")
+                 else region.get("style", DEFAULT_STYLE) if region else state["background"])
         widgets = (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up, self.page_render.combo_map)
         blockers = [QSignalBlocker(w) for w in widgets]
         for slider, value in zip(widgets[:3], style["levels"]):
@@ -135,6 +144,7 @@ class EnhancementInteractionMixin:
         if index >= 0:
             widgets[3].setCurrentIndex(index)
         del blockers
+        self._enhancement_restored_style = copy.deepcopy(self._enhancement_ui_style())
 
     def _enhancement_refresh(self, *, interactive=False):
         self._enhancement_cache = None
@@ -179,7 +189,7 @@ class EnhancementInteractionMixin:
         self._update_color_lock_button_style()
 
     def _select_enhancement_target(self, region_id):
-        """下拉框切换查看对象：「全部显示」展示所有区域色带与轮廓，其余只显示选中区域。"""
+        """切换调整对象并回显其设置；色带与轮廓随下拉框显示。"""
         state = self._enhancement_state()
         if state is None:
             return
@@ -189,6 +199,7 @@ class EnhancementInteractionMixin:
         else:
             state["show_all_regions"] = False
             state["selected_id"] = region_id or None
+        self._restore_enhancement_style()
         self._clear_enhancement_interaction()
         self._sync_enhancement_controls(self._enhancement_spec(), self.current_render_context)
         self._draw_enhancement_regions(self.current_render_context, self._enhancement_display(self.current_render_context))
@@ -222,6 +233,7 @@ class EnhancementInteractionMixin:
         state["selected_id"] = region["region_id"]
         state["show_all_regions"] = False
         state["revision"] += 1
+        self._restore_enhancement_style()
         self._enhancement_refresh()
         # 全局锁定开启时，新增区域立即锁定自己当前的强度范围。
         if VisualEngine.locked_data_range() is not None:
@@ -240,6 +252,7 @@ class EnhancementInteractionMixin:
         if state.get("selected_id") == region_id:
             state["selected_id"] = state["regions"][min(index, len(state["regions"]) - 1)]["region_id"] if state["regions"] else None
         state["revision"] += 1
+        self._restore_enhancement_style()
         self._release_global_lock()
         self._clear_enhancement_interaction()
         self._enhancement_refresh()
@@ -381,10 +394,14 @@ class EnhancementInteractionMixin:
             return
         state = self._enhancement_state(spec)
         regions = matching_regions(context, state["regions"]) if state and context else []
-        if state and context and state.get("selected_id") not in {r["region_id"] for r in regions}:
-            state["selected_id"] = None
-        if state and context and not regions:
-            state["show_all_regions"] = False
+        if state and context:
+            previous = (state.get("selected_id"), bool(state.get("show_all_regions")))
+            if state.get("selected_id") not in {r["region_id"] for r in regions}:
+                state["selected_id"] = None
+            if not regions:
+                state["show_all_regions"] = False
+            if previous != (state.get("selected_id"), bool(state.get("show_all_regions"))):
+                self._restore_enhancement_style()
         self.page_render.region_combo.sync(
             regions,
             state.get("selected_id") if state else None,
@@ -411,7 +428,9 @@ class EnhancementInteractionMixin:
         state = self._enhancement_state()
         if state is None:
             return
+        self._commit_enhancement_controls()
         state["show_all_regions"] = bool(enabled)
+        self._restore_enhancement_style()
         context = self.current_render_context
         self._sync_enhancement_controls(self._enhancement_spec(), context)
         self._draw_enhancement_regions(context, self._enhancement_display(context))
@@ -545,7 +564,7 @@ class EnhancementInteractionMixin:
         for region in reversed(self._enhancement_outline_regions(matching_regions(context, state["regions"]))):
             x0, x1, y0, y1 = physical_bounds(context, region["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked())
             if x0 <= event.xdata <= x1 and y0 <= event.ydata <= y1:
-                if region["region_id"] != state.get("selected_id"):
+                if state.get("show_all_regions") or region["region_id"] != state.get("selected_id"):
                     QTimer.singleShot(0, lambda rid=region["region_id"]: self._select_enhancement_target(rid))
                 break
 
@@ -606,7 +625,8 @@ class EnhancementInteractionMixin:
         picker = vtk.vtkPropPicker()
         picker.Pick(x, y, 0, self.plotter.renderer)
         region_id = self._enhancement_actor_regions.get(picker.GetActor())
-        if region_id and region_id != self._enhancement_state().get("selected_id"):
+        state = self._enhancement_state()
+        if region_id and state and (state.get("show_all_regions") or region_id != state.get("selected_id")):
             QTimer.singleShot(0, lambda: self._select_enhancement_target(region_id))
 
     def _start_enhancement_box(self, _obj, _event):

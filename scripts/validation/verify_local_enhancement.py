@@ -8,6 +8,7 @@ from scripts.validation._common import arguments
 
 def main():
     args = arguments("local_enhancement", default_data=".local/data/WSe2_step.npz")
+    import copy
     import json
     import traceback
     import numpy as np
@@ -58,6 +59,67 @@ def main():
         window._enhancement_state()["revision"] += 1
         window._enhancement_refresh()
 
+    def styles():
+        state = window._enhancement_state()
+        return copy.deepcopy({"": state["background"], **{r["region_id"]: r["style"] for r in state["regions"]}})
+
+    def select_target(region_id, name):
+        combo = window.page_render.region_combo
+        index = combo.findData(region_id)
+        check(name + " exists in dropdown", index >= 0)
+        combo.setCurrentIndex(index)
+        state = window._enhancement_state()
+        check(name + " is the selected adjustment target",
+              state.get("selected_id") == (region_id or None) and not state.get("show_all_regions"))
+        style = styles()[region_id]
+        check(name + " restores all level and mapping controls", window._enhancement_ui_style() == style)
+        check(name + " restores slider value labels", tuple(s._value_label.text() for s in
+              (window.page_render.s_low, window.page_render.s_gamma, window.page_render.s_up)) ==
+              tuple(str(int(v)) for v in style["levels"]))
+
+    def set_style(style):
+        for slider, value in zip((window.page_render.s_low, window.page_render.s_gamma, window.page_render.s_up), style["levels"]):
+            slider.setValue(int(value))
+        window.page_render.combo_map.setCurrentText(style["opacity_mode"])
+        window.flush_render_levels_refresh()
+
+    def verify_independent_controls(view):
+        state = window._enhancement_state()
+        first, second = state["regions"]
+        first_id, second_id = first["region_id"], second["region_id"]
+        background_levels = (6., 57., 94.) if view == "2D" else (3., 54., 97.)
+        targets = ((second_id, second["label"], (8., 43., 93.), "对数"),
+                   (first_id, first["label"], (12., 62., 88.), "线性"),
+                   ("", "background", background_levels, "幂函数"))
+        for region_id, label, levels, mode in targets:
+            name = view + " " + label
+            select_target(region_id, name)
+            previous = styles()
+            before = window._enhancement_display(window.current_render_context)
+            expected = dict(levels=levels, opacity_mode=mode)
+            check(name + " acceptance changes the previous style", expected != previous[region_id])
+            set_style(expected)
+            current = styles()
+            check(name + " edits its levels and mapping", current[region_id] == expected)
+            check(name + " preserves every other target style",
+                  all(current[key] == value for key, value in previous.items() if key != region_id))
+            after = window._enhancement_display(window.current_render_context)
+            owner = next((i for i, r in enumerate(after["regions"], 1) if r["region_id"] == region_id), 0)
+            selected = after["owners"] == owner
+            check(name + " has display samples", np.any(selected))
+            samples = np.asarray(window.current_render_context["data"])[selected]
+            data_range = finite_range(samples)
+            print(f"[INFO] {name} mapping acceptance sample range: {data_range}", flush=True)
+            check(name + " has intermediate intensities for mapping acceptance",
+                  data_range is not None and np.any((samples > data_range[0]) & (samples < data_range[1])))
+            check(name + " updates its display channels", any(not np.array_equal(before[key][selected], after[key][selected])
+                  for key in ("color", "alpha")))
+            check(name + " preserves other display channels", all(np.array_equal(before[key][~selected], after[key][~selected])
+                  for key in ("color", "alpha")))
+        for region_id, label, _, _ in targets:
+            select_target(region_id, view + " revisit " + label)
+        select_target(first_id, view + " active " + first["label"])
+
     def export(name):
         snapshot = capture_snapshot(window)
         check(name + " snapshot has scientific data and separate display channels", "enhancement" in snapshot.payload)
@@ -85,7 +147,9 @@ def main():
                 check("3D source ready", window.current_render_context["view"] == "3d")
                 progress["source_sample"] = window.core.raw_data[::25, ::25, ::25, :].copy()
                 window._add_enhancement_region()
-                set_bounds(window._enhancement_selected(), ((.05, .28), (.25, .55), (.1, .4)))
+                # WSe2's lower-energy corner contains only 0/1: both endpoints
+                # remain clipped under level edits. Include intermediate counts.
+                set_bounds(window._enhancement_selected(), ((.05, .28), (.25, .55), (.25, .55)))
             elif step == 1:
                 check("region dropdown lists the new region", window.page_render.region_combo.count() == 3)
                 check("3D editor widget present", window._enhancement_box_widget is not None)
@@ -107,7 +171,7 @@ def main():
             elif step == 2:
                 check("two independent 3D regions", len(window._enhancement_state()["regions"]) == 2)
                 check("second region inherits current gamma", window.page_render.s_gamma.value() == 62)
-                window._select_enhancement_target(progress["first_id"])
+                verify_independent_controls("3D")
                 check("first gamma restored", window.page_render.s_gamma.value() == 62)
                 progress["colors"] = window.volume_session.display_channel.buffer[:, 0].copy()
                 progress["alphas"] = window.volume_session.display_channel.buffer[:, 1].copy()
@@ -170,6 +234,7 @@ def main():
                 set_bounds(window._enhancement_selected(), ((.55, .85), (.5, .8)))
             elif step == 10:
                 check("two 2D regions share one view", len(window._enhancement_state()["regions"]) == 2)
+                verify_independent_controls("2D")
                 screenshot("2d_regions")
                 progress["canonical_bounds"] = tuple(window._enhancement_selected()["bounds"])
                 window.timeline_bar.switch_flip.setChecked(True)
@@ -177,6 +242,7 @@ def main():
                 check("E flip preserves canonical sample bounds", tuple(window._enhancement_selected()["bounds"]) == progress["canonical_bounds"])
                 screenshot("2d_flipped")
                 export("2d_publication")
+                progress["styles_before_all"] = styles()
                 combo = window.page_render.region_combo
                 combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
             elif step == 12:
@@ -184,7 +250,19 @@ def main():
                 check("show-all selects the dropdown entry", window._enhancement_state()["show_all_regions"])
                 check("show-all displays every region colorbar", len(window._enhancement_colorbars) == 2)
                 labels = sorted(t.get_text() for t in window.ax_2d.texts if t.get_text().startswith("R"))
-                check("show-all displays every region outline", labels == ["R1", "R2"])
+                expected_labels = sorted(r["label"] for r in window._enhancement_state()["regions"])
+                check("show-all displays every region outline", labels == expected_labels)
+                check("show-all selection preserves independent styles", styles() == progress["styles_before_all"])
+                check("show-all restores background as the batch starting point",
+                      window._enhancement_ui_style() == styles()[""])
+                batch_style = dict(levels=(4., 58., 96.), opacity_mode="sigmoid")
+                set_style(batch_style)
+                check("show-all sliders and mapping update background and every region",
+                      all(style == batch_style for style in styles().values()))
+                for region_id in styles():
+                    select_target(region_id, "2D batch revisit " + (region_id or "background"))
+                combo = window.page_render.region_combo
+                combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
                 screenshot("2d_show_all")
                 window.page_render.region_combo.showPopup()
             elif step == 13:

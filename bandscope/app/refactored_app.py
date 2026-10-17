@@ -2315,7 +2315,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     def flush_render_levels_refresh(self):
         if self._syncing_controls:
             return
-        local = self._commit_enhancement_controls()
+        local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(
             RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION,
             RenderQuality.EXACT,
@@ -2325,7 +2325,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     def schedule_render_levels_refresh(self, _value):
         if self._syncing_controls:
             return
-        local = self._commit_enhancement_controls()
+        local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION, interactive=True)
 
     def on_time_slider_changed(self, value):
