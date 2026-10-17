@@ -14,12 +14,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-VERSION = "1.14.1"
+from bandscope.app_metadata import APP_VERSION
+
+# 版本跟随当前源码，避免本机发布工具写死上一版的文件名。
+VERSION = APP_VERSION
 INSTALLERS = {
-    "CPU": ROOT / "release" / "BandScope-1.14.1-Windows-x64-CPU-Setup.exe",
-    "NVIDIA": ROOT / "release" / "BandScope-1.14.1-Windows-x64-NVIDIA-Setup.exe",
+    "CPU": ROOT / "release" / f"BandScope-{VERSION}-Windows-x64-CPU-Setup.exe",
+    "NVIDIA": ROOT / "release" / f"BandScope-{VERSION}-Windows-x64-NVIDIA-Setup.exe",
 }
-NOTES = ROOT / "release" / "release-notes-1.14.1.txt"
+NOTES = ROOT / "release" / f"release-notes-{VERSION}.txt"
 STATE = ROOT / "release" / f".matelab-publish-{VERSION}.json"
 
 
