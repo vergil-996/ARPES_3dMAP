@@ -2,13 +2,15 @@ import numpy as np
 import vtk
 import pyvista as pv
 from matplotlib import colormaps, transforms as mtransforms
-from matplotlib.colors import ListedColormap
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import PowerNorm
 from PIL import Image
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
 import bandscope.ui.theme as theme
 from bandscope.processing import display_transfer
+from bandscope.rendering.color_mapping import LeveledColormap
 
 
 def build_volume_grid(shape, data_bounds, spacing, *, masked=False):
@@ -198,7 +200,6 @@ class VolumeAlphaChannel:
                 f"volume energy axis {energy_count}."
             )
         self.attach()
-        ramp_values, ramp_opacities = opacity_ramp_points(opac_mode, level_info)
         view = self.buffer.reshape(energy_count, self._plane, 2)
         gain = values[:, None]
         finite = (
@@ -209,8 +210,8 @@ class VolumeAlphaChannel:
         chunk = max(1, self.ALPHA_CHUNK_VOXELS // max(self._plane, 1))
         for start in range(0, energy_count, chunk):
             stop = min(energy_count, start + chunk)
-            alpha = np.interp(
-                view[start:stop, :, 0].reshape(-1), ramp_values, ramp_opacities
+            alpha = display_transfer.opacity_values(
+                view[start:stop, :, 0].reshape(-1), level_info, opac_mode
             )
             alpha *= np.broadcast_to(gain[start:stop], (stop - start, self._plane)).reshape(-1)
             np.clip(alpha, 0.0, 1.0, out=alpha)
@@ -290,10 +291,7 @@ class VisualEngine:
     @staticmethod
     def _leveled_cmap(cmap, level_info):
         base_cmap = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
-        samples = np.linspace(0.0, 1.0, 256)
-        colors = base_cmap(VisualEngine._level_mapped_positions(level_info, samples))
-        name = f"{getattr(base_cmap, 'name', 'cmap')}_levels_{level_info['gamma_power']:.4g}"
-        return ListedColormap(colors, name=name)
+        return LeveledColormap(base_cmap, level_info)
 
     @staticmethod
     def _mapped_opacity(opacity, level_info):
@@ -353,9 +351,13 @@ class VisualEngine:
         }
 
     @staticmethod
-    def _apply_3d_colorbar_ticks(plotter, level_info):
+    def _apply_3d_colorbar_ticks(plotter, level_info, *, normalized=False):
         try:
             scalar_bar = plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+            scalar_bar.SetDrawTickLabels(not normalized)
+            scalar_bar.SetDrawAnnotations(normalized)
+            if normalized:
+                return
             labels = vtk.vtkDoubleArray()
             for tick in VisualEngine._level_ticks(level_info):
                 labels.InsertNextValue(float(tick))
@@ -365,6 +367,23 @@ class VisualEngine:
             scalar_bar.SetLabelFormat("%.4g")
         except Exception:
             pass
+
+    @staticmethod
+    def _3d_colorbar_lut(cmap, level_info):
+        """Use color coordinates for geometry and label physical intensities."""
+        palette = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        lut = pv.LookupTable(cmap=palette, scalar_range=(0., 1.))
+        lut.annotations = {position: VisualEngine._format_level_tick(level_info[key])
+                           for position, key in ((0., "black_value"), (.5, "gray_value"), (1., "white_value"))}
+        return lut
+
+    @staticmethod
+    def _colorbar_mappable(cmap, level_info):
+        """Show the full palette with ticks positioned by the same Gamma."""
+        palette = cmap.base_cmap if isinstance(cmap, LeveledColormap) else cmap
+        return ScalarMappable(norm=PowerNorm(level_info["gamma_power"],
+                                            vmin=level_info["black_value"], vmax=level_info["white_value"]),
+                              cmap=palette)
 
     @staticmethod
     def clear_2d_colorbar(ax):
@@ -447,7 +466,7 @@ class VisualEngine:
             ]
         )
         colorbar_ax._arpes_colorbar_axis = True
-        colorbar = fig.colorbar(image, cax=colorbar_ax)
+        colorbar = fig.colorbar(VisualEngine._colorbar_mappable(image.cmap, level_info), cax=colorbar_ax)
         VisualEngine._configure_2d_colorbar(colorbar, level_info)
         ax._arpes_colorbar = colorbar
         ax._arpes_colorbar_ax = colorbar_ax
@@ -474,7 +493,7 @@ class VisualEngine:
             VisualEngine._add_2d_colorbar(ax, image, level_info)
             return
         try:
-            colorbar.update_normal(image)
+            colorbar.update_normal(VisualEngine._colorbar_mappable(image.cmap, level_info))
             VisualEngine._configure_2d_colorbar(colorbar, level_info)
         except Exception:
             VisualEngine._add_2d_colorbar(ax, image, level_info)
@@ -810,10 +829,12 @@ class VisualEngine:
         """
         try:
             VisualEngine._ensure_2d_preview_cache(ax, canvas)
-            for overlay in getattr(ax, "_arpes_enhancement_images", ()):
-                if overlay.axes is not None:
-                    overlay.remove()
-            ax._arpes_enhancement_images = []
+            existing_layers = list(getattr(ax, "_arpes_enhancement_images", ()))
+            if display_fields is None:
+                for overlay in existing_layers:
+                    if overlay.axes is not None:
+                        overlay.remove()
+                ax._arpes_enhancement_images = []
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
@@ -966,7 +987,8 @@ class VisualEngine:
             if display_fields is not None:
                 from bandscope.rendering.local_enhancement import draw_region_layers_2d, region_layers_2d
                 layers = region_layers_2d(display_fields, data, slice_info, coords)
-                ax._arpes_enhancement_images = draw_region_layers_2d(ax, layers, cmap)
+                ax._arpes_enhancement_images = draw_region_layers_2d(
+                    ax, layers, cmap, existing=existing_layers)
                 ax.set_xlim(ext[0], ext[1])
                 ax.set_ylim(ext[2], ext[3])
                 colorbar = getattr(ax, "_arpes_colorbar", None)
@@ -997,6 +1019,7 @@ class VolumeRenderSession:
         self.data_token = None
         self.level_info = None
         self._style_signature = None
+        self._display_signature = None
         self._clip_signature = None
         self._axes_signature = None
         self._domain_signature = None
@@ -1035,6 +1058,7 @@ class VolumeRenderSession:
         self.data_token = None
         self.level_info = None
         self._style_signature = None
+        self._display_signature = None
         self._clip_signature = None
         self._axes_signature = None
         self._domain_signature = None
@@ -1155,6 +1179,8 @@ class VolumeRenderSession:
         opacity_multiplier=None,
         axis_titles=None,
         display_fields=None,
+        display_token=None,
+        render=True,
     ):
         source = np.asarray(data, dtype=np.float32)
         if source.ndim != 3:
@@ -1226,23 +1252,43 @@ class VolumeRenderSession:
         # 倍率与数据同行，长度按数据的能量轴校验；None 表示不使用插件效果。
         self.set_opacity_multiplier(opacity_multiplier, int(source.shape[2]))
         # 先建通道、再定样式、最后填值：三步的顺序都不能换，见各自文档。
-        if display_fields is not None:
+        if display_fields is not None or float(levels_params[1]) != 50.:
             from bandscope.rendering.local_enhancement import apply_volume_display
             self._release_alpha_channel()
-            if self.display_channel is None:
-                self.display_channel = VolumeAlphaChannel(self.volume, self.grid, display_fields["color"], self.finite_flat)
-            apply_volume_display(self.display_channel, display_fields["color"],
-                                 display_fields["alpha"], cmap, self.opacity_multiplier,
-                                 color_rules=display_fields.get("color_rules"))
-            self.level_info = display_fields["background_level_info"]
-            self._style_signature = None
+            signature = (
+                "display", tuple(float(v) for v in levels_params), str(opac_mode),
+                str(cmap), self.data_token, bool(include_zero),
+                VisualEngine._locked_data_range,
+                None if self.opacity_multiplier is None else tuple(self.opacity_multiplier),
+            )
+            # 增强区域自带颜色通道：用调用方给的递增 token 判断是否需要重传，
+            # 避免相机/坐标轴/标题等刷新把两份体素数组整块再写一遍。
+            display_signature = (
+                "enhancement", display_token, str(cmap),
+                None if self.opacity_multiplier is None else tuple(self.opacity_multiplier),
+            )
+            changed = (display_fields is None and signature != self._style_signature)
+            changed = changed or (display_fields is not None and (
+                display_token is None or display_signature != self._display_signature))
+            if changed:
+                if display_fields is None:
+                    self.level_info = VisualEngine._level_info(source, levels_params, include_zero=bool(include_zero))
+                    color, alpha = display_transfer.channels(source, self.level_info, opac_mode)
+                else:
+                    self.level_info = display_fields["background_level_info"]
+                    color, alpha = display_fields["color"], display_fields["alpha"]
+                if self.display_channel is None:
+                    self.display_channel = VolumeAlphaChannel(self.volume, self.grid, color, self.finite_flat)
+                apply_volume_display(self.display_channel, color, alpha, cmap, self.opacity_multiplier)
+                self._style_signature = signature if display_fields is None else None
+                if display_fields is not None:
+                    self._display_signature = display_signature
             try:
                 scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
-                lut = pv.LookupTable(cmap=VisualEngine._leveled_cmap(cmap, self.level_info),
-                                     scalar_range=(self.level_info["black_value"], self.level_info["white_value"]))
+                lut = VisualEngine._3d_colorbar_lut(cmap, self.level_info)
                 scalar_bar.SetLookupTable(lut)
-                scalar_bar.SetTitle("Background intensity")
-                VisualEngine._apply_3d_colorbar_ticks(self.plotter, self.level_info)
+                scalar_bar.SetTitle("Background intensity" if display_fields is not None else VisualEngine.COLORBAR_TITLE)
+                VisualEngine._apply_3d_colorbar_ticks(self.plotter, self.level_info, normalized=True)
             except (KeyError, AttributeError):
                 pass
         else:
@@ -1268,7 +1314,8 @@ class VolumeRenderSession:
                 self.plotter.camera_position = saved_camera
             except Exception:
                 pass
-        self.plotter.render()
+        if render:
+            self.plotter.render()
         self.render_count += 1
         return self.volume
 
@@ -1396,7 +1443,7 @@ class VolumeRenderSession:
             include_zero=include_zero,
         )
         display_cmap = VisualEngine._leveled_cmap(cmap, self.level_info)
-        colors = display_cmap(np.linspace(0.0, 1.0, 256))
+        colors = display_cmap(np.linspace(0.0, 1.0, 256), bytes=True).astype(np.float64) / 255.
         low = float(self.level_info["black_value"])
         high = float(self.level_info["white_value"])
         if high <= low:
@@ -1431,9 +1478,11 @@ class VolumeRenderSession:
         self._style_signature = signature
 
     def _opacity_values(self, opac_mode, level_info):
-        # 与 VolumeAlphaChannel 共用同一条折线：单分量查表和逐体素 alpha 必须
-        # 得到完全相同的“强度 → 基础不透明度”，否则开关插件会改变颜色外观。
-        return opacity_ramp_points(opac_mode, level_info)[1].tolist()
+        # Initial construction only: nonlinear styles subsequently upload their
+        # final color/alpha channels, before the first render. The linear fast
+        # path can use the original opacity knots directly.
+        values = self.OPACITY_MAPS.get(str(opac_mode), self.OPACITY_MAPS["linear"])
+        return display_transfer.mapped_opacity(values, level_info)
 
     def _update_clipping(self, clip_ranges):
         signature = None if clip_ranges is None else tuple(float(value) for value in clip_ranges)

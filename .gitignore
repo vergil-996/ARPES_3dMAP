@@ -40,6 +40,11 @@ coverage.xml
 /.local/
 *.log
 
+# Temporary plugin downloads, catalog caches, and test settings at repository root
+/bandscope-plugin-*/
+/bandscope-catalog-*/
+/tmp[0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_][0-9a-z_]/
+
 # Local environment configuration and signing credentials
 .env
 .env.*

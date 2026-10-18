@@ -26,7 +26,7 @@ import matplotlib
 # 不调用 matplotlib.use()；按需使用 Figure/Agg，不经过 pyplot 全局状态。
 from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.colors import ListedColormap, Normalize
+from matplotlib.colors import Colormap
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 import numpy as np
@@ -135,7 +135,7 @@ def actual_data_range(data) -> Tuple[float, float]:
     return float(np.min(finite)), float(np.max(finite))
 
 
-def build_display_cmap(cmap, level_info: Mapping[str, float]) -> ListedColormap:
+def build_display_cmap(cmap, level_info: Mapping[str, float]) -> Colormap:
     return VisualEngine._leveled_cmap(cmap, level_info)
 
 
@@ -590,8 +590,7 @@ def _draw_colorbar(
     high = float(level_info["white_value"])
     if high <= low:
         high = low + 1.0
-    norm = Normalize(vmin=low, vmax=high)
-    mappable = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+    mappable = VisualEngine._colorbar_mappable(cmap, level_info)
 
     d_lo, d_hi = data_range
     eps = (high - low) * 1e-9
@@ -607,7 +606,8 @@ def _draw_colorbar(
     colorbar = fig.colorbar(mappable, cax=cbar_ax, orientation=orientation, extend=extend)
 
     if tick_mode == "values":
-        ticks = nice_ticks(low, high, target_ticks)
+        ticks = (nice_ticks(low, high, target_ticks) if level_info["gamma_power"] == 1. else
+                 mappable.norm.inverse(np.linspace(0., 1., max(2, target_ticks))))
     elif tick_mode == "endpoints":
         ticks = np.asarray([low, high]) if high > low else np.asarray([low])
     else:
@@ -761,17 +761,11 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
         vmax=float(level_info["white_value"]),
     )
     enhancement = snapshot.payload.get("enhancement")
-    if enhancement is not None:
-        from matplotlib.patches import Rectangle
-        from bandscope.rendering.local_enhancement import draw_region_layers_2d, enhancement_legend
-        if enhancement["active"]:
-            draw_region_layers_2d(ax, enhancement["layers"], snapshot.cmap_name)
-        for region in enhancement["regions"]:
-            x0, x1, y0, y1 = region["display_bounds"]
-            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0, fill=False, edgecolor="#45b9d5", linewidth=.7))
-            ax.text(x0, y1, region.get("label", "ROI"), fontsize=7, color="#2389a5", clip_on=True)
-        ax.text(.01, .01, enhancement_legend(enhancement), transform=ax.transAxes, fontsize=6,
-                color="#2389a5", va="bottom")
+    if enhancement is not None and enhancement["active"]:
+        # 截图只保留增强后的着色通道。区域轮廓、编号/图例与区域色带都是
+        # 主视图的交互提示，不能进入出版图片。
+        from bandscope.rendering.local_enhancement import draw_region_layers_2d
+        draw_region_layers_2d(ax, enhancement["layers"], snapshot.cmap_name)
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
 
@@ -1301,7 +1295,7 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         # alpha 通道；没有效果就保持原有单分量渲染，导出与屏幕一致。
         opacity_multiplier = snapshot.payload.get("opacity_multiplier")
         alpha_channel = None
-        if opacity_multiplier is not None:
+        if opacity_multiplier is not None and float(level_info["gamma_power"]) == 1.:
             alpha_channel = attach_volume_alpha(
                 volume_actor,
                 grid,
@@ -1311,19 +1305,19 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
                 level_info,
             )
         enhancement = snapshot.payload.get("enhancement")
-        if enhancement is not None and enhancement["active"]:
+        if (enhancement is not None and enhancement["active"]) or float(level_info["gamma_power"]) != 1.:
             from bandscope.rendering.render_core import VolumeAlphaChannel
             from bandscope.rendering.local_enhancement import apply_volume_display
+            from bandscope.processing.display_transfer import channels
             if alpha_channel is not None:
                 alpha_channel.detach()
-            alpha_channel = VolumeAlphaChannel(volume_actor, grid, enhancement["color"])
-            apply_volume_display(alpha_channel, enhancement["color"], enhancement["alpha"], snapshot.cmap_name, opacity_multiplier,
-                                 color_rules=enhancement.get("color_rules"))
-            for region in enhancement["regions"]:
-                bounds = region["render_bounds"]
-                plotter.add_mesh(pv.Box(bounds=bounds).outline(), color="#45b9d5", render=False)
-                plotter.add_point_labels([[(bounds[0]+bounds[1])/2, (bounds[2]+bounds[3])/2, bounds[5]]],
-                    [region.get("label", "ROI")], show_points=False, font_size=10, always_visible=True, render=False)
+            if enhancement is not None and enhancement["active"]:
+                color, alpha = enhancement["color"], enhancement["alpha"]
+            else:
+                color, alpha = channels(volume, level_info, snapshot.payload["opacity_mode"])
+            alpha_channel = VolumeAlphaChannel(volume_actor, grid, color)
+            apply_volume_display(alpha_channel, color, alpha, snapshot.cmap_name, opacity_multiplier)
+            # 截图不画区域边框和编号；增强只体现在体素颜色/alpha 上。
         clip = snapshot.payload.get("clip_render_bounds")
         if clip is not None:
             _apply_clipping_planes(plotter, clip)
@@ -1411,11 +1405,7 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
     finally:
         plotter.close()
 
-    # 3D 注释叠加在图像坐标系（像素）；边距仍做一遍实测防裁切
-    if snapshot.payload.get("enhancement") is not None:
-        from bandscope.rendering.local_enhancement import enhancement_legend
-        ax_img.text(.01, .01, enhancement_legend(snapshot.payload["enhancement"]), transform=ax_img.transAxes,
-                    fontsize=6, color="#2389a5", va="bottom")
+    # 3D 布局也做一遍实测防裁切；截图不叠加任何增强区域标注。
     overflow = _fit_layout_3d(
         fig, ax_img, cbar_ax, width_mm, height_mm, margins, cbar_layout,
         scale=body_factor, title_plan=title_plan,

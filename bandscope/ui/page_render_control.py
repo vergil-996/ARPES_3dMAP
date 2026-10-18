@@ -98,14 +98,17 @@ class RenderControlPage(ControlPageBase):
         self.s_up = self._create_accent_slider()
         self.s_up.setRange(0, 100)
         self.s_up.setValue(100)  # 默认不截断高光
+        self.s_up.setToolTip("白场：强度窗口上限，映射到色带终点；更强的信号使用终点颜色。")
 
         self.s_gamma = self._create_accent_slider()
         self.s_gamma.setRange(0, 100)
         self.s_gamma.setValue(50)  # 默认线性映射 (Gamma 1.0)
+        self.s_gamma.setToolTip("灰场（Gamma）：50 为线性；调高可提升弱信号的色带位置，3D 中同时调整基础不透明度。")
 
         self.s_low = self._create_accent_slider()
         self.s_low.setRange(0, 100)
         self.s_low.setValue(0)    # 默认不截断低光
+        self.s_low.setToolTip("黑场：强度窗口下限，映射到色带起点；更弱的信号使用起点颜色。")
 
         self._add_centered_slider_block(v_exp, "白场", self.s_up)
         self._add_centered_slider_block(v_exp, "灰场", self.s_gamma)

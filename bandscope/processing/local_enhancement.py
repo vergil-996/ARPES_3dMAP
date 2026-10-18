@@ -1,14 +1,56 @@
 """Resolve independent color and opacity channels without modifying science data."""
+import threading
+import weakref
+
 import numpy as np
 
 from bandscope.core.local_enhancement import DEFAULT_STYLE, matching_regions, region_slices
-from bandscope.processing.display_transfer import channels, level_info, normalized_color_samples, volume_unit_distance
+from bandscope.processing.display_transfer import channels, level_info, volume_unit_distance
+from bandscope.processing.gpu_display import array_key
+
+_RANGE_CACHE = {}
+_RANGE_CACHE_LOCK = threading.RLock()
+_RANGE_CACHE_LIMIT = 8
 
 
 def finite_range(data):
     values = np.asarray(data)
-    values = values[np.isfinite(values)]
-    return (float(values.min()), float(values.max())) if values.size else None
+    key, base = array_key(values)
+    with _RANGE_CACHE_LOCK:
+        entry = _RANGE_CACHE.get(key)
+        if entry is not None and entry[0]() is not None:
+            return entry[1]
+    result = _measure_range(values)
+    with _RANGE_CACHE_LOCK:
+        _RANGE_CACHE[key] = (weakref.ref(base), result)
+        if len(_RANGE_CACHE) > _RANGE_CACHE_LIMIT:
+            for stale_key, item in list(_RANGE_CACHE.items()):
+                if item[0]() is None:
+                    _RANGE_CACHE.pop(stale_key, None)
+            while len(_RANGE_CACHE) > _RANGE_CACHE_LIMIT:
+                _RANGE_CACHE.pop(next(iter(_RANGE_CACHE)))
+    return result
+
+
+def _measure_range(values):
+    """Min/max over finite samples; the volume is re-mapped once per slider tick."""
+    from bandscope.processing import gpu_display
+
+    handled, result = gpu_display.try_finite_range(values)
+    if handled:
+        return result
+    mask = np.isfinite(values)
+    if mask.all():
+        # All-finite volumes are the common case: min/max avoids the boolean
+        # index copy that dominated this call.
+        return (float(values.min()), float(values.max())) if values.size else None
+    finite = values[mask]
+    return (float(finite.min()), float(finite.max())) if finite.size else None
+
+
+def clear_range_cache():
+    with _RANGE_CACHE_LOCK:
+        _RANGE_CACHE.clear()
 
 
 def resolve_display(context, state, *, background_locked_range=None, region_data=None):
@@ -62,10 +104,6 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
     bg_style = state.get("background", DEFAULT_STYLE)
     bg_info = level_info(bg_range, bg_style["levels"], include_zero=background_locked_range is None and view == "3d" and bool(context.get("include_zero")))
     color, alpha = channels(source, bg_info, bg_style["opacity_mode"], view=view)
-    color_rules = []
-    if view == "3d":
-        color = np.where(np.isfinite(source), normalized_color_samples(source, bg_info), 0)
-        color_rules.append(dict(offset=0., level_info=bg_info))
     for index, region in enumerate(resolved, 1):
         if region["status"] not in {"ready", "constant"}:
             continue
@@ -76,10 +114,6 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
             # A single volume retains the original grid's opacity distance.
             # Rebase the ROI alpha so attenuation matches a separately cropped grid.
             a = (1. - np.power(1. - a.astype(np.float64), base_distance / region["opacity_unit_distance"])).astype(np.float32)
-        if view == "3d":
-            offset = float(2*index)
-            c = np.where(np.isfinite(values), offset + normalized_color_samples(values, region["level_info"]), 0)
-            color_rules.append(dict(offset=offset, level_info=region["level_info"]))
         mask = owners[slices] == index
         color[slices][mask] = c[mask]
         alpha[slices][mask] = a[mask]
@@ -88,7 +122,7 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
             "active": any(r["status"] in {"ready", "constant"} for r in resolved),
             "revision": int(state.get("revision", 0)),
             "owners": owners,
-            "color_rules": color_rules,
+            "color_rules": [],
             "region_data": {r["region_id"]: values for r, _, _, values in candidates if values is not None},
             "geometry_context": {k: v for k, v in context.items() if k != "data"}}
 

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pyvista as pv
@@ -82,6 +83,22 @@ class VolumeRenderSessionTests(unittest.TestCase):
             self.assertEqual(session.render_count, 4)
         finally:
             plotter.close()
+
+
+class RenderSuppressionTests(unittest.TestCase):
+    """Render 由调用方统一触发一次；会话自身不得偷偷多画一帧。"""
+
+    @requires_opengl
+    def test_render_flag_controls_the_single_plotter_render(self):
+        plotter = pv.Plotter(off_screen=True, window_size=(160, 160))
+        self.addCleanup(plotter.close)
+        session = VolumeRenderSession(plotter)
+        data = np.random.default_rng(3).random((12, 10, 8), dtype=np.float32)
+        with patch.object(plotter, "render") as render:
+            session.render(data, (0, 50, 100), "linear", show_axes=False, render=False)
+            self.assertEqual(render.call_count, 0)
+            session.render(data, (0, 50, 100), "linear", show_axes=False)
+            self.assertEqual(render.call_count, 1)
 
 
 class MaskedVolumeGridTests(unittest.TestCase):

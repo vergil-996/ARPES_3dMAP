@@ -1,6 +1,7 @@
 import copy
 import os
 import re
+import time
 import traceback
 import uuid
 from pathlib import Path
@@ -200,6 +201,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.settings = QSettings("ARPES", "ARPES_3dMAP")
         saved_backend = self.settings.value("compute_backend", "Auto", type=str)
         self.backend_manager = BackendManager(saved_backend)
+        self._sync_gpu_display_backend()
         self.refresh_coordinator = RefreshCoordinator(self)
         self.refresh_coordinator.dispatch_requested.connect(self._dispatch_refresh_request)
         self.refresh_coordinator.result_ready.connect(self._on_refresh_result)
@@ -1175,8 +1177,16 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._last_compute_backend = backend
         self._update_render_status(phase, backend)
 
+    def _sync_gpu_display_backend(self):
+        """只在选中 NVIDIA 后端时把逐体素显示映射放到 CUDA；其余保持 CPU 参考路径。"""
+        from bandscope.processing import gpu_display
+
+        gpu_display.reset()
+        return gpu_display.set_enabled(self.backend_manager.selected_backend_name() == "NVIDIA GPU")
+
     def on_backend_mode_changed(self, mode):
         selected = self.backend_manager.set_mode(mode)
+        self._sync_gpu_display_backend()
         if selected != mode:
             blocker = QSignalBlocker(self.page_render.combo_backend)
             self.page_render.set_backend_mode(selected)
@@ -1196,6 +1206,18 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     def _active_refresh_page_id(self):
         spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
         return spec.page_id if spec is not None else "home"
+
+    def _adaptive_preview_interval_ms(self):
+        """Preview 定时器不短于上一帧耗时，拖动时不会堆积待处理事件。"""
+        last = float(self.__dict__.get("_last_render_ms", 0.0))
+        return int(min(250.0, max(66.0, last)))
+
+    def _render_active_page_timed(self, quality, cause=None):
+        started = time.perf_counter()
+        try:
+            self._render_active_page(quality, cause)
+        finally:
+            self._last_render_ms = (time.perf_counter() - started) * 1000.0
 
     def request_refresh(
         self,
@@ -1220,7 +1242,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self.refresh_coordinator.schedule_interactive(
                 preview,
                 exact,
-                preview_interval_ms=preview_interval_ms,
+                preview_interval_ms=preview_interval_ms or self._adaptive_preview_interval_ms(),
             )
             return
 
@@ -1400,13 +1422,13 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
         if request.cause in {RefreshCause.TRANSFER_FUNCTION, RefreshCause.DISPLAY_MAPPING, RefreshCause.GEOMETRY, RefreshCause.OVERLAY}:
-            self._render_active_page(request.quality, request.cause)
+            self._render_active_page_timed(request.quality, request.cause)
             self._finish_ui_refresh(request, self._last_compute_backend)
             return
 
         descriptor = self._volume_source_descriptor(spec, request)
         if descriptor is None:
-            self._render_active_page(request.quality, request.cause)
+            self._render_active_page_timed(request.quality, request.cause)
             self._finish_ui_refresh(request, self._last_compute_backend)
             return
         cache_key, job, extra_metadata = descriptor
@@ -1430,7 +1452,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
         analysis_cached = analysis_cache_ready()
         if base_cached and analysis_cached:
-            self._render_active_page(request.quality, request.cause)
+            self._render_active_page_timed(request.quality, request.cause)
             self._finish_ui_refresh(request, self._last_compute_backend)
             return
 
@@ -1635,8 +1657,13 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def _finish_ui_refresh(self, request, backend):
         if request.quality == RenderQuality.EXACT:
-            self._render_exact_ready = True
-            self._update_render_status("complete", backend)
+            if self.__dict__.get("_enhancement_roi_job") is None:
+                self._render_exact_ready = True
+                self._update_render_status("complete", backend)
+            else:
+                # ROI 还在后台算：这一帧不是最终结果，不能开放导出/冻结。
+                self._render_exact_ready = False
+                self._update_render_status("computing", backend)
         else:
             self._update_render_status("preview", backend)
         self._update_export_button_states()
@@ -7634,7 +7661,15 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._set_camera_view_visible(False)
             return
         render_context = self._render_context_for_visual_flip(context)
-        display_fields = self._enhancement_display(context, spec, freeze_pending=quality == RenderQuality.EXACT)
+        enhancement_state = self._enhancement_state(spec)
+        if enhancement_state and context.get("view") == "3d":
+            # ROI 去噪在后台线程跑；等待期间照常渲染缓存数据，不阻塞界面。
+            self._schedule_enhancement_roi(context, spec, enhancement_state)
+        display_fields = self._enhancement_display(
+            context, spec,
+            freeze_pending=quality == RenderQuality.EXACT,
+            allow_compute=bool(self.__dict__.get("_enhancement_roi_disabled", False)),
+        )
         active_display_fields = display_fields if display_fields and display_fields["active"] else None
         self.ax_2d.set_axis_on()
         if preserve_2d_interaction and render_context.get("view") != "2d":
@@ -7703,6 +7738,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
                 opacity_multiplier=opacity_multiplier,
                 axis_titles=self._three_d_axis_titles(spec),
                 display_fields=active_display_fields,
+                display_token=self.__dict__.get("_enhancement_display_token"),
+                render=False,
             )
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
@@ -7761,8 +7798,12 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         # 「相机视角」只在真正显示 3D 场景时展开：目标状态不变时不会重播动画，
         self._sync_enhancement_controls(spec, context)
         self._draw_enhancement_regions(context, display_fields)
-        # 因此时间轴拖动、色带调整等普通 3D 重绘不会让面板反复出现。
+        # 体数据、框、标签与色带更新完之后只渲染一次；辅助对象自己不再 render。
         is_3d_view = render_context["view"] == "3d"
+        plotter = self.__dict__.get("plotter")
+        if is_3d_view and plotter is not None:
+            plotter.render()
+        # 因此时间轴拖动、色带调整等普通 3D 重绘不会让面板反复出现。
         self._set_camera_view_visible(is_3d_view)
         # 扩展卡片同样只在 3D 场景参与渲染；切回来时状态原样恢复。
         session = self._plugin_session()

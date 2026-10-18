@@ -579,6 +579,9 @@ class BackendManager:
         self.gpu = gpu_backend if gpu_backend is not None else CupyComputeBackend()
         self.set_mode(mode)
         self.last_fallback_error: Optional[str] = None
+        # ROI 去噪与卷准备可能来自不同线程；GPU 上下文不是线程隔离的，
+        # 串行执行避免两个任务同时抢显存/上下文。
+        self._execute_lock = threading.RLock()
 
     @property
     def gpu_available(self):
@@ -599,6 +602,10 @@ class BackendManager:
         return "CPU"
 
     def execute(self, job):
+        with self._execute_lock:
+            return self._execute_unlocked(job)
+
+    def _execute_unlocked(self, job):
         use_gpu = self.mode == "NVIDIA GPU" or (self.mode == "Auto" and self.gpu_available)
         if use_gpu:
             try:

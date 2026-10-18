@@ -33,13 +33,31 @@ def region_layers_2d(fields, data, slice_info, coords):
     return layers
 
 
-def draw_region_layers_2d(ax, layers, cmap):
+def draw_region_layers_2d(ax, layers, cmap, existing=()):
+    """Draw region crop layers, reusing existing images when the count matches."""
     from bandscope.rendering.render_core import VisualEngine
-    return [ax.imshow(layer["image"], cmap=VisualEngine._leveled_cmap(cmap, layer["level_info"]),
-                      vmin=layer["level_info"]["black_value"], vmax=layer["level_info"]["white_value"],
-                      origin="lower", extent=layer["extent"], interpolation="spline16", resample=True,
-                      aspect=ax.get_aspect(), zorder=2+i)
-            for i, layer in enumerate(layers)]
+
+    images = []
+    for i, layer in enumerate(layers):
+        info = layer["level_info"]
+        display_cmap = VisualEngine._leveled_cmap(cmap, info)
+        target = existing[i] if i < len(existing) else None
+        if target is not None and target.axes is ax and target in ax.images:
+            target.set_data(layer["image"])
+            target.set_cmap(display_cmap)
+            target.set_clim(info["black_value"], info["white_value"])
+            target.set_extent(layer["extent"])
+            target.set_zorder(2 + i)
+            images.append(target)
+        else:
+            images.append(ax.imshow(layer["image"], cmap=display_cmap,
+                                    vmin=info["black_value"], vmax=info["white_value"],
+                                    origin="lower", extent=layer["extent"], interpolation="spline16",
+                                    resample=True, aspect=ax.get_aspect(), zorder=2+i))
+    for extra in list(existing)[len(layers):]:
+        if extra.axes is not None:
+            extra.remove()
+    return images
 
 
 def apply_volume_display(channel, color, alpha, cmap, multiplier=None, *, color_rules=None):
@@ -48,36 +66,40 @@ def apply_volume_display(channel, color, alpha, cmap, multiplier=None, *, color_
     from bandscope.rendering.render_core import identity_opacity_function
 
     channel.attach()
-    channel.buffer[:, 0] = np.asarray(color).ravel(order="F")
+    volume_shape = np.shape(color)
+    # Write straight into the interleaved buffer through a transposed view: one
+    # pass instead of "raven(order=F) + strided column assignment" (two passes
+    # and an 18 MB temporary for a 4.5M-voxel volume).
+    np.copyto(channel.buffer[:, 0].reshape(volume_shape, order="F"), np.asarray(color))
     final = np.asarray(alpha, dtype=np.float32)
     if multiplier is not None:
         final = np.clip(final * np.asarray(multiplier)[None, None, :], 0, 1)
-    channel.buffer[:, 1] = final.ravel(order="F")
+    np.copyto(channel.buffer[:, 1].reshape(volume_shape, order="F"), final)
     channel.vtk_array.Modified()
     channel.volume.mapper.Modified()
     palette = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
-    function = vtk.vtkColorTransferFunction()
-    from bandscope.processing.display_transfer import mapped_positions
-    samples = np.linspace(0., 1., 256)
-    if color_rules:
-        # Each owner gets the exact 256-node color transfer function used by
-        # its crop. Gaps separate discontinuous endpoints between owners.
-        for rule in color_rules:
-            # The crop's PyVista lookup table stores the palette as uint8.
-            colors = palette(mapped_positions(rule["level_info"], samples), bytes=True).astype(np.float64) / 255.
-            for position, rgba in zip(samples + rule["offset"], colors):
-                function.AddRGBPoint(float(position), *map(float, rgba[:3]))
-        high = max(r["offset"] for r in color_rules) + 1.
-    else:
-        for position, rgba in zip(samples, palette(samples)):
+    palette_key = str(cmap)
+    cached = getattr(channel, "_display_transfer", None)
+    if cached is None or cached[0] != palette_key:
+        samples = np.linspace(0., 1., 256)
+        # Gamma and the owner's intensity window have already been evaluated per
+        # voxel. Only the base palette remains for the GPU's uniform lookup table.
+        colors = palette(samples, bytes=True).astype(np.float64) / 255.
+        function = vtk.vtkColorTransferFunction()
+        for position, rgba in zip(samples, colors):
             function.AddRGBPoint(float(position), *map(float, rgba[:3]))
-        high = 1.
-    channel.volume.mapper.lookup_table.apply_cmap(palette, n_values=256)
+        cached = (palette_key, function, identity_opacity_function())
+        channel._display_transfer = cached
+        # The palette table only depends on the colormap; rebuilding it for every
+        # level tick is the expensive half of this call.
+        channel.volume.mapper.lookup_table.apply_cmap(palette, n_values=256)
+    _key, function, opacity_function = cached
+    high = 1.
     channel.volume.mapper.scalar_range = (0.0, high)
     channel.volume.mapper.lookup_table.scalar_range = (0.0, high)
     prop = channel.volume.GetProperty()
     prop.SetColor(function)
-    prop.SetScalarOpacity(identity_opacity_function())
+    prop.SetScalarOpacity(opacity_function)
 
 
 def display_rgba(color, alpha, cmap):
@@ -106,15 +128,13 @@ def _colorbar_regions(regions):
     ]
 
 
-def draw_region_colorbars_2d(ax, regions, cmap):
+def draw_region_colorbars_2d(ax, regions, cmap, existing=()):
     """在 2D 视图左下角为每个可见区域叠一条小色带；返回 colorbar 列表（调用方负责移除）。
 
     色带用区域自己的 level_info 做映射与刻度，与区域内图像的着色保持一致；
     区域锁定时这里自然显示锁定的范围。可见区域由调用方按下拉框选择过滤。
+    数量不变时复用现有 colorbar，只更新 mappable 与刻度。
     """
-    from matplotlib import cm
-    from matplotlib.colors import Normalize
-
     from bandscope.rendering.render_core import VisualEngine
     from bandscope.ui import theme
 
@@ -122,15 +142,25 @@ def draw_region_colorbars_2d(ax, regions, cmap):
     fig = getattr(ax, "figure", None)
     if fig is None:
         return colorbars
-    for i, region in enumerate(_colorbar_regions(regions)):
+    visible = _colorbar_regions(regions)
+    existing = list(existing)
+    if len(existing) != len(visible):
+        for bar in existing:
+            try:
+                bar.remove()
+            except Exception:
+                pass
+        existing = []
+    for i, region in enumerate(visible):
         info = region["level_info"]
-        # 每条色带占一个竖向槽位，从左下角向上堆叠：标签在色带上方，刻度在下方。
-        cax = ax.inset_axes([0.03, 0.05 + i * 0.105, 0.30, 0.032])
-        mappable = cm.ScalarMappable(
-            norm=Normalize(info["black_value"], info["white_value"]),
-            cmap=VisualEngine._leveled_cmap(cmap, info),
-        )
-        colorbar = fig.colorbar(mappable, cax=cax, orientation="horizontal")
+        mappable = VisualEngine._colorbar_mappable(cmap, info)
+        if i < len(existing):
+            colorbar = existing[i]
+            colorbar.update_normal(mappable)
+        else:
+            # 每条色带占一个竖向槽位，从左下角向上堆叠：标签在色带上方，刻度在下方。
+            cax = ax.inset_axes([0.03, 0.05 + i * 0.105, 0.30, 0.032])
+            colorbar = fig.colorbar(mappable, cax=cax, orientation="horizontal")
         ticks = VisualEngine._level_ticks(info)
         colorbar.set_ticks(ticks)
         colorbar.set_ticklabels([VisualEngine._format_level_tick(t) for t in ticks])
@@ -147,18 +177,13 @@ def draw_region_colorbars_2d(ax, regions, cmap):
 
 def add_region_scalar_bars_3d(plotter, regions, cmap):
     """为每个区域在 3D 视图左侧加一条竖向 scalar bar；返回标题列表（用于移除）。"""
-    import pyvista as pv
-
     from bandscope.rendering.render_core import VisualEngine
 
     titles = []
     for i, region in enumerate(_colorbar_regions(regions)):
         info = region["level_info"]
         title = str(region.get("label", region["name"]))
-        lut = pv.LookupTable(
-            cmap=VisualEngine._leveled_cmap(cmap, info),
-            scalar_range=(info["black_value"], info["white_value"]),
-        )
+        lut = VisualEngine._3d_colorbar_lut(cmap, info)
         bar = plotter.add_scalar_bar(
             title=title,
             n_labels=3,
@@ -176,6 +201,8 @@ def add_region_scalar_bars_3d(plotter, regions, cmap):
         )
         try:
             bar.SetLookupTable(lut)
+            bar.SetDrawTickLabels(False)
+            bar.SetDrawAnnotations(True)
         except AttributeError:
             pass
         titles.append(title)

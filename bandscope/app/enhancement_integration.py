@@ -1,9 +1,10 @@
 """Host-owned multi-region display controls and interaction lifecycle."""
 import copy
+import threading
 import uuid
 
 import numpy as np
-from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt
+from PyQt5.QtCore import QEvent, QRunnable, QSignalBlocker, QThreadPool, QTimer, Qt, pyqtSlot
 from matplotlib.patches import Rectangle
 
 from bandscope.core.local_enhancement import (
@@ -15,12 +16,56 @@ from bandscope.processing.local_enhancement import resolve_display
 from bandscope.rendering.local_enhancement import (
     add_region_scalar_bars_3d, draw_region_colorbars_2d, enhancement_legend,
 )
-from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
+from bandscope.rendering.refresh_pipeline import ComputeJob, RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.control_layout_utils import combo_index_for_text, sync_slider_visual
 from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.interactive_crop_box import InteractiveCropBox
+
+
+class _EnhancementRoiTask(QRunnable):
+    """Run the ROI denoise pipeline off the GUI thread and park the outcome.
+
+    The poll timer in the host moves the result back to the GUI thread; no Qt
+    object other than the thread pool is touched from here.
+    """
+
+    def __init__(self, host, token, source_id, version, requests, methods, original):
+        super().__init__()
+        self.host = host
+        self.token = token
+        self.source_id = source_id
+        self.version = version
+        self.requests = list(requests)
+        self.methods = list(methods)
+        self.original = original
+
+    def _run_requests(self):
+        backend = self.host.backend_manager
+        validate = self.host._validate_denoise_for_descriptor
+        results = {}
+        for region_id, bounds, key in self.requests:
+            descriptor = DataScopeDescriptor("enhancement:" + region_id, self.original.shape, bounds)
+            try:
+                validate(self.methods, descriptor)
+                job = ComputeJob("denoise_pipeline", {
+                    "data": descriptor.extract(self.original),
+                    "methods": copy.deepcopy(self.methods),
+                })
+                results[region_id] = {"key": key, "values": backend.execute(job).value}
+            except ValueError as exc:
+                results[region_id] = {"key": key, "error": str(exc)}
+        return results
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            outcome = ("ok", self._run_requests())
+        except Exception as exc:  # pragma: no cover - defensive worker boundary
+            outcome = ("error", f"{type(exc).__name__}: {exc}")
+        with self.host._enhancement_roi_lock:
+            self.host._enhancement_roi_result = (self.token, self.source_id, self.version, outcome)
 
 
 class EnhancementInteractionMixin:
@@ -33,8 +78,18 @@ class EnhancementInteractionMixin:
         self._enhancement_scalar_bars = []
         self._enhancement_cache = None
         self._enhancement_draw_key = None
+        self._enhancement_box_signature = None
+        self._enhancement_bar_signature = None
         self._enhancement_dragging = False
         self._enhancement_actor_regions = {}
+        self._enhancement_roi_pool = None
+        self._enhancement_roi_timer = None
+        self._enhancement_roi_lock = threading.Lock()
+        self._enhancement_roi_token = 0
+        self._enhancement_roi_job = None
+        self._enhancement_roi_task = None
+        self._enhancement_roi_result = None
+        self._enhancement_roi_disabled = False
         self.plotter.iren.add_observer("LeftButtonPressEvent", self._pick_enhancement_box)
         combo = self.page_render.region_combo
         combo.target_changed.connect(self._select_enhancement_target)
@@ -202,7 +257,8 @@ class EnhancementInteractionMixin:
         self._restore_enhancement_style()
         self._clear_enhancement_interaction()
         self._sync_enhancement_controls(self._enhancement_spec(), self.current_render_context)
-        self._draw_enhancement_regions(self.current_render_context, self._enhancement_display(self.current_render_context))
+        self._draw_enhancement_regions(self.current_render_context,
+                                       self._enhancement_display(self.current_render_context, allow_compute=False))
 
     def _add_enhancement_region(self):
         context = self.current_render_context
@@ -279,7 +335,7 @@ class EnhancementInteractionMixin:
         if not state:
             return
         if locked:
-            fields = self._enhancement_display(self.current_render_context)
+            fields = self._enhancement_display(self.current_render_context, allow_compute=False)
             resolved = {r["region_id"]: r for r in fields["regions"]} if fields else {}
             for region in state["regions"]:
                 record = resolved.get(region["region_id"])
@@ -347,13 +403,132 @@ class EnhancementInteractionMixin:
         context["enhancement_errors"] = errors
         return context, data
 
-    def _enhancement_display(self, context, spec=None, *, freeze_pending=True):
+    def _enhancement_roi_requests(self, context, spec, state):
+        """Regions whose ROI denoise data is missing or stale, plus their frozen keys."""
+        if context.get("view") != "3d" or getattr(spec, "page_kind", None) != "home":
+            return []
+        if spec.params.get("crop_regions") or abs(float(self.__dict__.get("rotation_angle", 0))) >= 1e-6:
+            return []
+        methods = self.__dict__.get("global_denoise_methods", [])
+        original = self.__dict__.get("original_raw_data")
+        if not methods or original is None:
+            return []
+        cache = self.__dict__.get("_enhancement_roi_data_cache", {})
+        _, domain = geometry(context)
+        requests = []
+        for region in matching_regions(context, state["regions"]):
+            if not region.get("enabled", True):
+                continue
+            slices = region_slices(context, region)
+            if slices is None:
+                continue
+            bounds = tuple(v + int(domain[2 * i]) for i, s in enumerate(slices) for v in (s.start, s.stop - 1))
+            key = (id(original), tuple(bounds), repr(methods),
+                   self.__dict__.get("shared_denoise_version", 0))
+            entry = cache.get(region["region_id"])
+            if entry is None or entry.get("key") != key:
+                requests.append((region["region_id"], bounds, key))
+        return requests
+
+    def _ensure_enhancement_roi_transport(self):
+        if self.__dict__.get("_enhancement_roi_pool") is None:
+            pool = QThreadPool()
+            pool.setMaxThreadCount(1)
+            self._enhancement_roi_pool = pool
+        if self.__dict__.get("_enhancement_roi_lock") is None:
+            self._enhancement_roi_lock = threading.Lock()
+        if self.__dict__.get("_enhancement_roi_timer") is None:
+            timer = QTimer()
+            timer.setInterval(30)
+            timer.timeout.connect(self._poll_enhancement_roi)
+            self._enhancement_roi_timer = timer
+
+    def _schedule_enhancement_roi(self, context, spec, state):
+        """Submit missing ROI denoise work once; the GUI keeps rendering cached data."""
+        if self.__dict__.get("_enhancement_roi_disabled") or state is None or spec is None:
+            return
+        if self.__dict__.get("_enhancement_roi_job") is not None:
+            return
+        try:
+            requests = self._enhancement_roi_requests(context, spec, state)
+            if not requests:
+                return
+            original = self.__dict__.get("original_raw_data")
+            methods = list(self.__dict__.get("global_denoise_methods", []))
+            self._ensure_enhancement_roi_transport()
+            self._enhancement_roi_token = int(self.__dict__.get("_enhancement_roi_token", 0)) + 1
+            token = self._enhancement_roi_token
+            task = _EnhancementRoiTask(
+                self, token, id(original), int(self.__dict__.get("shared_denoise_version", 0)),
+                requests, methods, original,
+            )
+            self._enhancement_roi_job = token
+            self._enhancement_roi_task = task
+            self._enhancement_roi_timer.start()
+            self._enhancement_roi_pool.start(task)
+            self._render_exact_ready = False
+            update = getattr(self, "_update_export_button_states", None)
+            if callable(update):
+                update()
+        except Exception as exc:  # pragma: no cover - defensive submission boundary
+            self._enhancement_roi_disabled = True
+            print(f"Enhancement ROI scheduling disabled: {type(exc).__name__}: {exc}")
+
+    def _poll_enhancement_roi(self):
+        """Move a finished worker result onto the GUI thread exactly once."""
+        lock = self.__dict__.get("_enhancement_roi_lock")
+        if lock is None:
+            return
+        with lock:
+            pending = self.__dict__.get("_enhancement_roi_result")
+            self._enhancement_roi_result = None
+        if pending is None:
+            return
+        timer = self.__dict__.get("_enhancement_roi_timer")
+        if timer is not None:
+            timer.stop()
+        token, source_id, version, outcome = pending
+        current = (self.__dict__.get("_enhancement_roi_job"),
+                   id(self.__dict__.get("original_raw_data")),
+                   int(self.__dict__.get("shared_denoise_version", 0)))
+        if current != (token, source_id, version):
+            # 数据源、去噪版本或 token 已变化：丢弃结果，等下一次刷新重新排。
+            self._enhancement_roi_job = None
+            self._enhancement_roi_task = None
+            return
+        self._enhancement_roi_job = None
+        self._enhancement_roi_task = None
+        if outcome[0] == "error":
+            self._enhancement_roi_disabled = True
+            print(f"Enhancement ROI job failed: {outcome[1]}")
+        else:
+            cache = self.__dict__.setdefault("_enhancement_roi_data_cache", {})
+            cache.update(outcome[1])
+        self._enhancement_cache = None
+        request = getattr(self, "request_refresh", None)
+        if callable(request):
+            request(RefreshCause.DENOISE, RenderQuality.EXACT, immediate=True)
+
+    def _invalidate_enhancement_roi(self):
+        self._enhancement_roi_token = int(self.__dict__.get("_enhancement_roi_token", 0)) + 1
+        self._enhancement_roi_job = None
+        self._enhancement_roi_task = None
+        lock = self.__dict__.get("_enhancement_roi_lock")
+        if lock is not None:
+            with lock:
+                self._enhancement_roi_result = None
+        timer = self.__dict__.get("_enhancement_roi_timer")
+        if timer is not None:
+            timer.stop()
+
+    def _enhancement_display(self, context, spec=None, *, freeze_pending=True, allow_compute=None):
         state = self._enhancement_state(spec)
         if not state or context is None or context.get("view") not in {"2d", "3d"} or context.get("crop_empty"):
             return None
         adapt_regions(context, state)
+        allow = freeze_pending if allow_compute is None else bool(allow_compute)
         context, region_data = self._enhancement_crop_data(context, spec or self._enhancement_spec(), state,
-                                                         allow_compute=freeze_pending)
+                                                          allow_compute=allow)
         if freeze_pending:
             pending_fields = None
             pending = (state.get("common_lock_pending") if state.get("common") else
@@ -372,7 +547,11 @@ class EnhancementInteractionMixin:
                         state["common_locked_range"] = tuple(record["data_range"])
                         state["revision"] += 1
         data = np.asarray(context["data"])
-        key = (id(data), int(data.__array_interface__["data"][0]), data.shape,
+        # 每次刷新拿到的都是同一帧的新视图（id 变化、内存不变），键必须落在底层缓冲上。
+        from bandscope.processing.gpu_display import array_key
+
+        data_key, _base = array_key(data)
+        key = (data_key,
                self.__dict__.get("shared_denoise_version", 0), self.__dict__.get("rotation_angle", 0),
                repr(context.get("slice_info")), repr(context.get("plot_logical_bounds")),
                repr(context.get("data_bounds")),
@@ -384,6 +563,8 @@ class EnhancementInteractionMixin:
             cached = (key, resolve_display(context, state, background_locked_range=VisualEngine.locked_data_range(),
                                           region_data=region_data))
             self._enhancement_cache = cached
+            # 递增 token 让渲染层区分「同一份通道」与「重新算过」：只有前者可以跳过重传。
+            self._enhancement_display_token = int(self.__dict__.get("_enhancement_display_token", 0)) + 1
         if cached[1] is not None and VisualEngine.locked_data_range() is None:
             info = cached[1]["background_level_info"]
             VisualEngine._last_data_range = (info["data_min"], info["data_max"])
@@ -433,7 +614,7 @@ class EnhancementInteractionMixin:
         self._restore_enhancement_style()
         context = self.current_render_context
         self._sync_enhancement_controls(self._enhancement_spec(), context)
-        self._draw_enhancement_regions(context, self._enhancement_display(context))
+        self._draw_enhancement_regions(context, self._enhancement_display(context, allow_compute=False))
 
     def _enhancement_outline_regions(self, regions):
         """Outline visibility is independent of all active enhancement channels."""
@@ -445,8 +626,15 @@ class EnhancementInteractionMixin:
 
     def _reset_enhancement_for_new_data(self):
         self._clear_enhancement_interaction()
+        self._invalidate_enhancement_roi()
         self._enhancement_cache = None
         self._enhancement_roi_data_cache = {}
+        # 换数据时释放驻留显存与按数组身份缓存的统计，避免旧体数据继续占用。
+        from bandscope.processing import gpu_display
+        from bandscope.processing.local_enhancement import clear_range_cache
+
+        gpu_display.reset()
+        clear_range_cache()
         workspace = self.__dict__.get("left_workspace")
         pages = getattr(workspace, "page_specs", {}) if workspace is not None else {}
         if isinstance(pages, dict):
@@ -490,6 +678,8 @@ class EnhancementInteractionMixin:
             self.plotter.remove_actor(name, render=False)
         self._enhancement_actors = []
         self._enhancement_draw_key = None
+        self._enhancement_box_signature = None
+        self._enhancement_bar_signature = None
 
     def _enhancement_blit_artists(self):
         artists = list(self.__dict__.get("_enhancement_artists", []))
@@ -534,14 +724,10 @@ class EnhancementInteractionMixin:
             note = self.ax_2d.text(.01, .99, enhancement_legend(fields), transform=self.ax_2d.transAxes,
                                   color=theme.TEXT_2, fontsize=8, zorder=90, va="top")
             self._enhancement_artists.append(note)
-        # 区域色带随每次绘制重建：刻度范围随数据/锁定状态变化，不能走上面的绘制键缓存。
-        for colorbar in self.__dict__.get("_enhancement_colorbars", []):
-            try:
-                colorbar.remove()
-            except Exception:
-                pass
+        # 数量不变时复用色带，只更新 mappable 与刻度；数量变化由绘制函数重建。
         self._enhancement_colorbars = draw_region_colorbars_2d(
-            self.ax_2d, fields["regions"], self.page_render.get_selected_cmap())
+            self.ax_2d, fields["regions"], self.page_render.get_selected_cmap(),
+            existing=self.__dict__.get("_enhancement_colorbars", ()))
         if self._enhancement_selector is not None and active:
             self._enhancement_selector.sync_bounds(physical_bounds(context, active["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked()))
         self.canvas_2d.draw_idle()
@@ -569,33 +755,60 @@ class EnhancementInteractionMixin:
                 break
 
     def _draw_enhancement_boxes(self, context, fields, active):
-        self._enhancement_actor_regions = {}
-        for name in self._enhancement_actors:
-            self.plotter.remove_actor(name, render=False)
-        self._enhancement_actors = []
-        for title in self.__dict__.get("_enhancement_scalar_bars", []):
+        """Update 3D outlines, labels and scalar bars; the caller renders once.
+
+        Geometry only changes when regions move or the selection changes, while
+        scalar bars change whenever the levels change.  Keeping both signatures
+        apart lets a colour-slider tick skip the box/label teardown entirely.
+        """
+        box_signature = tuple(
+            (region["region_id"], tuple(region["bounds"]), str(region.get("label")), bool(region["enabled"]))
+            for region in fields["regions"]
+        )
+        bar_signature = tuple(
+            (region["region_id"], tuple(region["data_range"] or ()),
+             region["level_info"]["black_value"], region["level_info"]["white_value"],
+             region["level_info"]["gamma_power"], bool(region["enabled"]))
+            for region in fields["regions"]
+        )
+        if box_signature != self.__dict__.get("_enhancement_box_signature"):
+            self._enhancement_actor_regions = {}
+            for name in self._enhancement_actors:
+                self.plotter.remove_actor(name, render=False)
+            self._enhancement_actors = []
+            shape = context.get("full_shape", context["data"].shape)
+            for region in fields["regions"]:
+                bounds = self.core.logical_to_render_bounds(region["bounds"], shape, clamp=False)
+                name = "enhancement:" + region["region_id"]
+                import pyvista as pv
+                actor = self.plotter.add_mesh(pv.Box(bounds=bounds).outline(), color=theme.ACCENT, name=name, render=False)
+                self._enhancement_actor_regions[actor] = region["region_id"]
+                self.plotter.add_point_labels([[(bounds[0]+bounds[1])/2, (bounds[2]+bounds[3])/2, bounds[5]]],
+                                              [region.get("label", "ROI")], name=name+":label", show_points=False,
+                                              font_size=12, always_visible=True, render=False)
+                self._enhancement_actors.extend((name, name+":label"))
+            self._enhancement_box_signature = box_signature
+            self._enhancement_bar_signature = None
+        if bar_signature != self.__dict__.get("_enhancement_bar_signature"):
+            for title in self.__dict__.get("_enhancement_scalar_bars", []):
+                try:
+                    self.plotter.remove_scalar_bar(title, render=False)
+                except Exception:
+                    pass
+            self._enhancement_scalar_bars = []
             try:
-                self.plotter.remove_scalar_bar(title, render=False)
+                self.plotter.remove_actor("enhancement:legend", render=False)
             except Exception:
                 pass
-        self._enhancement_scalar_bars = []
-        shape = context.get("full_shape", context["data"].shape)
-        for region in fields["regions"]:
-            bounds = self.core.logical_to_render_bounds(region["bounds"], shape, clamp=False)
-            name = "enhancement:" + region["region_id"]
-            import pyvista as pv
-            actor = self.plotter.add_mesh(pv.Box(bounds=bounds).outline(), color=theme.ACCENT, name=name, render=False)
-            self._enhancement_actor_regions[actor] = region["region_id"]
-            self.plotter.add_point_labels([[(bounds[0]+bounds[1])/2, (bounds[2]+bounds[3])/2, bounds[5]]],
-                                         [region.get("label", "ROI")], name=name+":label", show_points=False,
-                                         font_size=12, always_visible=True, render=False)
-            self._enhancement_actors.extend((name, name+":label"))
-        if fields["regions"]:
-            self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="upper_left", font_size=9, render=False)
-            self._enhancement_actors.append("enhancement:legend")
-            # 每个可见区域一条自己的 scalar bar，范围用区域（可能已锁定）的归一化区间。
-            self._enhancement_scalar_bars = add_region_scalar_bars_3d(
-                self.plotter, fields["regions"], self.page_render.get_selected_cmap())
+            if "enhancement:legend" in self._enhancement_actors:
+                self._enhancement_actors.remove("enhancement:legend")
+            if fields["regions"]:
+                self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="upper_left", font_size=9, render=False)
+                self._enhancement_actors.append("enhancement:legend")
+                # 每个可见区域一条自己的 scalar bar，范围用区域（可能已锁定）的归一化区间。
+                self._enhancement_scalar_bars = add_region_scalar_bars_3d(
+                    self.plotter, fields["regions"], self.page_render.get_selected_cmap())
+            self._enhancement_bar_signature = bar_signature
         key = (active and active["region_id"], active and tuple(active["bounds"]))
         if key != self._enhancement_draw_key and not self._enhancement_dragging:
             widget = self._enhancement_box_widget
@@ -608,6 +821,7 @@ class EnhancementInteractionMixin:
             if active:
                 self._enhancement_building = True
                 try:
+                    shape = context.get("full_shape", context["data"].shape)
                     self._enhancement_box_widget = self.plotter.add_box_widget(
                         self._on_enhancement_box, bounds=self.core.logical_to_render_bounds(active["bounds"], shape, clamp=False),
                         factor=1, rotation_enabled=False, color=theme.ACCENT, interaction_event="always")
@@ -615,7 +829,6 @@ class EnhancementInteractionMixin:
                     self._enhancement_box_widget.AddObserver("EndInteractionEvent", self._finish_enhancement_box)
                 finally:
                     self._enhancement_building = False
-        self.plotter.render()
 
     def _pick_enhancement_box(self, _obj, _event):
         if self._crop_enabled() or self._enhancement_dragging or not self.current_render_context or self.current_render_context.get("view") != "3d":

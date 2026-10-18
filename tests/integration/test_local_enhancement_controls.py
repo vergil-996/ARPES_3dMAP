@@ -1,4 +1,6 @@
 import copy
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -7,12 +9,14 @@ import numpy as np
 
 from PyQt5.QtCore import QEvent, QPointF, Qt
 from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QMenu, QPushButton
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
-from bandscope.core.local_enhancement import STATE_KEY, update_region_bounds
+from bandscope.core.local_enhancement import DEFAULT_STYLE, STATE_KEY, update_region_bounds
+from bandscope.processing.display_transfer import level_info
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
@@ -687,3 +691,141 @@ class RegionControlTests(unittest.TestCase):
         host.backend_manager.execute.assert_called_once()
         np.testing.assert_array_equal(raw, original)
         np.testing.assert_array_equal(host.current_render_context["data"], processed[..., 0])
+
+
+class EnhancementBoxIncrementalTests(unittest.TestCase):
+    """3D 辅助对象按签名增量更新：只改色阶时不重建框和标签。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        theme.apply_siui_palette()
+
+    @staticmethod
+    def _host():
+        host = EnhancementInteractionMixin.__new__(EnhancementInteractionMixin)
+        host.plotter = Mock(box_widgets=[])
+        host.plotter.add_mesh.return_value = object()
+        host._enhancement_actors = []
+        host._enhancement_scalar_bars = []
+        host._enhancement_actor_regions = {}
+        host._enhancement_box_widget = None
+        host._enhancement_draw_key = None
+        host._enhancement_box_signature = None
+        host._enhancement_bar_signature = None
+        host._enhancement_dragging = False
+        host.core = SimpleNamespace(logical_to_render_bounds=lambda bounds, shape, clamp=False: tuple(bounds))
+        host.page_render = SimpleNamespace(get_selected_cmap=lambda: "magma")
+        return host
+
+    @staticmethod
+    def _fields(levels=(0, 50, 100)):
+        info = level_info((0.0, 100.0), levels)
+        return {"regions": [{"region_id": "1", "name": "R1", "label": "R1", "status": "ready",
+                             "data_range": (0.0, 100.0), "level_info": info, "enabled": True,
+                             "bounds": (0.0, 3.0, 0.0, 3.0, 0.0, 3.0)}],
+                "background_level_info": info, "active": True, "common": False}
+
+    def test_geometry_is_reused_while_bars_follow_the_levels(self):
+        host = self._host()
+        context = {"data": np.zeros((4, 4, 4), dtype=np.float32)}
+        fields = self._fields()
+        host._draw_enhancement_boxes(context, fields, None)
+        self.assertEqual(host.plotter.add_mesh.call_count, 1)
+        host.plotter.add_scalar_bar.assert_called_once()
+
+        host.plotter.remove_actor.reset_mock()
+        host.plotter.add_scalar_bar.reset_mock()
+        host._draw_enhancement_boxes(context, fields, None)
+        host.plotter.remove_actor.assert_not_called()
+        host.plotter.add_scalar_bar.assert_not_called()
+
+        host.plotter.add_scalar_bar.reset_mock()
+        host._draw_enhancement_boxes(context, self._fields((10, 60, 90)), None)
+        self.assertEqual(host.plotter.add_mesh.call_count, 1)
+        host.plotter.add_scalar_bar.assert_called_once()
+
+
+class EnhancementRoiAsyncTests(unittest.TestCase):
+    """ROI 去噪在后台线程执行；结果按 token/数据源/版本提交，过期即丢弃。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        theme.apply_siui_palette()
+
+    def setUp(self):
+        self.hosts = []
+
+    def tearDown(self):
+        for host in self.hosts:
+            pool = host._enhancement_roi_pool
+            if pool is not None:
+                pool.waitForDone(5000)
+            host._invalidate_enhancement_roi()
+
+    def _host(self):
+        host = EnhancementInteractionMixin.__new__(EnhancementInteractionMixin)
+        host._enhancement_roi_pool = None
+        host._enhancement_roi_timer = None
+        host._enhancement_roi_lock = threading.Lock()
+        host._enhancement_roi_token = 0
+        host._enhancement_roi_job = None
+        host._enhancement_roi_task = None
+        host._enhancement_roi_result = None
+        host._enhancement_roi_disabled = False
+        host._enhancement_roi_data_cache = {}
+        host._enhancement_cache = object()
+        host._render_exact_ready = True
+        host._update_export_button_states = Mock()
+        host.request_refresh = Mock()
+        host.rotation_angle = 0.0
+        host.shared_denoise_version = 0
+        host.original_raw_data = np.ones((4, 4, 8, 2), dtype=np.float32)
+        host.global_denoise_methods = [{"method": "savitzky_golay"}]
+        host.backend_manager = SimpleNamespace(
+            execute=Mock(return_value=SimpleNamespace(value=np.ones((4, 4, 4, 2), dtype=np.float32))))
+        host._validate_denoise_for_descriptor = Mock()
+        roi = region(1, (0, 1, 0, 1, 2, 5), view="3d", axes=("X", "Y", "E"))
+        host.state = {"regions": [roi], "background": copy.deepcopy(DEFAULT_STYLE),
+                      "revision": 1, "next_label": 2, "common": False}
+        host.active_page_spec = SimpleNamespace(page_kind="home", params={STATE_KEY: host.state})
+        shape = host.original_raw_data.shape[:3]
+        host.current_render_context = {
+            "view": "3d",
+            "data": host.original_raw_data[..., 0],
+            "coords": {key: np.arange(n, dtype=float) for key, n in zip(("X", "Y", "E"), shape)},
+        }
+        self.hosts.append(host)
+        return host
+
+    def _wait_for_job(self, host, timeout=5.0):
+        deadline = time.time() + timeout
+        while host._enhancement_roi_job is not None and time.time() < deadline:
+            QTest.qWait(20)
+        return host._enhancement_roi_job is None
+
+    def test_roi_denoise_runs_off_thread_and_commits(self):
+        host = self._host()
+        host._schedule_enhancement_roi(host.current_render_context, host.active_page_spec, host.state)
+        self.assertIsNotNone(host._enhancement_roi_job)
+        self.assertFalse(host._render_exact_ready)
+        self.assertTrue(self._wait_for_job(host))
+        self.assertEqual(host.backend_manager.execute.call_count, 1)
+        self.assertIn("1", host._enhancement_roi_data_cache)
+        self.assertIs(host._enhancement_cache, None)
+        host.request_refresh.assert_called_once()
+
+    def test_stale_result_is_dropped_after_invalidation(self):
+        host = self._host()
+        host._schedule_enhancement_roi(host.current_render_context, host.active_page_spec, host.state)
+        host._invalidate_enhancement_roi()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with host._enhancement_roi_lock:
+                if host._enhancement_roi_result is not None:
+                    break
+            QTest.qWait(20)
+        host._poll_enhancement_roi()
+        self.assertEqual(host._enhancement_roi_data_cache, {})
+        self.assertIsNone(host._enhancement_roi_job)

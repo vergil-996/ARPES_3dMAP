@@ -83,6 +83,34 @@ def main():
         window.page_render.combo_map.setCurrentText(style["opacity_mode"])
         window.flush_render_levels_refresh()
 
+    def verify_global_gamma(view):
+        from matplotlib import colormaps
+        set_style(dict(levels=(0, 100, 100), opacity_mode="线性"))
+        context = window.current_render_context
+        check(view + " gamma100 uses the global mapping", window._enhancement_display(context) is None)
+        if view == "3D":
+            info = window.volume_session.level_info
+            source = np.asarray(context["data"])
+        else:
+            image = window.ax_2d._arpes_image
+            info = VisualEngine._level_info(context["data"], (0, 100, 100))
+            source = np.asarray(image.get_array())
+        normalized = np.clip((source.astype(np.float64) - info["black_value"]) /
+                             (info["white_value"] - info["black_value"]), 0, 1)
+        expected = normalized ** .1
+        weak = np.isfinite(source) & (normalized > 0) & (normalized < .1)
+        check(view + " real spectrum contains weak samples", np.any(weak))
+        if view == "3D":
+            actual = window.volume_session.display_channel.buffer.reshape(source.shape + (2,), order="F")
+            check(view + " global weak colors receive gamma before lookup", np.allclose(actual[..., 0][weak], expected[weak]))
+            check(view + " global weak opacity receives gamma before lookup", np.allclose(actual[..., 1][weak], expected[weak]))
+        else:
+            actual = image.to_rgba(image.get_array(), bytes=True)
+            palette = colormaps.get_cmap(window.page_render.combo_cmap.currentText())
+            check(view + " global weak colors receive gamma before lookup", np.array_equal(actual[weak], palette(expected, bytes=True)[weak]))
+            check(view + " weak samples remain opaque", np.all(actual[..., 3][weak] == 255))
+        screenshot(view.lower() + "_global_gamma100")
+
     def verify_independent_controls(view):
         state = window._enhancement_state()
         first, second = state["regions"]
@@ -146,6 +174,7 @@ def main():
             if step == 0:
                 check("3D source ready", window.current_render_context["view"] == "3d")
                 progress["source_sample"] = window.core.raw_data[::25, ::25, ::25, :].copy()
+                verify_global_gamma("3D")
                 window._add_enhancement_region()
                 # WSe2's lower-energy corner contains only 0/1: both endpoints
                 # remain clipped under level edits. Include intermediate counts.
@@ -210,12 +239,20 @@ def main():
                 window._delete_enhancement_region(window._enhancement_selected()["region_id"])
             elif step == 6:
                 check("last deletion leaves background and show-all entries", window.page_render.region_combo.count() == 2)
-                check("last deletion restores original volume path", window.volume_session.display_channel is None)
+                session = window.volume_session
+                check("last deletion restores global-only mapping", window._enhancement_display(window.current_render_context) is None)
+                if session.display_channel is not None:
+                    from bandscope.processing.display_transfer import channels
+                    style = window._enhancement_background_style()
+                    color, alpha = channels(window.current_render_context["data"], session.level_info, style["opacity_mode"])
+                    check("global gamma colors survive last region deletion", np.allclose(session.display_channel.buffer[:, 0], color.ravel(order="F")))
+                    check("global gamma opacity survives last region deletion", np.allclose(session.display_channel.buffer[:, 1], alpha.ravel(order="F")))
                 screenshot("3d_restored")
                 window.page_data.combo_ax.setCurrentIndex(1)
                 window.on_apply_axis_integral()
             elif step == 7:
                 check("2D integral ready", window.current_render_context["view"] == "2d")
+                verify_global_gamma("2D")
                 window._add_enhancement_region()
                 set_bounds(window._enhancement_selected(), ((.1, .35), (.2, .5)))
             elif step == 8:
