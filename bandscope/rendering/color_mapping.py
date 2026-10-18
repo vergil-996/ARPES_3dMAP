@@ -2,7 +2,7 @@
 
 import numpy as np
 from matplotlib import colormaps
-from matplotlib.colors import Colormap
+from matplotlib.colors import Colormap, to_rgba
 
 
 class LeveledColormap(Colormap):
@@ -45,7 +45,15 @@ class LeveledColormap(Colormap):
         self._isinit = True
         self._set_extremes()
 
-    def _set_extremes(self):
+    def _set_extremes(self, bad=None, under=None, over=None):
+        # Matplotlib 3.11 passes replacement colors here (``with_extremes``);
+        # 3.10 calls this with no arguments and only re-applies the stored ones.
+        if bad is not None:
+            self._rgba_bad = tuple(to_rgba(bad))
+        if under is not None:
+            self._rgba_under = tuple(to_rgba(under))
+        if over is not None:
+            self._rgba_over = tuple(to_rgba(over))
         super()._set_extremes()
         self.base_cmap.set_extremes(
             bad=self._rgba_bad, under=self._rgba_under, over=self._rgba_over,
