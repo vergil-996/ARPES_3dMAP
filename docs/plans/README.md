@@ -3,7 +3,7 @@
 本索引只列尚待设计或实施的工作；按任务选择对应计划，不批量读取本目录。
 
 - [单条 EDC 曲线的悬停说明](single-edc-help.md)：方案已确认，待实施；在类型选择框旁显示仅用于单条 EDC 的悬停帮助。
-- [MatElab 更新源接入](matelab-update-source.md)：已实现，v1.14.0–v1.14.3 均已对真实服务器完成发布与下载校验；待界面人工验收。
+- [MatElab 更新源接入](matelab-update-source.md)：已实现，v1.14.0–v1.14.4 均已对真实服务器完成发布与下载校验；待界面人工验收。
 - [局部增强控件简化与锁定色带整合](enhancement-controls-simplify.md)：已实施并随 v1.14.3 发布（2026-10-17）；剩余人工视觉与发行包验收见主记录。
 - [局部增强交互性能（拖动帧时）优化](enhancement-render-performance.md)：P0、CUDA 映射、2D 复用与 ROI 异步已实施（2026-10-18）；真实窗口 3D 刷新 78.5 → 47.4 ms、空闲 3.9 ms、首次 ROI 去噪不再冻结界面；剩余 CPU 路线与发行验收。
 
