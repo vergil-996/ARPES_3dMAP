@@ -46,6 +46,34 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 
 验证构建可通过 `--workpath .local/build-validation --distpath .local/dist-validation` 使用独立输出；标准安装器默认仍读取根目录 `dist`。
 
+## 发布环境与代理切换
+
+GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维护者切换代理，不能假定一次配置能同时完成两步。
+
+- **GitHub（代理开启）**：本机通过代理访问 GitHub；系统代理写在
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`（实测 `127.0.0.1:7897`），
+  但 `git` 不读取系统代理，推送分支与标签要显式传：
+
+  ```powershell
+  git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push origin main
+  git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 push origin vX.Y.Z
+  ```
+
+  未带代理时实测报 `Failed to connect to github.com port 443`。
+- **MatElab（代理关闭）**：`eln.iphy.ac.cn:61262` 是所内直连，代理开启时连不上。
+  GitHub Release 与安装包校验完成后必须停下，**等待维护者关闭代理**，再执行发布脚本；
+  不能在代理仍开启时反复重试，也不要自行切换维护者的代理。
+- **收尾提交（代理再次开启）**：MatElab 校验完成后通常还有计划/交接文档要提交；
+  推送需要维护者重新开启代理。代理仍关闭时保留本地提交并明确告知「待补推」，
+  不得写成已推送——v1.14.4 发布时就是这种状态。
+- **状态检查**：`gh` CLI 在本机未安装；CI 进度与 Release 资产可用网页
+  （`/actions/runs/<id>`、`/releases/expanded_assets/vX.Y.Z`）检查。
+  匿名 GitHub API 常被共享出口 IP 限流，不要依赖轮询 API 判断构建结果。
+- **MatElab 凭证**：`publish_matelab.py` 依次取命令行 `--username/--password`、
+  环境变量 `MATELAB_USER`/`MATELAB_PASSWORD`，最后才交互输入；也可以只读使用应用
+  「更新设置」里已保存的账号（registry `updates/matelab_username` /
+  `updates/matelab_password_b64`）。任何情况下都不把密码写进仓库、日志或提交。
+
 ## CI 与正式发布
 
 - 普通提交和 PR 运行共享测试工作流；版本标签 `vX.Y.Z` 触发发布工作流。
@@ -60,6 +88,8 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 ## MatElab 更新源发布
 
 除 GitHub 外，正式版还可发布到 MatElab（物质科学电子实验室）更新源，供所内用户在软件内切换使用。发布约定与客户端解析逻辑见 `bandscope/updates/matelab_source.py` 顶部 docstring。
+
+**发布前确认系统代理已关闭**（见「发布环境与代理切换」）；代理开启时该地址不可达，脚本会在登录或上传阶段失败。
 
 一次性准备：在 MatElab 上创建发布记录本（默认 `BandScope发布`）。发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构（「manifest」「安装包」两个模块），不需要预先建模板。
 
