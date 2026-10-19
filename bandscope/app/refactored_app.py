@@ -430,9 +430,16 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         return False
 
     def _focus_accepts_number_input(self):
-        return self._widget_has_class_marker(
-            QApplication.focusWidget(), self.EDITABLE_CLASS_MARKERS
-        )
+        focus_widget = QApplication.focusWidget()
+        if self._widget_has_class_marker(
+                focus_widget, self.EDITABLE_CLASS_MARKERS):
+            return True
+        # 可编辑下拉框把焦点留在组合框本身，文字由内部编辑框接收；此时数字
+        # 应输入到框内，而不是触发 1-4 数字切页。
+        if self._widget_has_class_marker(focus_widget, ("ComboBox",)):
+            is_editable = getattr(focus_widget, "isEditable", None)
+            return bool(is_editable()) if callable(is_editable) else False
+        return False
 
     @staticmethod
     def _widget_is_descendant(widget, ancestor):
@@ -501,17 +508,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def _select_page_under_cursor(self, index):
         cursor_pos = QCursor.pos()
-        if self._cursor_inside_widget(self.right_panel, cursor_pos):
-            self._select_control_page_by_index(index)
-            return True
         if self._cursor_inside_widget(self.left_workspace, cursor_pos):
             self._select_left_workspace_page_by_index(index)
-            return True
-        return False
-
-    def _select_control_page_by_index(self, index):
-        if 0 <= index < self.page_container.count():
-            self._select_control_page(index)
             return True
         return False
 
@@ -3556,7 +3554,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
-        self._append_enhancement_actions(menu)
+        target = (self.__dict__.get("_enhancement_context_target")
+                  if context and context.get("view") == "2d" else None)
+        self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.canvas_2d, global_pos)
 
         if can_copy or can_paste or show_curve_actions:
@@ -3570,7 +3570,10 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         if show_curve_actions:
             log_action = menu.addAction("取对数 (log10)")
             log_action.triggered.connect(lambda: self._apply_log_to_current_curves(show_message=True))
-        menu.exec_(global_pos)
+        try:
+            menu.exec_(global_pos)
+        finally:
+            self._enhancement_context_target = None
 
     def _show_main_context_menu(self, pos):
         if self._crop_enabled():
@@ -3578,10 +3581,19 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._show_crop_popup(global_pos)
             self._show_axis_title_menu(self.plotter, global_pos)
             return
+        context = self.current_render_context
+        target = (self.__dict__.get("_enhancement_context_target")
+                  if context and context.get("view") == "3d" else None)
+        if target is None and context and context.get("view") == "3d":
+            # 右键观察者未先到时再按当前光标补一次拾取，避免菜单漏掉删除入口。
+            target = self._enhancement_box_region_at_cursor()
         menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
-        self._append_enhancement_actions(menu)
+        self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
-        menu.exec_(global_pos)
+        try:
+            menu.exec_(global_pos)
+        finally:
+            self._enhancement_context_target = None
 
     def _get_clip_slices(self, logical_bounds=None):
         shape = self._full_domain_spatial_shape()

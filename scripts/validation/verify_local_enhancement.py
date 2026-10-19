@@ -1,6 +1,7 @@
 """Native-window validation of display regions on real ARPES data."""
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.validation._common import arguments
@@ -12,10 +13,10 @@ def main():
     import json
     import traceback
     import numpy as np
-    from PyQt5.QtCore import QEvent, QPointF, Qt, QTimer
+    from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
     from PyQt5.QtGui import QMouseEvent
-    from PyQt5.QtWidgets import QApplication
-    from bandscope.core.local_enhancement import geometry, region_slices
+    from PyQt5.QtWidgets import QApplication, QMenu
+    from bandscope.core.local_enhancement import geometry, physical_bounds, region_slices
     from bandscope.processing.local_enhancement import finite_range
     from bandscope.rendering.render_core import VisualEngine
     from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
@@ -202,6 +203,35 @@ def main():
                 check("second region inherits current gamma", window.page_render.s_gamma.value() == 62)
                 verify_independent_controls("3D")
                 check("first gamma restored", window.page_render.s_gamma.value() == 62)
+                # 右键点在区域框内部（不是轮廓线）也应命中并给出删除项。
+                region = window._enhancement_selected()
+                context = window.current_render_context
+                shape = context.get("full_shape", context["data"].shape)
+                render_bounds = window.core.logical_to_render_bounds(
+                    region["bounds"], shape, clamp=False)
+                center = (
+                    (render_bounds[0] + render_bounds[1]) / 2,
+                    (render_bounds[2] + render_bounds[3]) / 2,
+                    (render_bounds[4] + render_bounds[5]) / 2,
+                )
+                renderer = window.plotter.renderer
+                renderer.SetWorldPoint(center[0], center[1], center[2], 1.0)
+                renderer.WorldToDisplay()
+                display = renderer.GetDisplayPoint()
+                window.plotter.iren.interactor.SetEventInformation(
+                    int(display[0]), int(display[1]))
+                window._remember_enhancement_box_context(None, None)
+                check("3D right click inside region box finds it",
+                      window._enhancement_context_target == region["region_id"])
+                menu = QMenu(window)
+                window._append_enhancement_actions(menu, window._enhancement_context_target)
+                check("3D right-click menu offers region deletion",
+                      any(a.text().startswith("删除增强区域") for a in menu.actions()))
+                menu.popup(window.plotter.mapToGlobal(window.plotter.rect().center()))
+                app.processEvents()
+                menu.grab().save(str(args.output_dir / "3d_region_delete_menu.png"))
+                menu.close()
+                menu.deleteLater()
                 progress["colors"] = window.volume_session.display_channel.buffer[:, 0].copy()
                 progress["alphas"] = window.volume_session.display_channel.buffer[:, 1].copy()
                 window.page_render.combo_map.setCurrentIndex(3)
@@ -301,19 +331,36 @@ def main():
                 combo = window.page_render.region_combo
                 combo.setCurrentIndex(combo.findData(SHOW_ALL_REGIONS_ID))
                 screenshot("2d_show_all")
-                window.page_render.region_combo.showPopup()
+                # 右键某个可见区域：菜单提供删除当前区域。
+                region = window._enhancement_selected()
+                x0, x1, y0, y1 = physical_bounds(
+                    window.current_render_context, region["bounds"],
+                    e_flip=window.timeline_bar.switch_flip.isChecked())
+                click = SimpleNamespace(
+                    inaxes=window.ax_2d, button=3,
+                    xdata=(x0 + x1) / 2, ydata=(y0 + y1) / 2)
+                window._pick_enhancement_region(click)
+                check("right click finds region under cursor",
+                      window._enhancement_context_target == region["region_id"])
+                menu = QMenu(window)
+                window._append_enhancement_actions(
+                    menu, window._enhancement_context_target)
+                action = next(a for a in menu.actions()
+                              if a.text().startswith("删除增强区域"))
+                check("right-click menu offers region deletion", action.isEnabled())
+                menu.popup(window.canvas_2d.mapToGlobal(
+                    window.canvas_2d.rect().center()))
+                app.processEvents()
+                menu.grab().save(str(args.output_dir / "region_delete_menu.png"))
+                progress["delete_action"] = action
+                progress["delete_menu"] = menu
             elif step == 13:
-                combo = window.page_render.region_combo
-                screenshot("dropdown_delete")
-                combo.view().window().grab().save(str(args.output_dir / "dropdown_popup.png"))
-                index = combo.model().index(2, 0)
-                rect = combo.view().visualRect(index)
-                pos = QPointF(rect.right()-8, rect.center().y())
-                for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
-                    QApplication.sendEvent(combo.view().viewport(), QMouseEvent(kind, pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
-                combo.hidePopup()
+                progress["delete_action"].trigger()
+                progress["delete_menu"].close()
+                app.processEvents()
             elif step == 14:
-                check("dropdown row action deletes region", len(window._enhancement_state()["regions"]) == 1)
+                check("right-click delete action deletes region",
+                      len(window._enhancement_state()["regions"]) == 1)
                 window._delete_enhancement_region(window._enhancement_state()["regions"][0]["region_id"])
             else:
                 check("2D last deletion leaves background and show-all entries", window.page_render.region_combo.count() == 2)

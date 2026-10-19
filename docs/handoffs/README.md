@@ -14,7 +14,7 @@
 | EDC 瀑布图插件（v1.13.0 / API 3） | 瀑布样例逐张人工视觉复核 | [EDC 迁移交接](edc-waterfall-migration-2026-10-12.md) |
 | 路径记忆（v1.12.5 起） | 原生文件对话框人工交互验收 | [v1.12.5 剩余检查](v1.12.5-release.md) |
 | 轴积分与 1D 出图（v1.12.4 起） | 轴积分端点 / E 翻转真实窗口视觉验收、PDF 逐页人工检查 | [v1.12.4 剩余验收](v1.12.4-release-2026-10-10.md) |
-| 局部增强（v1.14.3 起：色阶与映射跟随下拉框，「全部显示」时批量调整） | 人工视觉与拖拽手感验收、实窗 ROI 去噪、冻结包与安装器验收；帧时改造已实施（3D 刷新 78.5 → 47.4 ms、空闲 3.9 ms、ROI 去噪后台化），见 [性能计划](../plans/enhancement-render-performance.md) | [控件简化与修复主记录](../plans/enhancement-controls-simplify.md) |
+| 局部增强（v1.14.3 起：色阶与映射跟随下拉框，「全部显示」时批量调整；2026-10-19 删除入口移至视图右键、下拉框改用 SiliconUI） | 人工视觉与拖拽手感验收、实窗 ROI 去噪、冻结包与安装器验收；2026-10-19 的自动化与 2D/3D 实窗命中验证已通过，真实鼠标手测待人工；可编辑下拉框数字键 1-4 冲突已修复；帧时改造已实施（3D 刷新 78.5 → 47.4 ms、空闲 3.9 ms、ROI 去噪后台化），见 [性能计划](../plans/enhancement-render-performance.md) | [控件简化与修复主记录](../plans/enhancement-controls-simplify.md) |
 | ARPES 弱信号色阶（2026-10-17 源码修复） | 用户弱带视觉确认、非线性体渲染性能与发行包验收；性能跟进见 [性能计划](../plans/enhancement-render-performance.md) | [色阶映射修复](display-transfer-weak-signals.md) |
 | 活动裁剪框（2026-10-13 源码） | 人工手感及 1D / 对比 / 瀑布页视觉复核；Matplotlib 3.11.2 运行与修复后 CI 结果待核实 | [活动裁剪框验收](../archive/crop/interactive-crop-box.md) |
 | 平带增强（现有插件） | 实测数据中的弱带增强效果人工确认 | [平带效果验收方案](../plans/flat_band_opacity_plugin_plan_2026-09-27.md) |

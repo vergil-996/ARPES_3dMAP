@@ -472,6 +472,25 @@ class PageNumberShortcutTests(_WorkspaceFixture):
 
         self.assertEqual(selected, ["p2"])
 
+    def test_number_shortcut_never_targets_right_control_pages(self):
+        self.analyzer.right_panel = object()
+        self.analyzer._cursor_inside_widget = (
+            lambda widget, _pos: widget is self.analyzer.right_panel
+        )
+
+        self.assertFalse(self.analyzer._select_page_under_cursor(1))
+
+    def test_number_shortcut_still_targets_the_left_workspace(self):
+        selected = []
+        self.analyzer._cursor_inside_widget = (
+            lambda widget, _pos: widget is self.analyzer.left_workspace
+        )
+        self.analyzer._select_left_workspace_page_by_index = selected.append
+
+        self.assertTrue(self.analyzer._select_page_under_cursor(2))
+
+        self.assertEqual(selected, [2])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,39 @@ from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.interactive_crop_box import InteractiveCropBox
 
 
+def _convex_hull(points):
+    """2D monotonic-chain hull (counter-clockwise) for projected box corners."""
+    points = sorted(set(points))
+    if len(points) <= 1:
+        return points
+
+    def cross(origin, a, b):
+        return ((a[0] - origin[0]) * (b[1] - origin[1])
+                - (a[1] - origin[1]) * (b[0] - origin[0]))
+
+    lower = []
+    for point in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _point_in_convex_polygon(x, y, polygon):
+    if len(polygon) < 3:
+        return False
+    for index, (x1, y1) in enumerate(polygon):
+        x2, y2 = polygon[(index + 1) % len(polygon)]
+        if (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1) < -1e-6:
+            return False
+    return True
+
+
 class _EnhancementRoiTask(QRunnable):
     """Run the ROI denoise pipeline off the GUI thread and park the outcome.
 
@@ -90,10 +123,12 @@ class EnhancementInteractionMixin:
         self._enhancement_roi_task = None
         self._enhancement_roi_result = None
         self._enhancement_roi_disabled = False
+        # 左侧视图右键命中的区域：菜单据此提供「删除当前区域」。
+        self._enhancement_context_target = None
         self.plotter.iren.add_observer("LeftButtonPressEvent", self._pick_enhancement_box)
+        self.plotter.iren.add_observer("RightButtonPressEvent", self._remember_enhancement_box_context)
         combo = self.page_render.region_combo
         combo.target_changed.connect(self._select_enhancement_target)
-        combo.delete_requested.connect(self._delete_enhancement_region)
         combo.rename_committed.connect(self._rename_enhancement_region)
         self.page_render.btn_lock.toggled.connect(self.on_toggle_color_lock)
         self.canvas_2d.mpl_connect("button_press_event", self._pick_enhancement_region)
@@ -303,6 +338,8 @@ class EnhancementInteractionMixin:
         index = next((i for i, r in enumerate(state["regions"]) if r["region_id"] == region_id), None)
         if index is None:
             return
+        if self.__dict__.get("_enhancement_context_target") == region_id:
+            self._enhancement_context_target = None
         self._commit_enhancement_controls()
         state["regions"].pop(index)
         if state.get("selected_id") == region_id:
@@ -590,10 +627,21 @@ class EnhancementInteractionMixin:
         )
         self._sync_color_lock_button()
 
-    def _append_enhancement_actions(self, menu):
+    def _append_enhancement_actions(self, menu, target_region_id=None):
         context = self.current_render_context
         if context and context.get("view") in {"2d", "3d"} and not context.get("crop_empty"):
             menu.addSeparator()
+            state = self._enhancement_state()
+            target = None
+            if state and target_region_id:
+                target = next((r for r in matching_regions(context, state["regions"])
+                               if r["region_id"] == target_region_id), None)
+            if target is not None:
+                label = target.get("label") or target.get("name") or "区域"
+                region_id = target["region_id"]
+                delete_action = menu.addAction(f"删除增强区域「{label}」")
+                delete_action.triggered.connect(
+                    lambda _checked=False, rid=region_id: self._delete_enhancement_region(rid))
             action = menu.addAction("添加局部增强区域")
             action.triggered.connect(self._add_enhancement_region)
             state = self._enhancement_state()
@@ -625,6 +673,7 @@ class EnhancementInteractionMixin:
         return [r for r in regions if r["region_id"] == selected_id]
 
     def _reset_enhancement_for_new_data(self):
+        self._enhancement_context_target = None
         self._clear_enhancement_interaction()
         self._invalidate_enhancement_roi()
         self._enhancement_cache = None
@@ -740,19 +789,41 @@ class EnhancementInteractionMixin:
             self._enhancement_state()["revision"] += 1
             QTimer.singleShot(0, self._enhancement_refresh)
 
-    def _pick_enhancement_region(self, event):
-        if self._crop_enabled() or event.inaxes is not getattr(self, "ax_2d", None) or event.button != 1 or event.xdata is None:
-            return
+    def _enhancement_region_at_2d_point(self, xdata, ydata):
+        """Return the outlined region under a 2D data point, topmost first."""
         state = self._enhancement_state()
         context = self.current_render_context
-        if not state or not context or context.get("view") != "2d":
+        if (not state or not context or context.get("view") != "2d"
+                or xdata is None or ydata is None):
+            return None
+        e_flip = self.timeline_bar.switch_flip.isChecked()
+        for region in reversed(self._enhancement_outline_regions(
+                matching_regions(context, state["regions"]))):
+            x0, x1, y0, y1 = physical_bounds(context, region["bounds"], e_flip=e_flip)
+            if x0 <= xdata <= x1 and y0 <= ydata <= y1:
+                return region
+        return None
+
+    def _pick_enhancement_region(self, event):
+        if event.button == 3:
+            # 右键只记录该点所属区域：菜单据此提供删除入口，不改变当前选择。
+            self._enhancement_context_target = None
+            if (not self._crop_enabled()
+                    and event.inaxes is getattr(self, "ax_2d", None)):
+                region = self._enhancement_region_at_2d_point(event.xdata, event.ydata)
+                if region is not None:
+                    self._enhancement_context_target = region["region_id"]
             return
-        for region in reversed(self._enhancement_outline_regions(matching_regions(context, state["regions"]))):
-            x0, x1, y0, y1 = physical_bounds(context, region["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked())
-            if x0 <= event.xdata <= x1 and y0 <= event.ydata <= y1:
-                if state.get("show_all_regions") or region["region_id"] != state.get("selected_id"):
-                    QTimer.singleShot(0, lambda rid=region["region_id"]: self._select_enhancement_target(rid))
-                break
+        if self._crop_enabled() or event.inaxes is not getattr(self, "ax_2d", None) or event.button != 1:
+            return
+        self._enhancement_context_target = None
+        state = self._enhancement_state()
+        region = self._enhancement_region_at_2d_point(event.xdata, event.ydata)
+        if state is None or region is None:
+            return
+        if state.get("show_all_regions") or region["region_id"] != state.get("selected_id"):
+            QTimer.singleShot(
+                0, lambda rid=region["region_id"]: self._select_enhancement_target(rid))
 
     def _draw_enhancement_boxes(self, context, fields, active):
         """Update 3D outlines, labels and scalar bars; the caller renders once.
@@ -830,17 +901,71 @@ class EnhancementInteractionMixin:
                 finally:
                     self._enhancement_building = False
 
-    def _pick_enhancement_box(self, _obj, _event):
-        if self._crop_enabled() or self._enhancement_dragging or not self.current_render_context or self.current_render_context.get("view") != "3d":
-            return
+    def _enhancement_box_region_at_cursor(self):
+        """Pick an outlined 3D box; empty interiors fall back to projection hit-testing."""
         import vtk
         x, y = self.plotter.iren.interactor.GetEventPosition()
         picker = vtk.vtkPropPicker()
         picker.Pick(x, y, 0, self.plotter.renderer)
         region_id = self._enhancement_actor_regions.get(picker.GetActor())
+        if region_id is not None:
+            return region_id
+        return self._enhancement_box_region_at_display_point(x, y)
+
+    def _enhancement_box_region_at_display_point(self, x, y):
+        """Hit-test projected box volumes so right-clicking inside a box still works.
+
+        ``vtkPropPicker`` only sees the wireframe outline.  Projecting the eight
+        box corners and testing the cursor against their convex hull covers the
+        empty interior while staying in the same display coordinate system as
+        the VTK picker.
+        """
+        state = self._enhancement_state()
+        context = self.current_render_context
+        if not state or not context or context.get("view") != "3d":
+            return None
+        try:
+            shape = context.get("full_shape", context["data"].shape)
+            renderer = self.plotter.renderer
+            candidates = []
+            for region in reversed(self._enhancement_outline_regions(
+                    matching_regions(context, state["regions"]))):
+                bounds = self.core.logical_to_render_bounds(
+                    region["bounds"], shape, clamp=False)
+                if bounds is None:
+                    continue
+                points = []
+                depth = 0.0
+                for corner_x in (bounds[0], bounds[1]):
+                    for corner_y in (bounds[2], bounds[3]):
+                        for corner_z in (bounds[4], bounds[5]):
+                            renderer.SetWorldPoint(corner_x, corner_y, corner_z, 1.0)
+                            renderer.WorldToDisplay()
+                            display = renderer.GetDisplayPoint()
+                            points.append((display[0], display[1]))
+                            depth += display[2]
+                if _point_in_convex_polygon(x, y, _convex_hull(points)):
+                    candidates.append((depth / len(points), region["region_id"]))
+            return min(candidates)[1] if candidates else None
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return None
+
+    def _pick_enhancement_box(self, _obj, _event):
+        if self._crop_enabled() or self._enhancement_dragging or not self.current_render_context or self.current_render_context.get("view") != "3d":
+            return
+        self._enhancement_context_target = None
+        region_id = self._enhancement_box_region_at_cursor()
         state = self._enhancement_state()
         if region_id and state and (state.get("show_all_regions") or region_id != state.get("selected_id")):
             QTimer.singleShot(0, lambda: self._select_enhancement_target(region_id))
+
+    def _remember_enhancement_box_context(self, _obj, _event):
+        """Pick the outlined 3D box under the cursor for the right-click menu."""
+        self._enhancement_context_target = None
+        context = self.current_render_context
+        if self._crop_enabled() or not context or context.get("view") != "3d":
+            return
+        self._enhancement_context_target = self._enhancement_box_region_at_cursor()
 
     def _start_enhancement_box(self, _obj, _event):
         self._enhancement_dragging = True

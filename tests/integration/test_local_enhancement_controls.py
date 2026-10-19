@@ -7,12 +7,11 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from PyQt5.QtCore import QEvent, QPointF, Qt
-from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QMenu, QPushButton
+from PyQt5.QtWidgets import QApplication, QComboBox, QMenu, QPushButton
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from siui.components.combobox_ import SiCapsuleComboBox
 
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.local_enhancement import DEFAULT_STYLE, STATE_KEY, update_region_bounds
@@ -22,6 +21,22 @@ from bandscope.ui import theme
 from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.page_render_control import RenderControlPage
 from tests.support.enhancement import context_2d, context_3d, region, state_2d
+
+
+class _ProjectedRenderer:
+    """Identity display projection for the 3D box-volume hit-test fallback."""
+
+    def __init__(self):
+        self._world = (0.0, 0.0, 0.0)
+
+    def SetWorldPoint(self, x, y, z, _w):
+        self._world = (x, y, z)
+
+    def WorldToDisplay(self):
+        return 1
+
+    def GetDisplayPoint(self):
+        return self._world[0], self._world[1], 0.5
 
 
 class Host(EnhancementInteractionMixin):
@@ -40,7 +55,8 @@ class Host(EnhancementInteractionMixin):
         self._draw_enhancement_regions = Mock()
         combo = self.page_render.region_combo
         combo.target_changed.connect(self._select_enhancement_target)
-        combo.delete_requested.connect(self._delete_enhancement_region)
+        combo.rename_committed.connect(self._rename_enhancement_region)
+        self._enhancement_context_target = None
         self._restore_enhancement_style()
         self._sync_enhancement_controls(self.active_page_spec, self.current_render_context)
 
@@ -209,31 +225,127 @@ class RegionControlTests(unittest.TestCase):
         self.assertFalse(any("locked_range" in r for r in host._enhancement_state()["regions"]))
         self.assertFalse(host.page_render.btn_lock.isChecked())
 
-    def test_dropdown_delete_is_a_row_action_and_fixed_entries_cannot_be_deleted(self):
+    def test_dropdown_is_siliconui_editable_without_row_delete(self):
+        combo = self.host.page_render.region_combo
+        self.assertIsInstance(combo, SiCapsuleComboBox)
+        self.assertTrue(combo.isEditable())
+        self.assertFalse(hasattr(combo, "delete_requested"))
+        self.assertEqual(combo.toolTip(), "")
+        self.assertEqual(combo.lineEdit().toolTip(), "")
+        self.assertEqual(combo.count(), 4)
+        self.assertEqual(combo.itemData(1), SHOW_ALL_REGIONS_ID)
+
+    def test_editable_combo_focus_accepts_number_input(self):
+        from bandscope.app.refactored_app import My3DAnalyzer
+
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        combo = self.host.page_render.region_combo
+        plain = QComboBox()
+        plain.addItem("普通下拉")
+        with patch("bandscope.app.refactored_app.QApplication") as qapp:
+            qapp.focusWidget.return_value = combo
+            self.assertTrue(analyzer._focus_accepts_number_input())
+            qapp.focusWidget.return_value = plain
+            self.assertFalse(analyzer._focus_accepts_number_input())
+        plain.close()
+
+    def test_dropdown_selection_switches_target(self):
         host = self.host
         combo = host.page_render.region_combo
+        combo.setCurrentIndex(3)  # R2
+        self.assertEqual(combo.lineEdit().text(), combo.itemText(3))
+        self.assertEqual(host._enhancement_state()["selected_id"], "2")
+        self.assertFalse(host._enhancement_state()["show_all_regions"])
+        combo.setCurrentIndex(1)  # 全部显示
+        self.assertTrue(host._enhancement_state()["show_all_regions"])
+        combo.setCurrentIndex(0)  # 全局（背景）
+        self.assertIsNone(host._enhancement_state()["selected_id"])
+        self.assertFalse(host._enhancement_state()["show_all_regions"])
+
+    def test_siliconui_popup_lists_regions_and_selects_target(self):
+        host = self.host
+        combo = host.page_render.region_combo
+        names = [r["name"] for r in host._enhancement_state()["regions"]]
         combo.show()
-        combo.showPopup()
+        try:
+            combo.showPopup()
+            self.app.processEvents()
+            self.assertTrue(combo._menu.isVisible())
+            self.assertEqual(
+                [a.text() for a in combo._menu.actions()],
+                ["全局（背景）", "全部显示"] + names,
+            )
+            action = next(a for a in combo._menu.actions() if a.text() == names[1])
+            action.trigger()
+            self.app.processEvents()
+            self.assertEqual(host._enhancement_state()["selected_id"], "2")
+            self.assertEqual(combo.lineEdit().text(), names[1])
+        finally:
+            combo.hidePopup()
+            combo.hide()
+
+    def test_view_right_click_deletes_region_under_cursor(self):
+        host, figure = self._use_real_2d_canvas()
+        host._set_enhancement_show_all(True)
+        click = SimpleNamespace(inaxes=host.ax_2d, button=3, xdata=2.5, ydata=3.)
+        host._pick_enhancement_region(click)
+        self.assertEqual(host._enhancement_context_target, "2")
+        menu = QMenu()
+        host._append_enhancement_actions(menu, host._enhancement_context_target)
+        action = next(a for a in menu.actions() if a.text() == "删除增强区域「R2」")
+        action.trigger()
         self.app.processEvents()
-        # 「全部显示」条目右侧没有删除入口，点击不消费事件。
-        show_all_index = combo.model().index(1, 0)
-        show_all_rect = combo.view().visualRect(show_all_index)
-        show_all_pos = QPointF(show_all_rect.right() - 8, show_all_rect.center().y())
-        event = QMouseEvent(QEvent.MouseButtonPress, show_all_pos, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
-        self.assertFalse(combo.eventFilter(combo.view().viewport(), event))
-        self.assertEqual(len(host._enhancement_state()["regions"]), 2)
-        index = combo.model().index(2, 0)
-        rect = combo.view().visualRect(index)
-        position = QPointF(rect.right() - 8, rect.center().y())
-        for kind in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
-            event = QMouseEvent(kind, position, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
-            self.assertTrue(combo.eventFilter(combo.view().viewport(), event))
-        self.assertEqual([r["region_id"] for r in host._enhancement_state()["regions"]], ["2"])
-        host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
-        self.assertEqual(combo.itemData(0), "")
-        self.assertEqual(combo.itemData(1), SHOW_ALL_REGIONS_ID)
-        self.assertEqual(combo.count(), 3)
-        combo.hidePopup()
+        self.assertEqual([r["region_id"] for r in host._enhancement_state()["regions"]], ["1"])
+        self.assertIsNone(host._enhancement_context_target)
+        menu.deleteLater()
+        figure.clear()
+
+    def test_view_right_click_outside_regions_offers_no_delete(self):
+        host, figure = self._use_real_2d_canvas()
+        click = SimpleNamespace(inaxes=host.ax_2d, button=3, xdata=4.5, ydata=4.5)
+        host._pick_enhancement_region(click)
+        self.assertIsNone(host._enhancement_context_target)
+        menu = QMenu()
+        host._append_enhancement_actions(menu, host._enhancement_context_target)
+        self.assertFalse(any(a.text().startswith("删除增强区域") for a in menu.actions()))
+        menu.deleteLater()
+        figure.clear()
+
+    def test_3d_right_click_picks_outlined_box_for_delete(self):
+        host = self._use_real_outline_drawing()
+        self._volume_source()
+        host.current_render_context = context_3d()
+        host.core = SimpleNamespace(logical_to_render_bounds=lambda bounds, *_a, **_kw: bounds)
+        actor = object()
+        host.plotter.add_mesh.return_value = actor
+        fields = host._enhancement_display(host.current_render_context)
+        host._draw_enhancement_regions(host.current_render_context, fields)
+        host.plotter.iren.interactor.GetEventPosition.return_value = (10, 10)
+        with patch("vtk.vtkPropPicker") as picker_cls:
+            picker_cls.return_value.GetActor.return_value = actor
+            host._remember_enhancement_box_context(None, None)
+        self.assertEqual(host._enhancement_context_target, "1")
+        menu = QMenu()
+        host._append_enhancement_actions(menu, host._enhancement_context_target)
+        self.assertTrue(any(a.text() == "删除增强区域「R1」" for a in menu.actions()))
+        menu.deleteLater()
+
+    def test_3d_right_click_inside_box_falls_back_to_projection(self):
+        host = self._use_real_outline_drawing()
+        self._volume_source()
+        host.current_render_context = context_3d()
+        host.core = SimpleNamespace(logical_to_render_bounds=lambda bounds, *_a, **_kw: bounds)
+        actor = object()
+        host.plotter.add_mesh.return_value = actor
+        fields = host._enhancement_display(host.current_render_context)
+        host._draw_enhancement_regions(host.current_render_context, fields)
+        host.plotter.renderer = _ProjectedRenderer()
+        host.plotter.iren.interactor.GetEventPosition.return_value = (2.5, 2.0)
+        with patch("vtk.vtkPropPicker") as picker_cls:
+            # 点在区域内部时硬件拾取只会命中体数据/背景，而不是轮廓线。
+            picker_cls.return_value.GetActor.return_value = object()
+            host._remember_enhancement_box_context(None, None)
+        self.assertEqual(host._enhancement_context_target, "1")
 
     def test_combo_edit_renames_region_and_syncs_view_label(self):
         host = self.host
@@ -244,10 +356,16 @@ class RegionControlTests(unittest.TestCase):
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         combo = host.page_render.region_combo
         self.assertEqual(combo.itemText(2), "主峰")
+        # 可编辑框提交即重命名选中区域。
+        combo.lineEdit().setText("新名")
+        combo.lineEdit().editingFinished.emit()
+        self.assertEqual(host._enhancement_selected()["name"], "新名")
+        self.assertEqual(host._enhancement_selected()["label"], "新名")
+        self.assertEqual(combo.itemText(2), "新名")
         # 空名不生效，下拉框文字回到当前名称。
         host._rename_enhancement_region("  ")
-        self.assertEqual(host._enhancement_selected()["name"], "主峰")
-        self.assertEqual(combo.lineEdit().text(), "主峰")
+        self.assertEqual(host._enhancement_selected()["name"], "新名")
+        self.assertEqual(combo.lineEdit().text(), "新名")
         # 「全部显示」不可重命名：编辑提交后恢复固定文字。
         host._select_enhancement_target(SHOW_ALL_REGIONS_ID)
         combo.lineEdit().setText("改名")
@@ -497,6 +615,16 @@ class RegionControlTests(unittest.TestCase):
         host.timeline_bar = SimpleNamespace(switch_flip=SimpleNamespace(isChecked=lambda: False))
         host._draw_enhancement_regions = EnhancementInteractionMixin._draw_enhancement_regions.__get__(host)
         return host
+
+    def _use_real_2d_canvas(self):
+        host = self._use_real_outline_drawing()
+        figure = Figure()
+        host.canvas_2d = FigureCanvasAgg(figure)
+        host.ax_2d = figure.add_subplot()
+        host.ax_2d._arpes_image = host.ax_2d.imshow(np.zeros((6, 6)))
+        fields = host._enhancement_display(host.current_render_context)
+        host._draw_enhancement_regions(host.current_render_context, fields)
+        return host, figure
 
     def test_2d_outlines_follow_selection_and_hidden_regions_cannot_be_picked(self):
         host = self._use_real_outline_drawing()

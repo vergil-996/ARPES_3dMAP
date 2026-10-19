@@ -5,7 +5,7 @@
 1. 光标在左侧视图上，单击 `Shift` / `Ctrl` 不再切换结果页；
 2. 光标在右侧控件面板上，单击 `Shift` / `Ctrl` 不再切换控件页；
 3. 按住 `Ctrl` 在视图里拖动（原冲突场景）后松开，页面不跳；
-4. 数字键 `1`–`4` 仍按光标所在区域翻页（左侧结果页 / 右侧控件页）；
+4. 数字键 `1`–`4` 只切换左侧结果页；光标在右侧控件面板时不切控件页；
 5. `Shift + ←` / `Shift + →` 的十帧步进不受影响（动态数据）。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_page_shortcuts.py <npz路径> [--dynamic]
@@ -142,12 +142,13 @@ def main():
               window.left_workspace.current_page_id == page_ids[1])
 
         park_cursor(window.page_container)
+        control_before = window.page_container.currentIndex()
         QTest.keyClick(window, Qt.Key_2)
-        check("数字键 2 在右侧面板切到「处理分析」",
-              window.page_container.currentIndex() == 1)
+        check("数字键 2 不再切换右侧控件页",
+              window.page_container.currentIndex() == control_before)
         QTest.keyClick(window, Qt.Key_1)
-        check("数字键 1 在右侧面板切回「渲染控制」",
-              window.page_container.currentIndex() == 0)
+        check("数字键 1 不再切换右侧控件页",
+              window.page_container.currentIndex() == control_before)
         QTimer.singleShot(300, guarded(step_shift_arrows))
 
     def step_shift_arrows():

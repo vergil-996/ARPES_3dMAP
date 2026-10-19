@@ -30,6 +30,58 @@
 - 未执行：用户人工拖拽手感与完整视觉复核、实窗 ROI 去噪、其余四个既有增强 validation 脚本、
   冻结包（CPU / NVIDIA）与安装器端到端验收。下一步仍按这些范围补验，本记录保留开放。
 
+## 三次调整（2026-10-19）：删除入口移至视图右键 + 下拉框改用 SiliconUI
+
+状态：自动化、2D/3D 真实窗口命中与下拉弹层检查已通过；真实鼠标点击手感待人工确认。
+
+- 增强区域删除入口从下拉框条目右侧的 × 移到左侧视图右键：2D 在当前显示轮廓的区域上命中，3D 用
+  `vtkPropPicker` 命中区域框；菜单新增「删除增强区域「R1」」，未命中区域时不显示该条目。
+  3D 的 `vtkPropPicker` 只命中轮廓线，因此框内部（空白体素）再按八个角点的投影凸包做一次
+  命中测试，保证右键区域内部也能出删除项。删除仍走 `_delete_enhancement_region`，保持原有
+  选中接替、背景重新归一化与全局解锁行为。
+- `RegionComboBox` 改为继承 `siui.components.combobox_.SiCapsuleComboBox`：保留可编辑重命名、
+  空名/固定条目回退与 `target_changed`/`rename_committed` 信号；移除 `delete_requested`、
+  `QListView` 委托和条目 × 点击拦截；同时移除下拉框及其编辑框的 `setToolTip`，悬停不再弹出气泡。
+- 相关文件：`bandscope/ui/enhancement_controls.py`、`bandscope/app/enhancement_integration.py`、
+  `bandscope/app/refactored_app.py`、`tests/integration/test_local_enhancement_controls.py`、
+  `scripts/validation/verify_local_enhancement.py`。
+- 已验证（2026-10-19，仓库 `.venv` Python 3.12.10）：
+  - `python -m unittest tests.integration.test_local_enhancement_controls -v`：40 项通过；
+    其中断言下拉框与编辑框 `toolTip()` 为空，悬停不再出现气泡；
+  - `python -m unittest discover -s tests -t .`：1306 项全部通过；
+  - 真实数据 `.local/data/WSe2_step.npz`：`scripts/validation/verify_local_enhancement.py
+    --output-dir .local/outputs/enhancement-3d-context` 160 项通过，覆盖 2D 右键命中与菜单删除、
+    3D 区域框内部右键命中与删除项、删除后的色带/轮廓与科学数据不变；证据为同目录
+    `acceptance.json`、`2d_show_all_window.png`、`region_delete_menu.png`、
+    `3d_region_delete_menu.png`；
+  - `scripts/validation/verify_enhancement_outline_visibility.py` 24 项通过，覆盖 3D/2D
+    下拉切换、全部显示与轮廓/色带联动；证据在 `.local/outputs/enhancement-outline-visibility/`；
+  - SiliconUI 下拉框实际弹层：菜单列出「全局（背景）/全部显示/R1/R2」四项，触发 R2 后
+    `currentIndex=3`、框内文字 `R2`、`target_changed="2"`；自动化
+    `test_siliconui_popup_lists_regions_and_selects_target` 已覆盖，截图
+    `.local/outputs/region_dropdown_popup.png`；窗口内布局见 `2d_show_all_window.png`。
+- 未执行：真实鼠标点击到 Qt `customContextMenuRequested` 的端到端手测（当前用真实 VTK
+  事件位置、真实相机投影与菜单构建验证）、人工拖动/视觉手感复核。
+- 下一步：人工在 3D 视图右键区域框内部确认菜单与删除手感；其余视觉项随本记录保留开放。
+
+## 数字键输入与切页快捷键冲突修复（2026-10-19）
+
+状态：已修复并验证。
+
+- 现象：可编辑区域下拉框只能输入 5 及以后的数字，1-4 输入不进去。
+- 原因：SiliconUI 可编辑下拉框的焦点留在 `RegionComboBox` 本身，文字由内部
+  `SiCapsuleLineEdit` 接收，`QApplication.focusWidget()` 返回的是组合框。
+  `_focus_accepts_number_input()` 只按 `LineEdit`/`EditBox`/`SpinBox` 等类名判断，
+  没识别可编辑 `ComboBox`，于是 `_handle_number_page_shortcut` 把 1-4 当成数字切页消费。
+- 修复：`bandscope/app/refactored_app.py` 的 `_focus_accepts_number_input()` 对可编辑
+  ComboBox 返回 `True`；非可编辑 ComboBox 仍返回 `False`，保留左侧结果页数字切页。
+  同时移除 `_select_page_under_cursor` 的右侧控件页分支：数字键 1-4 不再切换
+  「渲染控制 / 处理分析」，右侧仍可用 `Ctrl+1` / `Ctrl+2`。
+- 验证：实窗脚本输入 `12345` 完整保留；新增单测
+  `test_editable_combo_focus_accepts_number_input`；`verify_page_shortcuts.py` 的实窗检查
+  全部通过，确认数字键只切左侧、不再切换右侧控件页；增强控件集成测试 40 项、全量
+  `python -m unittest discover -s tests -t .` 1308 项全部通过。
+
 ## 二次调整记录（2026-10-17）：色带跟随下拉框 + 全局统一调控
 
 当次实现解决新增增强区域后多条色带堆叠的问题：色带跟随下拉框选择显示，新增「全部显示」条目。
@@ -147,6 +199,9 @@
 3. 区域色带的显示范围？——只显示当前选中区域的一条；勾选「显示全部增强区域」时全部显示。
 4. 锁定按钮文案？——沿用「锁定色带 / 色带已锁定」。
 5. 摘要标签？——直接移除。
+
+> 2026-10-19 已变更：第 2 条的「下拉框 × 删除」改为左侧视图右键删除；下拉框改用 SiliconUI
+> 可编辑框。以上旧结论仅保留为当时记录，当前实现见文首「三次调整」。
 
 ## 下一步
 
