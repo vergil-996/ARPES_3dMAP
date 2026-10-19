@@ -1,7 +1,7 @@
 # MatElab 更新源接入（可切换更新源）
 
 - 日期：2026-10-16
-- 状态：已实现并通过自动化回归；v1.14.0（2026-10-16）至 v1.14.4（2026-10-18）均已对真实服务器完成发布与下载校验；界面人工验收未执行。
+- 状态：已实现并通过自动化回归；v1.14.0（2026-10-16）至 v1.14.5（2026-10-19）均已对真实服务器完成发布与下载校验；界面人工验收未执行。
 - 负责范围：主程序更新模块与发布工具，由实施任务负责集成。
 - 共享文件：`bandscope/updates/update_service.py`、`bandscope/updates/update_controller.py`、`bandscope/updates/net.py`、`bandscope/app/refactored_app.py`（版本按钮接线）、`bandscope/extensions/catalog.py`（仅确认耦合面，第一阶段不改行为）。
 - 交付物：更新源抽象与 MatElab 源实现、切换入口与登录对话框、发布脚本、自动化测试、文档更新；完成后将本计划连同材料归档并更新计划索引。
@@ -74,5 +74,6 @@
 - 真实发布验证（2026-10-17，v1.14.2）：CI 出包后先按 `.sha256` 边车校验本地下载（CPU `795e34efd185ab54…`，NVIDIA `b1bffa15a6970e61…`）。CPU 安装包（145 MiB）直传 51s 完成；NVIDIA 安装包（1143 MiB）用分步续传驱动 `scripts/release/publish_matelab_driver.py` 分 3 轮逐片追加（同一 uid 续传），服务器组装后整包 hash 校验通过。驱动已改为按 `APP_VERSION` 推导版本、文件名与状态文件，不再写死上一版。发布记录「BandScope v1.14.2」（uid `bandscope-release-1.14.2`）建于「BandScope发布」记录本，含 manifest / 安装包两个模块。客户端只读验证（`scripts/validation/verify_matelab_release.py`）三项全部通过：从 1.14.1 检查更新，两个 flavor 均发现 1.14.2，文件名 / 大小 / SHA-256 与 CI 发布值一致；CPU 安装包经客户端 `download_installer` 完整下载并校验通过；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。发布前全量回归 1257 项通过、插件发布链路 7 组检查通过（2026-10-17）。
 - 真实发布验证（2026-10-17，v1.14.3）：CI 出包后按 `.sha256` 边车校验本地下载（CPU `256f1f299684b31a…`、NVIDIA `26f24ac00c7de258…`）。CPU 安装包（145.1 MiB）直传 82s 完成；NVIDIA 安装包（1143 MiB）本轮一次直传 505s 完成（未触发续传）。发布记录「BandScope v1.14.3」（uid `bandscope-release-1.14.3`）建于「BandScope发布」记录本，含 manifest / 安装包两个模块。客户端只读验证（`scripts/validation/verify_matelab_release.py`）三项全部通过：从 1.14.2 检查更新，两个 flavor 均发现 1.14.3，文件名 / 大小 / SHA-256 与 CI 发布值一致；CPU 安装包经客户端 `download_installer` 完整下载并校验通过；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。发布前全量回归 1266 项通过（2026-10-17）。
 - 真实发布验证（2026-10-18，v1.14.4）：GitHub Release 发布后按 `.sha256` 边车校验本地下载（CPU `ad2f87428125a542…`，152,179,142 B；NVIDIA `231c471a7dfd990c…`，1,198,694,982 B）。MatElab 一次直传完成（未触发续传），发布记录「BandScope v1.14.4」（uid `bandscope-release-1.14.4`）建于「BandScope发布」记录本，含 manifest / 安装包两个模块。客户端只读验证（`scripts/validation/verify_matelab_release.py`）三项全部通过：从 1.14.3 检查更新，两个 flavor 均发现 1.14.4，文件名 / 大小 / SHA-256 与 CI 发布值一致；CPU 安装包经客户端 `download_installer` 完整下载并校验通过；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。发布前全量回归 1299 项通过（Matplotlib 3.10.8 与 3.11.2 各跑一遍）。
+- 真实发布验证（2026-10-19，v1.14.5）：GitHub Release CI 全部成功后，按 `.sha256` 边车校验本地下载（CPU `3d6e2c607dba2b4b…`，152,209,371 B；NVIDIA `5945b0413de624ff…`，1,198,679,818 B）。MatElab 一次直传完成（CPU 145.2 MiB、NVIDIA 1143.2 MiB，未触发续传），发布记录「BandScope v1.14.5」（uid `bandscope-release-1.14.5`）建于「BandScope发布」记录本，含 manifest / 安装包两个模块。客户端只读验证（`scripts/validation/verify_matelab_release.py`）三项全部通过：从 1.14.4 检查更新，两个 flavor 均发现 1.14.5，文件名 / 大小 / SHA-256 与 CI 发布值一致；CPU 安装包经客户端 `download_installer` 完整下载并校验通过；NVIDIA 安装包做头 / 中 / 尾三段 4 MiB 区间抽检，与 CI 版逐字节一致。发布前全量回归 1308 项通过、插件发布链路 7 组检查通过（2026-10-19）。
 - 未执行的检查：界面视觉与登录对话框人工验收、非 frozen 运行行为、下载后安装启动未执行，不能视为通过。
 - 下一步：在做界面人工验收（两源切换、登录失败提示、断网降级）后归档本计划。

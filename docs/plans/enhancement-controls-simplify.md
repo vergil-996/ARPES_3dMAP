@@ -32,7 +32,7 @@
 
 ## 三次调整（2026-10-19）：删除入口移至视图右键 + 下拉框改用 SiliconUI
 
-状态：自动化、2D/3D 真实窗口命中与下拉弹层检查已通过；真实鼠标点击手感待人工确认。
+状态：自动化、2D/3D 真实窗口命中与下拉弹层检查已通过；真实鼠标点击手感待人工确认；已随 v1.14.5 发布（2026-10-19）。
 
 - 增强区域删除入口从下拉框条目右侧的 × 移到左侧视图右键：2D 在当前显示轮廓的区域上命中，3D 用
   `vtkPropPicker` 命中区域框；菜单新增「删除增强区域「R1」」，未命中区域时不显示该条目。
@@ -60,6 +60,9 @@
     `currentIndex=3`、框内文字 `R2`、`target_changed="2"`；自动化
     `test_siliconui_popup_lists_regions_and_selects_target` 已覆盖，截图
     `.local/outputs/region_dropdown_popup.png`；窗口内布局见 `2d_show_all_window.png`。
+- 发布（2026-10-19，v1.14.5）：提交 `fe914ff`，标签 `v1.14.5` 的 CI 全部成功；GitHub Release
+  与 MatElab 均已发布并完成校验。CPU `3d6e2c60…`、NVIDIA `5945b041…`（sha256 边车一致），
+  插件与目录资产摘要与 CI 一致；MatElab 记录 `bandscope-release-1.14.5`。
 - 未执行：真实鼠标点击到 Qt `customContextMenuRequested` 的端到端手测（当前用真实 VTK
   事件位置、真实相机投影与菜单构建验证）、人工拖动/视觉手感复核。
 - 下一步：人工在 3D 视图右键区域框内部确认菜单与删除手感；其余视觉项随本记录保留开放。
