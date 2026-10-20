@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pyvista as pv
@@ -9,7 +9,9 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from bandscope.processing.display_transfer import level_info
 from bandscope.processing.local_enhancement import orient_2d, resolve_display
-from bandscope.rendering.local_enhancement import display_rgba, draw_region_colorbars_2d
+from bandscope.rendering.local_enhancement import (
+    add_region_scalar_bars_3d, display_rgba, draw_region_colorbars_2d,
+)
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
 from bandscope.core.crop_model import CropSelection, apply_selection
 from bandscope.core.local_enhancement import physical_bounds
@@ -72,11 +74,40 @@ class Display2DTests(unittest.TestCase):
         FigureCanvasAgg(fig)
         bars = draw_region_colorbars_2d(ax, regions, "magma")
         self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0].ax._arpes_band_target, ("region", "1"))
         again = draw_region_colorbars_2d(ax, regions, "viridis", existing=bars)
         self.assertIs(again[0], bars[0])
+        self.assertEqual(again[0].ax._arpes_band_target, ("region", "1"))
         empty = draw_region_colorbars_2d(ax, [], "magma", existing=again)
         self.assertEqual(empty, [])
         self.assertNotIn(again[0].ax, fig.axes)
+
+    def test_region_scalar_bars_report_their_region_targets(self):
+        class Plotter:
+            background_color = (1.0, 1.0, 1.0)
+
+            def __init__(self):
+                self.calls = []
+
+            def add_scalar_bar(self, **kwargs):
+                bar = Mock()
+                self.calls.append((kwargs, bar))
+                return bar
+
+        regions = [
+            dict(region_id="1", name="R1", label="R1", status="ready",
+                 data_range=(0.0, 1.0), level_info=level_info((0.0, 1.0), (0, 50, 100))),
+            dict(region_id="2", name="R2", label="R2", status="ready",
+                 data_range=(0.0, 1.0), level_info=level_info((0.0, 1.0), (10, 50, 90))),
+        ]
+        plotter = Plotter()
+        records = add_region_scalar_bars_3d(plotter, regions, "magma")
+        self.assertEqual([record["region_id"] for record in records], ["1", "2"])
+        self.assertEqual([record["title"] for record in records], ["R1", "R2"])
+        self.assertIs(records[0]["actor"], plotter.calls[0][1])
+        self.assertIs(records[1]["actor"], plotter.calls[1][1])
+        self.assertEqual(plotter.calls[0][0]["position_y"], 0.08)
+        self.assertEqual(plotter.calls[1][0]["position_y"], 0.38)
 
     def test_background_pixels_stay_identical_when_adding_and_removing_region(self):
         data = np.random.default_rng(17).uniform(2, 99, (36, 36)).astype(np.float32)

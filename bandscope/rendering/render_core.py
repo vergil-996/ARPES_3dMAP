@@ -466,6 +466,8 @@ class VisualEngine:
             ]
         )
         colorbar_ax._arpes_colorbar_axis = True
+        # 右键菜单据此把这条色带解析为背景目标。
+        colorbar_ax._arpes_band_target = ("background", None)
         colorbar = fig.colorbar(VisualEngine._colorbar_mappable(image.cmap, level_info), cax=colorbar_ax)
         VisualEngine._configure_2d_colorbar(colorbar, level_info)
         ax._arpes_colorbar = colorbar

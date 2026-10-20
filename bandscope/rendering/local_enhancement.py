@@ -171,15 +171,25 @@ def draw_region_colorbars_2d(ax, regions, cmap, existing=()):
             colorbar.outline.set_edgecolor(theme.BORDER_HEX)
         except Exception:
             pass
+        try:
+            # 右键菜单据此把这条色带解析回它的增强区域。
+            colorbar.ax._arpes_band_target = ("region", region["region_id"])
+        except Exception:
+            pass
         colorbars.append(colorbar)
     return colorbars
 
 
 def add_region_scalar_bars_3d(plotter, regions, cmap):
-    """为每个区域在 3D 视图左侧加一条竖向 scalar bar；返回标题列表（用于移除）。"""
+    """为每个区域在 3D 视图左侧加一条竖向 scalar bar。
+
+    返回与色带一一对应的记录（title / region_id / actor），调用方负责按
+    title 移除。actor 可能为 None（同名色带被 PyVista 复用），此时右键命中
+    回退到按 title 查找。
+    """
     from bandscope.rendering.render_core import VisualEngine
 
-    titles = []
+    records = []
     for i, region in enumerate(_colorbar_regions(regions)):
         info = region["level_info"]
         title = str(region.get("label", region["name"]))
@@ -205,5 +215,5 @@ def add_region_scalar_bars_3d(plotter, regions, cmap):
             bar.SetDrawAnnotations(True)
         except AttributeError:
             pass
-        titles.append(title)
-    return titles
+        records.append({"title": title, "region_id": region["region_id"], "actor": bar})
+    return records

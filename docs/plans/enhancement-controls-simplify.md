@@ -1,6 +1,6 @@
 # 局部增强控件简化与锁定色带整合
 
-日期：2026-10-16　状态：已实施并随 v1.14.3 发布（2026-10-17）；自动化与真实窗口脚本通过，仍有人工视觉及发行包验收
+日期：2026-10-16　状态：已实施；v1.14.3 / v1.14.5 / v1.15.0 增量发布；自动化与真实窗口脚本通过，仍有人工视觉及发行包验收
 
 ## 当前修复（2026-10-17）：色阶与强度映射跟随调整对象
 
@@ -84,6 +84,24 @@
   `test_editable_combo_focus_accepts_number_input`；`verify_page_shortcuts.py` 的实窗检查
   全部通过，确认数字键只切左侧、不再切换右侧控件页；增强控件集成测试 40 项、全量
   `python -m unittest discover -s tests -t .` 1308 项全部通过。
+
+## 四次调整（2026-10-20）：色带复制/粘贴
+
+状态：已实施并随 v1.15.0 发布；自动化、真实 QtAgg / Qt/VTK 命中与主窗口启动冒烟通过；真实数据下的完整右键菜单与粘贴观感待人工验收。
+
+- 目标：右键任一可见色带（2D 右侧全局条、2D 左下区域条、3D 右侧全局 scalar bar、3D 左侧区域 scalar bar）复制其色阶映射，再在任意可见色带处右键粘贴。
+- 复制内容：黑场、灰场、白场（Gamma）。不复制 colormap、绝对强度范围、锁定状态/范围和强度映射方式。
+- 粘贴：只改目标对象的 levels；目标保留自己的范围（锁定则用锁定范围）、锁定状态和 `opacity_mode`；不切换下拉框；只刷新显示映射，不重算科学数据。跨 2D/3D、跨结果页、跨数据可用；「全部显示」下只作用于右键的那一条色带；裁剪模式保留原右键行为。
+- 相关文件：`bandscope/app/enhancement_integration.py`、`bandscope/app/refactored_app.py`、
+  `bandscope/rendering/render_core.py`、`bandscope/rendering/local_enhancement.py`、
+  `tests/integration/test_local_enhancement_controls.py`、`tests/rendering/test_local_enhancement.py`。
+- 已验证（2026-10-20，仓库 `.venv` Python 3.12）：全量 `python -m unittest discover -s tests -t .`
+  **1323 项通过**；增强控件 / 渲染目标测试 72 项通过；真实 QtAgg 画布点击 2D 全局/区域色条
+  （含 child_axes、125% DPI 与菜单坐标回退）解析为背景/区域；真实 Qt/VTK 窗口的左侧区域 bar、
+  右侧全局 bar、空白区域分别命中区域、背景、`None`；主窗口启动冒烟通过。
+- 未执行：加载真实实验数据后完整走「右键 → 菜单 → 粘贴 → 画面观感」的人工视觉验收；CPU / NVIDIA
+  冻结包与安装器端到端验收。
+- 下一步：随 v1.15.0 发布验收；人工视觉闭环后与本记录其余增强事项一并归档。
 
 ## 二次调整记录（2026-10-17）：色带跟随下拉框 + 全局统一调控
 

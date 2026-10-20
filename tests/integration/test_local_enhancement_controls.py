@@ -16,6 +16,8 @@ from siui.components.combobox_ import SiCapsuleComboBox
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.local_enhancement import DEFAULT_STYLE, STATE_KEY, update_region_bounds
 from bandscope.processing.display_transfer import level_info
+from bandscope.rendering.local_enhancement import draw_region_colorbars_2d
+from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
@@ -37,6 +39,33 @@ class _ProjectedRenderer:
 
     def GetDisplayPoint(self):
         return self._world[0], self._world[1], 0.5
+
+
+class _BandScalarBar:
+    def __init__(self, position, size):
+        self._position = position
+        self._size = size
+
+    def GetPosition(self):
+        return self._position
+
+    def GetWidth(self):
+        return self._size[0]
+
+    def GetHeight(self):
+        return self._size[1]
+
+
+class _BandRenderer:
+    def __init__(self, size=(100, 100), origin=(0, 0)):
+        self._size = size
+        self._origin = origin
+
+    def GetSize(self):
+        return self._size
+
+    def GetOrigin(self):
+        return self._origin
 
 
 class Host(EnhancementInteractionMixin):
@@ -957,3 +986,226 @@ class EnhancementRoiAsyncTests(unittest.TestCase):
         host._poll_enhancement_roi()
         self.assertEqual(host._enhancement_roi_data_cache, {})
         self.assertIsNone(host._enhancement_roi_job)
+
+
+class ColorBandClipboardTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        theme.apply_siui_palette()
+
+    def setUp(self):
+        VisualEngine.unlock_data_range()
+        self.host = Host()
+        self.host._color_band_clipboard = None
+        self.host._band_context_target = None
+        self.host._enhancement_scalar_bar_records = []
+
+    def tearDown(self):
+        self.host._clear_enhancement_interaction()
+        self.host.page_render.close()
+        self.host.page_render.deleteLater()
+        self.app.processEvents()
+        VisualEngine.unlock_data_range()
+
+    def test_copy_and_paste_region_only_changes_target_levels(self):
+        host = self.host
+        state = host._enhancement_state()
+        first, second = state["regions"]
+        first["style"] = {"levels": (10., 60., 90.), "opacity_mode": "sigmoid"}
+        second["style"] = {"levels": (0., 50., 100.), "opacity_mode": "对数"}
+        second["locked_range"] = (29., 94.)
+        cmap = host.page_render.get_selected_cmap()
+        self.assertTrue(host._copy_color_band(("region", "1")))
+        self.assertEqual(host._color_band_clipboard["levels"], (10., 60., 90.))
+        self.assertEqual(host._color_band_clipboard["source"], "R1")
+        background = copy.deepcopy(state["background"])
+        self.assertTrue(host._paste_color_band(("region", "2")))
+        self.assertEqual(first["style"]["levels"], (10., 60., 90.))
+        self.assertEqual(second["style"]["levels"], (10., 60., 90.))
+        # 透明度映射与锁定范围都属于目标对象，粘贴不覆盖。
+        self.assertEqual(second["style"]["opacity_mode"], "对数")
+        self.assertEqual(second["locked_range"], (29., 94.))
+        self.assertEqual(state["background"], background)
+        self.assertEqual(host.page_render.get_selected_cmap(), cmap)
+        fields = host._enhancement_display(host.current_render_context)
+        record = next(region for region in fields["regions"] if region["region_id"] == "2")
+        self.assertAlmostEqual(record["level_info"]["data_min"], 29.)
+        self.assertAlmostEqual(record["level_info"]["data_max"], 94.)
+        self.assertAlmostEqual(record["level_info"]["black_pos"], .1)
+        self.assertAlmostEqual(record["level_info"]["white_pos"], .9)
+        host.request_refresh.assert_called_with(
+            RefreshCause.DISPLAY_MAPPING, RenderQuality.EXACT, interactive=False, immediate=True)
+
+    def test_paste_to_selected_region_syncs_controls(self):
+        host = self.host
+        state = host._enhancement_state()
+        state["regions"][1]["style"]["levels"] = (20., 70., 90.)
+        self.assertTrue(host._copy_color_band(("region", "2")))
+        self.assertTrue(host._paste_color_band(("region", "1")))
+        self.assertEqual(
+            (host.page_render.s_low.value(), host.page_render.s_gamma.value(), host.page_render.s_up.value()),
+            (20, 70, 90))
+        self.assertEqual(state["regions"][0]["style"]["levels"], (20., 70., 90.))
+        self.assertEqual(state["regions"][0]["style"]["opacity_mode"], "线性")
+
+    def test_paste_to_background_does_not_touch_region_controls(self):
+        host = self.host
+        state = host._enhancement_state()
+        state["background"]["levels"] = (5., 55., 95.)
+        self.assertTrue(host._copy_color_band(("background", None)))
+        self.assertTrue(host._paste_color_band(("region", "2")))
+        self.assertEqual(state["background"]["levels"], (5., 55., 95.))
+        self.assertEqual(state["regions"][1]["style"]["levels"], (5., 55., 95.))
+        # 当前下拉框仍是 R1：粘贴背景只改状态，不移动当前调整对象。
+        host._color_band_clipboard = {"levels": (12., 62., 92.), "source": "R1"}
+        self.assertTrue(host._paste_color_band(("background", None)))
+        self.assertEqual(state["background"]["levels"], (12., 62., 92.))
+        self.assertEqual(
+            (host.page_render.s_low.value(), host.page_render.s_gamma.value(), host.page_render.s_up.value()),
+            (0, 50, 100))
+
+    def test_no_state_background_paste_updates_sliders_only(self):
+        host = self.host
+        host.active_page_spec.params.clear()
+        self.assertIsNone(host._enhancement_state())
+        host._color_band_clipboard = {"levels": (20., 70., 90.), "source": "R1"}
+        self.assertTrue(host._paste_color_band(("background", None)))
+        self.assertEqual(
+            (host.page_render.s_low.value(), host.page_render.s_gamma.value(), host.page_render.s_up.value()),
+            (20, 70, 90))
+        host.request_refresh.assert_called_with(
+            RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
+
+    def test_empty_clipboard_paste_is_noop(self):
+        self.host._color_band_clipboard = None
+        self.assertFalse(self.host._paste_color_band(("region", "2")))
+        self.host.request_refresh.assert_not_called()
+
+    def test_paste_does_not_change_locked_state(self):
+        host = self.host
+        state = host._enhancement_state()
+        state["regions"][0]["style"]["levels"] = (11., 61., 91.)
+        state["regions"][1]["locked_range"] = (29., 94.)
+        VisualEngine._last_data_range = (0., 100.)
+        self.assertTrue(VisualEngine.lock_data_range())
+        self.addCleanup(VisualEngine.unlock_data_range)
+        self.assertTrue(host._copy_color_band(("region", "1")))
+        self.assertTrue(host._paste_color_band(("region", "2")))
+        self.assertEqual(VisualEngine.locked_data_range(), (0., 100.))
+        self.assertEqual(state["regions"][1]["locked_range"], (29., 94.))
+
+    def test_two_d_colorbar_hit_returns_band_target(self):
+        host = self.host
+        info = level_info((0., 1.), (0, 50, 100))
+        fig = Figure()
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        image = ax.imshow(np.zeros((2, 2)))
+        VisualEngine._add_2d_colorbar(ax, image, info)
+        canvas.draw()
+        cax = ax._arpes_colorbar_ax
+        self.assertEqual(getattr(cax, "_arpes_band_target", None), ("background", None))
+        # inset colourbars live in child_axes, not figure.axes: the parent axes
+        # is what matplotlib reports for the click, so always hit-test the boxes.
+        event = SimpleNamespace(canvas=canvas, x=(cax.bbox.x0 + cax.bbox.x1) / 2,
+                                y=(cax.bbox.y0 + cax.bbox.y1) / 2, inaxes=ax,
+                                button=3, xdata=0.0, ydata=0.0)
+        self.assertEqual(host._two_d_band_target_at_event(event), ("background", None))
+        host.ax_2d = ax
+        host.canvas_2d = canvas
+        host._crop_enabled = lambda: False
+        host._pick_enhancement_region(event)
+        self.assertEqual(host._band_context_target, ("background", None))
+        self.assertIsNone(host._enhancement_context_target)
+
+        class _CanvasView:
+            def __init__(self, source):
+                self.figure = source.figure
+                self.device_pixel_ratio = 1.0
+                self._source = source
+
+            def get_renderer(self):
+                return self._source.get_renderer()
+
+            def height(self):
+                return self._source.get_width_height()[1]
+
+        view = _CanvasView(canvas)
+        host.canvas_2d = view
+        pos = SimpleNamespace(
+            x=lambda: int(round((cax.bbox.x0 + cax.bbox.x1) / 2)),
+            y=lambda: int(round(view.height() - (cax.bbox.y0 + cax.bbox.y1) / 2)))
+        self.assertEqual(host._two_d_band_target_at_canvas_pos(pos), ("background", None))
+
+        fig2 = Figure()
+        canvas2 = FigureCanvasAgg(fig2)
+        ax2 = fig2.add_subplot(111)
+        record = {"region_id": "7", "name": "R7", "label": "R7", "status": "ready",
+                  "level_info": level_info((0., 1.), (0, 50, 100))}
+        bars = draw_region_colorbars_2d(ax2, [record], "magma")
+        canvas2.draw()
+        region_cax = bars[0].ax
+        self.assertEqual(getattr(region_cax, "_arpes_band_target", None), ("region", "7"))
+        event = SimpleNamespace(canvas=canvas2, x=(region_cax.bbox.x0 + region_cax.bbox.x1) / 2,
+                                y=(region_cax.bbox.y0 + region_cax.bbox.y1) / 2,
+                                inaxes=ax2, button=3, xdata=0.0, ydata=0.0)
+        self.assertEqual(host._two_d_band_target_at_event(event), ("region", "7"))
+        host.ax_2d = ax2
+        host._pick_enhancement_region(event)
+        self.assertEqual(host._band_context_target, ("region", "7"))
+        view2 = _CanvasView(canvas2)
+        host.canvas_2d = view2
+        pos = SimpleNamespace(
+            x=lambda: int(round((region_cax.bbox.x0 + region_cax.bbox.x1) / 2)),
+            y=lambda: int(round(view2.height() - (region_cax.bbox.y0 + region_cax.bbox.y1) / 2)))
+        self.assertEqual(host._two_d_band_target_at_canvas_pos(pos), ("region", "7"))
+
+    def test_three_d_scalar_bar_hit_returns_region_and_background(self):
+        host = self.host
+        region_bar = _BandScalarBar((0.02, 0.08), (0.06, 0.26))
+        global_bar = _BandScalarBar((0.88, 0.08), (0.08, 0.84))
+        host.plotter = SimpleNamespace(
+            renderer=_BandRenderer((100, 100), (0, 0)),
+            scalar_bars={"Intensity": global_bar},
+        )
+        host._enhancement_scalar_bar_records = [
+            {"title": "R1", "region_id": "1", "actor": region_bar}]
+        self.assertEqual(host._three_d_band_target_at_display(5, 20), ("region", "1"))
+        self.assertEqual(host._three_d_band_target_at_display(92, 50), ("background", None))
+        self.assertIsNone(host._three_d_band_target_at_display(50, 50))
+        # A region whose title collides with the global bar must not shadow it.
+        host._enhancement_scalar_bar_records = [
+            {"title": "Intensity", "region_id": "1", "actor": global_bar}]
+        self.assertEqual(host._three_d_band_target_at_display(92, 50), ("background", None))
+        # Two regions sharing one PyVista actor (duplicate label) target the
+        # region whose bar was actually created first.
+        host._enhancement_scalar_bar_records = [
+            {"title": "R1", "region_id": "1", "actor": region_bar},
+            {"title": "R1", "region_id": "2", "actor": region_bar},
+        ]
+        self.assertEqual(host._three_d_band_target_at_display(5, 20), ("region", "1"))
+        host._enhancement_scalar_bar_records = [
+            {"title": "R1", "region_id": "1", "actor": region_bar}]
+        top = _BandScalarBar((0.02, 0.08), (0.06, 0.26))
+        host._enhancement_scalar_bar_records.append(
+            {"title": "R2", "region_id": "2", "actor": top})
+        self.assertEqual(host._three_d_band_target_at_display(5, 20), ("region", "2"))
+
+    def test_menu_actions_are_placed_first_and_paste_tracks_clipboard(self):
+        host = self.host
+        menu = QMenu()
+        menu.addAction("原有入口")
+        self.assertTrue(host._append_band_actions(menu, ("region", "1")))
+        actions = menu.actions()
+        self.assertEqual([action.text() for action in actions[:3]],
+                         ["复制色带", "粘贴色带", ""])
+        self.assertFalse(actions[1].isEnabled())
+        actions[0].trigger()
+        self.assertTrue(host._color_band_clipboard)
+        menu2 = QMenu()
+        menu2.addAction("原有入口")
+        host._append_band_actions(menu2, ("region", "1"))
+        self.assertTrue(menu2.actions()[1].isEnabled())
+        menu.deleteLater()
+        menu2.deleteLater()

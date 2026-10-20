@@ -6,6 +6,9 @@
 与距离后画面立即跟随且观察中心不跳变 → 重置视角 → E 轴翻转一致性 →
 切到 2D 平滑收起 → 快速来回切换后终态正确、无残留高度 → 窄窗口不截断。
 
+默认视角与重置会按数据 E 轴方向摆正：E 降序时自动上下翻转，保证较小的 E
+值落在画面下方。
+
 全程 QTimer 链驱动，不手动 processEvents（Windows 上会触发
 RPC_E_CANTCALLOUT_ININPUTSYNCCALL 致命错误）。
 
@@ -134,6 +137,44 @@ def main():
     def panel_pose():
         return page.camera_pose()
 
+    def e_axis_descends():
+        values = np.asarray(window.core.coords["E"], dtype=np.float64).reshape(-1)
+        finite = values[np.isfinite(values)]
+        return (
+            finite.size > 1
+            and bool(np.all(np.diff(finite) <= 0.0))
+            and bool(float(finite[0]) > float(finite[-1]))
+        )
+
+    def default_pose_values():
+        """未开 E 轴翻转时的默认姿态；降序数据按相机水平轴翻转 180°。"""
+        if e_axis_descends():
+            return -135.0, -DEFAULT_ELEVATION, 180.0
+        return DEFAULT_AZIMUTH, DEFAULT_ELEVATION, DEFAULT_ROLL
+
+    def flipped_pose_values():
+        """打开 E 轴翻转后的默认姿态，恰好与未翻转相反。"""
+        if e_axis_descends():
+            return DEFAULT_AZIMUTH, DEFAULT_ELEVATION, DEFAULT_ROLL
+        return -135.0, -DEFAULT_ELEVATION, 180.0
+
+    def displayed_e_axis():
+        values = np.asarray(window.core.coords["E"], dtype=np.float64)
+        if window.timeline_bar.switch_flip.isChecked():
+            values = values[::-1]
+        return values
+
+    def e_small_at_bottom():
+        """按相机 up 判断屏幕上方对应 E 轴的哪一端。"""
+        up = np.asarray(window.plotter.camera.up, dtype=np.float64)
+        up = up / np.linalg.norm(up)
+        values = displayed_e_axis()
+        if float(up[2]) > 0.0:
+            top, bottom = float(values[-1]), float(values[0])
+        else:
+            top, bottom = float(values[0]), float(values[-1])
+        return top > bottom
+
     def pan_camera(right_amount, up_amount):
         """复刻 vtkInteractorStyleTrackballCamera 的平移：相机与观察中心一起在像平面内平移。
 
@@ -224,12 +265,17 @@ def main():
         check("唯一的操作按钮为「重置视角」", panel.reset_button.text() == "重置视角")
 
         initial = pose()
+        expected_azimuth, expected_elevation, expected_roll = default_pose_values()
         check(
-            f"初始读数等于应用初次展示的等轴视图（方位 {initial.azimuth:.1f}° "
+            f"初始读数为默认视角且按 E 轴方向摆正（方位 {initial.azimuth:.1f}° "
             f"仰角 {initial.elevation:.1f}° 滚转 {initial.roll:.1f}°）",
-            same_angle(initial.azimuth, DEFAULT_AZIMUTH)
-            and same_angle(initial.elevation, DEFAULT_ELEVATION)
-            and same_angle(initial.roll, DEFAULT_ROLL),
+            same_angle(initial.azimuth, expected_azimuth)
+            and same_angle(initial.elevation, expected_elevation)
+            and same_angle(initial.roll, expected_roll),
+        )
+        check(
+            f"初始视角 E 轴小值在下（E {'降序' if e_axis_descends() else '升序'}）",
+            e_small_at_bottom(),
         )
         check(
             "初始输入框与相机同步",
@@ -453,13 +499,15 @@ def main():
     def step_reset():
         window.on_camera_view_reset()
         reset = pose()
+        expected_azimuth, expected_elevation, expected_roll = default_pose_values()
         check(
             f"重置恢复默认等轴视图（方位 {reset.azimuth:.1f}° 仰角 {reset.elevation:.1f}° "
             f"滚转 {reset.roll:.1f}°）",
-            same_angle(reset.azimuth, DEFAULT_AZIMUTH)
-            and same_angle(reset.elevation, DEFAULT_ELEVATION)
-            and same_angle(reset.roll, DEFAULT_ROLL),
+            same_angle(reset.azimuth, expected_azimuth)
+            and same_angle(reset.elevation, expected_elevation)
+            and same_angle(reset.roll, expected_roll),
         )
+        check("重置后 E 轴小值在下", e_small_at_bottom())
         camera = window.plotter.camera
         center = tuple(float(v) for v in camera.focal_point)
         check(
@@ -481,11 +529,12 @@ def main():
 
     def step_after_refresh():
         after = pose()
+        expected_azimuth, expected_elevation, expected_roll = default_pose_values()
         check(
             f"重置后刷新仍保持默认姿态（方位 {after.azimuth:.1f}° 仰角 {after.elevation:.1f}°）",
-            same_angle(after.azimuth, DEFAULT_AZIMUTH)
-            and same_angle(after.elevation, DEFAULT_ELEVATION)
-            and same_angle(after.roll, DEFAULT_ROLL),
+            same_angle(after.azimuth, expected_azimuth)
+            and same_angle(after.elevation, expected_elevation)
+            and same_angle(after.roll, expected_roll),
         )
         window.timeline_bar.switch_flip.setChecked(True)
         soon(900, step_flip_reset)
@@ -493,16 +542,17 @@ def main():
     def step_flip_reset():
         window.on_camera_view_reset()
         first = pose()
-        # E 轴翻转是绕相机水平轴转 180°：本约定下默认姿态变成
-        # 方位角 -135°、仰角 -35.264°、滚转 180°。
+        # E 轴翻转是绕相机水平轴转 180°：默认姿态与未翻转时相反。
+        expected_azimuth, expected_elevation, expected_roll = flipped_pose_values()
         check(
             f"E 轴翻转打开时重置与开关一致（方位 {first.azimuth:.1f}° 仰角 {first.elevation:.1f}° "
             f"滚转 {first.roll:.1f}°）",
-            same_angle(first.azimuth, -135.0)
-            and same_angle(first.elevation, -DEFAULT_ELEVATION)
-            and same_angle(first.roll, 180.0),
+            same_angle(first.azimuth, expected_azimuth)
+            and same_angle(first.elevation, expected_elevation)
+            and same_angle(first.roll, expected_roll),
         )
         check("E 轴翻转标记与开关一致", window._camera_e_flip_applied is True)
+        check("E 轴翻转后显示坐标仍保持小值在下", e_small_at_bottom())
         window.on_camera_view_reset()
         second = pose()
         check(
@@ -521,9 +571,10 @@ def main():
 
     def step_flip_refreshed():
         after = pose()
+        expected_azimuth, _expected_elevation, expected_roll = flipped_pose_values()
         check(
             f"翻转开启时刷新不再旋转 180°（方位 {after.azimuth:.1f}° 滚转 {after.roll:.1f}°）",
-            same_angle(after.azimuth, -135.0) and same_angle(after.roll, 180.0),
+            same_angle(after.azimuth, expected_azimuth) and same_angle(after.roll, expected_roll),
         )
         window.timeline_bar.switch_flip.setChecked(False)
         soon(900, step_2d)

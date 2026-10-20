@@ -5,6 +5,7 @@ import uuid
 
 import numpy as np
 from PyQt5.QtCore import QEvent, QRunnable, QSignalBlocker, QThreadPool, QTimer, Qt, pyqtSlot
+from PyQt5.QtWidgets import QAction
 from matplotlib.patches import Rectangle
 
 from bandscope.core.local_enhancement import (
@@ -109,6 +110,7 @@ class EnhancementInteractionMixin:
         self._enhancement_actors = []
         self._enhancement_colorbars = []
         self._enhancement_scalar_bars = []
+        self._enhancement_scalar_bar_records = []
         self._enhancement_cache = None
         self._enhancement_draw_key = None
         self._enhancement_box_signature = None
@@ -125,6 +127,10 @@ class EnhancementInteractionMixin:
         self._enhancement_roi_disabled = False
         # 左侧视图右键命中的区域：菜单据此提供「删除当前区域」。
         self._enhancement_context_target = None
+        # 色带复制/粘贴：剪贴板只保存色阶映射（不含范围、锁定与透明度映射），
+        # 会话内有效；右键命中的色带决定粘贴目标。
+        self._color_band_clipboard = None
+        self._band_context_target = None
         self.plotter.iren.add_observer("LeftButtonPressEvent", self._pick_enhancement_box)
         self.plotter.iren.add_observer("RightButtonPressEvent", self._remember_enhancement_box_context)
         combo = self.page_render.region_combo
@@ -653,6 +659,154 @@ class EnhancementInteractionMixin:
             return True
         return False
 
+    def _band_region(self, target, state=None):
+        """Resolve a right-clicked band target to its region record."""
+        kind, region_id = target
+        if kind != "region":
+            return None
+        state = state or self._enhancement_state()
+        if not state:
+            return None
+        return next((r for r in state.get("regions", []) if r.get("region_id") == region_id), None)
+
+    def _band_target_label(self, target, state=None):
+        kind, _region_id = target
+        if kind == "background":
+            return "背景"
+        region = self._band_region(target, state)
+        return str((region or {}).get("label") or (region or {}).get("name") or "区域")
+
+    def _band_target_style(self, target):
+        """Current colour-scale mapping of the object behind a visible band.
+
+        Only levels are copied. Absolute range, lock state and opacity mapping
+        stay with the target so a paste never changes frame-to-frame locking.
+        """
+        kind, _region_id = target
+        state = self._enhancement_state()
+        if kind == "background":
+            style = state.get("background", DEFAULT_STYLE) if state is not None else self._enhancement_ui_style()
+        else:
+            region = self._band_region(target, state)
+            if region is None:
+                return None
+            style = (state.get("common_style", DEFAULT_STYLE) if state is not None and state.get("common")
+                     else region.get("style", DEFAULT_STYLE))
+        try:
+            levels = tuple(float(v) for v in style.get("levels", DEFAULT_STYLE["levels"]))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return levels if len(levels) == 3 else None
+
+    def _copy_color_band(self, target):
+        levels = self._band_target_style(target)
+        if levels is None:
+            return False
+        self._color_band_clipboard = {"levels": levels, "source": self._band_target_label(target)}
+        toast = getattr(self, "_toast_success", None)
+        if callable(toast):
+            toast("已复制色带", f"来源：{self._color_band_clipboard['source']}")
+        return True
+
+    def _current_color_band_target(self, state=None):
+        state = state or self._enhancement_state()
+        if state is None or state.get("show_all_regions"):
+            return ("background", None)
+        region_id = state.get("selected_id")
+        if region_id and any(r.get("region_id") == region_id for r in state.get("regions", [])):
+            return ("region", region_id)
+        return ("background", None)
+
+    @staticmethod
+    def _writable_band_style(container, key):
+        """Return a mutable style dict, copying the shared default if needed."""
+        style = container.get(key)
+        if style is DEFAULT_STYLE:
+            style = copy.deepcopy(style)
+        elif not isinstance(style, dict):
+            style = copy.deepcopy(DEFAULT_STYLE)
+        container[key] = style
+        return style
+
+    def _set_background_levels_ui(self, levels):
+        widgets = (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up)
+        blockers = [QSignalBlocker(widget) for widget in widgets]
+        for widget, value in zip(widgets, levels):
+            widget.setValue(int(round(float(value))))
+            sync_slider_visual(widget)
+        del blockers
+
+    def _paste_color_band(self, target):
+        clipboard = self.__dict__.get("_color_band_clipboard")
+        if not clipboard:
+            return False
+        levels = tuple(float(v) for v in clipboard.get("levels", ()))
+        if len(levels) != 3:
+            return False
+        kind, _region_id = target
+        state = self._enhancement_state()
+        changed = False
+        if kind == "background":
+            if state is not None:
+                style = self._writable_band_style(state, "background")
+                if tuple(float(v) for v in style.get("levels", ())) != levels:
+                    style["levels"] = levels
+                    changed = True
+            else:
+                current = tuple(float(w.value()) for w in
+                                (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up))
+                if current != levels:
+                    self._set_background_levels_ui(levels)
+                    changed = True
+        else:
+            region = self._band_region(target, state)
+            if state is None or region is None:
+                return False
+            if state.get("common"):
+                style = self._writable_band_style(state, "common_style")
+            else:
+                style = self._writable_band_style(region, "style")
+            if tuple(float(v) for v in style.get("levels", ())) != levels:
+                style["levels"] = levels
+                changed = True
+        toast = getattr(self, "_toast_success", None)
+        if not changed:
+            if callable(toast):
+                toast("色带相同", f"{self._band_target_label(target, state)} 已使用该色带")
+            return False
+        if state is not None:
+            state["revision"] = int(state.get("revision", 0)) + 1
+            if self._current_color_band_target(state) == target:
+                self._restore_enhancement_style()
+            self._enhancement_refresh()
+        else:
+            self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
+        if callable(toast):
+            toast("已粘贴色带", f"目标：{self._band_target_label(target, state)}")
+        return True
+
+    def _append_band_actions(self, menu, target):
+        """Put copy/paste at the top of the menu opened on a colour band."""
+        if target is None:
+            return False
+        first = menu.actions()[0] if menu.actions() else None
+        copy_action = QAction("复制色带", menu)
+        copy_action.triggered.connect(
+            lambda _checked=False, band_target=target: self._copy_color_band(band_target))
+        paste_action = QAction("粘贴色带", menu)
+        paste_action.setEnabled(bool(self.__dict__.get("_color_band_clipboard")))
+        paste_action.triggered.connect(
+            lambda _checked=False, band_target=target: self._paste_color_band(band_target))
+        if first is not None:
+            menu.insertAction(first, copy_action)
+            menu.insertAction(first, paste_action)
+            menu.insertSeparator(first)
+        else:
+            menu.addAction(copy_action)
+            menu.addAction(paste_action)
+            menu.addSeparator()
+        return True
+
     def _set_enhancement_show_all(self, enabled):
         state = self._enhancement_state()
         if state is None:
@@ -723,12 +877,14 @@ class EnhancementInteractionMixin:
             except Exception:
                 pass
         self._enhancement_scalar_bars = []
+        self._enhancement_scalar_bar_records = []
         for name in self.__dict__.get("_enhancement_actors", []):
             self.plotter.remove_actor(name, render=False)
         self._enhancement_actors = []
         self._enhancement_draw_key = None
         self._enhancement_box_signature = None
         self._enhancement_bar_signature = None
+        self._band_context_target = None
 
     def _enhancement_blit_artists(self):
         artists = list(self.__dict__.get("_enhancement_artists", []))
@@ -804,16 +960,91 @@ class EnhancementInteractionMixin:
                 return region
         return None
 
+    def _two_d_band_target_at(self, canvas, x, y, axes=None):
+        """Return the colour band under display-space canvas coordinates.
+
+        Colourbars created by ``Axes.inset_axes`` live in ``child_axes`` rather
+        than ``figure.axes``, and matplotlib reports the parent axes for a click
+        inside a child inset.  Hit-test the actual child axes boxes instead of
+        trusting ``event.inaxes``; the tight box also covers tick labels.
+        """
+        if canvas is None or x is None or y is None:
+            return None
+        target = getattr(axes, "_arpes_band_target", None) if axes is not None else None
+        if target is not None:
+            return target
+        figure = getattr(canvas, "figure", None)
+        if figure is None:
+            return None
+        try:
+            renderer = canvas.get_renderer()
+        except Exception:
+            renderer = None
+        candidates = []
+        seen = set()
+        for ax in getattr(figure, "axes", ()):
+            for candidate in (ax, *getattr(ax, "child_axes", ())):
+                if id(candidate) in seen:
+                    continue
+                seen.add(id(candidate))
+                target = getattr(candidate, "_arpes_band_target", None)
+                if target is not None:
+                    candidates.append((candidate, target))
+        for ax, target in candidates:
+            try:
+                if ax.get_visible() and ax.bbox.contains(x, y):
+                    return target
+            except Exception:
+                pass
+        if renderer is None:
+            return None
+        for ax, target in candidates:
+            try:
+                bbox = ax.get_tightbbox(renderer)
+            except Exception:
+                bbox = None
+            if bbox is not None and bbox.contains(x, y):
+                return target
+        return None
+
+    def _two_d_band_target_at_event(self, event):
+        if event is None:
+            return None
+        return self._two_d_band_target_at(
+            getattr(event, "canvas", None),
+            getattr(event, "x", None),
+            getattr(event, "y", None),
+            getattr(event, "inaxes", None),
+        )
+
+    def _two_d_band_target_at_canvas_pos(self, pos):
+        """Fallback for Qt menu events that arrive without a matplotlib press."""
+        canvas = getattr(self, "canvas_2d", None)
+        if canvas is None or pos is None:
+            return None
+        ratio_value = getattr(canvas, "device_pixel_ratio", 1.0)
+        try:
+            ratio = float(ratio_value() if callable(ratio_value) else (ratio_value or 1.0))
+            x = float(pos.x()) * ratio
+            y = (float(canvas.height()) - float(pos.y())) * ratio
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return self._two_d_band_target_at(canvas, x, y)
+
     def _pick_enhancement_region(self, event):
         if event.button == 3:
-            # 右键只记录该点所属区域：菜单据此提供删除入口，不改变当前选择。
+            # 右键只记录该点所属区域/色带：菜单据此提供入口，不改变当前选择。
             self._enhancement_context_target = None
-            if (not self._crop_enabled()
-                    and event.inaxes is getattr(self, "ax_2d", None)):
-                region = self._enhancement_region_at_2d_point(event.xdata, event.ydata)
-                if region is not None:
-                    self._enhancement_context_target = region["region_id"]
+            self._band_context_target = None
+            if not self._crop_enabled():
+                self._band_context_target = self._two_d_band_target_at_event(event)
+                if (self._band_context_target is None
+                        and event.inaxes is getattr(self, "ax_2d", None)):
+                    region = self._enhancement_region_at_2d_point(event.xdata, event.ydata)
+                    if region is not None:
+                        self._enhancement_context_target = region["region_id"]
             return
+        self._band_context_target = None
         if self._crop_enabled() or event.inaxes is not getattr(self, "ax_2d", None) or event.button != 1:
             return
         self._enhancement_context_target = None
@@ -867,6 +1098,7 @@ class EnhancementInteractionMixin:
                 except Exception:
                     pass
             self._enhancement_scalar_bars = []
+            self._enhancement_scalar_bar_records = []
             try:
                 self.plotter.remove_actor("enhancement:legend", render=False)
             except Exception:
@@ -877,8 +1109,10 @@ class EnhancementInteractionMixin:
                 self.plotter.add_text(enhancement_legend(fields), name="enhancement:legend", position="upper_left", font_size=9, render=False)
                 self._enhancement_actors.append("enhancement:legend")
                 # 每个可见区域一条自己的 scalar bar，范围用区域（可能已锁定）的归一化区间。
-                self._enhancement_scalar_bars = add_region_scalar_bars_3d(
+                records = add_region_scalar_bars_3d(
                     self.plotter, fields["regions"], self.page_render.get_selected_cmap())
+                self._enhancement_scalar_bars = [record["title"] for record in records]
+                self._enhancement_scalar_bar_records = records
             self._enhancement_bar_signature = bar_signature
         key = (active and active["region_id"], active and tuple(active["bounds"]))
         if key != self._enhancement_draw_key and not self._enhancement_dragging:
@@ -950,7 +1184,78 @@ class EnhancementInteractionMixin:
         except (AttributeError, IndexError, KeyError, TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _scalar_bar_contains(actor, nx, ny):
+        """Whether a normalized viewport point lies inside a scalar bar."""
+        try:
+            position = actor.GetPosition()
+            px, py = float(position[0]), float(position[1])
+            width = float(actor.GetWidth())
+            height = float(actor.GetHeight())
+            return px <= nx <= px + width and py <= ny <= py + height
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return False
+
+    def _three_d_band_target_at_display(self, x, y):
+        """Resolve the 3D scalar bar under a display-space point."""
+        try:
+            renderer = self.plotter.renderer
+            size = renderer.GetSize()
+            width, height = float(size[0]), float(size[1])
+            if width <= 0 or height <= 0:
+                return None
+            origin = renderer.GetOrigin()
+            ox, oy = float(origin[0]), float(origin[1])
+            nx = (float(x) - ox) / width
+            ny = (float(y) - oy) / height
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return None
+        if not (0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0):
+            return None
+        # The background bar sits on the right, region bars on the left.  Check
+        # the background first so a region accidentally named "Intensity"
+        # cannot shadow it when PyVista reuses the scalar-bar actor by title.
+        try:
+            actor = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+        except (KeyError, AttributeError, TypeError):
+            actor = None
+        if actor is not None and self._scalar_bar_contains(actor, nx, ny):
+            return ("background", None)
+        # Later region bars are drawn on top; check them first so overlapping
+        # bars (more than three visible regions use the same slot) stay usable.
+        # A title shared by two regions reuses one PyVista actor; keep the first
+        # record for that actor instead of letting the later region shadow it.
+        resolved = []
+        seen_actors = set()
+        for record in self.__dict__.get("_enhancement_scalar_bar_records", ()):
+            if not isinstance(record, dict):
+                continue
+            actor = record.get("actor")
+            if actor is None:
+                try:
+                    actor = self.plotter.scalar_bars[record["title"]]
+                except (KeyError, AttributeError, TypeError):
+                    actor = None
+            if actor is None or id(actor) in seen_actors:
+                continue
+            seen_actors.add(id(actor))
+            resolved.append((actor, record["region_id"]))
+        for actor, region_id in reversed(resolved):
+            if self._scalar_bar_contains(actor, nx, ny):
+                return ("region", region_id)
+        return None
+
+    def _three_d_band_target_at_cursor(self):
+        if self._crop_enabled():
+            return None
+        try:
+            x, y = self.plotter.iren.interactor.GetEventPosition()
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return self._three_d_band_target_at_display(x, y)
+
     def _pick_enhancement_box(self, _obj, _event):
+        self._band_context_target = None
         if self._crop_enabled() or self._enhancement_dragging or not self.current_render_context or self.current_render_context.get("view") != "3d":
             return
         self._enhancement_context_target = None
@@ -960,10 +1265,16 @@ class EnhancementInteractionMixin:
             QTimer.singleShot(0, lambda: self._select_enhancement_target(region_id))
 
     def _remember_enhancement_box_context(self, _obj, _event):
-        """Pick the outlined 3D box under the cursor for the right-click menu."""
+        """Pick the outlined 3D box or scalar bar under the cursor for the menu."""
         self._enhancement_context_target = None
+        self._band_context_target = None
         context = self.current_render_context
         if self._crop_enabled() or not context or context.get("view") != "3d":
+            return
+        self._band_context_target = self._three_d_band_target_at_cursor()
+        if self._band_context_target is not None:
+            # The scalar bar overlays the scene; a hit on it must not also offer
+            # the box-delete entry for a region behind the bar.
             return
         self._enhancement_context_target = self._enhancement_box_region_at_cursor()
 

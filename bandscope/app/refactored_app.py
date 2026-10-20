@@ -953,6 +953,84 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         except Exception:
             pass
 
+    @staticmethod
+    def _axis_values_descend(values):
+        """坐标数组是否从大到小；至少要有两个有限值。"""
+        if values is None:
+            return False
+        try:
+            array = np.asarray(values, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError):
+            return False
+        finite = array[np.isfinite(array)]
+        return (
+            finite.size > 1
+            and bool(np.all(np.diff(finite) <= 0.0))
+            and bool(float(finite[0]) > float(finite[-1]))
+        )
+
+    def _e_axis_descends_for_view(self):
+        """当前数据的 E 轴是否降序；缺数据时按升序处理。"""
+        core = self.__dict__.get("core")
+        coords = getattr(core, "coords", None) or {}
+        return self._axis_values_descend(coords.get("E"))
+
+    def _apply_default_3d_camera_orientation(self):
+        """把相机放到默认等轴方向；E 降序数据再上下翻转，保证小值在下。
+
+        默认姿态来自 ``DEFAULT_AZIMUTH`` / ``DEFAULT_ELEVATION`` /
+        ``DEFAULT_ROLL``。E 轴降序时，世界 +Z 端是最小能量；只换 ``view_up``
+        会同时左右镜像，因此沿用 E 轴翻转的相机语义：绕相机水平轴转 180°，
+        只交换画面上下。
+        """
+        plotter = self.__dict__.get("plotter")
+        if plotter is None:
+            return False
+        camera = plotter.camera
+        try:
+            focal_point = tuple(float(value) for value in camera.focal_point)
+            distance = float(camera.distance)
+        except (TypeError, ValueError):
+            return False
+        if not np.isfinite(distance) or distance <= 0.0:
+            return False
+        try:
+            position, view_up = vectors_from_pose(
+                DEFAULT_AZIMUTH,
+                DEFAULT_ELEVATION,
+                DEFAULT_ROLL,
+                distance,
+                focal_point,
+            )
+        except (TypeError, ValueError):
+            return False
+
+        camera.position = position
+        camera.up = view_up
+        camera.OrthogonalizeViewUp()
+        if self._e_axis_descends_for_view():
+            camera.Elevation(180.0)
+            camera.OrthogonalizeViewUp()
+        return True
+
+    def _reset_3d_camera_to_default(self):
+        """重置到默认等轴视角并重新取景；E 降序数据保持小值在下。"""
+        plotter = self.__dict__.get("plotter")
+        if plotter is None:
+            return
+        try:
+            plotter.reset_camera()
+        except Exception:
+            return
+        if not self._apply_default_3d_camera_orientation():
+            return
+
+        # 刚设定的是“未叠加 E 轴翻转开关”的默认姿态；开关打开时再补一次
+        # 180°，与下一次普通刷新走同一条路径。
+        self._camera_e_flip_applied = False
+        self._apply_pending_e_flip_camera()
+        self._refresh_camera_view_scene(force_sync=True)
+
     def _apply_pending_e_flip_camera(self):
         desired = bool(self.timeline_bar.switch_flip.isChecked())
         applied = bool(getattr(self, "_camera_e_flip_applied", False))
@@ -1107,35 +1185,10 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self._refresh_camera_view_scene()
 
     def on_camera_view_reset(self):
-        """「重置视角」：默认方向 + 默认滚转，观察中心对准当前内容并自动取景。"""
+        """「重置视角」：默认方向 + 默认滚转，E 降序数据上下翻转后重新取景。"""
         if not self._camera_view_active():
             return
-
-        plotter = self.plotter
-        camera = plotter.camera
-        try:
-            focal_point = tuple(float(value) for value in camera.focal_point)
-            distance = float(camera.distance)
-            position, view_up = vectors_from_pose(
-                DEFAULT_AZIMUTH,
-                DEFAULT_ELEVATION,
-                DEFAULT_ROLL,
-                distance,
-                focal_point,
-            )
-        except (TypeError, ValueError):
-            return
-
-        camera.position = position
-        camera.up = view_up
-        camera.OrthogonalizeViewUp()
-        # 交给 VTK 按当前展示内容重新对焦并取景，与应用初次展示 3D 数据时一致。
-        plotter.reset_camera()
-        # 此刻相机是「未翻转的默认姿态」，交回既有 E 翻转机制按开关补齐状态：
-        # 开关打开时补一次 180°，下一次刷新就不会再多转一次。
-        self._camera_e_flip_applied = False
-        self._apply_pending_e_flip_camera()
-        self._refresh_camera_view_scene(force_sync=True)
+        self._reset_3d_camera_to_default()
 
     def _update_render_status(self, phase, backend=""):
         label = getattr(self, "render_status_label", None)
@@ -3540,6 +3593,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
             # 裁剪模式下右键先把范围窗口移到光标处（原有行为），再补上轴标题入口。
+            self._band_context_target = None
             global_pos = self.canvas_2d.mapToGlobal(pos)
             self._show_crop_popup(global_pos)
             self._show_axis_title_menu(self.canvas_2d, global_pos)
@@ -3554,8 +3608,14 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
+        band_target = (self.__dict__.get("_band_context_target")
+                       if context and context.get("view") == "2d" else None)
+        if band_target is None and context and context.get("view") == "2d":
+            # 某些平台先发菜单事件、后发 matplotlib 按下事件；按菜单坐标补一次。
+            band_target = self._two_d_band_target_at_canvas_pos(pos)
         target = (self.__dict__.get("_enhancement_context_target")
-                  if context and context.get("view") == "2d" else None)
+                  if context and context.get("view") == "2d" and band_target is None else None)
+        self._append_band_actions(menu, band_target)
         self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.canvas_2d, global_pos)
 
@@ -3574,26 +3634,34 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             menu.exec_(global_pos)
         finally:
             self._enhancement_context_target = None
+            self._band_context_target = None
 
     def _show_main_context_menu(self, pos):
         if self._crop_enabled():
+            self._band_context_target = None
             global_pos = self.plotter.mapToGlobal(pos)
             self._show_crop_popup(global_pos)
             self._show_axis_title_menu(self.plotter, global_pos)
             return
         context = self.current_render_context
+        band_target = (self.__dict__.get("_band_context_target")
+                       if context and context.get("view") == "3d" else None)
+        if band_target is None and context and context.get("view") == "3d":
+            band_target = self._three_d_band_target_at_cursor()
         target = (self.__dict__.get("_enhancement_context_target")
-                  if context and context.get("view") == "3d" else None)
-        if target is None and context and context.get("view") == "3d":
+                  if context and context.get("view") == "3d" and band_target is None else None)
+        if target is None and band_target is None and context and context.get("view") == "3d":
             # 右键观察者未先到时再按当前光标补一次拾取，避免菜单漏掉删除入口。
             target = self._enhancement_box_region_at_cursor()
         menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
+        self._append_band_actions(menu, band_target)
         self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
         try:
             menu.exec_(global_pos)
         finally:
             self._enhancement_context_target = None
+            self._band_context_target = None
 
     def _get_clip_slices(self, logical_bounds=None):
         shape = self._full_domain_spatial_shape()
@@ -6028,8 +6096,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self._bind_axis_interval(self.left_workspace.home_spec(), animate=False)
         self.plotter.set_background("white")
         self.global_refresh()
-        self.plotter.reset_camera()
-        self._capture_3d_camera_position()
+        # 新数据的默认视角同样按 E 轴方向摆正：降序数据的较小能量在画面下方。
+        self._reset_3d_camera_to_default()
 
     def load_data(self, path):
         target_path = self._prepare_load_target(path)

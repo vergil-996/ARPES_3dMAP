@@ -323,7 +323,7 @@ class CameraViewPanelTests(unittest.TestCase):
 class CameraResetTests(unittest.TestCase):
     """重置与 E 轴翻转的配合：用真实离屏相机 + 桩化的窗口属性。"""
 
-    def _make_analyzer(self, *, flip):
+    def _make_analyzer(self, *, flip, e_axis=None):
         plotter = _plotter_with_volume()
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer.plotter = plotter
@@ -337,6 +337,10 @@ class CameraResetTests(unittest.TestCase):
         analyzer._saved_3d_camera_position = None
         analyzer._camera_e_flip_applied = False
         analyzer._camera_view_sync_timer = None
+        if e_axis is not None:
+            analyzer.core = SimpleNamespace(
+                coords={"E": np.asarray(e_axis, dtype=np.float64)}
+            )
         return analyzer
 
     def _pose(self, analyzer):
@@ -351,6 +355,82 @@ class CameraResetTests(unittest.TestCase):
         self.assertAlmostEqual(actual.elevation, expected.elevation, places=9)
         self.assertAlmostEqual(actual.roll, expected.roll, places=9)
         self.assertAlmostEqual(actual.distance, expected.distance, places=9)
+
+    def _assert_e_axis_small_at_bottom(self, analyzer, e_axis):
+        """世界 +Z 是 E 下标方向；按相机 up 判断屏幕上方对应哪一端。"""
+        up = np.asarray(analyzer.plotter.camera.up, dtype=np.float64)
+        up = up / np.linalg.norm(up)
+        values = np.asarray(e_axis, dtype=np.float64)
+        if float(np.dot(up, (0.0, 0.0, 1.0))) > 0.0:
+            top, bottom = float(values[-1]), float(values[0])
+        else:
+            top, bottom = float(values[0]), float(values[-1])
+        self.assertGreater(
+            top,
+            bottom,
+            msg=f"E axis must increase upward, got top={top}, bottom={bottom}",
+        )
+
+    def test_e_axis_descending_helper_requires_monotonic_values(self):
+        self.assertFalse(My3DAnalyzer._axis_values_descend(None))
+        self.assertFalse(My3DAnalyzer._axis_values_descend([]))
+        self.assertFalse(My3DAnalyzer._axis_values_descend([1.0]))
+        self.assertTrue(My3DAnalyzer._axis_values_descend([2.0, 1.0, 0.0]))
+        self.assertTrue(My3DAnalyzer._axis_values_descend([2.0, 2.0, 0.0]))
+        self.assertFalse(My3DAnalyzer._axis_values_descend([0.0, 2.0, 1.0]))
+        self.assertFalse(My3DAnalyzer._axis_values_descend([0.0, 1.0, 2.0]))
+        self.assertFalse(My3DAnalyzer._axis_values_descend([1.0, 1.0, 1.0]))
+
+    def test_reset_keeps_ascending_e_axis_small_at_bottom(self):
+        e_axis = np.linspace(-1.5, 1.5, 200)
+        analyzer = self._make_analyzer(flip=False, e_axis=e_axis)
+        try:
+            analyzer.on_camera_view_reset()
+            pose = self._pose(analyzer)
+            self.assertAlmostEqual(pose.azimuth, DEFAULT_AZIMUTH, places=6)
+            self.assertAlmostEqual(pose.elevation, DEFAULT_ELEVATION, places=6)
+            self.assertAlmostEqual(pose.roll, DEFAULT_ROLL, places=6)
+            self._assert_e_axis_small_at_bottom(analyzer, e_axis)
+        finally:
+            analyzer.plotter.close()
+
+    def test_reset_flips_descending_e_axis_so_small_is_at_bottom(self):
+        e_axis = np.linspace(1.5, -1.5, 200)
+        analyzer = self._make_analyzer(flip=False, e_axis=e_axis)
+        try:
+            analyzer.on_camera_view_reset()
+            pose = self._pose(analyzer)
+            # 与 E 轴翻转相同的相机语义：方位角 -135°、仰角 -35.264°、滚转 180°。
+            self.assertAlmostEqual(pose.azimuth, -135.0, places=6)
+            self.assertAlmostEqual(pose.elevation, -DEFAULT_ELEVATION, places=6)
+            self.assertAlmostEqual(pose.roll, 180.0, places=6)
+            self._assert_e_axis_small_at_bottom(analyzer, e_axis)
+        finally:
+            analyzer.plotter.close()
+
+    def test_initial_default_view_also_flips_descending_e_axis(self):
+        e_axis = np.linspace(1.5, -1.5, 200)
+        analyzer = self._make_analyzer(flip=False, e_axis=e_axis)
+        try:
+            analyzer._reset_3d_camera_to_default()
+            self._assert_e_axis_small_at_bottom(analyzer, e_axis)
+            snapshot = analyzer._current_3d_camera_position()
+            np.testing.assert_allclose(
+                np.asarray(analyzer._saved_3d_camera_position), snapshot, atol=1e-9
+            )
+        finally:
+            analyzer.plotter.close()
+
+    def test_reset_still_puts_small_e_at_bottom_with_flip_enabled(self):
+        e_axis = np.linspace(1.5, -1.5, 200)
+        analyzer = self._make_analyzer(flip=True, e_axis=e_axis)
+        try:
+            analyzer.on_camera_view_reset()
+            # 翻转开关把显示坐标反成升序；默认视角仍应保持小值在下。
+            self._assert_e_axis_small_at_bottom(analyzer, e_axis[::-1])
+            self.assertTrue(analyzer._camera_e_flip_applied)
+        finally:
+            analyzer.plotter.close()
 
     def test_reset_restores_default_direction_and_framing(self):
         analyzer = self._make_analyzer(flip=False)
