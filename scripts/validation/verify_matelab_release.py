@@ -10,6 +10,7 @@ CI 产物需先下载到 release/（含 .sha256 边车）。
 """
 import base64
 import hashlib
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -23,7 +24,9 @@ CI_DIR = ROOT / "release"
 OUT_DIR = ROOT / ".local" / "outputs" / f"matelab-verify-{APP_VERSION}"
 
 _parts = APP_VERSION.split(".")
-PREVIOUS_VERSION = ".".join([_parts[0], _parts[1], str(int(_parts[2]) - 1)])
+PREVIOUS_VERSION = os.environ.get("BANDSCOPE_PREVIOUS_VERSION", "").strip() or ".".join(
+    [_parts[0], _parts[1], str(int(_parts[2]) - 1)]
+)
 
 EXPECTED = {}
 for flavor in ("CPU", "NVIDIA"):
