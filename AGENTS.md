@@ -34,8 +34,9 @@
 3. 下载安装包并按 `.sha256` 边车校验后再分发。
 4. **等待维护者关闭代理**：MatElab 走所内直连，代理开启时无法访问。此步骤必须显式等待，不能在代理仍开启时尝试发布，也不能自行切换代理。
 5. MatElab 发布：`python scripts/release/publish_matelab.py --version X.Y.Z --installer CPU=… --installer NVIDIA=… --notes …`。脚本走「分片上传 → 创建空记录 → update 搭模块」，记录含「manifest」（富文本 JSON：version/notes/published_at）与「安装包」（文件集）两个模块，标题固定 `BandScope vX.Y.Z`；不需要模板，不需要手工建记录结构。实测细节（文件名改写、delModule 参数形式、慢网断点续传）见 releasing.md「实测注意」。
-6. 发布后用客户端逻辑只读验证：`check_for_update` 从上一版本能发现新版本，文件名/大小/SHA-256 与 CI 一致；抽样或完整下载校验通过才算发出。
+6. **GitHub** 发布后用客户端逻辑只读验证：`check_for_update` 从上一版本能发现新版本，文件名/大小/SHA-256 与 CI 一致；抽样或完整下载校验通过才算发出。**MatElab 不做回传校验**：安装包上传完成、发布记录创建成功后即视为发出，不再下载回来复验（2026-10-20 约定）。
 7. 收尾：更新计划/交接文档的验收记录（如实标注未执行项），README 与 releasing.md 同步，提交推送。**推送需要再次等待维护者开启代理**；若代理仍关闭，保留本地提交并明确告知待补推，不能写成已推送。
+8. 清理本地 `release/`：只保留历次上传状态/审计记录 `.matelab-publish-*.json`；安装包、`.sha256`、插件包、插件目录、发布说明文本等其余产物均可删除——正式产物在 GitHub Release，CI 可重新下载，不把 `release/` 当长期归档，也不提交。
 
 ## 交付检查
 

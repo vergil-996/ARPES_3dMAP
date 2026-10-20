@@ -1,5 +1,8 @@
 """Read-only post-publish verification of the MatElab release record.
 
+2026-10-20 起按协作约定，MatElab 上传完成、发布记录创建成功即视为发出，**不再要求**
+本脚本的回传下载复验；保留此脚本用于排查网络/内容问题或按需抽查。
+
 步骤：
 1. 从上一个补丁版本检查更新，两个 flavor 都应发现当前版本，且文件名/大小/SHA-256 与 CI 发布值一致；
 2. CPU 安装包经客户端 download_installer 完整下载并校验；

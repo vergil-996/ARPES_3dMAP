@@ -46,6 +46,8 @@ PyInstaller 产物在 `dist/`，安装器与插件包在 `release/`。图标来�
 
 验证构建可通过 `--workpath .local/build-validation --distpath .local/dist-validation` 使用独立输出；标准安装器默认仍读取根目录 `dist`。
 
+**本地 `release/` 清理（2026-10-20 约定）**：发布结束后只保留历次上传状态/审计记录 `.matelab-publish-*.json`；安装包、`.sha256`、`.bsplugin`、`.sig`、`plugins-index.json`、`release-notes-*.txt` 等其余产物都可以删除。正式产物在 GitHub Release，CI 可重新下载，不要用 `release/` 充当长期归档；该目录本身也不提交。
+
 ## 发布环境与代理切换
 
 GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维护者切换代理，不能假定一次配置能同时完成两步。
@@ -90,6 +92,8 @@ GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维�
 除 GitHub 外，正式版还可发布到 MatElab（物质科学电子实验室）更新源，供所内用户在软件内切换使用。发布约定与客户端解析逻辑见 `bandscope/updates/matelab_source.py` 顶部 docstring。
 
 **发布前确认系统代理已关闭**（见「发布环境与代理切换」）；代理开启时该地址不可达，脚本会在登录或上传阶段失败。
+
+**完成判定（2026-10-20 约定）**：安装包上传完成、发布记录创建成功后，MatElab 发布即视为结束，不再从服务器下载回来复验。上传前的本地校验仍按第 3 步使用 CI `.sha256` 边车完成；上传脚本会核对服务器回传的整包 hash。GitHub 源仍按客户端逻辑做发布后只读验证。
 
 一次性准备：在 MatElab 上创建发布记录本（默认 `BandScope发布`）。发布脚本通过「创建空记录 + 数据更新」接口直接搭建记录结构（「manifest」「安装包」两个模块），不需要预先建模板。
 
