@@ -20,7 +20,7 @@
 | ARPES 弱信号色阶（2026-10-17 源码修复） | 用户弱带视觉确认、非线性体渲染性能与发行包验收；性能跟进见 [性能计划](../plans/enhancement-render-performance.md) | [色阶映射修复](display-transfer-weak-signals.md) |
 | 活动裁剪框（2026-10-13 源码） | 人工手感及 1D / 对比 / 瀑布页视觉复核；Matplotlib 3.11.2 运行与修复后 CI 结果待核实 | [活动裁剪框验收](../archive/crop/interactive-crop-box.md) |
 | 平带增强（现有插件） | 实测数据中的弱带增强效果人工确认 | [平带效果验收方案](../plans/flat_band_opacity_plugin_plan_2026-09-27.md) |
-| 多数据源工作区（2026-10-20 源码与自动化通过） | CPU/NVIDIA 路线显存占用与释放对照；切换动画、输入快捷键与根删除的鼠标/键盘人工验收 | [多数据源工作区](../plans/multi-data-source-workspaces.md) |
+| 多数据源工作区（2026-10-20 源码与自动化通过，v1.16.0 已发布 GitHub） | MatElab 发布（等待代理关闭）；CPU/NVIDIA 路线显存占用与释放对照；切换动画、输入快捷键与根删除的鼠标/键盘人工验收 | [多数据源工作区](../plans/multi-data-source-workspaces.md) |
 
 冻结包、安装器及在线安装的当前进度统一在发行主记录跟进；其他记录保留原验收快照，不把其中同类条目重复建立为新待办。
 已实现的方案和已归档的开发记录可作为证据，接续时先读最新状态段，再按需查看设计正文。
