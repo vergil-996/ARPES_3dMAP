@@ -630,6 +630,49 @@ class PageTreePanel(QWidget):
     def search_text(self) -> str:
         return self._search_text
 
+    # ------------------------------------------------------------ 导航状态
+    def export_navigation_state(self) -> dict:
+        """保存源级切换要带走的临时导航状态：搜索、展开、滚动与多选。
+
+        栏宽不在这里：它属于全局布局偏好，跨数据源保持一致。
+        """
+        return {
+            "search": str(self._search_text),
+            "expanded": sorted(str(page_id) for page_id in self._expanded_ids),
+            "scroll": int(self.tree.verticalScrollBar().value()),
+            "selected": [str(page_id) for page_id in self.tree.selected_page_ids()],
+        }
+
+    def restore_navigation_state(self, state) -> None:
+        """恢复另一份数据源的搜索、展开与滚动位置。"""
+        state = state or {}
+        text = str(state.get("search") or "")
+        self.blockSignals(True)
+        try:
+            if text != self._search_text:
+                self.search_edit.setText(text)
+                self._search_text = text
+            self._expanded_ids = {
+                str(page_id) for page_id in state.get("expanded") or () if page_id
+            }
+            self._apply_expansion()
+            self._apply_filter()
+        finally:
+            self.blockSignals(False)
+
+        selected = [str(page_id) for page_id in state.get("selected") or ()]
+        if selected:
+            self.tree.clearSelection()
+            for page_id in selected:
+                item = self._items.get(page_id)
+                if item is not None and self.tree.item_is_displayed(item):
+                    item.setSelected(True)
+
+        scroll = int(state.get("scroll") or 0)
+        if scroll > 0:
+            bar = self.tree.verticalScrollBar()
+            bar.setValue(min(scroll, bar.maximum()))
+
     def is_renaming(self, page_id: Optional[str] = None) -> bool:
         if self._editing_page_id is None:
             return False

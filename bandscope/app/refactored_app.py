@@ -4,7 +4,6 @@ import re
 import time
 import traceback
 import uuid
-from pathlib import Path
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 
@@ -60,6 +59,8 @@ from bandscope.ui.camera_view_controls import (
 from bandscope.ui.crop_controls import CropController
 from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
+from bandscope.app.source_workspace import SourceWorkspaceMixin
+from bandscope.app.view_recipe_integration import ViewRecipeMixin
 from bandscope.core.crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval, AxisSpace, nearest_index
@@ -95,6 +96,7 @@ from bandscope.ui.result_workspace import (
     unique_title_among,
 )
 from bandscope.ui.settings_popups import DenoiseSettingsPopup
+from bandscope.ui.source_switcher import SourceSwitcherBar
 from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.ui.toast import ToastManager
 from bandscope.app_metadata import APP_NAME, APP_VERSION
@@ -118,7 +120,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
+class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
@@ -207,6 +209,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.refresh_coordinator.result_ready.connect(self._on_refresh_result)
         self.refresh_coordinator.failed.connect(self._on_refresh_failed)
         self.refresh_coordinator.status_changed.connect(self._on_refresh_status_changed)
+        # 多数据源会话管理器：先于任何加载/页面构造就绪，切换器在工具栏里创建。
+        self._init_source_workspaces()
 
         self.current_render_context = None
         self.axis_crop_selector = None
@@ -750,6 +754,12 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
         self._update_screenshot_tooltip()
         row.addWidget(self.btn_tb_load)
+        # 数据源切换器：仅在 2 份及以上数据时展开，默认收起、不占布局空间。
+        self.source_switcher_bar = SourceSwitcherBar(self.toolbar)
+        self.source_switcher_bar.source_selected.connect(self.activate_source)
+        self.source_switcher_bar.alias_committed.connect(self._commit_source_alias)
+        self._sync_source_switcher()
+        row.addWidget(self.source_switcher_bar)
         row.addWidget(self.btn_tb_shot)
         row.addWidget(self.btn_tb_export)
         row.addWidget(self.btn_tb_crop)
@@ -842,6 +852,10 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self.status_page.setText("未加载数据")
 
         parts = []
+        manager = self.__dict__.get("source_manager")
+        active_source = manager.active() if manager is not None else None
+        if active_source is not None and active_source.alias:
+            parts.append(f"数据源: {active_source.alias}")
         if self.core.raw_data is not None:
             parts.append("×".join(str(d) for d in self.core.raw_data.shape))
         backend = getattr(self, "_last_compute_backend", "") or ""
@@ -1256,7 +1270,10 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def _active_refresh_page_id(self):
         spec = self.left_workspace.current_spec() if hasattr(self, "left_workspace") else None
-        return spec.page_id if spec is not None else "home"
+        if spec is not None:
+            return spec.page_id
+        # 没有页面（未加载 / 空工作区）时的占位键：不要复用任何真实页面 ID。
+        return f"__no_page__:{self._source_cache_namespace()}"
 
     def _adaptive_preview_interval_ms(self):
         """Preview 定时器不短于上一帧耗时，拖动时不会堆积待处理事件。"""
@@ -1267,6 +1284,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         started = time.perf_counter()
         try:
             self._render_active_page(quality, cause)
+            if quality == RenderQuality.EXACT and self.current_render_context is not None:
+                self._restore_recipe_scene(self.left_workspace.current_spec())
         finally:
             self._last_render_ms = (time.perf_counter() - started) * 1000.0
 
@@ -1281,6 +1300,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         preview_interval_ms=None,
     ):
         if self._syncing_controls:
+            return
+        if self.__dict__.get("_source_pending_id"):
+            # 新数据源准备途中：登记会话后由提交事务统一触发一次刷新。
             return
         self._capture_3d_camera_position()
         page_id = self._active_refresh_page_id()
@@ -1595,7 +1617,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
         if (
             request.cause == RefreshCause.DENOISE
-            and request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+            and request.page_id == self._global_denoise_page_id()
         ):
             expected_signature = request.snapshot.get("denoise_signature")
             if (
@@ -1691,7 +1713,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._render_exact_ready = True
         is_global_denoise = (
             request.cause == RefreshCause.DENOISE
-            and request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+            and request.page_id == self._global_denoise_page_id()
         )
         if is_global_denoise:
             if request.snapshot.get("denoise_signature") == self._pending_denoise_signature:
@@ -1786,9 +1808,29 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     def add_plugin_result_page(self, *, title, source_page_id, source_title, data_scope_id, params):
         """插件分析结果页：唯一标题、挂在来源页下、**不切换**当前页。
 
-        结果属于提交任务时的来源页与快照，用户正在看什么就继续看什么；新页在
-        左侧页面树里等着被点开。
+        结果属于提交任务时的来源页与快照。来源页所在的数据源不是当前活动源时，
+        结果登记回那份工作区（切回去就能看到），不打断用户当前查看的数据。
         """
+        manager = self.__dict__.get("source_manager")
+        owner = self._session_for_page(source_page_id) if manager is not None else None
+        if owner is not None and not manager.is_active(owner.session_id):
+            spec = self._add_page_to_session(
+                owner,
+                title=title,
+                page_kind=self.PLUGIN_CURVE_PAGE_KIND,
+                source_module="plugin_analysis",
+                source_page_id=source_page_id,
+                source_title=source_title,
+                data_scope_id=data_scope_id,
+                params=params,
+            )
+            if spec is not None:
+                self._toast_success(
+                    "分析完成",
+                    f"{spec.title}（在「{owner.alias}」的页面树中查看）",
+                )
+            return spec
+
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=self._make_unique_page_title(title),
@@ -1896,6 +1938,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         ``energy_length`` 给出本次渲染的能量体素数，长度不符时按“不生效”处理：
         插件异常绝不能让 3D 视图打不开。
         """
+        frozen = self._recipe_frozen_multiplier(render_context, stride=stride)
+        if frozen is not None:
+            return None, frozen
         session = self._plugin_session()
         if session is None or not session.manager.records:
             return None, None
@@ -1973,20 +2018,18 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
 
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
+        self.left_workspace.page_added.connect(self._on_recipe_page_added)
+        self.left_workspace.page_added.connect(self._register_page_with_session)
         self.left_workspace.page_closed.connect(self.on_result_page_closed)
+        self.left_workspace.source_close_requested.connect(self._on_source_close_requested)
         self.left_workspace.page_updated.connect(self.on_result_page_updated)
         self.left_workspace.page_rename_requested.connect(self._rename_page)
         self.left_workspace.page_restore_name_requested.connect(self._restore_page_auto_title)
 
     def _initialize_result_workspace(self):
-        home_spec = AnalysisPageSpec(
-            page_id="home",
-            title="原始视图",
-            page_kind="home",
-            source_module="system",
-            closeable=False,
-            data_scope_id=self.FULL_SCOPE_ID,
-        )
+        # 启动时还没有数据源：放一个不可删除的占位根页面；第一份数据加载时
+        # 会把它整体换出，换成属于该数据源的根页面。
+        home_spec = self._build_home_page(closeable=False)
         self.left_workspace.set_home_page(home_spec)
         self.active_page_spec = home_spec
         self.last_visual_page_id = home_spec.page_id
@@ -2018,7 +2061,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             return
         descriptor = DataScopeDescriptor.full(self.original_raw_data.shape)
         self.data_scopes[descriptor.scope_id] = descriptor
-        self._scope_data_cache = ArrayLRUCache(max_bytes=max(int(self.original_raw_data.nbytes), 1))
+        # 可重建的 ROI / 去噪结果缓存：每个源一个缓存对象，预算由会话管理器
+        # 按源数平分全应用总预算（min(4 GiB, 物理内存×20%)），不逐源倍增。
+        self._scope_data_cache = ArrayLRUCache()
         self._scope_committed_signatures[descriptor.scope_id] = self._denoise_signature([])
 
     def _full_domain_spatial_shape(self):
@@ -2055,7 +2100,13 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         return descriptor.label if descriptor is not None else "完整数据"
 
     def _scope_cache_key(self, scope_id, signature=None):
-        return str(scope_id), str(signature or self.shared_denoise_signature)
+        # 跨源注册与缓存归属用 (数据源, 数据域, 处理签名) 组合键；scope_id 本身
+        # 保持会话内局部标识（full / roi-N）。
+        return (
+            self._source_cache_namespace(),
+            str(scope_id),
+            str(signature or self.shared_denoise_signature),
+        )
 
     def _scope_values(self, descriptor, *, signature=None):
         if descriptor is None or self.original_raw_data is None:
@@ -2544,9 +2595,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
         scope_id = str(scope_id)
         if cancel_task:
-            self.refresh_coordinator.cancel_page(
-                f"{self.SCOPE_DENOISE_PAGE_PREFIX}{scope_id}"
-            )
+            self.refresh_coordinator.cancel_page(self._scope_denoise_page_id(scope_id))
         self.data_scopes.pop(scope_id, None)
         self._scope_committed_signatures.pop(scope_id, None)
         if clear_cache:
@@ -2624,7 +2673,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             return True
         self._pending_scope_denoise_keys.add(pending_key)
 
-        page_id = f"{self.SCOPE_DENOISE_PAGE_PREFIX}{descriptor.scope_id}"
+        page_id = self._scope_denoise_page_id(descriptor.scope_id)
         request = self.refresh_coordinator.make_request(
             page_id,
             RefreshCause.DENOISE,
@@ -2664,7 +2713,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         pending_key = descriptor.scope_id, signature
         self._pending_scope_denoise_keys.add(pending_key)
         request = self.refresh_coordinator.make_request(
-            f"{self.SCOPE_DENOISE_PAGE_PREFIX}{descriptor.scope_id}",
+            self._scope_denoise_page_id(descriptor.scope_id),
             RefreshCause.DATA_SCOPE,
             RenderQuality.EXACT,
             {
@@ -3341,6 +3390,11 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             result["palette_slot"] = int(snapshot["palette_slot"])
         if isinstance(snapshot.get("is_base"), bool):
             result["is_base"] = snapshot["is_base"]
+        if snapshot.get("recipe_id"):
+            result["recipe_id"] = str(snapshot["recipe_id"])
+        for key in ("provenance_error", "source_path"):
+            if key in snapshot:
+                result[key] = str(snapshot[key])
         return result
 
     def _curve_snapshot_from_context(self, spec, context, *, label=None):
@@ -3365,6 +3419,13 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         )
         if snapshot is not None:
             snapshot["curve_kind"] = curve_kind
+            if getattr(self.core, "source_identity", None) is not None:
+                self._persist_active_page_state()
+                try:
+                    snapshot["recipe_id"] = self._freeze_recipe_page(spec, verify_source=False)
+                except (ValueError, OSError) as exc:
+                    snapshot["provenance_error"] = str(exc)
+                    snapshot["source_path"] = self.core.source_identity.path
         return snapshot
 
     def _current_single_curve_snapshot(self):
@@ -3657,6 +3718,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self._append_band_actions(menu, band_target)
         self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
+        self._append_recipe_actions(menu)
         try:
             menu.exec_(global_pos)
         finally:
@@ -5534,6 +5596,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
     def _get_derived_render_context(self, spec):
         """派生结果页的渲染上下文：由插件同步计算，宿主负责缓存与回退。"""
+        saved = spec.params.get("_restored_result")
+        if saved:
+            return self._recipe_derived_context(spec, saved)
         session = self._plugin_session()
         if session is None:
             raise ValueError("插件系统未初始化，无法计算派生结果。")
@@ -5899,7 +5964,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             target_descriptor.scope_id if target_descriptor is not None else self.FULL_SCOPE_ID
         )
         request = self.refresh_coordinator.make_request(
-            self.GLOBAL_DENOISE_PAGE_ID,
+            self._global_denoise_page_id(),
             RefreshCause.DENOISE,
             RenderQuality.EXACT,
             {
@@ -5959,7 +6024,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self,
             "选择数据文件",
             "",
-            "Supported Data (*.npz *.mat);;NumPy Files (*.npz);;MATLAB Files (*.mat)",
+            "Supported Files (*.npz *.mat *.bsview.json);;BandScope View (*.bsview.json);;NumPy Files (*.npz);;MATLAB Files (*.mat)",
         )
         if not path:
             return
@@ -5987,44 +6052,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         return path
 
     def _reset_loaded_data_state(self, target_path):
-        self._reset_enhancement_for_new_data()
-        from bandscope.exporting.curve_presentation import publication_session
-        publication_session(self).clear()
-        dialog = self.__dict__.get("_publication_dialog")
-        if dialog is not None:
-            dialog.clear_session()
-        self.loaded_npz_stem = Path(target_path).stem
-        canonical, original, base = self._canonical_data_aliases(self.core.raw_data)
-        self.core.raw_data = canonical
-        self.original_raw_data = original
-        self.original_coords = self._clone_coords()
-        self.base_raw_data = base
-        self.base_coords = self._clone_coords(self.original_coords)
-        self.refresh_coordinator.cancel_page(self.GLOBAL_DENOISE_PAGE_ID)
-        self.global_denoise_methods = []
-        self.shared_denoised_raw_data = None
-        self.shared_denoise_signature = self._denoise_signature([])
-        self.shared_denoise_version += 1
-        self._initialize_data_scopes()
-        self._pending_denoise_methods = None
-        self._pending_denoise_signature = None
-        self._pending_denoise_scope_id = None
-        self._pending_scope_denoise_keys = set()
-        self._pending_roi_scope_id = None
-        self._rotation_cache.clear()
-        self._computed_volume_cache.clear()
-        self.backend_manager.clear_caches()
-        if hasattr(self, "volume_session"):
-            self.volume_session.clear(render=False)
-        self._second_derivative_volume_cache = None
-        self._clear_axis_prefix_cache()
-        self.rotation_angle = 0.0
-        self._rendered_rotation_angle = 0.0
-        self._saved_3d_camera_position = None
-        self._camera_e_flip_applied = False
-        self.clip_ranges = None
-        self.home_slice_info = None
-        self.axis_source_mode = "frame"
+        """兼容入口：把当前窗口状态切到"刚加载一份数据"的初始值。"""
+        self._prime_loaded_data_state(target_path)
 
     def _restore_initial_controls_after_load(self):
         self._syncing_controls = True
@@ -6071,7 +6100,12 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._syncing_axis_value_boxes = False
 
     def _reset_workspace_after_load(self):
-        self.crop_controller.clear()
+        # 只收起当前裁剪交互，不清空其它数据源尚未应用的选区草稿。
+        controller = self.__dict__.get("crop_controller")
+        if controller is not None:
+            controller.popup.hide()
+            controller.selection = None
+            controller.page_id = None
         self.btn_tb_crop.setChecked(False)
         self.btn_tb_erase.setChecked(False)
         self.update_ax_slider_range()
@@ -6097,28 +6131,21 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
         self.plotter.set_background("white")
         self.global_refresh()
         # 新数据的默认视角同样按 E 轴方向摆正：降序数据的较小能量在画面下方。
-        self._reset_3d_camera_to_default()
+        # 此刻场景里还没有体积，真正的取景推迟到第一次 3D 渲染之后。
+        self._pending_default_camera = True
 
     def load_data(self, path):
+        """加载入口：每次成功都新增独立数据源，不覆盖已打开的分析。"""
+        if str(path).lower().endswith(".bsview.json"):
+            try:
+                return self._load_view_recipe(path)
+            except Exception as exc:
+                self._show_message("复现文件加载失败", str(exc), QMessageBox.Critical)
+                return False
         target_path = self._prepare_load_target(path)
         if not target_path:
-            return
-
-        success, info = self.core.load_npz(target_path)
-        if not success:
-            self._show_message("数据加载失败", f"无法加载文件：\n{info}", QMessageBox.Critical)
-            return
-
-        self._reset_loaded_data_state(target_path)
-        self._restore_initial_controls_after_load()
-        self._refresh_core_display_state()
-        # 换数据文件后清空平带峰位：旧数据的能量位置不能自动套到新数据上。
-        session = self._plugin_session()
-        if session is not None:
-            session.reset_for_new_data()
-        self._configure_loaded_time_controls(info)
-        self._reset_workspace_after_load()
-        self._update_statusbar()
+            return False
+        return self.open_npz_source(path, target_path)
 
     # ------------------------------------------------------------------
     # 积分区间：物理空间 + 唯一真值
@@ -6570,7 +6597,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             page_kind="time_integral",
             source_module="data_process",
             params={"t_low": low, "t_up": up},
-            source_page_id=source_spec.page_id if source_spec is not None else "home",
+            source_page_id=source_spec.page_id if source_spec is not None else self.left_workspace.home_page_id,
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -6760,10 +6787,18 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
 
         current_spec = self.left_workspace.current_spec()
         if params.get("source_page_kind") == "time_integral":
-            source_page_id = current_spec.page_id if current_spec is not None and current_spec.page_kind == "time_integral" else "home"
+            source_page_id = (
+                current_spec.page_id
+                if current_spec is not None and current_spec.page_kind == "time_integral"
+                else self.left_workspace.home_page_id
+            )
         else:
             source_spec = self._current_home_source_spec()
-            source_page_id = source_spec.page_id if source_spec is not None else "home"
+            source_page_id = (
+                source_spec.page_id
+                if source_spec is not None
+                else self.left_workspace.home_page_id
+            )
 
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
@@ -6828,7 +6863,7 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             page_kind="slice_dos",
             source_module="data_process",
             params={"clip_ranges": list(self.clip_ranges)},
-            source_page_id=source_spec.page_id if source_spec is not None else "home",
+            source_page_id=source_spec.page_id if source_spec is not None else self.left_workspace.home_page_id,
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -7821,6 +7856,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
                 display_token=self.__dict__.get("_enhancement_display_token"),
                 render=False,
             )
+            if self.__dict__.pop("_pending_default_camera", False):
+                # 新数据第一次出现体积后再取景：此时包围盒已就绪，默认视角才正确。
+                self._reset_3d_camera_to_default()
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
             if self._box_interacting:
@@ -7897,23 +7935,8 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
             self._sync_camera_view_controls()
 
     def on_result_page_closed(self, page_id):
-        from bandscope.exporting.curve_presentation import publication_session
-        publication_session(self).forget_page(page_id)
-        dialog = self.__dict__.get("_publication_dialog")
-        if dialog is not None:
-            dialog.forget_page(page_id)
-        self.crop_controller.remove_page(page_id)
-        self.refresh_coordinator.cancel_page(page_id)
-        # 来源页关闭后结果没有归属：取消它名下的分析任务，晚到的结果也会被丢弃。
-        session = self._plugin_session()
-        if session is not None:
-            session.cancel_page_analysis(page_id)
-            session.invalidate_derived_page(page_id)
-        self._clear_axis_prefix_cache(page_id)
-        self._axis_titles().forget_page(page_id)
-        self._rotation_cache.clear()
-        self._computed_volume_cache.clear()
-        self._second_derivative_volume_cache = None
+        # 单页 / 分支删除的公共清理；源级关闭也复用同一套按页清理。
+        self._forget_page_resources(page_id)
         if self.active_page_spec is not None and self.active_page_spec.page_id == page_id:
             self._clear_enhancement_interaction()
             self._enhancement_cache = None
@@ -7931,6 +7954,9 @@ class My3DAnalyzer(EnhancementInteractionMixin, CropInteractionMixin, QWidget):
                 self.last_visual_page_id = self.left_workspace.home_page_id
 
         self._discard_unreferenced_roi_scopes()
+        manager = self.__dict__.get("source_manager")
+        if manager is not None:
+            manager.unregister_page(page_id)
 
     def closeEvent(self, event):
         self._clear_enhancement_interaction()

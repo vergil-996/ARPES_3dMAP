@@ -264,6 +264,9 @@ class DerivedPageController:
                 "context": self._context_from_result(source, input2d, validated),
                 "notified": False,
             }
+            remember = getattr(window, "_remember_derived_recipe", None)
+            if remember is not None:
+                remember(window.left_workspace.page_by_id(page_id), self._cache[str(page_id)]["context"])
         return page_id
 
     # ------------------------------------------------------------------
@@ -466,6 +469,9 @@ class DerivedPageController:
             "context": context,
             "notified": False,
         }
+        remember = getattr(self.window, "_remember_derived_recipe", None)
+        if remember is not None:
+            remember(spec, context)
         return context
 
     def _context_from_result(self, source, input2d, result) -> dict:
@@ -551,6 +557,8 @@ class DerivedPageController:
         spec = self._current_derived_spec(plugin_id)
         if spec is None:
             return False, "当前页不是该插件的派生结果页，已保留各页原有参数。"
+        if spec.params.get("_restored_result"):
+            return False, "此页为保存的结果快照；请从来源页新建派生结果后修改参数。"
         source = DerivedSource2D.from_mapping(spec.params.get(DERIVED_SOURCE_KEY))
         try:
             instance = self._instance(plugin_id)

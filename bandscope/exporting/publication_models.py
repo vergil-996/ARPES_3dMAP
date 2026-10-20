@@ -610,6 +610,8 @@ class PublicationSnapshot:
     source_desc: str = ""
     home_frame_index: Optional[int] = None
     source_revision: Tuple = ()
+    view_recipe: Optional[Dict[str, Any]] = None
+    recipe_error: str = ""
 
     def axis_label(self, axis_key: str) -> str:
         return axis_label(

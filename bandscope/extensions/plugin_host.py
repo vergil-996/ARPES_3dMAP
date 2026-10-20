@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import uuid
+import copy
 from typing import Dict, List, Mapping, Optional
 
 import numpy as np
@@ -443,12 +444,44 @@ class PluginSession:
             except Exception as exc:
                 self._failed[record.plugin_id] = f"参数恢复失败：{type(exc).__name__}: {exc}"
 
-    def reset_for_new_data(self) -> None:
-        """加载新的数据文件：清空与旧数据绑定的峰位，并作废进行中的分析。"""
-        # 先取消：正在跑的任务会在检查点退出，晚到的结果也会被数据代次核对丢弃。
-        self._analysis_runner.cancel_all()
-        # 派生结果按冻结来源重算，新数据下旧来源与缓存一律作废。
-        self._derived.clear_cache()
+    def export_panel_state(self) -> Dict[str, object]:
+        """导出各插件面板的当前参数（切源前调用，按数据源保存）。"""
+        payload: Dict[str, object] = {}
+        for record in self.manager.plugins():
+            if record.instance is None:
+                continue
+            try:
+                state = record.instance.export_state()
+            except Exception:
+                continue
+            if state:
+                payload[record.plugin_id] = state
+        return payload
+
+    def restore_panel_state(self, payload) -> None:
+        """恢复某个数据源的面板参数；没有记录的新源必须回到默认状态。
+
+        这里只动面板状态：已提交的分析任务继续执行，由分析网关按来源与处理
+        代次决定归属（切换数据源不等于取消分析）。
+        """
+        payload = payload or {}
+        for record in self.manager.plugins():
+            if record.instance is None:
+                continue
+            state = payload.get(record.plugin_id)
+            try:
+                if state:
+                    record.instance.restore_state(state)
+                else:
+                    # 缺少记录时不能沿用上一份数据的峰位等设置。
+                    record.instance.reset_for_new_data()
+            except Exception as exc:
+                self._failed[record.plugin_id] = (
+                    f"面板参数恢复失败：{type(exc).__name__}: {exc}"
+                )
+
+    def reset_panel_state(self) -> None:
+        """只重置插件面板参数，不取消已提交的分析、不作废派生缓存。"""
         for record in self.manager.plugins():
             if record.instance is None:
                 continue
@@ -456,6 +489,14 @@ class PluginSession:
                 record.instance.reset_for_new_data()
             except Exception:
                 pass
+
+    def reset_for_new_data(self) -> None:
+        """加载新的数据文件：清空与旧数据绑定的峰位，并作废进行中的分析。"""
+        # 先取消：正在跑的任务会在检查点退出，晚到的结果也会被数据代次核对丢弃。
+        self._analysis_runner.cancel_all()
+        # 派生结果按冻结来源重算，新数据下旧来源与缓存一律作废。
+        self._derived.clear_cache()
+        self.reset_panel_state()
 
     # ------------------------------------------------------------------
     # 能力 5：分析（API 2）
@@ -594,7 +635,7 @@ class PluginSession:
         _, y_unit = self._coordinate_meta(window, y_key)
         frame_index, frame_label = self._current_frame(window)
         slice_info = dict(context.get("slice_info") or {})
-        return AnalysisInput2D(
+        snapshot = AnalysisInput2D(
             plugin_id=str(plugin_id or ""),
             page_id=str(spec.page_id),
             page_title=str(spec.title),
@@ -621,6 +662,13 @@ class PluginSession:
                 "data_order": ANALYSIS_ARRAY_ORDER,
             },
         )
+        if getattr(window.__dict__.get("core"), "source_identity", None) is not None:
+            window._persist_active_page_state()
+            try:
+                snapshot.source["recipe_id"] = window._freeze_recipe_page(spec, verify_source=False)
+            except (ValueError, OSError) as exc:
+                raise AnalysisUnavailable(f"无法冻结原始数据来源：{exc}") from exc
+        return snapshot
 
     def submit_analysis(self, plugin_id, snapshot, work, *, title="", params=None):
         """提交一次后台分析；忙碌时提示用户并返回 None。"""
@@ -632,6 +680,7 @@ class PluginSession:
         )
         if handle is not None:
             self._snapshots[handle.task_id] = snapshot
+            self.__dict__.setdefault("_recipe_submissions", {})[handle.task_id] = copy.deepcopy(dict(params or {}))
         return handle
 
     def cancel_analysis(self, handle) -> None:
@@ -647,12 +696,14 @@ class PluginSession:
 
     def on_analysis_failed(self, handle, message) -> None:
         self._snapshots.pop(getattr(handle, "task_id", ""), None)
+        self.__dict__.get("_recipe_submissions", {}).pop(getattr(handle, "task_id", ""), None)
         self._failed[str(getattr(handle, "plugin_id", ""))] = f"分析失败：{message}"
         self.notify(f"分析任务失败：{message}", level="error")
         self._notify_plugin_task(handle, "failed", message)
 
     def on_analysis_cancelled(self, handle, reason) -> None:
         self._snapshots.pop(getattr(handle, "task_id", ""), None)
+        self.__dict__.get("_recipe_submissions", {}).pop(getattr(handle, "task_id", ""), None)
         self._notify_plugin_task(handle, "cancelled", reason)
 
     def _notify_plugin_task(self, handle, status: str, detail: str = "") -> None:
@@ -670,6 +721,7 @@ class PluginSession:
     def on_analysis_succeeded(self, handle, curve) -> None:
         """主线程收结果：校验 → 核对来源 → 建结果页（不切换当前页）。"""
         snapshot = self._snapshots.pop(getattr(handle, "task_id", ""), None)
+        submitted = self.__dict__.get("_recipe_submissions", {}).pop(getattr(handle, "task_id", ""), {})
         if snapshot is None:
             return
         try:
@@ -681,7 +733,17 @@ class PluginSession:
         if self._result_is_stale(snapshot):
             self._notify_plugin_task(handle, "cancelled", "数据已更新，结果已作废。")
             return
-        source_spec = window.left_workspace.page_by_id(snapshot.page_id)
+        manager = self._source_manager(window)
+        owner = manager.session_for_page(snapshot.page_id) if manager is not None else None
+        if manager is not None and owner is None:
+            # 来源页所属的数据源已关闭：结果没有归属，直接丢弃。
+            self._notify_plugin_task(handle, "cancelled", "来源页已关闭，结果已丢弃。")
+            return
+        if owner is not None and not manager.is_active(owner.session_id):
+            # 结果登记回提交时所属的工作区；用户正在看别的数据就不抢焦点。
+            source_spec = window._session_page_by_id(owner, snapshot.page_id)
+        else:
+            source_spec = window.left_workspace.page_by_id(snapshot.page_id)
         if source_spec is None:
             # 来源页已关闭：结果没有归属，直接丢弃。
             self._notify_plugin_task(handle, "cancelled", "来源页已关闭，结果已丢弃。")
@@ -700,9 +762,12 @@ class PluginSession:
                 "source_description": snapshot.describe(),
                 "scope_id": snapshot.scope_id,
                 "params": dict(validated.params),
+                "submitted_params": submitted,
+                "source_recipe_id": snapshot.source.get("recipe_id"),
             },
             # 展示与导出都走宿主既有的 1D 路径，直接存标准曲线快照。
             "base_curve": {
+                "recipe_id": snapshot.source.get("recipe_id"),
                 "curve_kind": "plugin_curve",
                 "title": title,
                 "source_title": source_spec.title,
@@ -732,14 +797,29 @@ class PluginSession:
             return ""
         return str(record.running_version or record.version or "")
 
+    @staticmethod
+    def _source_manager(window):
+        """主窗口的多数据源管理器；测试替身用 ``__new__`` 构造时只能查字典。"""
+        payload = getattr(window, "__dict__", None)
+        return payload.get("source_manager") if isinstance(payload, dict) else None
+
     def _result_is_stale(self, snapshot: AnalysisInput2D) -> bool:
         """完成回调再次核对数据代次：加载新数据后过期结果一律丢弃。
 
-        退出应用时不必在这里判断：``shutdown()`` 会先清掉所有快照，晚到的结果
-        找不到归属，自然被丢弃。
+        代次按**任务所属的数据源**核对：切源不会让仍在执行的分析作废，源被关闭
+        或该源又加载了新的处理结果才算过期。退出应用时不必在这里判断：
+        ``shutdown()`` 会先清掉所有快照，晚到的结果找不到归属，自然被丢弃。
         """
-        current = int(getattr(self.window, "shared_denoise_version", 0) or 0)
-        return current != int(snapshot.data_generation)
+        window = self.window
+        manager = self._source_manager(window)
+        if manager is None:
+            current = int(getattr(window, "shared_denoise_version", 0) or 0)
+            return current != int(snapshot.data_generation)
+        owner = manager.session_for_page(snapshot.page_id)
+        if owner is None:
+            return True
+        current = window._session_denoise_generation(owner)
+        return int(current or 0) != int(snapshot.data_generation)
 
     # ------------------------------------------------------------------
     # 能力 6：派生结果与插件设置（API 3）

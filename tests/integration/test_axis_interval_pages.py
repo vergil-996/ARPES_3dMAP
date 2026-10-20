@@ -80,6 +80,10 @@ class _AxisHarness:
                 time=np.linspace(0.0, 30.0, t_max + 1),
             )
             success, info = self.core.load_npz(str(path))
+            if success:
+                # 加载时会在后台线程计算文件摘要；临时目录必须等它读完再删，
+                # 否则 Windows 上 unlink 会因文件仍被打开而失败。
+                self.core.source_identity.future.result(timeout=30)
         assert success, f"合成数据加载失败: {info}"
 
         self.page_data = DataProcessPage()

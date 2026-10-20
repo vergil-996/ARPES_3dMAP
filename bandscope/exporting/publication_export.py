@@ -136,6 +136,9 @@ def capture_snapshot(window) -> PublicationSnapshot:
     if spec.page_kind == "control_panel":
         raise ExportError("配置页不是科学结果，不支持图片导出。")
 
+    prepare_recipe = getattr(window, "_prepare_recipe_capture", None)
+    if prepare_recipe is not None:
+        prepare_recipe()
     context = window._compute_render_context(spec)
     if context is None:
         raise ExportError("当前页没有可导出的完整结果。")
@@ -202,6 +205,12 @@ def capture_snapshot(window) -> PublicationSnapshot:
     else:
         raise ExportError(f"暂不支持导出的视图类型：{view}")
     _freeze_enhancement(window, snapshot, spec, context, render_context)
+    capture_recipe = getattr(window, "_capture_view_recipe", None)
+    if capture_recipe is not None:
+        try:
+            snapshot.view_recipe = capture_recipe(snapshot, context)
+        except Exception as exc:
+            snapshot.recipe_error = str(exc)
     return snapshot
 
 
@@ -292,9 +301,10 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
 
     # 扩展效果：与主视图共用同一份对齐逻辑，把已解析到体素的一维倍率冻结进
     # 快照。离屏渲染不再读实时控件，参数改动也不会让已捕获的图片跟着变。
-    opacity_multiplier = None
+    frozen_multiplier = getattr(window, "_recipe_frozen_multiplier", None)
+    opacity_multiplier = frozen_multiplier(render_context) if frozen_multiplier is not None else None
     session = window.__dict__.get("plugin_session")
-    if session is not None and session.manager.records:
+    if opacity_multiplier is None and session is not None and session.manager.records:
         try:
             context = session.build_context(window, render_context)
             opacity_multiplier = session.voxel_multiplier(context, render_context)
@@ -307,6 +317,9 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
     camera = _capture_camera(window)
     plotter = window.plotter
     viewport_aspect = max(plotter.width(), 1) / max(plotter.height(), 1)
+    restored_view = window.__dict__.get("_restored_recipe_views", {}).get(snapshot.source_page_id, {})
+    if restored_view.get("viewport_aspect"):
+        viewport_aspect = restored_view["viewport_aspect"]
     custom_3d = _custom_axis_titles(
         window, snapshot.source_page_id, "3d", render_context
     )

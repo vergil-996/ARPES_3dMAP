@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import io
 import copy
+import json
+from dataclasses import replace
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
@@ -31,6 +34,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -78,6 +82,8 @@ from bandscope.exporting.curve_presentation import (
     load_presentation, save_presentation,
 )
 from bandscope.exporting.curve_style_editor import CurveStyleEditor
+from bandscope.core.view_recipe import RecipeError, sidecar_path
+from bandscope.exporting.recipe_export import export_pair
 
 CARD_DPI = 80          # 卡片预览 dpi（完整数据、较低像素）
 LARGE_DPI = 150        # 大图预览 dpi（与正式文件同一排版）
@@ -676,6 +682,12 @@ class PublicationExportDialog(QDialog):
         self.btn_export.clicked.connect(self._on_export)
         self.btn_cancel.clicked.connect(self.reject)
         footer.addWidget(self.btn_update)
+        self.chk_view_recipe = QCheckBox("同时保存复现文件")
+        self.chk_view_recipe.setToolTip("保存原始 NPZ 路径、有效处理链、显示参数与出版设置，可再次加载。")
+        self.chk_view_recipe.setChecked(self.main_window.__dict__.get("_save_view_recipe", True))
+        self.chk_view_recipe.toggled.connect(
+            lambda enabled: self.main_window.__dict__.__setitem__("_save_view_recipe", bool(enabled)))
+        footer.addWidget(self.chk_view_recipe)
         footer.addStretch(1)
         footer.addWidget(self.btn_export)
         footer.addWidget(self.btn_cancel)
@@ -782,6 +794,8 @@ class PublicationExportDialog(QDialog):
         }
         self._draft_style_id = style.style_id
         self._draft_overrides = dict(self._committed_overrides.get(style.style_id, {}))
+        restored = self.main_window.__dict__.get("_restored_publication", {}).get(snapshot.source_page_id, {})
+        self._restored_style_params = {}
         if family == "1d":
             remembered = publication_session(self.main_window).pages.get(snapshot.source_page_id)
             if remembered is not None:
@@ -795,6 +809,14 @@ class PublicationExportDialog(QDialog):
             self.curve_editor.set_snapshot(snapshot, self.presentation, self._current_style())
             if self.width() < 1120:
                 self.resize(1120, 820)
+        if restored:
+            self._draft_style_id = restored["style_id"]
+            self._draft_overrides = copy.deepcopy(restored["overrides"])
+            self._restored_style_params = {restored["style_id"]: copy.deepcopy(restored["style_params"])}
+            if family == "1d":
+                self.presentation = Figure1DPresentation.from_dict(restored.get("presentation"))
+                self._page_style_drafts[self._draft_style_id] = copy.deepcopy(self._draft_overrides)
+                self.curve_editor.set_snapshot(snapshot, self.presentation, self._current_style())
         self.curve_editor.setVisible(family == "1d")
         self.curve_editor.show_common(family == "1d")
         self.tune_toggle.setVisible(family != "1d")
@@ -1071,7 +1093,9 @@ class PublicationExportDialog(QDialog):
     def _current_style(self):
         from bandscope.exporting.publication_models import resolve_style
 
-        return resolve_style(self.snapshot.view_family, self._draft_style_id)
+        style = resolve_style(self.snapshot.view_family, self._draft_style_id)
+        params = self.__dict__.get("_restored_style_params", {}).get(style.style_id)
+        return replace(style, params=params) if params is not None else style
 
     def _compute_cbar_default_center(self, overrides):
         """按当前样式与输出尺寸计算色带默认中心（画布 %）；无色带返回 None。"""
@@ -1303,6 +1327,9 @@ class PublicationExportDialog(QDialog):
 
     def _load_output_options_ui(self):
         options = output_options_for(self.main_window.settings, self.snapshot.view_family)
+        restored = self.main_window.__dict__.get("_restored_publication", {}).get(self.snapshot.source_page_id, {})
+        if restored.get("output"):
+            options = OutputOptions.from_json(json.dumps(restored["output"]))
         widgets = [
             self.combo_width, self.spin_width, self.spin_height,
             self.combo_dpi, self.spin_dpi, self.combo_format,
@@ -1646,6 +1673,12 @@ class PublicationExportDialog(QDialog):
         if not path:
             return  # 取消路径选择：保留草稿，不提交偏好
         path = self.main_window._sanitize_save_path(path, selected)
+        save_recipe = self.chk_view_recipe.isChecked()
+        if save_recipe and Path(sidecar_path(path)).exists():
+            answer = QMessageBox.question(self, "替换复现文件", "同名复现文件已存在，将与图片一起替换，是否继续？",
+                                          QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if answer != QMessageBox.Yes:
+                return
 
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         self.btn_export.setEnabled(False)
@@ -1653,8 +1686,12 @@ class PublicationExportDialog(QDialog):
         QApplication.processEvents()
         try:
             kwargs = {"presentation": self.presentation.clone()} if self.snapshot.view_family == "1d" else {}
-            render_and_save(self.snapshot, style, self._draft_overrides, options, path, **kwargs)
-        except (ExportError, RenderError, OSError, ValueError) as exc:
+            if save_recipe:
+                export_pair(self.snapshot, style, self._draft_overrides, options, path,
+                            render=render_and_save, **kwargs)
+            else:
+                render_and_save(self.snapshot, style, self._draft_overrides, options, path, **kwargs)
+        except (ExportError, RenderError, OSError, ValueError, RecipeError) as exc:
             self.status_label.setText(f"导出失败：{exc}")
             self.main_window._show_message("导出失败", str(exc))
             return  # 不提交草稿，不提示成功
@@ -1682,7 +1719,7 @@ class PublicationExportDialog(QDialog):
         self.cards[style.style_id].set_tuned(bool(self._draft_overrides))
         persist_output_options(self.main_window.settings, options)
         self.main_window._update_screenshot_tooltip()
-        self.status_label.setText(f"已导出：{path}")
+        self.status_label.setText(f"已导出图片和复现文件：{path}" if save_recipe else f"已导出：{path}")
         self.main_window._toast_success("图片已导出", path)
 
     # ------------------------------------------------------------- 关闭

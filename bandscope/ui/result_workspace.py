@@ -162,8 +162,11 @@ class AnalysisPageSpec:
 
 
 class ResultWorkspace(QWidget):
+    page_added = pyqtSignal(str)
     page_activated = pyqtSignal(str)
     page_closed = pyqtSignal(str)
+    #: 删除左侧根页面 = 关闭整份数据源；由宿主接管，不做逐页删除。
+    source_close_requested = pyqtSignal(str)
     #: 页面标题等展示信息更新后发出（改名、改名撤销、自动命名刷新）。
     page_updated = pyqtSignal(str)
     #: 用户要求改名 / 恢复自动名称；应用层负责弹窗、去重与落地。
@@ -333,7 +336,7 @@ class ResultWorkspace(QWidget):
         self.content_layout.addWidget(widget)
 
     def set_home_page(self, spec: AnalysisPageSpec):
-        spec.closeable = False
+        # 主页是否可删除由调用方决定：多数据源下删除根页面等于关闭整份数据源。
         self.home_page_id = spec.page_id
         self._add_page(spec)
         self.activate_page(spec.page_id)
@@ -384,9 +387,116 @@ class ResultWorkspace(QWidget):
         self._add_to_tab_order(spec.page_id)
         self._rebuild_title_index()
         self._refresh_navigation_layout()
+        self.page_added.emit(spec.page_id)
         if reveal and spec.page_id != self.home_page_id:
             # 新页面自动展开祖先并定位；被搜索隐藏时先清空搜索。
             self.page_tree.reveal_page(spec.page_id)
+
+    def replace_pages(self, pages, home_page_id, target_page_id):
+        """Install a validated tree without activation callbacks or global preferences."""
+        blocked = self.blockSignals(True)
+        try:
+            self.page_specs = {p.page_id: p for p in pages}
+            self.home_page_id = home_page_id
+            self._tab_order = [p.page_id for p in pages if p.page_id != home_page_id]
+            self.activation_history = []
+            self._rebuild_title_index()
+            self.page_tree.clear_search()
+            self.activate_page(target_page_id)
+            self.page_tree.reveal_page(target_page_id)
+        finally:
+            self.blockSignals(blocked)
+
+    # ------------------------------------------------------------------
+    # 多数据源：整份工作区换入换出
+    # ------------------------------------------------------------------
+    def export_source_state(self) -> dict:
+        """捕获当前数据源的页面树与导航状态。
+
+        页面对象按引用交出：它们只属于这份数据源，不做深拷贝（内存保留）。
+        """
+        return {
+            "pages": list(self.page_specs.values()),
+            "order": list(self._tab_order),
+            "home": self.home_page_id,
+            "current": self.current_page_id,
+            "activation_seq": int(self.activation_counter),
+            "history": list(self.activation_history),
+            "navigation": self.page_tree.export_navigation_state(),
+        }
+
+    def install_source_state(self, state) -> Optional[AnalysisPageSpec]:
+        """安装另一份数据源的页面树；不发出激活回调，由宿主统一激活一次。"""
+        state = state or {}
+        pages = [page for page in state.get("pages") or ()]
+        self.page_specs = {page.page_id: page for page in pages}
+        self.home_page_id = state.get("home") if state.get("home") in self.page_specs else None
+        self._tab_order = [
+            page_id
+            for page_id in state.get("order") or ()
+            if page_id in self.page_specs and page_id != self.home_page_id
+        ]
+        self.activation_history = [
+            page_id
+            for page_id in state.get("history") or ()
+            if page_id in self.page_specs
+        ]
+        self.activation_counter = max(
+            int(state.get("activation_seq") or 0),
+            max((int(page.activation_seq) for page in pages), default=0),
+        )
+        target_id = state.get("current")
+        if target_id not in self.page_specs:
+            target_id = self.home_page_id
+        self.current_page_id = target_id if target_id in self.page_specs else None
+        self._rebuild_title_index()
+        self._refresh_navigation_layout()
+        self.page_tree.restore_navigation_state(state.get("navigation") or {})
+        if self.current_page_id is not None:
+            self.page_tree.set_current_page(self.current_page_id)
+        self._refresh_header()
+        return self.current_spec()
+
+    def detach_source_state(self) -> dict:
+        """把页面树整体摘下并返回其状态；不发 ``page_closed``。
+
+        切源 / 新增源用它：旧页面没有删除，只是暂时不显示。
+        """
+        state = self.export_source_state()
+        self.page_specs = {}
+        self.home_page_id = None
+        self.current_page_id = None
+        self._tab_order = []
+        self.activation_history = []
+        self.activation_counter = 0
+        self._rebuild_title_index()
+        self._rebuild_children_map()
+        self.page_tree.clear_search()
+        self._refresh_navigation_layout()
+        self.page_tree.set_current_page(None)
+        self._refresh_header()
+        return state
+
+    def detach_all_pages(self) -> List[str]:
+        """源级关闭：先摘记录再逐页通知，避免逐页删除期间误激活其他页面。
+
+        返回被摘除的页面（先子后父），调用方据此清理全局引用。
+        """
+        removed = self._order_for_removal(list(self.page_specs))
+        self.page_specs = {}
+        self.home_page_id = None
+        self.current_page_id = None
+        self._tab_order = []
+        self.activation_history = []
+        self.activation_counter = 0
+        self._rebuild_title_index()
+        self._rebuild_children_map()
+        for page_id in removed:
+            self.page_closed.emit(page_id)
+        self._refresh_navigation_layout()
+        self.page_tree.set_current_page(None)
+        self._refresh_header()
+        return removed
 
     def _rebuild_title_index(self):
         self.title_to_page_id = {}
@@ -576,6 +686,10 @@ class ResultWorkspace(QWidget):
         self.page_title.setToolTip(f"{title}（双击重命名）" if renameable else title)
         self.page_title.set_rename_state(renameable, bool(spec.title_overridden))
         scope = str(spec.params.get("data_scope_label") or "")
+        if spec.params.get("_restored_result") or spec.params.get("_restored_snapshot"):
+            scope += " · 已保存结果（无法重新计算）"
+        elif spec.params.get("_restored_effect"):
+            scope += " · 插件效果快照"
         self.scope_label.setText(scope)
         self.scope_label.setVisible(bool(scope))
         self.close_button.setVisible(spec.closeable)
@@ -691,8 +805,17 @@ class ResultWorkspace(QWidget):
         return self.delete_pages([page_id])
 
     def delete_pages(self, page_ids: Sequence[str]) -> bool:
-        """直接删除选中分支，跳过受保护分支；重复后代只清理一次。"""
+        """直接删除选中分支，跳过受保护分支；重复后代只清理一次。
+
+        根页面（主页）可删除时，删除它等于关闭整份数据源：不在这里逐页删除，
+        改由宿主走源级关闭事务。
+        """
         selected = set(page_ids)
+        home = self.page_specs.get(self.home_page_id) if self.home_page_id else None
+        if self.home_page_id in selected and home is not None and home.closeable:
+            self.source_close_requested.emit(self.home_page_id)
+            return True
+
         removed = set()
         for page_id in self._ordered_page_ids():
             if page_id not in selected:

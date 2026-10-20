@@ -1,5 +1,6 @@
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal
+from bandscope.core.view_recipe import SourceIdentity
 
 from bandscope.core.axis_mapping import (
     NPZ_COORD_CANDIDATES,
@@ -36,10 +37,27 @@ class AnalyzerCore(QObject):
         # coord_units[axis] = 显式单位元数据（如 'eV'、'Å⁻¹'），没有则为 None。
         self.coord_sources = {}
         self.coord_units = {}
+        self.source_identity = None
+        self.source_layout = {}
 
-    def load_npz(self, path):
+    def load_npz(self, path, *, layout=None):
+        """Prepare independently; failed loads never corrupt the active dataset."""
+        candidate = AnalyzerCore()
         try:
-            data = np.load(path)
+            candidate.source_identity = SourceIdentity(path)
+        except OSError as exc:
+            return False, str(exc)
+        success, info = candidate._read_npz(path, layout=layout)
+        if success:
+            for name in ("raw_data", "coords", "has_time_axis", "coord_sources", "coord_units",
+                         "source_identity", "source_layout"):
+                setattr(self, name, getattr(candidate, name))
+        return success, info
+
+    def _read_npz(self, path, *, layout=None):
+        data = None
+        try:
+            data = np.load(path, allow_pickle=False)
 
             def safe_get_array(key):
                 try:
@@ -52,6 +70,8 @@ class AnalyzerCore(QObject):
                 role: find_first_key(data, candidates)
                 for role, candidates in search_map.items()
             }
+            if layout is not None:
+                coord_keys = dict(layout["coord_keys"])
             coord_lengths = {}
             for role, key in coord_keys.items():
                 values = safe_get_array(key) if key is not None else None
@@ -77,8 +97,13 @@ class AnalyzerCore(QObject):
             if main_key is None:
                 return False, "文件内未找到 3 维或 4 维数据矩阵"
 
+            if layout is not None:
+                main_key = layout["array_key"]
             raw = data[main_key]
+            main_ndim = raw.ndim
             sh = list(raw.shape)
+            if layout is not None and sh != layout["original_shape"]:
+                raise ValueError("NPZ 数组形状与复现记录不同。")
             has_time_coord_axis = coord_lengths.get("T") in sh
             role_order = role_order_for_shape(sh, main_ndim == 4 or has_time_coord_axis)
 
@@ -91,6 +116,9 @@ class AnalyzerCore(QObject):
                 or legacy_hdf5_axis_roles(sh, coord_lengths, role_order)
                 or infer_axis_roles(sh, coord_lengths, role_order)
             )
+            if layout is not None:
+                role_order = list(layout["role_order"])
+                roles = dict(layout["axis_roles"])
             self.has_time_axis = 'T' in role_order
 
             # 3. 重排与内存优化
@@ -155,6 +183,18 @@ class AnalyzerCore(QObject):
                 self.coords['delay'] = np.array([0.0], dtype=np.float32)
                 self.coord_sources['delay'] = 'index'
 
+            self.source_layout = {
+                "array_key": main_key, "original_shape": sh, "axis_roles": roles,
+                "role_order": list(role_order), "coord_keys": coord_keys,
+                "canonical_shape": list(self.raw_data.shape),
+                "coord_sources": dict(self.coord_sources), "coord_units": dict(self.coord_units),
+            }
+            if layout is not None and self.source_layout != layout:
+                raise ValueError("NPZ 坐标或轴解析结果与复现记录不同。")
+            if self.source_identity is not None:
+                from bandscope.core.view_recipe import file_stamp
+                if file_stamp(path) != self.source_identity.stamp:
+                    raise ValueError("NPZ 在加载过程中发生变化。")
             return True, self.raw_data.shape
 
         except Exception as e:
@@ -162,6 +202,9 @@ class AnalyzerCore(QObject):
             traceback.print_exc()
             print(f"智能加载失败: {e}")
             return False, str(e)
+        finally:
+            if data is not None:
+                data.close()
 
     def _resolve_axis_key(self, axis_ref):
         if isinstance(axis_ref, int):

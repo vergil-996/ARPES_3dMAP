@@ -167,6 +167,9 @@ class CurveStyleUiTests(unittest.TestCase):
         self.assertEqual(self.dialog.edit_title.text(), "changed")
 
     def test_cancelled_or_failed_export_does_not_commit_general_style(self):
+        # This isolated style fixture has no NPZ origin; exercise picture-only
+        # rendering here. Recipe pairs have their own real-source tests.
+        self.dialog.chk_view_recipe.setChecked(False)
         self.editor.fields["figure", "title_size"][0].setValue(12)
         self.dialog._big_ready = True
         with patch("bandscope.exporting.publication_dialog.QFileDialog.getSaveFileName", return_value=("", "")):
@@ -178,6 +181,7 @@ class CurveStyleUiTests(unittest.TestCase):
         self.assertEqual(load_presentation(self.window.settings, "1d_open").figure, {})
 
     def test_successful_export_commits_only_general_style(self):
+        self.dialog.chk_view_recipe.setChecked(False)
         self.editor.fields["figure", "title_size"][0].setValue(12)
         self.editor.fields["curve", "label"][0].setText("scientific label")
         self.editor.fields["curve", "label"][0].editingFinished.emit()

@@ -23,7 +23,7 @@ python -m compileall -q bandscope plugins scripts tests start.py
 
 测试全部纳入 Git；默认 Qt 离屏运行、临时扩展目录和临时 INI 设置，不依赖 `.local/data/`。时间控件测试在临时目录生成含非均匀时间坐标的 NPZ。共享导出快照构造器位于 `tests/support/publication.py`。
 
-测试需要 NumPy、Qt、VTK 等运行依赖，但不要求 CUDA。Windows 沙箱如果导致 `TemporaryDirectory` 新建后不可读写，应在具备正常临时目录权限的环境复核，并保留错误日志；不要通过删除断言绕过。
+测试需要 NumPy、Qt、VTK 等运行依赖，但不要求 CUDA。加载 NPZ 时会在后台线程计算文件摘要，Windows 上紧接着删除临时目录可能因文件仍被打开而报 WinError 32；`tests/__init__.py` 对**清理动作**做 5 秒有界重试，断言本身不变。Windows 沙箱如果导致 `TemporaryDirectory` 新建后不可读写，应在具备正常临时目录权限的环境复核，并保留错误日志；不要通过删除断言绕过。
 
 ## 视觉与真实数据验证
 
@@ -37,6 +37,8 @@ python scripts/validation/verify_camera_view_panel.py .local/data/NiHITP_calibra
 python scripts/validation/verify_time_axis_visibility.py .local/data/scan07_dynamic.npz .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_flat_band_alpha.py --bands 5
+python scripts/validation/verify_view_recipe.py
+python scripts/validation/verify_multi_source_workspaces.py
 python scripts/validation/verify_plugin_management.py
 python scripts/validation/verify_plugin_release_flow.py
 python scripts/validation/verify_derived_waterfall.py .local/data/<数据>.npz

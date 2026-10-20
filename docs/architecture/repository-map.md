@@ -4,11 +4,11 @@
 
 | 位置 | 职责与现有模块 |
 |---|---|
-| `bandscope/app/` | `startup` 启动；`refactored_app` 主窗口与总协调；`crop_integration` 裁剪接入；`qt_bootstrap` Qt 配置 |
-| `bandscope/core/` | `analyzer_core` 数据加载；`axis_mapping` 坐标映射；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型 |
+| `bandscope/app/` | `startup` 启动；`refactored_app` 主窗口与总协调；`source_workspace` 多数据源会话的换入换出与新增 / 切换 / 关闭事务；`view_recipe_integration` 复现文件预检与恢复；`crop_integration` 裁剪接入；`qt_bootstrap` Qt 配置 |
+| `bandscope/core/` | `analyzer_core` 数据加载；`source_session` 数据源会话与页面归属；`axis_mapping` 坐标映射；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型 |
 | `bandscope/processing/` | `compute_backends` 计算后端；`denoise_config` 参数；`denoise_engines` 去噪算法 |
 | `bandscope/rendering/` | `render_core` 显示及体渲染；`refresh_pipeline` 刷新、任务和缓存失效协调 |
-| `bandscope/ui/` | 控制页面、相机与裁剪控件、时间轴、结果工作区、主题、弹层与提示 |
+| `bandscope/ui/` | 控制页面、相机与裁剪控件、时间轴、数据源切换器、结果工作区、主题、弹层与提示 |
 | `bandscope/exporting/` | `publication_models` 数据契约；`publication_export` 快照；`publication_renderers` 出图；`publication_dialog` 导出交互 |
 | `bandscope/extensions/` | `api` 插件协议；`ui` 公共界面组件；`plugin_manager` 安装加载；`plugin_host` 宿主接入；`derived_host` 派生结果协调；`plugin_dialog` 管理界面 |
 | `bandscope/updates/` | `update_service` 网络及安装包校验；`update_controller` 更新交互；`update_settings_dialog` 更新源与账号设置草稿；`sources` 更新源抽象；`matelab_source` MatElab 更新源 |

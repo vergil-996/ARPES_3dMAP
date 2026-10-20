@@ -111,6 +111,22 @@ class AxisTitleState:
         self._texts.clear()
         self._positions.clear()
 
+    def export_records(self, page_ids=None):
+        keys = set(self._texts) | set(self._positions)
+        return [{"page_id": key[0], "view": key[1], "axes": list(key[2]),
+                 "texts": dict(self._texts.get(key, {})),
+                 "positions": dict(self._positions.get(key, {}))}
+                for key in sorted(keys) if page_ids is None or key[0] in page_ids]
+
+    def restore_records(self, records):
+        self.clear()
+        for record in records:
+            key = axis_title_key(record["page_id"], record["view"], record["axes"])
+            for axis, text in record.get("texts", {}).items():
+                self.set_text(key, axis, text)
+            for axis, position in record.get("positions", {}).items():
+                self.set_position(key, axis, position)
+
     @staticmethod
     def _drop(store, key, axis) -> bool:
         bucket = store.get(key)

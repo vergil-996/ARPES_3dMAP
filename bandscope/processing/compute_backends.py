@@ -71,15 +71,24 @@ class ArrayLRUCache:
                 return value
             self._items[key] = value
             self.current_bytes += int(value.nbytes)
-            while self.current_bytes > self.max_bytes and self._items:
-                _, removed = self._items.popitem(last=False)
-                self.current_bytes -= int(removed.nbytes)
+            self._trim()
         return value
 
     def clear(self):
         with self._lock:
             self._items.clear()
             self.current_bytes = 0
+
+    def set_budget(self, max_bytes):
+        """调整预算并立即裁掉超出部分（多数据源共用一份全应用预算）。"""
+        with self._lock:
+            self.max_bytes = max(1, int(max_bytes))
+            self._trim()
+
+    def _trim(self):
+        while self.current_bytes > self.max_bytes and self._items:
+            _, removed = self._items.popitem(last=False)
+            self.current_bytes -= int(removed.nbytes)
 
     def __len__(self):
         with self._lock:
