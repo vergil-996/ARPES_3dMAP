@@ -690,8 +690,8 @@ def _colorbar_bounds(fig, ax):
         if tight is None:
             return None
         box = tight.transformed(fig.transFigure.inverted())
-        # 1pt 留白吸收不同输出 DPI 的字形栅格取整；矩形自身仍按物理坐标定位。
-        px, py = (1. / (72. * length) for length in fig.get_size_inches())
+        # 2pt 留白吸收不同输出 DPI 的字形栅格取整；矩形自身仍按物理坐标定位。
+        px, py = (2. / (72. * length) for length in fig.get_size_inches())
         return (float(box.x0) - px, float(box.y0) - py,
                 float(box.x1) + px, float(box.y1) + py)
 
