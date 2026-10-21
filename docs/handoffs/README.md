@@ -8,9 +8,9 @@
 
 | 事项与适用范围 | 需要继续确认的内容 | 状态主记录 |
 | --- | --- | --- |
-| 截图方向标与色条拖动（v1.17.1 已发布 GitHub） | 人工交互及发行包验收；大数据体与原坐标轴同开时的布局边界验证见主记录 | [截图方向标与色条拖动](screenshot-orientation.md) |
+| 截图方向标与色条拖动（v1.17.2 已发布 GitHub 与 MatElab） | 人工交互及发行包验收；大数据体与原坐标轴同开时的布局边界验证见主记录 | [截图方向标与色条拖动](screenshot-orientation.md) |
 | 视图复现文件（当前源码） | 原生文件对话框、重新定位及维护者交互验收；实现与自动化/真实数据检查见主记录 | [视图复现文件](../plans/view-reproducibility.md) |
-| E 轴翻转（2026-10-21 改为显示镜像；v1.17.1 已发布 GitHub） | 维护者人工确认各视图翻转观感与出版图；冻结包验收；MatElab 待发布 | [E 翻转验收](e-axis-consistency-acceptance.md) |
+| E 轴翻转（2026-10-21 改为显示镜像；v1.17.1 已发布 GitHub 与 MatElab） | 维护者人工确认各视图翻转观感与出版图；冻结包验收 | [E 翻转验收](e-axis-consistency-acceptance.md) |
 | 发行与插件安装（v1.13.0 主记录；v1.14.5 已于 2026-10-19 发布 GitHub 与 MatElab） | CPU/NVIDIA 冻结包、安装器端到端、官方目录在线安装；线上状态在接续发布时核验 | [v1.13.0 发布](v1.13.0-release.md) |
 | 插件管理（v1.12.2 起，按当前源码复核） | C–F 真实窗口交互、旧未签名插件转官方来源的人工复核 | [插件管理实施记录](../plans/plugin-management-entry.md) |
 | EDC 瀑布图插件（v1.13.0 / API 3） | 瀑布样例逐张人工视觉复核 | [EDC 迁移交接](edc-waterfall-migration-2026-10-12.md) |
