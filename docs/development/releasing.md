@@ -5,7 +5,7 @@
 ## 发布前检查
 
 ```powershell
-python scripts/release/check_release_version.py v1.17.0
+python scripts/release/check_release_version.py v1.17.1
 python -m unittest discover -s tests -t . -v
 python scripts/validation/verify_plugin_release_flow.py
 python scripts/release/build_plugin.py flat_band_opacity --output-dir release
@@ -37,7 +37,7 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 ```powershell
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm packaging/pyinstaller/ARPES_3dMAP.spec
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.17.0 /DBuildFlavor=CPU packaging\windows\BandScope.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=1.17.1 /DBuildFlavor=CPU packaging\windows\BandScope.iss
 ```
 
 NVIDIA 环境安装 `requirements-gpu-cu13.txt`，使用 `packaging/pyinstaller/ARPES_3dMAP_gpu.spec` 和 `/DBuildFlavor=NVIDIA`。CPU 与 NVIDIA 依赖建议使用独立虚拟环境。
@@ -100,9 +100,9 @@ GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维�
 发布命令：
 
 ```powershell
-python scripts/release/publish_matelab.py --version 1.17.0 `
-    --installer CPU=release/BandScope-1.17.0-Windows-x64-CPU-Setup.exe `
-    --installer NVIDIA=release/BandScope-1.17.0-Windows-x64-NVIDIA-Setup.exe `
+python scripts/release/publish_matelab.py --version 1.17.1 `
+    --installer CPU=release/BandScope-1.17.1-Windows-x64-CPU-Setup.exe `
+    --installer NVIDIA=release/BandScope-1.17.1-Windows-x64-NVIDIA-Setup.exe `
     --notes release-notes.txt
 ```
 
