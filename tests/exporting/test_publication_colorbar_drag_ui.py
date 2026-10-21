@@ -1,11 +1,13 @@
 """Colorbar drag layers reach both worker previews and the style draft."""
 import unittest
 
+import numpy as np
 from PyQt5.QtWidgets import QApplication, QWidget
 
 from bandscope.exporting.publication_dialog import (
-    LARGE_DPI, PublicationExportDialog, _PreviewTask,
+    LARGE_DPI, PublicationExportDialog, _PreviewTask, _draggable_preview_layers,
 )
+from bandscope.exporting.publication_renderers import render_snapshot
 from tests.support.publication import MemoryPublicationSettings, _make_2d_snapshot
 
 
@@ -102,6 +104,34 @@ class ColorbarDragControlTests(unittest.TestCase):
         self.assertEqual(self.dialog._draft_overrides, expected)
         self.dialog._sync_tune_ui_from_draft()
         self.assertEqual(self.dialog._collect_overrides_from_ui(), expected)
+
+    def test_colorbar_layers_preserve_mirrored_energy_mapping(self):
+        snapshot = self.dialog.snapshot
+        # Match the display-only mirror produced by the publication snapshot:
+        # reverse pixels and display extent together, leaving coordinates intact.
+        snapshot.payload["image"] = snapshot.payload["image"][::-1].copy()
+        extent = list(snapshot.payload["extent"])
+        extent[2], extent[3] = extent[3], extent[2]
+        snapshot.payload["extent"] = extent
+        coordinates = snapshot.coords["E"].copy()
+        pixels = snapshot.payload["image"].copy()
+        options = self.dialog._collect_output_options().with_updates(dpi=LARGE_DPI)
+        for overrides in ({}, {"colorbar_cx": 62.35, "colorbar_cy": 45.25}):
+            with self.subTest(overrides=overrides):
+                figure = render_snapshot(snapshot, self.dialog._current_style(), overrides, options)
+                try:
+                    axes = figure.axes[0]
+                    limits = axes.get_ylim()
+                    self.assertGreater(limits[0], limits[1])
+                    drawn_pixels = np.asarray(axes.images[0].get_array()).copy()
+                    layers = _draggable_preview_layers(figure, options)
+                    self.assertIn("colorbar", layers)
+                    self.assertEqual(axes.get_ylim(), limits)
+                    np.testing.assert_array_equal(axes.images[0].get_array(), drawn_pixels)
+                    np.testing.assert_array_equal(snapshot.payload["image"], pixels)
+                    np.testing.assert_array_equal(snapshot.coords["E"], coordinates)
+                finally:
+                    figure.clear()
 
 
 if __name__ == "__main__":

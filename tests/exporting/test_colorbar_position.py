@@ -127,6 +127,32 @@ class ColorbarPositionTests(unittest.TestCase):
     def test_hidden_colorbar_has_no_drag_geometry(self):
         self.assertIsNone(colorbar_preview_geometry(self._render({"colorbar_visible": False})))
 
+    def test_default_physical_layout_matches_preview_and_export_dpi(self):
+        positions = []
+        for dpi in (80, 150, 180, 600):
+            figure = self._render({"colorbar_position": "bottom", "colorbar_length": 60}, dpi=dpi)
+            rect, _bounds = colorbar_preview_geometry(figure)
+            self.assertEqual(figure.get_dpi(), dpi)
+            positions.append((figure.axes[0].get_position(original=True).bounds, rect))
+        for main, bar in positions[1:]:
+            np.testing.assert_allclose(main, positions[0][0], atol=1e-10)
+            np.testing.assert_allclose(bar, positions[0][1], atol=1e-10)
+
+    def test_complete_annotation_boundary_clamp_matches_across_dpi(self):
+        positions = []
+        for dpi in (80, 150, 180, 600):
+            figure = self._render({
+                "colorbar_position": "bottom", "colorbar_length": 60,
+                "colorbar_cx": 0., "colorbar_cy": 0.,
+            }, dpi=dpi)
+            rect, bounds = colorbar_preview_geometry(figure)
+            self.assertEqual(figure.get_dpi(), dpi)
+            self._assert_complete_colorbar_inside(figure)
+            positions.append((rect, bounds))
+        for rect, bounds in positions[1:]:
+            np.testing.assert_allclose(rect, positions[0][0], atol=1e-10)
+            np.testing.assert_allclose(bounds, positions[0][1], atol=1e-10)
+
     def test_3d_layout_overlay_moves_without_changing_image_position(self):
         style = resolve_style("3d", "3d_minimal")
         positions = []

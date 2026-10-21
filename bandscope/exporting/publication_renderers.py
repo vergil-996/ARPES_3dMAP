@@ -19,6 +19,7 @@ import math
 import os
 import threading
 import time
+from contextlib import contextmanager
 from itertools import permutations
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -47,6 +48,7 @@ from bandscope.exporting.publication_models import (
 RENDER_LOCK = threading.RLock()
 
 MM_PER_INCH = 25.4
+LAYOUT_DPI = 150  # 排版按固定物理字形度量，输出 DPI 只决定栅格分辨率。
 
 
 def _font_style_params(style, overrides):
@@ -311,32 +313,43 @@ def _annotation_artists(ax):
     return artists
 
 
+@contextmanager
+def _layout_renderer(fig):
+    original_dpi = fig.get_dpi()
+    try:
+        if original_dpi != LAYOUT_DPI:
+            fig.set_dpi(LAYOUT_DPI)
+        fig.canvas.draw()
+        yield fig.canvas.get_renderer()
+    finally:
+        if original_dpi != LAYOUT_DPI:
+            fig.set_dpi(original_dpi)
+
+
 def _measure_overflow(fig, axes_list) -> Dict[str, float]:
     """测量注释艺术家超出当前坐标框的部分（figure 分数坐标）。"""
-    canvas = fig.canvas
-    canvas.draw()
-    renderer = canvas.get_renderer()
     overflow = {"left": 0.0, "right": 0.0, "bottom": 0.0, "top": 0.0}
-    for ax in axes_list:
-        bbox = ax.get_position()
-        for artist in _annotation_artists(ax):
-            if artist is None or not artist.get_visible():
-                continue
-            try:
-                extent = artist.get_window_extent(renderer)
-            except (RuntimeError, ValueError):
-                continue
-            if extent.width <= 0 or extent.height <= 0:
-                continue
-            corners = fig.transFigure.inverted().transform(
-                [(extent.x0, extent.y0), (extent.x1, extent.y1)]
-            )
-            x0, y0 = corners[0]
-            x1, y1 = corners[1]
-            overflow["left"] = max(overflow["left"], bbox.x0 - x0)
-            overflow["right"] = max(overflow["right"], x1 - bbox.x1)
-            overflow["bottom"] = max(overflow["bottom"], bbox.y0 - y0)
-            overflow["top"] = max(overflow["top"], y1 - bbox.y1)
+    with _layout_renderer(fig) as renderer:
+        for ax in axes_list:
+            bbox = ax.get_position()
+            for artist in _annotation_artists(ax):
+                if artist is None or not artist.get_visible():
+                    continue
+                try:
+                    extent = artist.get_window_extent(renderer)
+                except (RuntimeError, ValueError):
+                    continue
+                if extent.width <= 0 or extent.height <= 0:
+                    continue
+                corners = fig.transFigure.inverted().transform(
+                    [(extent.x0, extent.y0), (extent.x1, extent.y1)]
+                )
+                x0, y0 = corners[0]
+                x1, y1 = corners[1]
+                overflow["left"] = max(overflow["left"], bbox.x0 - x0)
+                overflow["right"] = max(overflow["right"], x1 - bbox.x1)
+                overflow["bottom"] = max(overflow["bottom"], bbox.y0 - y0)
+                overflow["top"] = max(overflow["top"], y1 - bbox.y1)
     return overflow
 
 
@@ -671,19 +684,29 @@ def _draw_colorbar(
     return colorbar
 
 
+def _colorbar_bounds(fig, ax):
+    with _layout_renderer(fig) as renderer:
+        tight = ax.get_tightbbox(renderer)
+        if tight is None:
+            return None
+        box = tight.transformed(fig.transFigure.inverted())
+        # 1pt 留白吸收不同输出 DPI 的字形栅格取整；矩形自身仍按物理坐标定位。
+        px, py = (1. / (72. * length) for length in fig.get_size_inches())
+        return (float(box.x0) - px, float(box.y0) - py,
+                float(box.x1) + px, float(box.y1) + py)
+
+
 def colorbar_preview_geometry(fig):
     """返回色条参考矩形与含刻度/标题的完整包围盒（figure 比例坐标）。"""
     ax = next((axis for axis in fig.axes
                if axis.get_label() == "publication-colorbar" and axis.get_visible()), None)
     if ax is None:
         return None
-    fig.canvas.draw()
-    tight = ax.get_tightbbox(fig.canvas.get_renderer())
-    if tight is None:
+    box = _colorbar_bounds(fig, ax)
+    if box is None:
         return None
-    box = tight.transformed(fig.transFigure.inverted())
-    x0, y0 = max(0., float(box.x0)), max(0., float(box.y0))
-    x1, y1 = min(1., float(box.x1)), min(1., float(box.y1))
+    x0, y0 = max(0., box[0]), max(0., box[1])
+    x1, y1 = min(1., box[2]), min(1., box[3])
     rect = tuple(float(value) for value in ax.get_position(original=True).bounds)
     return rect, (x0, y0, max(0., x1 - x0), max(0., y1 - y0))
 
@@ -697,13 +720,11 @@ def _fit_manual_colorbar_to_canvas(fig, overrides):
     if ax is None:
         return
     for _ in range(2):
-        fig.canvas.draw()
-        tight = ax.get_tightbbox(fig.canvas.get_renderer())
-        if tight is None:
+        box = _colorbar_bounds(fig, ax)
+        if box is None:
             return
-        box = tight.transformed(fig.transFigure.inverted())
-        dx = max(0., -float(box.x0)) + min(0., 1. - float(box.x1))
-        dy = max(0., -float(box.y0)) + min(0., 1. - float(box.y1))
+        dx = max(0., -box[0]) + min(0., 1. - box[2])
+        dy = max(0., -box[1]) + min(0., 1. - box[3])
         if abs(dx) < 1e-9 and abs(dy) < 1e-9:
             return
         ax.set_position(ax.get_position(original=True).translated(dx, dy))
