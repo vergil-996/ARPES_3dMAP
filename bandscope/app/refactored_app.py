@@ -2435,8 +2435,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if interval is None:
             return
         spec.params["axis_interval"] = interval.as_dict()
-        if key == "E":
-            spec.params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
         spec.params["low"] = int(low)
         spec.params["up"] = int(up)
         spec.params["mid"] = int(mid)
@@ -3176,66 +3174,28 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         return bounds
 
     def _render_context_for_visual_flip(self, context):
+        """标记 E 轴翻转的显示方向；不在数据层重排任何数组。
+
+        翻转是画面镜像：图像/曲线与 E 轴刻度一起反向，翻转前后同一个 E 坐标
+        仍对应同一份强度，数值导出与插件输入保持原始排列。
+        """
         if not self.timeline_bar.switch_flip.isChecked() or context is None:
             return context
 
         view = context.get("view")
+        render_context = dict(context)
         if view == "2d":
-            render_context = dict(context)
             slice_info = dict(render_context["slice_info"])
             slice_info["display_e_flip"] = True
             render_context["slice_info"] = slice_info
             return render_context
 
-        if view == "1d":
-            render_context = dict(context)
-            if "energy" in str(render_context.get("xlabel", "")).lower():
-                render_context["y_data"] = np.flip(np.asarray(render_context["y_data"]), axis=0)
+        if view == "3d":
+            # 3D 的镜像由相机完成：整场景（体数据与坐标轴标注）一起转 180°。
+            # 坐标数组保持原样，否则标签会和体素错位。
             return render_context
 
-        if view == "waterfall":
-            # 瀑布图的 E 翻转是一次真正的定向翻转：能量轴与采样一起反序，因此
-            # 同一个 E 坐标在翻转前后对应同一份强度，屏幕、出版图与数值导出
-            # 在相同 E 坐标下保持一致（绘制时按升序重排，观感与翻转前相同）。
-            render_context = dict(context)
-            render_context["curves"] = np.flip(np.asarray(render_context["curves"]), axis=1)
-            if render_context.get("raw_curves") is not None:
-                render_context["raw_curves"] = np.flip(np.asarray(render_context["raw_curves"]), axis=1)
-            if render_context.get("energy_axis") is not None:
-                render_context["energy_axis"] = np.flip(
-                    np.asarray(render_context["energy_axis"]), axis=0
-                )
-            return render_context
-
-        if view == "1d_comparison":
-            render_context = dict(context)
-            if render_context.get("comparison_kind") not in {"energy_dos", "edc_curve"}:
-                return render_context
-            curves = []
-            for curve in render_context.get("curves", []):
-                flipped_curve = dict(curve)
-                flipped_curve["y_data"] = np.flip(np.asarray(flipped_curve["y_data"]), axis=0)
-                curves.append(flipped_curve)
-            render_context["curves"] = curves
-            return render_context
-
-        if view != "3d":
-            return context
-
-        render_context = dict(context)
-        # In 3D, E flip changes the coordinate interpretation and camera
-        # viewpoint.  Keep voxel ordering untouched so this is not confused
-        # with a data reflection or a rigid actor rotation.
-        coords = self._clone_coords(render_context.get("coords", self.core.coords))
-        if coords.get("E") is not None:
-            coords["E"] = np.flip(coords["E"])
-        render_context["coords"] = coords
-
-        # Keep compact ROI geometry in the original absolute voxel domain.
-        # The camera elevation supplies the requested visual 180° drag.  If
-        # data_bounds or clip_ranges are mirrored as well, a feature's world
-        # position becomes dependent on the current E ROI limits and the whole
-        # image appears to follow the E-axis box handle.
+        render_context["display_e_flip"] = True
         return render_context
 
     def _current_delay_text(self, t_index):
@@ -4712,8 +4672,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if interval is not None and interval.axis_key == space.key:
             state = interval.as_dict()
             state["locked"] = False
-            if space.key == "E":
-                state["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
             params["axis_interval"] = state
         return params
 
@@ -5672,6 +5630,20 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             y_values = np.flip(y_values, axis=0)
         return x_values, y_values
 
+    @staticmethod
+    def _mirror_plot_axis(axes, which):
+        """把一条已自动缩放的轴反向显示（数据与坐标不变，只换显示方向）。"""
+        if which == "x":
+            low, high = axes.get_xlim()
+        else:
+            low, high = axes.get_ylim()
+        if low == high:
+            return
+        if which == "x":
+            axes.set_xlim(high, low)
+        else:
+            axes.set_ylim(high, low)
+
     def _style_1d_axes(self, context, *, ylabel):
         # 复用同一个 ax_2d：2D 页拖过轴标题留下的显式位置在这里必须清掉。
         VisualEngine.reset_2d_axis_labels(self.ax_2d)
@@ -5704,6 +5676,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.ax_2d._arpes_line = line
         display_title = self._style_1d_axes(context, ylabel=context.get("ylabel", "Intensity (a.u.)"))
         self.ax_2d.margins(x=0.02, y=0.08)
+        if context.get("display_e_flip") and "energy" in str(context.get("xlabel", "")).lower():
+            # E 轴翻转只换显示方向：曲线数据和坐标不动，刻度跟着一起镜像。
+            self._mirror_plot_axis(self.ax_2d, "x")
         self._apply_1d_plot_layout(
             compact_title=display_title != str(context["title"])
         )
@@ -5742,6 +5717,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             for text in legend.get_texts():
                 text.set_color("white")
         self.ax_2d.margins(x=0.02, y=0.08)
+        if context.get("display_e_flip") and context.get("comparison_kind") in {
+            "energy_dos", "edc_curve"
+        }:
+            self._mirror_plot_axis(self.ax_2d, "x")
         self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
@@ -5787,6 +5766,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.ax_2d.set_ylabel(context["ylabel"], color="white")
         self.ax_2d.tick_params(colors="white")
         self.ax_2d.set_xlim(-0.1, max(1.25, (len(curves) - 1) * offset_step + 1.1))
+        if context.get("display_e_flip"):
+            # 瀑布图的 E 在纵轴：只反向显示方向，能量轴与采样保持原始排列。
+            self._mirror_plot_axis(self.ax_2d, "y")
         self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
@@ -6155,11 +6137,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         coords = (getattr(self.core, "coords", None) or {}).get(key)
         if coords is None:
             return np.array([], dtype=np.float64)
-        coords = np.asarray(coords, dtype=np.float64).flatten()
-        bar = self.__dict__.get("timeline_bar")
-        if key == "E" and bar is not None and bar.switch_flip.isChecked():
-            coords = coords[::-1]
-        return coords
+        # 区间控件按原始坐标工作：E 翻转只是显示镜像，不改变坐标顺序。
+        return np.asarray(coords, dtype=np.float64).flatten()
 
     def _axis_space_for_index(self, axis_index):
         """按轴向构造物理空间描述（范围、采样坐标、单位与来源）。"""
@@ -6227,9 +6206,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if isinstance(first, dict) and first.get("view") == "3d":
             bounds = list(first.get("bounds") or [])
             if len(bounds) == 6 and bounds[2 * axis_index] == bounds[2 * axis_index + 1]:
+                # 裁剪区域保存的是原始物理坐标，换算回采样下标也要走原始坐标。
                 index = self.core.physical_to_logical(axis_index, bounds[2 * axis_index])
-                coords = self._coords_for_axis(axis_index)
-                return float(np.interp(index, np.arange(coords.size), coords)) if coords.size else None
+                return float(self.core.logical_to_physical(axis_index, index))
         state = params.get("axis_interval")
         if isinstance(state, dict):
             low = state.get("low")
@@ -6243,11 +6222,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         state = params.get("axis_interval")
         interval = None
         if isinstance(state, dict) and state.get("axis_key") == space.key:
+            # 区间保存的是原始物理坐标；E 翻转只镜像画面，不影响保存值。
             interval = AxisInterval.from_dict(state)
-            if interval is not None and space.key == "E":
-                flipped = bool(self.timeline_bar.switch_flip.isChecked())
-                if bool(state.get("display_e_flip", False)) != flipped:
-                    interval = interval.reverse_coordinates(space.coords[::-1])
 
         if interval is None and mode == IntervalEditMode.POSITION and spec is not None:
             axis_index = self._spec_slice_axis(spec)
@@ -6330,8 +6306,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             and not np.array_equal(space.coords, previous_space.coords)
             and np.array_equal(space.coords, previous_space.coords[::-1])
         ):
-            # 翻转只改变坐标解释：保留同一采样选区与亚采样端点，物理
-            # 上下限重新排序，不能把旧上限直接当作新上限。
+            # 坐标方向真的反转（例如重新载入反向坐标）：保留同一采样选区与
+            # 亚采样端点，物理上下限重新排序，不能把旧上限直接当作新上限。
+            # E 翻转开关不再改变坐标顺序，不会走这里。
             interval = interval.reverse_coordinates(previous_space.coords)
             remapped = True
         if reset or interval is None or (mode == IntervalEditMode.POSITION and not remapped):
@@ -6406,8 +6383,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
 
         params = target_spec.params
         params["axis_interval"] = interval.as_dict()
-        if interval.axis_key == "E":
-            params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
 
         if target_spec.page_kind == "second_derivative" and params.get("source_view") == "2d":
             source_kind = params.get("source_page_kind")
@@ -8413,7 +8388,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             if context is None or context.get("crop_empty"):
                 self._show_message("无法导出", "当前裁剪范围内没有有效数据。", QMessageBox.Information)
                 return None
-            payload = export_cropped_context(context, e_flip=self.timeline_bar.switch_flip.isChecked())
+            payload = export_cropped_context(context)
             for key, value in self._crop_export_metadata(spec, context, coords).items():
                 payload.setdefault(key, value)
             return "导出裁剪结果", self._sanitize_filename_component(spec.title) + ".mat", payload

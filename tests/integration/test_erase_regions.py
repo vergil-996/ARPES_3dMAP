@@ -62,7 +62,8 @@ class EraseModelTests(unittest.TestCase):
         selection = CropSelection("2d", ("X", "E"), (1, 3, 5, 7), True, "erase")
         result = apply_selection(context, selection)
         expected = context["data"].astype(float)
-        expected[1:4, -3:] = np.nan
+        # 翻转只镜像画面：E=5..7 仍是降序坐标的前三个采样。
+        expected[1:4, :3] = np.nan
         np.testing.assert_equal(result["data"], expected)
 
     def test_curve_and_comparison_keep_samples_and_gaps(self):

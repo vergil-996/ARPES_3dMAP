@@ -334,8 +334,7 @@ def main():
                 # 右键某个可见区域：菜单提供删除当前区域。
                 region = window._enhancement_selected()
                 x0, x1, y0, y1 = physical_bounds(
-                    window.current_render_context, region["bounds"],
-                    e_flip=window.timeline_bar.switch_flip.isChecked())
+                    window.current_render_context, region["bounds"])
                 click = SimpleNamespace(
                     inaxes=window.ax_2d, button=3,
                     xdata=(x0 + x1) / 2, ydata=(y0 + y1) / 2)

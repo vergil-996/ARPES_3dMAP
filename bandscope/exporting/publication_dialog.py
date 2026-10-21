@@ -75,8 +75,11 @@ from bandscope.exporting.publication_renderers import (
     RenderError,
     background_kwargs,
     default_colorbar_center,
+    colorbar_preview_geometry,
+    default_orientation_center,
     render_snapshot,
 )
+from bandscope.exporting.orientation_preview import OrientationPreviewLabel
 from bandscope.exporting.curve_presentation import (
     Figure1DPresentation, publication_session, source_revision,
     load_presentation, save_presentation,
@@ -127,13 +130,61 @@ def _composite_preview(pixmap: QPixmap, transparent: bool) -> QPixmap:
     return board
 
 
+def _draggable_preview_layers(fig, options, *, include_colorbar=True):
+    """同一 Figure 分离静态底图、方向标和包含刻度/标题的色条层。"""
+    marker = next((ax for ax in fig.axes if ax.get_label() == "orientation"), None)
+    cbar = next((ax for ax in fig.axes if ax.get_label() == "publication-colorbar"), None)
+    if not include_colorbar:
+        cbar = None
+    if marker is None and cbar is None:
+        return None
+    with RENDER_LOCK:
+        result = {}
+        geometry = colorbar_preview_geometry(fig) if cbar is not None else None
+        artists = list(fig.axes) + list(fig.texts) + list(fig.legends) + list(fig.artists)
+        visibility = [(artist, artist.get_visible()) for artist in artists]
+        try:
+            for ax in (marker, cbar):
+                if ax is not None:
+                    ax.set_visible(False)
+            background = io.BytesIO()
+            fig.savefig(background, format="png", dpi=int(fig.get_dpi()),
+                        **background_kwargs(options))
+            result["background"] = background.getvalue()
+            for name, target in (("colorbar", cbar), ("orientation", marker)):
+                if target is None:
+                    continue
+                for artist, _visible in visibility:
+                    artist.set_visible(artist is target)
+                overlay = io.BytesIO()
+                fig.savefig(overlay, format="png", dpi=int(fig.get_dpi()),
+                            transparent=True, facecolor="none")
+                if name == "colorbar":
+                    result[name] = (*geometry, overlay.getvalue())
+                else:
+                    rect = tuple(float(v) for v in marker.get_position().bounds)
+                    result[name] = (rect, overlay.getvalue())
+            return result
+        finally:
+            for artist, visible in visibility:
+                artist.set_visible(visible)
+
+
+def _orientation_preview_layers(fig, options):
+    layers = _draggable_preview_layers(fig, options, include_colorbar=False)
+    if layers is None:
+        return None
+    rect, overlay = layers["orientation"]
+    return rect, layers["background"], overlay
+
+
 # ---------------------------------------------------------------------------
 # 预览 worker（仅 2D/1D；3D 在 GUI 线程渲染）
 # ---------------------------------------------------------------------------
 
 
 class _PreviewSignals(QObject):
-    done = pyqtSignal(object, int, bytes)          # key, revision, png bytes
+    done = pyqtSignal(object, int, bytes, object)  # key, revision, png bytes, drag layers
     failed = pyqtSignal(object, int, str)
 
 
@@ -163,12 +214,13 @@ class _PreviewTask(QRunnable):
                     **background_kwargs(self.options, fig),
                 )
                 payload = buffer.getvalue()
+                layers = _draggable_preview_layers(fig, self.options) if self.dpi == LARGE_DPI else None
             finally:
                 fig.clear()
         except Exception as exc:  # noqa: BLE001 - 结果通过信号回 GUI 线程
             self.signals.failed.emit(self.key, self.revision, str(exc))
             return
-        self.signals.done.emit(self.key, self.revision, payload)
+        self.signals.done.emit(self.key, self.revision, payload, layers)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +316,7 @@ class PublicationExportDialog(QDialog):
         self._editor_valid = True
         self._committed_overrides: Dict[str, Dict[str, Any]] = {}
         self._preview_cache: Dict[Tuple, bytes] = {}
+        self._orientation_previews = {}
         self._preview_revision = 0
         self._big_ready = False
         self._busy_3d = False
@@ -271,6 +324,9 @@ class PublicationExportDialog(QDialog):
         self._fit_to_window = True
         # 用户是否手动动过色带中心；未动过时中心值随布局默认自动刷新
         self._center_dirty = False
+        self._orientation_position_dirty = False
+        self._orientation_drag_active = False
+        self._colorbar_drag_active = False
         # 色带几何参数按位置（right/left/top/bottom）分别记忆：切换位置时
         # 收存旧位置的一套、换入新位置的一套；导出/提交/换样式/换快照/关闭时清空
         self._cbar_pos_memory: Dict[str, Dict[str, Any]] = {}
@@ -345,8 +401,12 @@ class PublicationExportDialog(QDialog):
         self.preview_scroll.setStyleSheet(
             f"QScrollArea {{ background-color: {theme.BG_1}; border: 1px solid {theme.BORDER_HEX}; border-radius: 8px; }}"
         )
-        self.preview_label = QLabel("正在生成预览…")
+        self.preview_label = OrientationPreviewLabel("正在生成预览…")
         self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.orientationMoved.connect(self._on_orientation_dragged)
+        self.preview_label.orientationDragFinished.connect(self._on_orientation_drag_finished)
+        self.preview_label.colorbarMoved.connect(self._on_colorbar_dragged)
+        self.preview_label.colorbarDragFinished.connect(self._on_colorbar_drag_finished)
         self.preview_label.setStyleSheet(f"color: {theme.TEXT_2}; background: transparent;")
         self.preview_scroll.setWidget(self.preview_label)
         self.preview_splitter = QSplitter(Qt.Horizontal)
@@ -428,19 +488,23 @@ class PublicationExportDialog(QDialog):
         self.spin_cbar_thick.setSuffix(" mm")
         self.spin_cbar_thick.setFixedWidth(84)
         self.spin_cbar_thick.setToolTip("色带厚度；可直接输入或用鼠标滚轮调节")
-        self.spin_cbar_cx = _WheelSpinBox()
+        self.spin_cbar_cx = _WheelDoubleSpinBox()
         self.spin_cbar_cx.setRange(0, 100)
         self.spin_cbar_cx.setValue(50)
         self.spin_cbar_cx.setSuffix(" %")
-        self.spin_cbar_cx.setFixedWidth(84)
+        self.spin_cbar_cx.setDecimals(2)
+        self.spin_cbar_cx.setSingleStep(0.5)
+        self.spin_cbar_cx.setFixedWidth(100)
         self.spin_cbar_cx.setToolTip(
             "色带中心在画布横向的位置（初始为自动居中值）；可直接输入或用鼠标滚轮调节"
         )
-        self.spin_cbar_cy = _WheelSpinBox()
+        self.spin_cbar_cy = _WheelDoubleSpinBox()
         self.spin_cbar_cy.setRange(0, 100)
         self.spin_cbar_cy.setValue(50)
         self.spin_cbar_cy.setSuffix(" %")
-        self.spin_cbar_cy.setFixedWidth(84)
+        self.spin_cbar_cy.setDecimals(2)
+        self.spin_cbar_cy.setSingleStep(0.5)
+        self.spin_cbar_cy.setFixedWidth(100)
         self.spin_cbar_cy.setToolTip(
             "色带中心在画布纵向的位置（初始为自动居中值）；可直接输入或用鼠标滚轮调节"
         )
@@ -485,6 +549,29 @@ class PublicationExportDialog(QDialog):
         self.frame_row.addWidget(self.edit_panel_label)
         self.frame_row.addStretch(1)
         tune_layout.addLayout(self.frame_row)
+
+        self.orientation_row = QWidget()
+        orientation_layout = QHBoxLayout(self.orientation_row)
+        orientation_layout.setContentsMargins(0, 0, 0, 0)
+        self.chk_orientation = QCheckBox("三轴方向标")
+        orientation_layout.addWidget(self.chk_orientation)
+        self.spin_orientation_cx = _WheelDoubleSpinBox()
+        self.spin_orientation_cy = _WheelDoubleSpinBox()
+        for box, label in ((self.spin_orientation_cx, "中心 X"),
+                           (self.spin_orientation_cy, "中心 Y")):
+            box.setRange(0., 100.)
+            box.setDecimals(2)
+            box.setSingleStep(0.5)
+            box.setSuffix(" %")
+            box.setFixedWidth(100)
+            orientation_layout.addWidget(QLabel(label))
+            orientation_layout.addWidget(box)
+        self.btn_orientation_auto = QPushButton("自动位置")
+        self.btn_orientation_auto.setFixedHeight(24)
+        theme.style_push_button(self.btn_orientation_auto, "secondary")
+        orientation_layout.addWidget(self.btn_orientation_auto)
+        orientation_layout.addStretch(1)
+        tune_layout.addWidget(self.orientation_row)
 
         self.tick_row = QWidget()
         tick_layout = QHBoxLayout(self.tick_row)
@@ -542,7 +629,8 @@ class PublicationExportDialog(QDialog):
         # 3D 轴名只在主视图「坐标轴」开关打开时才绘制（自动轴名也一样），
         # 关掉时提前说清楚，免得用户改了半天轴名却在导出图里看不到
         self.label_axis_hint = QLabel(
-            "主视图的「坐标轴」开关已关闭：导出图不绘制坐标轴，轴标签不会出现。"
+            "主视图的「坐标轴」开关已关闭：导出图不绘制带刻度的坐标轴及其轴标签；"
+            "三轴方向标仍可单独开启。"
         )
         self.label_axis_hint.setWordWrap(True)
         self.label_axis_hint.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
@@ -708,6 +796,10 @@ class PublicationExportDialog(QDialog):
         self.combo_tick_color.currentIndexChanged.connect(self._on_tune_changed)
         self.chk_box.toggled.connect(self._on_tune_changed)
         self.chk_grid.toggled.connect(self._on_tune_changed)
+        self.chk_orientation.toggled.connect(self._on_tune_changed)
+        self.spin_orientation_cx.valueChanged.connect(self._on_orientation_position_changed)
+        self.spin_orientation_cy.valueChanged.connect(self._on_orientation_position_changed)
+        self.btn_orientation_auto.clicked.connect(self._on_orientation_auto)
         self.chk_title.toggled.connect(self._on_tune_changed)
         self.edit_title.textChanged.connect(self._on_tune_changed)
         self.btn_title_auto.clicked.connect(self._on_title_auto)
@@ -780,6 +872,9 @@ class PublicationExportDialog(QDialog):
         self._remember_page()
         self.snapshot = snapshot
         self._preview_cache.clear()
+        self._orientation_previews.clear()
+        self.preview_label.clear_orientation()
+        self.preview_label.clear_colorbar()
         self._big_ready = False
         family = snapshot.view_family
         self._editor_valid = True
@@ -869,6 +964,8 @@ class PublicationExportDialog(QDialog):
         self.frame_row.itemAt(0).widget().setVisible(family in ("1d", "2d"))
         self.chk_box.setVisible(family == "3d")
         self.chk_grid.setVisible(family == "3d")
+        self.chk_orientation.setVisible(family == "3d")
+        self.orientation_row.setVisible(family == "3d")
         self.label_body_size.setVisible(family == "3d")
         self.spin_body_size.setVisible(family == "3d")
         # 轴标签行：3D 是 X / Y / E 三条轴名，其余是横轴 / 纵轴两条
@@ -893,6 +990,8 @@ class PublicationExportDialog(QDialog):
             (self.combo_frame,),
             (self.combo_tick_direction,), (self.combo_tick_color,),
             (self.chk_box,), (self.chk_grid,), (self.chk_title,), (self.edit_panel_label,),
+            (self.chk_orientation,),
+            (self.spin_orientation_cx,), (self.spin_orientation_cy,),
             (self.edit_axis_x,), (self.edit_axis_y,), (self.edit_axis_z,),
             (self.edit_title,), (self.combo_title_pos,), (self.combo_title_align,),
             (self.spin_title_gap,),
@@ -933,10 +1032,10 @@ class PublicationExportDialog(QDialog):
             center = self._compute_cbar_default_center(ov)
             if center is not None:
                 self.spin_cbar_cx.setValue(
-                    int(round(float(ov.get("colorbar_cx", center[0]))))
+                    round(float(ov.get("colorbar_cx", center[0])), 2)
                 )
                 self.spin_cbar_cy.setValue(
-                    int(round(float(ov.get("colorbar_cy", center[1]))))
+                    round(float(ov.get("colorbar_cy", center[1])), 2)
                 )
             frame = ov.get("frame_mode", params.get("frame_mode", "open"))
             self.combo_frame.setCurrentIndex(0 if frame == "box" else 1)
@@ -947,6 +1046,16 @@ class PublicationExportDialog(QDialog):
                 combo.setCurrentIndex(max(0, combo.findData(ov.get(key, default))))
             self.chk_box.setChecked(bool(ov.get("show_box", params.get("show_box", False))))
             self.chk_grid.setChecked(bool(ov.get("show_grid", params.get("show_grid", False))))
+            self.chk_orientation.setChecked(bool(ov.get("show_orientation", False)))
+            self._orientation_position_dirty = any(
+                key in ov for key in ("orientation_cx", "orientation_cy")
+            )
+            center = self._orientation_default_center(ov)
+            for box, key, value in zip(
+                (self.spin_orientation_cx, self.spin_orientation_cy),
+                ("orientation_cx", "orientation_cy"), center,
+            ):
+                box.setValue(float(ov.get(key, value)))
             self.chk_title.setChecked(bool(ov.get("show_title", True)))
             # 有 title_text 覆盖就用它（可能是空串 = 明确不要标题）；否则带入自动标题
             self.edit_title.setText(
@@ -976,6 +1085,7 @@ class PublicationExportDialog(QDialog):
         # 草稿重建（换快照/换样式/恢复默认）时清空各位置的几何记忆
         self._cbar_pos_memory.clear()
         self._cbar_pos_current = self._current_cbar_position()
+        self._update_orientation_controls()
 
     def _collect_overrides_from_ui(self) -> Dict[str, Any]:
         family = self.snapshot.view_family
@@ -1011,11 +1121,11 @@ class PublicationExportDialog(QDialog):
                 ov["colorbar_thickness"] = thick
             # 中心位置：与当前布局默认中心不同的轴才存为覆盖
             center = self._compute_cbar_default_center(ov)
-            if center is not None:
-                if int(self.spin_cbar_cx.value()) != int(round(center[0])):
-                    ov["colorbar_cx"] = int(self.spin_cbar_cx.value())
-                if int(self.spin_cbar_cy.value()) != int(round(center[1])):
-                    ov["colorbar_cy"] = int(self.spin_cbar_cy.value())
+            if center is not None and self._center_dirty:
+                if abs(self.spin_cbar_cx.value() - round(center[0], 2)) > 0.004:
+                    ov["colorbar_cx"] = float(self.spin_cbar_cx.value())
+                if abs(self.spin_cbar_cy.value() - round(center[1], 2)) > 0.004:
+                    ov["colorbar_cy"] = float(self.spin_cbar_cy.value())
         if family in ("1d", "2d"):
             frame = "box" if self.combo_frame.currentIndex() == 0 else "open"
             if frame != self._current_style().params.get("frame_mode", "open"):
@@ -1032,6 +1142,11 @@ class PublicationExportDialog(QDialog):
                 ov["show_box"] = self.chk_box.isChecked()
             if self.chk_grid.isChecked() != bool(self._current_style().params.get("show_grid", False)):
                 ov["show_grid"] = self.chk_grid.isChecked()
+            if self.chk_orientation.isChecked():
+                ov["show_orientation"] = True
+            if self._orientation_position_dirty:
+                ov["orientation_cx"] = float(self.spin_orientation_cx.value())
+                ov["orientation_cy"] = float(self.spin_orientation_cy.value())
             body_size = int(self.spin_body_size.value())
             if body_size != 100:
                 ov["body_size"] = body_size
@@ -1131,15 +1246,122 @@ class PublicationExportDialog(QDialog):
         self.spin_cbar_cx.blockSignals(True)
         self.spin_cbar_cy.blockSignals(True)
         try:
-            self.spin_cbar_cx.setValue(int(round(center[0])))
-            self.spin_cbar_cy.setValue(int(round(center[1])))
+            self.spin_cbar_cx.setValue(round(center[0], 2))
+            self.spin_cbar_cy.setValue(round(center[1], 2))
         finally:
             self.spin_cbar_cx.blockSignals(False)
             self.spin_cbar_cy.blockSignals(False)
 
     def _on_center_changed(self, *_args):
         self._center_dirty = True
+        self.preview_label.set_colorbar_center(
+            self.spin_cbar_cx.value(), self.spin_cbar_cy.value(),
+        )
+        rect = self.preview_label.colorbar_rect()
+        if rect is not None:
+            self._sync_colorbar_center_from_preview(rect)
         self._on_tune_changed()
+
+    def _set_colorbar_position_ui(self, cx, cy):
+        for box, value in ((self.spin_cbar_cx, cx), (self.spin_cbar_cy, cy)):
+            previous = box.blockSignals(True)
+            box.setValue(float(value))
+            box.blockSignals(previous)
+
+    def _sync_colorbar_center_from_preview(self, rect):
+        self._set_colorbar_position_ui(
+            (rect[0] + rect[2] / 2.) * 100., (rect[1] + rect[3] / 2.) * 100.,
+        )
+        if self._center_dirty:
+            self._draft_overrides.update(
+                colorbar_cx=float(self.spin_cbar_cx.value()),
+                colorbar_cy=float(self.spin_cbar_cy.value()),
+            )
+
+    def _on_colorbar_dragged(self, cx, cy):
+        if self.snapshot is None or self.snapshot.view_family not in ("2d", "3d"):
+            return
+        self._colorbar_drag_active = True
+        self._center_dirty = True
+        self._debounce.stop()
+        self._set_colorbar_position_ui(cx, cy)
+        self._draft_overrides = self._collect_overrides_from_ui()
+        self.btn_export.setEnabled(False)
+
+    def _on_colorbar_drag_finished(self):
+        if self._colorbar_drag_active:
+            self._colorbar_drag_active = False
+            self._on_tune_changed()
+
+    def _orientation_default_center(self, overrides):
+        if self.snapshot is None or self.snapshot.view_family != "3d":
+            return (50., 50.)
+        options = self._collect_output_options()
+        try:
+            return default_orientation_center(
+                self._current_style().params, overrides,
+                float(options.width_mm), options.resolved_height_mm("3d"),
+            )
+        except RenderError:
+            # 过小画布交给预览流程显示错误，控件同步仍应能完成。
+            return (50., 50.)
+
+    def _update_orientation_controls(self):
+        enabled = (self.snapshot is not None and self.snapshot.view_family == "3d"
+                   and self.chk_orientation.isChecked())
+        for widget in (self.spin_orientation_cx, self.spin_orientation_cy,
+                       self.btn_orientation_auto):
+            widget.setEnabled(enabled)
+
+    def _set_orientation_position_ui(self, cx, cy):
+        for box, value in ((self.spin_orientation_cx, cx), (self.spin_orientation_cy, cy)):
+            previous = box.blockSignals(True)
+            box.setValue(float(value))
+            box.blockSignals(previous)
+
+    def _sync_orientation_center_from_preview(self, rect):
+        cx = (rect[0] + rect[2] / 2.) * 100.
+        cy = (rect[1] + rect[3] / 2.) * 100.
+        self._set_orientation_position_ui(cx, cy)
+        if self._orientation_position_dirty:
+            self._draft_overrides.update(
+                orientation_cx=float(self.spin_orientation_cx.value()),
+                orientation_cy=float(self.spin_orientation_cy.value()),
+            )
+
+    def _on_orientation_position_changed(self, *_args):
+        if self.snapshot is None or self.snapshot.view_family != "3d":
+            return
+        self._orientation_position_dirty = True
+        self.preview_label.set_orientation_center(
+            self.spin_orientation_cx.value(), self.spin_orientation_cy.value(),
+        )
+        rect = self.preview_label.orientation_rect()
+        if rect is not None:
+            self._sync_orientation_center_from_preview(rect)
+        self._on_tune_changed()
+
+    def _on_orientation_auto(self, *_args):
+        self._orientation_position_dirty = False
+        self._draft_overrides.pop("orientation_cx", None)
+        self._draft_overrides.pop("orientation_cy", None)
+        self._set_orientation_position_ui(*self._orientation_default_center(self._draft_overrides))
+        self._on_tune_changed()
+
+    def _on_orientation_dragged(self, cx, cy):
+        if self.snapshot is None or self.snapshot.view_family != "3d":
+            return
+        self._orientation_drag_active = True
+        self._orientation_position_dirty = True
+        self._debounce.stop()
+        self._set_orientation_position_ui(cx, cy)
+        self._draft_overrides = self._collect_overrides_from_ui()
+        self.btn_export.setEnabled(False)
+
+    def _on_orientation_drag_finished(self):
+        if self._orientation_drag_active:
+            self._orientation_drag_active = False
+            self._on_tune_changed()
 
     # ------------------------------------------------- 色带几何：按位置记忆
 
@@ -1169,12 +1391,12 @@ class PublicationExportDialog(QDialog):
         if abs(thick - default_thick) > 1e-6:
             entry["colorbar_thickness"] = thick
         center = self._default_center_for_position(position, entry)
-        if center is not None:
-            cxv = int(self.spin_cbar_cx.value())
-            cyv = int(self.spin_cbar_cy.value())
-            if cxv != int(round(center[0])):
+        if center is not None and self._center_dirty:
+            cxv = float(self.spin_cbar_cx.value())
+            cyv = float(self.spin_cbar_cy.value())
+            if abs(cxv - round(center[0], 2)) > 0.004:
                 entry["colorbar_cx"] = cxv
-            if cyv != int(round(center[1])):
+            if abs(cyv - round(center[1], 2)) > 0.004:
                 entry["colorbar_cy"] = cyv
         self._cbar_pos_memory[position] = entry
 
@@ -1196,10 +1418,10 @@ class PublicationExportDialog(QDialog):
             center = self._default_center_for_position(position, entry)
             if center is not None:
                 self.spin_cbar_cx.setValue(
-                    int(round(float(entry.get("colorbar_cx", center[0]))))
+                    round(float(entry.get("colorbar_cx", center[0])), 2)
                 )
                 self.spin_cbar_cy.setValue(
-                    int(round(float(entry.get("colorbar_cy", center[1]))))
+                    round(float(entry.get("colorbar_cy", center[1])), 2)
                 )
             self._center_dirty = "colorbar_cx" in entry or "colorbar_cy" in entry
         finally:
@@ -1240,6 +1462,7 @@ class PublicationExportDialog(QDialog):
     def _on_tune_changed(self, *_args):
         if self.snapshot is None:
             return
+        self._update_orientation_controls()
         self._refresh_center_defaults_if_untouched()
         self._draft_overrides = self._collect_overrides_from_ui()
         if self.snapshot.view_family == "1d":
@@ -1251,6 +1474,8 @@ class PublicationExportDialog(QDialog):
     def _invalidate_preview(self):
         self._preview_revision += 1
         self._big_ready = False
+        self.preview_label.set_orientation_interactive(False)
+        self.preview_label.set_colorbar_interactive(False)
         self.btn_export.setEnabled(False)
 
     def _remember_page(self):
@@ -1430,10 +1655,16 @@ class PublicationExportDialog(QDialog):
             self.presentation.signature() if self.snapshot.view_family == "1d" else None,
         )
 
-    def _cache_put(self, key, payload: bytes):
+    def _cache_put(self, key, payload: bytes, orientation=None):
         if len(self._preview_cache) >= CACHE_LIMIT:
-            self._preview_cache.pop(next(iter(self._preview_cache)))
+            old_key = next(iter(self._preview_cache))
+            self._preview_cache.pop(old_key)
+            self._orientation_previews.pop(old_key, None)
         self._preview_cache[key] = payload
+        if orientation is not None:
+            self._orientation_previews[key] = orientation
+        else:
+            self._orientation_previews.pop(key, None)
 
     def _regenerate_previews(self):
         if self.snapshot is None:
@@ -1444,6 +1675,8 @@ class PublicationExportDialog(QDialog):
         self._preview_revision += 1
         self._pool.clear()  # Drop queued renders from older revisions; running results are rejected below.
         self._big_ready = False
+        self.preview_label.set_orientation_interactive(False)
+        self.preview_label.set_colorbar_interactive(False)
         self.btn_export.setEnabled(False)
         options = self._collect_output_options()
         family = self.snapshot.view_family
@@ -1469,7 +1702,8 @@ class PublicationExportDialog(QDialog):
                     continue  # 大图只生成选中样式
                 key = self._preview_key(style_id, tier_dpi, overrides)
                 if key in self._preview_cache:
-                    self._apply_preview(style_id, tier_dpi, self._preview_cache[key])
+                    self._apply_preview(style_id, tier_dpi, self._preview_cache[key],
+                                        self._orientation_previews.get(key))
                     continue
                 task = _PreviewTask(
                     key, self._preview_revision, self.snapshot, style,
@@ -1501,7 +1735,8 @@ class PublicationExportDialog(QDialog):
                         continue
                     key = self._preview_key(style_id, tier_dpi, overrides)
                     if key in self._preview_cache:
-                        self._apply_preview(style_id, tier_dpi, self._preview_cache[key])
+                        self._apply_preview(style_id, tier_dpi, self._preview_cache[key],
+                                            self._orientation_previews.get(key))
                         continue
                     try:
                         fig = render_snapshot(
@@ -1514,11 +1749,12 @@ class PublicationExportDialog(QDialog):
                                 dpi=int(fig.get_dpi()), **background_kwargs(options),
                             )
                             payload = buffer.getvalue()
+                            orientation = _draggable_preview_layers(fig, options) if is_large else None
                         finally:
                             fig.clear()
-                        self._cache_put(key, payload)
+                        self._cache_put(key, payload, orientation)
                         if revision == self._preview_revision:
-                            self._apply_preview(style_id, tier_dpi, payload)
+                            self._apply_preview(style_id, tier_dpi, payload, orientation)
                     except Exception as exc:  # noqa: BLE001
                         if revision == self._preview_revision:
                             self.status_label.setText(f"预览失败：{exc}")
@@ -1530,14 +1766,14 @@ class PublicationExportDialog(QDialog):
             self._pending_regenerate = False
             self._regenerate_previews()
 
-    @pyqtSlot(object, int, bytes)
-    def _on_preview_done(self, key, revision, payload):
+    @pyqtSlot(object, int, bytes, object)
+    def _on_preview_done(self, key, revision, payload, layers=None):
         if self.snapshot is None or key[0] != self.snapshot.snapshot_id:
             return  # 过期快照结果丢弃
         if revision != self._preview_revision:
             return  # 过期预览结果丢弃
-        self._cache_put(key, payload)
-        self._apply_preview(key[1], key[4], payload)
+        self._cache_put(key, payload, layers)
+        self._apply_preview(key[1], key[4], payload, layers)
 
     @pyqtSlot(object, int, str)
     def _on_preview_failed(self, key, revision, message):
@@ -1547,7 +1783,7 @@ class PublicationExportDialog(QDialog):
             return
         self.status_label.setText(f"预览失败：{message}")
 
-    def _apply_preview(self, style_id: str, dpi: int, payload: bytes):
+    def _apply_preview(self, style_id: str, dpi: int, payload: bytes, orientation=None):
         pixmap = QPixmap()
         pixmap.loadFromData(payload)
         if pixmap.isNull():
@@ -1559,8 +1795,34 @@ class PublicationExportDialog(QDialog):
             scaled = pixmap.scaledToWidth(card_w, Qt.SmoothTransformation)
             self.cards[style_id].set_preview(scaled)
         if dpi == LARGE_DPI and style_id == self._draft_style_id:
-            self._set_big_preview(pixmap)
+            self.preview_label.clear_orientation()
+            self.preview_label.clear_colorbar()
+            if orientation is None:
+                self._set_big_preview(pixmap)
+            else:
+                if isinstance(orientation, tuple):
+                    rect, background, overlay = orientation
+                    orientation = {"background": background, "orientation": (rect, overlay)}
+                base_pixmap = QPixmap()
+                base_pixmap.loadFromData(orientation["background"])
+                self._set_big_preview(_composite_preview(
+                    base_pixmap, bool(self._collect_output_options().transparent),
+                ))
+                if "colorbar" in orientation:
+                    rect, bounds, overlay = orientation["colorbar"]
+                    marker_pixmap = QPixmap()
+                    marker_pixmap.loadFromData(overlay)
+                    self.preview_label.set_colorbar_preview(marker_pixmap, rect, bounds)
+                    self._sync_colorbar_center_from_preview(rect)
+                if "orientation" in orientation:
+                    rect, overlay = orientation["orientation"]
+                    marker_pixmap = QPixmap()
+                    marker_pixmap.loadFromData(overlay)
+                    self.preview_label.set_orientation_preview(marker_pixmap, rect)
+                    self._sync_orientation_center_from_preview(rect)
             self._big_ready = True
+            self.preview_label.set_orientation_interactive(self.preview_label.orientation_rect() is not None)
+            self.preview_label.set_colorbar_interactive(self.preview_label.colorbar_rect() is not None)
             self.btn_export.setEnabled(self._editor_valid)
             style_name = self._current_style().full_name
             self.status_label.setText(f"预览就绪：{style_name}（与导出文件同一排版）")

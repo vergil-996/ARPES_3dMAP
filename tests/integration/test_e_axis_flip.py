@@ -39,7 +39,7 @@ class EAxisFlipTests(unittest.TestCase):
         analyzer.core = SimpleNamespace(coords=coords or {})
         return analyzer
 
-    def test_3d_flip_keeps_voxels_and_changes_only_e_coordinates(self):
+    def test_3d_flip_keeps_voxels_and_coordinates_untouched(self):
         coords = {
             "X": np.asarray([-1.0, 1.0]),
             "Y": np.asarray([-2.0, 0.0, 2.0]),
@@ -53,7 +53,8 @@ class EAxisFlipTests(unittest.TestCase):
         np.testing.assert_array_equal(actual["data"], data)
         np.testing.assert_array_equal(actual["coords"]["X"], coords["X"])
         np.testing.assert_array_equal(actual["coords"]["Y"], coords["Y"])
-        np.testing.assert_array_equal(actual["coords"]["E"], coords["E"][::-1])
+        # 3D 的镜像是相机转 180°，坐标与体素都不动，标签才会跟着体素走。
+        np.testing.assert_array_equal(actual["coords"]["E"], coords["E"])
         self.assertNotIn("actor_flip", actual)
 
     def test_3d_camera_elevation_is_applied_once_per_flip_transition(self):
@@ -110,7 +111,7 @@ class EAxisFlipTests(unittest.TestCase):
         self.assertEqual(actual["data_bounds"], context["data_bounds"])
         self.assertEqual(actual["clip_ranges"], context["clip_ranges"])
 
-    def test_energy_dos_and_waterfall_reverse_energy_samples(self):
+    def test_energy_dos_and_waterfall_keep_samples_and_only_mirror_the_axis(self):
         analyzer = self._analyzer()
         curve = analyzer._render_context_for_visual_flip(
             {
@@ -120,7 +121,10 @@ class EAxisFlipTests(unittest.TestCase):
                 "xlabel": "Energy (eV)",
             }
         )
-        np.testing.assert_array_equal(curve["y_data"], [3.0, 2.0, 1.0])
+        # 翻转是画面镜像：曲线与坐标保持原始排列，只标记显示方向。
+        np.testing.assert_array_equal(curve["y_data"], [1.0, 2.0, 3.0])
+        np.testing.assert_array_equal(curve["x_data"], [-0.2, -0.1, 0.0])
+        self.assertTrue(curve["display_e_flip"])
 
         waterfall = analyzer._render_context_for_visual_flip(
             {
@@ -130,11 +134,11 @@ class EAxisFlipTests(unittest.TestCase):
                 "raw_curves": np.asarray([[10.0, 20.0, 30.0]]),
             }
         )
-        # 瀑布图的 E 翻转是定向翻转：能量轴与采样一起反序，同一 E 坐标对应同一
-        # 强度，屏幕／出版图／数值导出因此保持一致。
-        np.testing.assert_array_equal(waterfall["energy_axis"], [0.0, -0.1, -0.2])
-        np.testing.assert_array_equal(waterfall["curves"], [[3.0, 2.0, 1.0], [6.0, 5.0, 4.0]])
-        np.testing.assert_array_equal(waterfall["raw_curves"], [[30.0, 20.0, 10.0]])
+        # 同一个 E 坐标始终对应同一份强度：能量轴与采样都不反序。
+        np.testing.assert_array_equal(waterfall["energy_axis"], [-0.2, -0.1, 0.0])
+        np.testing.assert_array_equal(waterfall["curves"], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        np.testing.assert_array_equal(waterfall["raw_curves"], [[10.0, 20.0, 30.0]])
+        self.assertTrue(waterfall["display_e_flip"])
 
     def test_non_energy_1d_curve_is_unchanged(self):
         analyzer = self._analyzer()

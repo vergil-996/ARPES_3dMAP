@@ -27,7 +27,11 @@ def region_layers_2d(fields, data, slice_info, coords):
         # Keep the mask oriented along with the samples (np.asarray loses it).
         image = orient_2d(masked.data, slice_info, raw_extent)
         mask = orient_2d(np.ma.getmaskarray(masked), slice_info, raw_extent)
-        extent = physical_bounds(context, logical, e_flip=flip)
+        extent = physical_bounds(context, logical)
+        if flip and int(slice_info["axis"]) in (0, 1):
+            # 主图把 E 轴刻度与像素一起镜像，区域层必须用同一显示方向，
+            # 否则叠加层会相对底图上下颠倒。
+            extent = (extent[0], extent[1], extent[3], extent[2])
         layers.append(dict(region_id=region["region_id"], image=np.ma.array(image, mask=mask),
                            extent=extent, level_info=region["level_info"]))
     return layers

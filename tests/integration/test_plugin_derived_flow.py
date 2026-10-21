@@ -326,11 +326,12 @@ class PluginDerivedFlowTests(unittest.TestCase):
         _freeze_waterfall(None, snapshot, render_off)
         payload_off = dict(snapshot.payload)
 
-        # E 翻转打开：屏幕与出版图都反序（同一 E 坐标对应同一强度）。
+        # E 翻转打开：只镜像显示方向，采样与坐标保持原始排列。
         self.analyzer.timeline_bar.switch_flip.setChecked(True)
         render_on = self.analyzer._render_context_for_visual_flip(context)
-        np.testing.assert_allclose(render_on["energy_axis"], np.flip(context["energy_axis"]))
-        np.testing.assert_allclose(render_on["curves"], np.flip(context["curves"], axis=1))
+        np.testing.assert_allclose(render_on["energy_axis"], context["energy_axis"])
+        np.testing.assert_allclose(render_on["curves"], context["curves"])
+        self.assertTrue(render_on["display_e_flip"])
 
         snapshot2 = PublicationSnapshot(
             snapshot_id="s", source_page_id=spec.page_id, source_page_title=spec.title,
@@ -360,9 +361,11 @@ class PluginDerivedFlowTests(unittest.TestCase):
             np.testing.assert_allclose(
                 np.asarray(payload["k_values"]), np.asarray(export["k"]), rtol=1e-6
             )
-        # 翻转开与关：出版图都按升序绘制，观感一致。
+        # 翻转开关只改出版图的显示方向：数组与坐标仍然逐点相同。
         np.testing.assert_allclose(payload_on["energy_axis"], payload_off["energy_axis"])
         np.testing.assert_allclose(payload_on["curves"], payload_off["curves"])
+        self.assertIsNone(payload_off["flip_axis"])
+        self.assertEqual(payload_on["flip_axis"], "y")
         # 数值导出与显示开关无关：同一份原始坐标。
         self.analyzer.timeline_bar.switch_flip.setChecked(False)
         _, _, export_again = self.analyzer._build_export_payload(spec, raw_data, coords)

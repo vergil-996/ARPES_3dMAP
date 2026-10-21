@@ -72,16 +72,17 @@ class CropEAxisCoordinateTests(unittest.TestCase):
         self.controller.popup.edits[4].setText("-1.4")
         self.controller.popup.edits[5].setText("-0.3")
         self.assertTrue(self.controller.commit_edits())
-        np.testing.assert_allclose(self.analyzer._crop_logical_bounds(), (0, 2, 0, 3, 2, 4))
+        # 翻转只镜像画面：输入框里的 E 值仍然直接指向对应的体素。
+        np.testing.assert_allclose(self.analyzer._crop_logical_bounds(), (0, 2, 0, 3, 1, 3))
         cropped = apply_selection(context, self.controller.selection)
-        self.assertEqual(cropped["data_bounds"], (0, 2, 0, 3, 2, 4))
-        np.testing.assert_array_equal(cropped["data"], self.core.raw_data[:, :, 2:5])
+        self.assertEqual(cropped["data_bounds"], (0, 2, 0, 3, 1, 3))
+        np.testing.assert_array_equal(cropped["data"], self.core.raw_data[:, :, 1:4])
         np.testing.assert_array_equal(cropped["coords"]["E"], self.core.coords["E"])
-        exported = export_cropped_context(cropped, e_flip=True)
-        np.testing.assert_allclose(exported["E"], self.core.coords["E"][::-1][2:5])
+        exported = export_cropped_context(cropped)
+        np.testing.assert_allclose(exported["E"], self.core.coords["E"][1:4])
         erased = apply_selection(context, replace(self.controller.selection, operation="erase"))
         expected = np.zeros(self.core.raw_data.shape, dtype=bool)
-        expected[:, :, 2:5] = True
+        expected[:, :, 1:4] = True
         np.testing.assert_array_equal(np.isnan(erased["data"]), expected)
         self.assertTrue(np.isfinite(context["data"]).all())
 
@@ -108,8 +109,9 @@ class CropEAxisCoordinateTests(unittest.TestCase):
         self.controller.activate("other", context)
         self.switch.checked = True
         self.activate(context)
+        # 3D 翻转不换坐标，草稿的物理边界原样保留。
         np.testing.assert_allclose(self.analyzer._crop_logical_bounds(), expected)
-        np.testing.assert_allclose(self.controller.selection.bounds[4:6], [-.8, -.1])
+        np.testing.assert_allclose(self.controller.selection.bounds[4:6], [-1.4, -.3])
 
     def test_flipped_single_layer_restores_canonical_slice_coordinates(self):
         context = self.context()
@@ -121,11 +123,11 @@ class CropEAxisCoordinateTests(unittest.TestCase):
                 self.assertEqual(result["view"], "2d")
                 np.testing.assert_array_equal(result["coords"]["E"], self.core.coords["E"])
                 if axis == "E":
-                    self.assertEqual(result["slice_info"]["index"], 2)
-                    np.testing.assert_array_equal(result["data"], self.core.raw_data[:, :, 2])
+                    self.assertEqual(result["slice_info"]["index"], 3)
+                    np.testing.assert_array_equal(result["data"], self.core.raw_data[:, :, 3])
                 else:
-                    np.testing.assert_array_equal(result["data"], self.core.raw_data[:, 1, 2:5])
-                    np.testing.assert_allclose(result["slice_info"]["extent_override"], [0, 2, -.8, -.1])
+                    np.testing.assert_array_equal(result["data"], self.core.raw_data[:, 1, 1:4])
+                    np.testing.assert_allclose(result["slice_info"]["extent_override"], [0, 2, -1.4, -.3])
 
     def test_new_pages_persist_canonical_ranges_for_slice_controls_and_erase(self):
         context = self.context()

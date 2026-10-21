@@ -95,8 +95,6 @@ def selection_for_context(context, *, e_flip=False):
     if context is None or context.get("view") not in CROP_VIEWS or context.get("crop_empty"):
         return None
     view = context["view"]
-    if view == "3d":
-        context = _orient(context, e_flip)
     if view in {"3d", "2d"}:
         axes = SPATIAL_KEYS if view == "3d" else tuple(context["plot_axes"][p + "_key"] for p in ("x", "y"))
         ranges = []
@@ -137,48 +135,16 @@ def axis_labels(selection):
 
 
 def reorient_volume_selection(context, selection, e_flip):
-    """Keep absolute voxel positions when a saved 3D draft changes orientation."""
-    if selection.view != "3d" or selection.e_flip == e_flip:
-        return replace(selection, e_flip=e_flip)
-    coords = np.asarray(context["coords"]["E"], dtype=float)
-    source = coords[::-1] if selection.e_flip else coords
-    target = coords[::-1] if e_flip else coords
-    indices = np.arange(len(coords), dtype=float)
-    xp, fp = (source[::-1], indices[::-1]) if source[0] > source[-1] else (source, indices)
-    positions = interpolate_axis(selection.bounds[4:6], xp, fp, extrapolate=True)
-    bounds = (*selection.bounds[:4], *sorted(interpolate_axis(positions, indices, target, extrapolate=True)))
-    return replace(selection, bounds=bounds, e_flip=e_flip)
+    """Keep absolute voxel positions when a saved 3D draft changes orientation.
+
+    3D 的 E 翻转由相机镜像整个场景完成，坐标与体素都不动，因此草稿只需要
+    更新记录下来的显示方向。
+    """
+    return replace(selection, e_flip=e_flip)
 
 
 def waterfall_offsets(context):
     return np.asarray(context.get("curve_offsets", np.arange(len(context["curves"])) * float(context.get("offset_step", 1.2))), dtype=float)
-
-
-def _orient(context, flip):
-    """Involution matching the main view's E orientation (without Qt state)."""
-    if not flip:
-        return context
-    result = dict(context)
-    view = context["view"]
-    if view == "3d":
-        # Match the 3D renderer: reverse coordinate labels, keep voxels and
-        # absolute ROI indices untouched (the camera supplies the rotation).
-        result["coords"] = dict(context["coords"], E=np.asarray(context["coords"]["E"])[::-1])
-    elif view == "2d" and int(context["slice_info"]["axis"]) in (0, 1):
-        result["data"] = np.flip(context["data"], axis=1)
-    elif view == "1d" and "energy" in str(context.get("xlabel", "")).lower():
-        result["y_data"] = np.flip(context["y_data"])
-    elif view == "1d_comparison" and context.get("comparison_kind") in {"energy_dos", "edc_curve"}:
-        result["curves"] = [dict(c, y_data=np.flip(c["y_data"])) for c in context["curves"]]
-    elif view == "waterfall":
-        # 瀑布图的 E 翻转是一次真正的定向翻转：能量轴与采样一起反序，翻转前后
-        # 同一个 E 坐标仍对应同一份强度（显示、出版、导出据此保持一致）。
-        for key in ("curves", "raw_curves"):
-            if context.get(key) is not None:
-                result[key] = np.flip(context[key], axis=1)
-        if context.get("energy_axis") is not None:
-            result["energy_axis"] = np.flip(np.asarray(context["energy_axis"]), axis=0)
-    return result
 
 
 def _index_interval(values, low, high):
@@ -292,10 +258,10 @@ def _erase_selection(context, selection):
 
 
 def apply_selection(context, selection):
-    """Apply in the coordinate orientation captured at selection time.
+    """Apply a selection in the canonical coordinate orientation.
 
-    Return canonical data so flipping the resulting page never applies the
-    selection twice. NaNs represent removed curve segments, including exports.
+    E 翻转只是显示镜像，坐标与数据始终是原始排列，选区因此直接落在原始体素上。
+    NaNs represent removed curve segments, including exports.
     """
     context = prepare_context(context)
     if context.get("crop_empty"):
@@ -304,39 +270,36 @@ def apply_selection(context, selection):
         return _empty(context)
     if selection.view == "2d" and tuple(context["plot_axes"][p + "_key"] for p in ("x", "y")) != selection.axes:
         return _empty(context)
-    oriented = _orient(context, selection.e_flip)
     view = selection.view
     if selection.operation == "erase":
-        result = _erase_selection(oriented, selection)
+        result = _erase_selection(context, selection)
     elif view in {"3d", "2d"}:
-        result = _crop_grid(oriented, selection)
+        result = _crop_grid(context, selection)
     elif view == "1d":
-        result, valid = _crop_curve(oriented, selection.bounds)
+        result, valid = _crop_curve(context, selection.bounds)
         result["crop_empty"] = not valid
     elif view == "1d_comparison":
-        cropped = [_crop_curve(c, selection.bounds) for c in oriented["curves"]]
-        result = dict(oriented, curves=[c for c, _ in cropped], crop_empty=not any(valid for _, valid in cropped))
+        cropped = [_crop_curve(c, selection.bounds) for c in context["curves"]]
+        result = dict(context, curves=[c for c, _ in cropped], crop_empty=not any(valid for _, valid in cropped))
     else:
-        result = dict(oriented)
-        energy = np.asarray(oriented["energy_axis"], dtype=float)
-        curves = np.asarray(oriented["curves"], dtype=float)
-        offsets = waterfall_offsets(oriented)
+        result = dict(context)
+        energy = np.asarray(context["energy_axis"], dtype=float)
+        curves = np.asarray(context["curves"], dtype=float)
+        offsets = waterfall_offsets(context)
         xl, xh, yl, yh = selection.bounds
         emask = np.isfinite(energy) & (energy >= yl) & (energy <= yh)
         curves = curves[:, emask]
         display_x = curves + offsets[:, None]
         valid = np.isfinite(display_x) & (display_x >= xl) & (display_x <= xh)
         result.update(energy_axis=energy[emask], curves=np.where(valid, curves, np.nan), curve_offsets=offsets, crop_empty=not np.any(valid))
-        if oriented.get("raw_curves") is not None:
-            result["raw_curves"] = np.where(valid, np.asarray(oriented["raw_curves"])[:, emask], np.nan)
+        if context.get("raw_curves") is not None:
+            result["raw_curves"] = np.where(valid, np.asarray(context["raw_curves"])[:, emask], np.nan)
     if view == "3d":
         # Also restore canonical coordinates when a volume becomes a slice.
         result["coords"] = context["coords"]
         if result["view"] == "2d":
             x, y = axis_values(result, 0), axis_values(result, 1)
             result["slice_info"] = dict(result["slice_info"], extent_override=[float(x[0]), float(x[-1]), float(y[0]), float(y[-1])])
-    elif result["view"] == context["view"]:
-        result = _orient(result, selection.e_flip)
     result["erase_bounds" if selection.operation == "erase" else "crop_bounds"] = selection.bounds
     return result
 
@@ -348,11 +311,10 @@ def apply_crop_regions(context, regions):
     return result
 
 
-def export_cropped_context(context, *, e_flip=False):
+def export_cropped_context(context):
     """Numeric arrays only: never leak uncropped backing arrays into exports."""
     if context.get("crop_empty"):
         raise ValueError("当前裁剪范围内没有有效数据。")
-    context = _orient(context, e_flip)
     view = context["view"]
     if view in {"3d", "2d"}:
         result = {"sample": np.asarray(context["data"], dtype=np.float32)}

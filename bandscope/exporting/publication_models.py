@@ -342,13 +342,17 @@ _OVERRIDE_SCHEMA = {
     # 色带厚度（毫米）
     "colorbar_thickness": ("float", (0.5, 10.0)),
     # 色带中心在画布上的位置（宽/高的百分比）；缺省时按布局自动居中
-    "colorbar_cx": ("int", (0, 100)),
-    "colorbar_cy": ("int", (0, 100)),
+    "colorbar_cx": ("float", (0.0, 100.0)),
+    "colorbar_cy": ("float", (0.0, 100.0)),
     "frame_mode": ("choice", ("box", "open")),
     "tick_direction": ("choice", ("in", "out")),
     "tick_color": ("choice", ("#000000", "#ffffff")),
     "show_box": ("bool", None),
     "show_grid": ("bool", None),
+    "show_orientation": ("bool", None),
+    # 方向标中心占整张画布的百分比；X 从左向右，Y 从下向上。
+    "orientation_cx": ("float", (0.0, 100.0)),
+    "orientation_cy": ("float", (0.0, 100.0)),
     "panel_label": ("str", 8),
     "show_title": ("bool", None),
     # 标题文字：显式给出即为用户命名（空串 = 明确不要标题）；缺省用快照自动标题
@@ -396,7 +400,8 @@ def validate_overrides(family: str, overrides: Optional[Mapping[str, Any]]) -> D
             continue  # 1D 通常没有色条
         if key == "frame_mode" and family == "3d":
             continue
-        if key in ("show_box", "show_grid") and family != "3d":
+        if key in ("show_box", "show_grid", "show_orientation",
+                   "orientation_cx", "orientation_cy") and family != "3d":
             continue
         if key == "body_size" and family != "3d":
             continue

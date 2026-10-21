@@ -161,18 +161,19 @@ class SessionTestCase(unittest.TestCase):
 
 
 class ContextTests(SessionTestCase):
-    def test_energy_axis_is_the_displayed_one(self):
+    def test_energy_axis_stays_canonical_when_display_is_flipped(self):
         energy = np.linspace(-1.0, 1.0, 9)
         window, _ = make_window(energy=energy, flip=True)
         session = self.make_session(window)
         render_context = {
             "view": "3d",
-            "coords": {"E": energy[::-1]},
+            "coords": {"E": energy},
             "data": np.zeros((2, 2, 9)),
         }
         context = session.build_context(window, render_context)
         self.assertEqual(context.view, "3d")
-        np.testing.assert_allclose(context.energy.values, energy[::-1])
+        # 翻转是画面镜像：插件拿到的能量轴不重排，翻转状态只作为显示标记。
+        np.testing.assert_allclose(context.energy.values, energy)
         self.assertTrue(context.display_e_flip)
         self.assertEqual(context.energy.unit, "eV")
         self.assertEqual(context.energy.display_unit, "eV")
@@ -220,10 +221,10 @@ class MultiplierTests(SessionTestCase):
         )
 
     def _context(self, *, flip=False, bounds=None):
-        values = self.energy[::-1] if flip else self.energy
+        # E 翻转只镜像画面，插件看到的能量轴始终是原始排列。
         render_context = {
             "view": "3d",
-            "coords": {"E": values},
+            "coords": {"E": self.energy},
             "data": np.zeros((2, 2, 9)),
         }
         if bounds is not None:

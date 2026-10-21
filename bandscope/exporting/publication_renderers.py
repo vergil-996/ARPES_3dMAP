@@ -19,6 +19,7 @@ import math
 import os
 import threading
 import time
+from itertools import permutations
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib
@@ -28,7 +29,10 @@ from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.colors import Colormap
 from matplotlib.figure import Figure
+from matplotlib.patches import Circle, FancyArrowPatch, PathPatch
+from matplotlib.textpath import TextPath
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
+from matplotlib.transforms import Affine2D
 import numpy as np
 
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
@@ -263,10 +267,11 @@ def _compute_rects(
             cx = min(max(cx_mm, thickness / 2.0), width_mm - thickness / 2.0)
         cbar = [cx - thickness / 2.0, cy - bar_h / 2.0,
                 cx + thickness / 2.0, cy + bar_h / 2.0]
+        # 手动中心只移动色条；主图区仍按该 side 的自动位置预留空间。
         if position == "right":
-            main[2] = cbar[0] - gap
+            main[2] = width_mm - mr - thickness - gap
         else:
-            main[0] = cbar[2] + gap
+            main[0] = ml + thickness + gap
     elif position in ("top", "bottom"):
         if cy_mm is None:
             cy = (height_mm - mt - thickness / 2.0) if position == "top" else (mb + thickness / 2.0)
@@ -274,9 +279,9 @@ def _compute_rects(
             cy = min(max(cy_mm, thickness / 2.0), height_mm - thickness / 2.0)
         cbar = [0.0, cy - thickness / 2.0, 0.0, cy + thickness / 2.0]
         if position == "top":
-            main[3] = cbar[1] - gap
+            main[3] = height_mm - mt - thickness - gap
         else:
-            main[1] = cbar[3] + gap
+            main[1] = mb + thickness + gap
         bar_width = (main[2] - main[0]) * 0.62 * frac
         cx = (main[0] + main[2]) / 2.0 if cx_mm is None else cx_mm
         cx = min(max(cx, bar_width / 2.0), width_mm - bar_width / 2.0)
@@ -290,13 +295,15 @@ def _compute_rects(
 
 def _annotation_artists(ax):
     artists = []
-    artists.extend(ax.get_xticklabels())
-    artists.extend(ax.get_yticklabels())
-    artists.append(ax.xaxis.label)
-    artists.append(ax.yaxis.label)
+    # set_axis_off() 和 Axis.set_visible(False) 并不逐个隐藏子 Text。
+    # 这些未绘制的默认刻度随像素范围/DPI变化，不能参与实际注记的留白测量。
+    if ax.axison:
+        for axis in (ax.xaxis, ax.yaxis):
+            if axis.get_visible():
+                artists.extend(axis.get_ticklabels())
+                artists.append(axis.label)
+                artists.append(axis.get_offset_text())
     artists.append(ax.title)
-    artists.append(ax.xaxis.get_offset_text())
-    artists.append(ax.yaxis.get_offset_text())
     legend = ax.get_legend()
     if legend is not None:
         artists.append(legend)
@@ -660,7 +667,46 @@ def _draw_colorbar(
             colorbar.outline.set_linewidth(0.4)
     except Exception:
         pass
+    cbar_ax.set_label("publication-colorbar")
     return colorbar
+
+
+def colorbar_preview_geometry(fig):
+    """返回色条参考矩形与含刻度/标题的完整包围盒（figure 比例坐标）。"""
+    ax = next((axis for axis in fig.axes
+               if axis.get_label() == "publication-colorbar" and axis.get_visible()), None)
+    if ax is None:
+        return None
+    fig.canvas.draw()
+    tight = ax.get_tightbbox(fig.canvas.get_renderer())
+    if tight is None:
+        return None
+    box = tight.transformed(fig.transFigure.inverted())
+    x0, y0 = max(0., float(box.x0)), max(0., float(box.y0))
+    x1, y1 = min(1., float(box.x1)), min(1., float(box.y1))
+    rect = tuple(float(value) for value in ax.get_position(original=True).bounds)
+    return rect, (x0, y0, max(0., x1 - x0), max(0., y1 - y0))
+
+
+def _fit_manual_colorbar_to_canvas(fig, overrides):
+    """自由放置色条时整体平移，使刻度和标题也完整留在图幅内。"""
+    if not any(key in overrides for key in ("colorbar_cx", "colorbar_cy")):
+        return
+    ax = next((axis for axis in fig.axes
+               if axis.get_label() == "publication-colorbar"), None)
+    if ax is None:
+        return
+    for _ in range(2):
+        fig.canvas.draw()
+        tight = ax.get_tightbbox(fig.canvas.get_renderer())
+        if tight is None:
+            return
+        box = tight.transformed(fig.transFigure.inverted())
+        dx = max(0., -float(box.x0)) + min(0., 1. - float(box.x1))
+        dy = max(0., -float(box.y0)) + min(0., 1. - float(box.y1))
+        if abs(dx) < 1e-9 and abs(dy) < 1e-9:
+            return
+        ax.set_position(ax.get_position(original=True).translated(dx, dy))
 
 
 def _colorbar_layout_for(style_params, overrides, family):
@@ -802,6 +848,7 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
         fig, ax, cbar_ax, width_mm, height_mm, margins, cbar_layout, title_plan=title_plan
     )
     place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
+    _fit_manual_colorbar_to_canvas(fig, overrides)
     return fig
 
 
@@ -888,6 +935,14 @@ def render_1d(snapshot, style, overrides, options, dpi: int, *, presentation=Non
 
     has_legend = _render_1d_axes_content(ax, snapshot, params)
     ax.margins(x=0.02, y=0.08)
+    # E 轴翻转是画面镜像：只反向显示方向，曲线与坐标保持原始排列。
+    flip_axis = snapshot.payload.get("flip_axis")
+    if flip_axis == "x":
+        low, high = ax.get_xlim()
+        ax.set_xlim(high, low)
+    elif flip_axis == "y":
+        low, high = ax.get_ylim()
+        ax.set_ylim(high, low)
 
     max_ticks = int(params.get("max_major_ticks", 5))
     x0, x1 = ax.get_xlim()
@@ -980,6 +1035,206 @@ def _world_to_display(renderer, point) -> Tuple[float, float]:
     renderer.WorldToDisplay()
     display = renderer.GetDisplayPoint()
     return float(display[0]), float(display[1])
+
+
+def _orientation_camera_basis(camera) -> np.ndarray:
+    """相机的右、上、朝观察者三个正交方向，均以世界坐标表示。"""
+    outward = (np.asarray(camera.get("position", (1., 1., 1.)), dtype=float)
+               - np.asarray(camera.get("focal_point", (0., 0., 0.)), dtype=float))
+    length = np.linalg.norm(outward)
+    if not np.isfinite(length) or length < 1e-12:
+        outward = np.ones(3)
+        length = np.linalg.norm(outward)
+    outward = outward / length
+    up = np.asarray(camera.get("view_up", (0., 0., 1.)), dtype=float)
+    right = np.cross(up, outward)
+    length = np.linalg.norm(right)
+    if not np.isfinite(length) or length < 1e-12:
+        # 处理与视线平行的 view-up，保持轴对齐视角也能生成方向标。
+        up = np.eye(3)[int(np.argmin(np.abs(outward)))]
+        right = np.cross(up, outward)
+        length = np.linalg.norm(right)
+    right = right / length
+    return np.asarray((right, np.cross(outward, right), outward))
+
+
+def _orientation_axis_order(camera) -> Tuple[int, int, int]:
+    """将 X/Y/E 一对一分配给水平、竖直和纵深角色，不决定投影角度。"""
+    screen_basis = _orientation_camera_basis(camera)
+    # 等轴视角同分时优先水平 kx、竖直 E、纵深 ky。
+    return max(
+        permutations((0, 2, 1)),
+        key=lambda order: round(sum(
+            abs(screen_basis[slot][axis]) for slot, axis in enumerate(order)
+        ), 12),
+    )
+
+
+def _orientation_axis_vectors(camera) -> np.ndarray:
+    """保留各轴的相机投影，仅选横向朝右、竖向朝上、纵深朝观察者的一端。
+
+    每行对应水平/竖直/纵深角色，每列对应屏幕右/上/朝观察者分量。
+    不读取坐标数值；不单独归一化二维投影，以保留纵深缩短的比例。
+    """
+    basis = _orientation_camera_basis(camera)
+    vectors = []
+    for slot, axis in enumerate(_orientation_axis_order(camera)):
+        vector = basis[:, axis].copy()
+        if vector[slot] < 0.:
+            vector = -vector
+        vectors.append(vector)
+    return np.asarray(vectors)
+
+
+def orientation_rect(main_rect, width_mm, height_mm, overrides) -> Tuple[float, float, float, float]:
+    """方向标的 figure 比例矩形；显式中心以整张画布百分比表示并防止越界。"""
+    available = min(main_rect[2] - main_rect[0], main_rect[3] - main_rect[1])
+    size_mm = min(15.0, available * 0.32, float(width_mm), float(height_mm))
+    inset_mm = min(1.0, available * 0.02)
+    centers = []
+    for key, default, length in (
+        ("orientation_cx", main_rect[0] + inset_mm + size_mm / 2., float(width_mm)),
+        ("orientation_cy", main_rect[1] + inset_mm + size_mm / 2., float(height_mm)),
+    ):
+        center = default
+        if key in overrides:
+            try:
+                requested = float(overrides[key]) / 100. * length
+            except (TypeError, ValueError):
+                requested = default
+            if np.isfinite(requested):
+                center = requested
+        centers.append(min(max(center, size_mm / 2.), length - size_mm / 2.))
+    return (
+        (centers[0] - size_mm / 2.) / width_mm,
+        (centers[1] - size_mm / 2.) / height_mm,
+        size_mm / width_mm, size_mm / height_mm,
+    )
+
+
+def default_orientation_center(style_params, overrides, width_mm, height_mm) -> Tuple[float, float]:
+    """按初始布局估算方向标自动中心（整张画布 %），不使用显式中心覆盖。
+
+    实际轴名/标题排版可能增加边距；预览生成后以实际方向标矩形校准控件。
+    """
+    clean = {key: value for key, value in (overrides or {}).items()
+             if key not in ("orientation_cx", "orientation_cy")}
+    margins = _initial_margins(style_params)
+    main_rect, _ = _compute_rects(
+        float(width_mm), float(height_mm), margins,
+        _colorbar_layout_for(style_params, clean, "3d"),
+    )
+    x, y, width, height = orientation_rect(main_rect, width_mm, height_mm, {})
+    return ((x + width / 2.) * 100., (y + height / 2.) * 100.)
+
+
+def _draw_3d_orientation(fig, snapshot, style_params, overrides, main_rect,
+                         width_mm, height_mm):
+    """三轴倾角跟随相机；只约束箭头朝右半边、上半边或观察者。"""
+    rect = orientation_rect(main_rect, width_mm, height_mm, overrides)
+    size_mm = rect[2] * width_mm
+    ax = fig.add_axes(rect, label="orientation", zorder=10)
+    ax.set_axis_off()
+    ax.patch.set_visible(False)
+    ax.set_xlim(0., 1.)
+    ax.set_ylim(0., 1.)
+    ax.set_aspect("equal")
+    ink = style_params.get("ink_color", "#000000")
+    scale = size_mm / 15.0
+    vectors = _orientation_axis_vectors(snapshot.camera)
+    projected = vectors[:, :2]
+    points = np.vstack((np.zeros(2), projected))
+    lower, upper = points.min(axis=0), points.max(axis=0)
+    # 统一缩放和平移，不拉伸或单独旋转某条轴；四周留出轴名空间。
+    fit = 0.56 / max(float(np.max(upper - lower)), 1e-12)
+    origin = np.full(2, 0.5) - fit * (lower + upper) / 2.
+    endpoints = origin + fit * projected
+    lengths = np.linalg.norm(projected, axis=1)
+    label_positions = np.asarray([
+        endpoint + 0.10 * direction / length if length >= 1e-9
+        else origin + np.asarray((-0.11, -0.11))
+        for endpoint, direction, length in zip(endpoints, projected, lengths)
+    ])
+    # 某些视角的轴投影本来就重合；只把标签沿垂线分开，保持轴线不变。
+    for first in range(3):
+        for second in range(first + 1, 3):
+            if np.linalg.norm(label_positions[first] - label_positions[second]) < 0.16:
+                direction = projected[first] / max(lengths[first], 1e-12)
+                perpendicular = np.asarray((-direction[1], direction[0]))
+                label_positions[first] += 0.11 * perpendicular
+                label_positions[second] -= 0.11 * perpendicular
+    label_positions = np.clip(label_positions, 0.10, 0.90)
+    symbols = (r"$k_x$", r"$k_y$", r"$E$")
+    # 数值单位不属于方向示意；显式命名/清空则仍沿用现有轴标签规则。
+    labels = resolve_axis_labels(snapshot, overrides)
+    for slot, axis in enumerate(_orientation_axis_order(snapshot.camera)):
+        direction = projected[slot]
+        length = lengths[slot]
+        if length < 1e-9:
+            # 精确沿纵深轴正视时，投影为一点；圈点表示朝屏幕外，避免伪造斜角。
+            arrow = Circle(origin, radius=0.032, facecolor="none",
+                           edgecolor=ink, linewidth=0.9 * scale, zorder=3)
+            ax.plot(*origin, marker=".", markersize=1.5 * scale,
+                    markeredgewidth=0., color=ink, zorder=4,
+                    gid="orientation-depth-dot")
+        else:
+            arrow = FancyArrowPatch(
+                origin, endpoints[slot], arrowstyle="-|>",
+                mutation_scale=7.0 * scale * min(1., fit * length / 0.18),
+                linewidth=0.9 * scale, color=ink, shrinkA=0., shrinkB=0.,
+            )
+        arrow.set_gid(("orientation-horizontal", "orientation-vertical",
+                       "orientation-depth")[slot])
+        ax.add_patch(arrow)
+        label = labels[axis]
+        key = ("X", "Y", "E")[axis]
+        override_key = ("xlabel_text", "ylabel_text", "zlabel_text")[axis]
+        if override_key not in overrides and label in (
+            snapshot.axis_label(key), ("kx", "ky", "E")[axis],
+        ):
+            label = symbols[axis]
+        if label:
+            ax.text(
+                *label_positions[slot], label,
+                ha="center", va="center",
+                color=ink, fontsize=float(style_params.get("axis_label_size", 7.0)) * scale,
+                fontfamily=style_params.get("font_family", "DejaVu Sans"),
+            )
+    # inset 后置于主布局；长的用户轴名也要收进标记内，避免越过图幅边界。
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    bounds = ax.get_window_extent(renderer)
+    for text in list(ax.texts):
+        extent = text.get_window_extent(renderer)
+        x, y = text.get_position()
+        available_w = (0.98 - x if text.get_ha() == "left"
+                       else 2.0 * min(x - 0.02, 0.98 - x)) * bounds.width
+        available_h = 2.0 * min(y - 0.02, 0.98 - y) * bounds.height
+        factor = min(1.0, available_w / max(extent.width, 1.0),
+                     available_h / max(extent.height, 1.0))
+        if factor < 1.0:
+            if text.get_fontsize() * factor >= 1.0:
+                text.set_fontsize(text.get_fontsize() * factor)
+            else:
+                # Text 的字号下限是 1pt；极长自定义名用字形轮廓等比缩小，
+                # 保留完整文字，不裁掉字符，也不受该下限影响。
+                path = TextPath((0., 0.), text.get_text(),
+                                prop=text.get_fontproperties())
+                box = path.get_extents()
+                shrink = min(available_w / max(box.width, 1e-6),
+                             available_h / max(box.height, 1e-6))
+                width = box.width * shrink / bounds.width
+                height = box.height * shrink / bounds.height
+                left = x if text.get_ha() == "left" else x - width / 2.0
+                transform = (Affine2D().translate(-box.x0, -box.y0)
+                             .scale(shrink / bounds.width, shrink / bounds.height)
+                             .translate(left, y - height / 2.0))
+                outline = PathPatch(path, transform=transform + ax.transAxes,
+                                    facecolor=ink, linewidth=0.)
+                outline.set_gid("orientation-label")
+                ax.add_patch(outline)
+                text.remove()
+    return ax
 
 
 def _box_geometry(snapshot) -> Tuple[np.ndarray, Tuple[float, float, float]]:
@@ -1411,6 +1666,12 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         scale=body_factor, title_plan=title_plan,
     )
     place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
+    _fit_manual_colorbar_to_canvas(fig, overrides)
+    if overrides.get("show_orientation", False):
+        main_rect, _ = _compute_rects(width_mm, height_mm, margins, cbar_layout)
+        _draw_3d_orientation(
+            fig, snapshot, params, overrides, main_rect, width_mm, height_mm,
+        )
     return fig
 
 

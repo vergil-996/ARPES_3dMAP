@@ -859,11 +859,6 @@ class VisualEngine:
                 title = f"{axis_label}-Slice ({slice_info['index']})"
 
             # 应用色阶处理
-            # E-axis flip is a data-orientation correction.  It never reverses
-            # the momentum axis and it does not leave descending 2D ticks.
-            if slice_info.get("display_e_flip") and idx in (0, 1):
-                img = np.flip(img, axis=0)
-
             level_info = (display_fields["background_level_info"] if display_fields is not None
                           else VisualEngine._level_info(img, (b, g, w)))
             cmap_name = getattr(cmap, "name", str(cmap))
@@ -885,6 +880,13 @@ class VisualEngine:
                 img = np.flip(img, axis=1)
                 ext[0], ext[1] = ext[1], ext[0]
             if ext[2] > ext[3]:
+                img = np.flip(img, axis=0)
+                ext[2], ext[3] = ext[3], ext[2]
+
+            # E 轴翻转是画面镜像：像素和 E 轴刻度一起反向，坐标与点的对应关系
+            # 不变（像素搬到另一端，刻度跟着搬）。ext 因此按降序交给
+            # set_ylim，matplotlib 会把图像与刻度一起画成镜像。
+            if slice_info.get("display_e_flip") and idx in (0, 1):
                 img = np.flip(img, axis=0)
                 ext[2], ext[3] = ext[3], ext[2]
 

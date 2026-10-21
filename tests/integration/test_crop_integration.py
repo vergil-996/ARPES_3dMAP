@@ -221,17 +221,10 @@ class CropChainTests(unittest.TestCase):
         context = _axis_integral_context()
         e = context["coords"]["E"]
         yl, yh = 3.0, 6.0
-        flipped = apply_selection(context, CropSelection("2d", ("Y", "E"), (0.0, 3.0, yl, yh), e_flip=True))
-        # Visible window under flip at labels [yl, yh] shows physical flip(e).
-        # flip maps e -> e_min + e_max - e over the full axis.
-        physical_lo, physical_hi = e[0] + e[-1] - yh, e[0] + e[-1] - yl
-        e_idx = np.where((e >= physical_lo - 1e-9) & (e <= physical_hi + 1e-9))[0]
-        np.testing.assert_array_equal(flipped["data"], context["data"][:, e_idx])
-        # Result stays in internal orientation: re-rendering with flip shows
-        # the same window again (involution).
-        from bandscope.core.crop_model import _orient
-        reoriented = _orient(flipped, True)
-        self.assertEqual(reoriented["data"].shape, flipped["data"].shape)
+        cropped = apply_selection(context, CropSelection("2d", ("Y", "E"), (0.0, 3.0, yl, yh), e_flip=True))
+        # 翻转只镜像画面：选区里的 E 读数直接对应同一批采样，不改变映射。
+        e_idx = np.where((e >= yl - 1e-9) & (e <= yh + 1e-9))[0]
+        np.testing.assert_array_equal(cropped["data"], context["data"][:, e_idx])
 
     def test_export_axes_match_cropped_sample(self):
         context = _grid_context()

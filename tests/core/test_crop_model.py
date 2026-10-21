@@ -54,11 +54,12 @@ class CropModelTests(unittest.TestCase):
         np.testing.assert_array_equal(result["data"], self.volume[2:4, 2, 2:5])
         self.assertEqual(result["slice_info"]["extent_override"], [3, 2, 5, 3])
 
-    def test_2d_flip_selection_matches_visible_pixels(self):
+    def test_2d_flip_selection_keeps_visible_samples(self):
         data = self.volume[:, 2, :]
         context = {"view": "2d", "data": data, "slice_info": {"axis": 1, "index": 2}, "coords": self.coords}
+        # 翻转只镜像画面：框里的 E 读数仍然选中同一批采样。
         result = apply_selection(context, self.select("2d", (1, 4, 0, 2), flip=True))
-        np.testing.assert_array_equal(result["data"][:, ::-1], data[1:5, ::-1][:, :3])
+        np.testing.assert_array_equal(result["data"], data[1:5, :3])
 
     def test_curve_removes_middle_points_without_bridging_gaps(self):
         context = {"view": "1d", "x_data": np.arange(6.), "y_data": np.array([0, 2, 9, 3, 8, 4]), "xlabel": "Delay (ps)"}
@@ -67,12 +68,14 @@ class CropModelTests(unittest.TestCase):
         np.testing.assert_allclose(result["y_data"], [2, np.nan, 3, np.nan, 4], equal_nan=True)
         np.testing.assert_allclose(export_cropped_context(result)["intensity"], result["y_data"], equal_nan=True)
 
-    def test_curve_flip_is_applied_once_and_chain_does_not_restore_removed_points(self):
+    def test_curve_flip_mirrors_display_without_reordering_samples(self):
         context = {"view": "1d", "x_data": np.arange(6.), "y_data": np.arange(6.), "xlabel": "Energy (eV)"}
         result = apply_selection(context, self.select("1d", (0, 3, 3, 5), flip=True))
-        np.testing.assert_allclose(result["y_data"][::-1], [5, 4, 3, np.nan], equal_nan=True)
+        # 翻转只改显示方向：选中的仍是 x=0..3、强度 3..5 的那些点。
+        np.testing.assert_array_equal(result["x_data"], [0, 1, 2, 3])
+        np.testing.assert_allclose(result["y_data"], [np.nan, np.nan, np.nan, 3], equal_nan=True)
         result = apply_selection(result, self.select("1d", (-2, 9, -2, 9), flip=True))
-        self.assertEqual(np.count_nonzero(np.isfinite(result["y_data"])), 3)
+        self.assertEqual(np.count_nonzero(np.isfinite(result["y_data"])), 1)
 
     def test_comparison_uses_one_rectangle_for_all_curves(self):
         context = {"view": "1d_comparison", "curves": [

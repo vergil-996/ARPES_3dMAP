@@ -25,24 +25,25 @@ class EnhancementGeometryTests(unittest.TestCase):
         context = context_2d()
         context["coords"]["X"] = np.array([9, 7, 4, 2, 1, -1.0])
         bounds = (.5, 2.5, 1.25, 4.25)
-        for flip in (False, True):
-            np.testing.assert_allclose(logical_bounds(context, physical_bounds(context, bounds, e_flip=flip), e_flip=flip), bounds)
+        np.testing.assert_allclose(logical_bounds(context, physical_bounds(context, bounds)), bounds)
 
-    def test_energy_flip_preserves_samples_on_cropped_2d(self):
+    def test_energy_flip_keeps_sample_mapping_on_cropped_2d(self):
         context = context_2d(np.ones((3, 4)), axis=0)
         context["coords"]["E"] = np.linspace(-2, 2, 12)
         context["plot_logical_bounds"] = dict(x_low=0, x_up=2, y_low=5, y_up=8)
         bounds = (0, 2, 5, 6)
-        flipped = physical_bounds(context, bounds, e_flip=True)
-        np.testing.assert_allclose(flipped[2:], context["coords"]["E"][[7, 8]])
-        np.testing.assert_allclose(logical_bounds(context, flipped, e_flip=True), bounds)
+        # E 翻转只是显示镜像，物理坐标换算与翻转开关无关。
+        physical = physical_bounds(context, bounds)
+        np.testing.assert_allclose(physical[2:], context["coords"]["E"][[5, 6]])
+        np.testing.assert_allclose(logical_bounds(context, physical), bounds)
 
-    def test_3d_energy_flip_changes_labels_without_moving_box(self):
+    def test_3d_energy_flip_keeps_coordinates_and_box(self):
         context = context_3d()
         bounds = (1, 4, 0, 3, 0, 1)
-        labels = physical_bounds(context, bounds, e_flip=True)
-        self.assertEqual(labels[4:], (2, 3))
-        np.testing.assert_allclose(logical_bounds(context, labels, e_flip=True), bounds)
+        labels = physical_bounds(context, bounds)
+        # 3D 翻转由相机镜像整个场景，坐标与框都不动。
+        self.assertEqual(labels[4:], (0, 1))
+        np.testing.assert_allclose(logical_bounds(context, labels), bounds)
 
     def test_volume_projects_onto_each_axis_and_keeps_depth(self):
         bounds = (1, 4, 2, 3, 0, 2)

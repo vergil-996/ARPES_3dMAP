@@ -96,7 +96,7 @@ def main():
                 check("publication includes both inherited regions", len(snapshot.payload["enhancement"]["regions"]) == 2)
                 render_and_save(snapshot, resolve_style("2d", ""), {}, OutputOptions(width_mm=150, height_mm=110, dpi=120), str(args.output_dir / "inherited_2d_publication.png"))
                 window.grab().save(str(args.output_dir / "inherited_2d_flipped_window.png"))
-                bounds = physical_bounds(window.current_render_context, (85, 135, 105, 175), e_flip=True)
+                bounds = physical_bounds(window.current_render_context, (85, 135, 105, 175))
                 window._on_enhancement_rectangle(SimpleNamespace(xdata=bounds[0], ydata=bounds[2]), SimpleNamespace(xdata=bounds[1], ydata=bounds[3]))
             elif step == 4:
                 check("projected edit survives refresh", np.allclose(window._enhancement_selected()["bounds"], (85, 135, 105, 175)))

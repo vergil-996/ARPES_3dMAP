@@ -1,0 +1,37 @@
+# 截图方向标与色条拖动
+
+日期：2026-10-21。状态：相机投影、预览拖动与位置输入已实现，全量自动化通过，真实窗口复验完成并记录 2 项既有布局失败；维护者人工交互及发行包验收未执行。
+
+## 目标与约束
+
+- 只在 3D「截图样式 → 微调」增加默认关闭的「三轴方向标」，按样式保存，不改变主视图状态。
+- 三轴保留当前相机的投影倾角及纵深缩短，只选择横向朝右半边、竖向朝上半边、纵深朝观察者的一端，不表示坐标值递增；按当前相机方向匹配 kx、ky、E 标签。精确正视纵深轴时用圈点表示屏幕外，不伪造斜角。
+- 方向标独立于带刻度坐标轴，默认短数学轴名不带单位；已有用户轴名覆盖和清空语义仍有效。
+- 大图预览可直接拖动方向标；中心 X/Y 输入框以整个图幅百分比定位（X 向右、Y 向上），与拖动双向同步。松手后重新生成完整预览，正式导出沿用相同位置；支持自动位置、完整入框夹取和关闭/重开保留位置。
+- 移除方向标整行控件的悬停气泡。2D/3D 色条、刻度和标题作为独立透明层拖动，与已有中心 X/Y 两位小数输入同步；显式移动不改变主图区，完整注记组夹取到图幅内。方向标与色条独立命中，重合时方向标优先。
+- 主任务负责导出渲染、README 与集成；子任务分别负责模型/控件、行为测试及真实窗口脚本。未修改主窗口、插件 API、依赖或打包配置。
+
+## 相关文件
+
+- `bandscope/exporting/publication_models.py`、`publication_dialog.py`、`publication_renderers.py`：3D 专属 `show_orientation` 与 `orientation_cx/cy`、草稿/持久化/重置，以及固定物理大小的透明方向标。预览从同一 Figure 提取无方向标底图与透明层，拖动中不重新计算体渲染。
+- `bandscope/exporting/orientation_preview.py`：方向标与色条共用拖动命中、抓取偏移、适应窗口/100%/留白/DPR 映射及实时图层绘制；完整色条文字跟随移动。
+- `tests/exporting/test_publication_orientation.py`、`test_publication_orientation_ui.py`、`test_orientation_preview.py`：合成快照与隔离设置；覆盖投影、图幅位置、Qt 鼠标拖动、输入同步、边界、缓存与重置。
+- `tests/exporting/test_colorbar_position.py`、`test_publication_colorbar_drag_ui.py`：自由色条位置、完整文字边界、2D worker 图层传递与悬停气泡移除。
+- `scripts/validation/verify_screenshot_orientation.py`：默认使用 `.local/data/WSe2_step.npz`，通过控件 API 验证面板、实际导出与科学状态隔离。
+
+## 验证
+
+- 导出模块自动化测试：188 项通过，包含方向标投影、位置、控件和 Qt 鼠标拖动测试。日志为 `.local/logs/screenshot-orientation-position-export-tests.log`。
+- 仓库 `.venv` 执行 `python -m unittest discover -s tests -t . -v`：1425 项全部通过（70.6 秒）。完整日志为 `.local/logs/screenshot-orientation-position-full-tests.log`；差异空白检查通过。
+- 真实窗口：Windows、仓库 `.venv` Python 3.12.10 / Qt 5.15.2 / Matplotlib 3.10.8 / PyVista 0.47.1 / VTK 9.6.0；真实 WSe₂ 数据形状 `(150, 150, 200, 25)`，E 为索引坐标。
+- 三种 3D 样式与带刻度坐标轴共存、关闭原坐标轴独立开启、反面/斜角/roll/正视纵深、透明 PNG 和面板入口通过；相机、数据摘要及色阶状态保持一致。PNG 与报告位于 `.local/outputs/screenshot_orientation_position/`，不提交。
+- 实际图标投影角度（水平/竖直/纵深）：默认 `[30, 90, -30]°`、斜角 `[-15, 90, -151.9]°`、roll `[3, 63, -57]°`；独立相机基断言确认投影角度与缩短比例正确，并非固定三个角度。
+- 真实窗口发送 Qt 鼠标 press/move/release 验证 fit 与 100% 拖动，保持抓取偏移、实时同步输入、释放后刷新；手动 `(70,30)%` 与预览/正式 PNG 中心一致，关闭重开保留位置，输入与拖动出界均夹取到全图内。
+- 已目视查看实际面板及位置导出：中心 X/Y、自动位置完整可见，方向标确实移动且边界不裁切；这些是自动驱动真实窗口，未执行维护者人工鼠标手测。
+- 真实窗口脚本最终结果为 20 通过、2 失败；失败是下述同一既有布局边界的开/关对照。关闭带刻度坐标轴的 `body_size=250` 导出通过。
+
+## 已有边界与下一步
+
+- `body_size=250` 且打开带刻度坐标轴时，现有 3D 布局会报「画布尺寸过小」。关闭方向标的对照同样失败，属于已有布局边界，本任务未修改该逻辑；验证脚本保留失败与对照，不将其标为通过。
+- 方向标是透明叠加；放大数据体时可能覆盖图像内容，需维护者确认科研排版观感。
+- 人工勾选/切换样式与发行包验收待执行。未发版。

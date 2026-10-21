@@ -124,34 +124,29 @@ def region_slices(context, region):
     return tuple(result)
 
 
-def _display_axis(context, key, dimension, e_flip):
+def _display_axis(context, key, dimension):
+    """逻辑下标轴与物理坐标轴的对应；E 翻转只是显示镜像，不参与换算。"""
     values = np.asarray(context["coords"][key], dtype=float)
     indices = np.arange(len(values), dtype=float)
-    if key == "E" and e_flip:
-        if context["view"] == "3d":
-            values = values[::-1]
-        else:
-            _, domain = geometry(context)
-            indices = domain[2*dimension] + domain[2*dimension+1] - indices
     return values, indices
 
 
-def physical_bounds(context, logical, *, e_flip=False):
+def physical_bounds(context, logical):
     axes, _ = geometry(context)
     result = []
     for i, key in enumerate(axes):
-        values, indices = _display_axis(context, key, i, e_flip)
+        values, indices = _display_axis(context, key, i)
         if indices[0] > indices[-1]:
             indices, values = indices[::-1], values[::-1]
         result.extend(sorted(interpolate_axis(logical[2*i:2*i+2], indices, values, extrapolate=True)))
     return tuple(float(v) for v in result)
 
 
-def logical_bounds(context, physical, *, e_flip=False):
+def logical_bounds(context, physical):
     axes, _ = geometry(context)
     result = []
     for i, key in enumerate(axes):
-        values, indices = _display_axis(context, key, i, e_flip)
+        values, indices = _display_axis(context, key, i)
         if values[0] > values[-1]:
             values, indices = values[::-1], indices[::-1]
         result.extend(sorted(interpolate_axis(physical[2*i:2*i+2], values, indices, extrapolate=True)))

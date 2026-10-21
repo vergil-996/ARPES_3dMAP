@@ -80,8 +80,7 @@ class TimePreviewTests(unittest.TestCase):
                             np.testing.assert_array_equal(preview.kwargs[key][axis], exact.kwargs[key][axis])
                     else:
                         self.assertEqual(preview.kwargs[key], exact.kwargs[key])
-                np.testing.assert_array_equal(preview.kwargs["core_coords"]["E"],
-                                              np.arange(133)[::-1] if flipped else np.arange(133))
+                np.testing.assert_array_equal(preview.kwargs["core_coords"]["E"], np.arange(133))
                 np.testing.assert_array_equal(preview.kwargs["opacity_multiplier"], exact.kwargs["opacity_multiplier"])
                 self.assertEqual(preview.kwargs["quality"], "preview")
                 self.assertEqual(exact.kwargs["quality"], "exact")

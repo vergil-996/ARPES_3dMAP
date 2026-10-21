@@ -275,6 +275,10 @@ def render_presentation(snapshot, style, overrides, options, dpi, presentation):
     _draw_annotations(ax, p, params)
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
+    # E 轴翻转是画面镜像：曲线数据保持原始排列，只反向显示方向。
+    flip_axis = snapshot.payload.get("flip_axis")
+    if flip_axis in {"x", "y"}:
+        getattr(ax, f"invert_{flip_axis}axis")()
     legend, position = _legend(ax, snapshot, p, params, handles)
     margins = base._initial_margins(params)
     if margins["left"] + margins["right"] >= width - 10 or margins["top"] + margins["bottom"] >= height - 10:

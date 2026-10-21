@@ -173,9 +173,9 @@ class CropInteractionMixin:
             return None
         result = []
         for i, key in enumerate(selection.axes):
+            # 3D 的 E 翻转只镜像相机与坐标轴标注，世界坐标与体素都不动，
+            # 因此物理坐标到逻辑下标的换算不需要再镜像一次。
             indices = [self.core.physical_to_logical(key, v, clamp=False) for v in selection.bounds[2*i:2*i+2]]
-            if key == "E" and selection.e_flip:
-                indices = [len(self.core.coords["E"]) - 1 - v for v in indices]
             result.extend(sorted(indices))
         return result
 
@@ -198,10 +198,8 @@ class CropInteractionMixin:
             return
         self.precise_logical_bounds = list(bounds)
         flipped = self.timeline_bar.switch_flip.isChecked()
-        coordinate_bounds = list(bounds)
-        if flipped:
-            coordinate_bounds[4:6] = [len(self.core.coords["E"]) - 1 - v for v in bounds[4:6]]
-        physical = self.core.logical_bounds_to_physical_bounds(coordinate_bounds, clamp=False)
+        # E 翻转由相机镜像整个场景，逻辑下标与物理坐标一一对应，不再镜像。
+        physical = self.core.logical_bounds_to_physical_bounds(bounds, clamp=False)
         physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
         self.last_synced_slice_texts = self._logical_bounds_to_texts(bounds)
         controller = self.__dict__.get("crop_controller")
@@ -283,8 +281,6 @@ class CropInteractionMixin:
         space = getattr(self, "axis_space", None)
         if space is not None:
             params["axis_interval"] = space.as_interval(low=value, up=value).as_dict()
-            if space.key == "E":
-                params["axis_interval"]["display_e_flip"] = bool(self.timeline_bar.switch_flip.isChecked())
 
         # 当前页的会话状态与页面参数保持同一份值。
         if self._is_current_page(spec):

@@ -231,8 +231,7 @@ def _freeze_enhancement(window, snapshot, spec, context, render_context):
     for region in fields["regions"]:
         record = copy.deepcopy({key: value for key, value in region.items() if key != "slices"})
         if snapshot.view == "2d":
-            record["display_bounds"] = physical_bounds(context, region["bounds"],
-                e_flip=bool(render_context["slice_info"].get("display_e_flip")))
+            record["display_bounds"] = physical_bounds(context, region["bounds"])
         else:
             record["render_bounds"] = window.core.logical_to_render_bounds(region["bounds"], snapshot.payload["full_shape"], clamp=False)
         frozen["regions"].append(record)
@@ -386,9 +385,6 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
     sliced_label, x_key, y_key, ext = axis_views.get(idx, axis_views[2])
 
     img = np.array(data.T, dtype=np.float64, copy=True)
-    # E 轴翻转是数据显示方向修正（已由 _render_context_for_visual_flip 标记）
-    if slice_info.get("display_e_flip") and idx in (0, 1):
-        img = np.flip(img, axis=0)
 
     mode = slice_info.get("mode")
     if mode == "integral":
@@ -404,6 +400,12 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
         img = np.flip(img, axis=1)
         ext[0], ext[1] = ext[1], ext[0]
     if ext[2] > ext[3]:
+        img = np.flip(img, axis=0)
+        ext[2], ext[3] = ext[3], ext[2]
+
+    # 与主视图一致：E 轴翻转是画面镜像，像素与 E 轴刻度一起反向，ext 交给
+    # render_2d 的 set_ylim 后自然成为降序刻度。
+    if slice_info.get("display_e_flip") and idx in (0, 1):
         img = np.flip(img, axis=0)
         ext[2], ext[3] = ext[3], ext[2]
 
@@ -466,6 +468,12 @@ def _freeze_1d(window, snapshot: PublicationSnapshot, render_context) -> None:
         "title": str(render_context.get("title") or snapshot.source_page_title),
         "xlabel": xlabel,
         "ylabel": str(render_context.get("ylabel") or "Intensity (a.u.)"),
+        "flip_axis": (
+            "x"
+            if bool(render_context.get("display_e_flip"))
+            and _context_xlabel_axis_key(render_context.get("xlabel", "")) == "E"
+            else None
+        ),
     }
 
 
@@ -498,6 +506,12 @@ def _freeze_1d_comparison(window, snapshot: PublicationSnapshot, render_context)
         "xlabel": xlabel,
         "ylabel": str(render_context.get("ylabel") or "Intensity (a.u.)"),
         "comparison_kind": render_context.get("comparison_kind"),
+        "flip_axis": (
+            "x"
+            if bool(render_context.get("display_e_flip"))
+            and render_context.get("comparison_kind") in {"energy_dos", "edc_curve"}
+            else None
+        ),
     }
 
 
@@ -528,6 +542,7 @@ def _freeze_waterfall(window, snapshot: PublicationSnapshot, render_context) -> 
         "title": str(render_context.get("title") or snapshot.source_page_title),
         "xlabel": str(render_context.get("xlabel") or "Intensity (normalized, arb. u.)"),
         "ylabel": ylabel,
+        "flip_axis": "y" if bool(render_context.get("display_e_flip")) else None,
     }
 
 

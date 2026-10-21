@@ -910,14 +910,14 @@ class EnhancementInteractionMixin:
             self._clear_enhancement_interaction()
             self._enhancement_draw_key = key
             if active:
-                bounds = physical_bounds(context, active["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked())
+                bounds = physical_bounds(context, active["bounds"])
                 self._enhancement_selector = InteractiveCropBox(self.ax_2d, self._on_enhancement_rectangle, bounds)
         for artist in self._enhancement_artists:
             if artist.axes is not None:
                 artist.remove()
         self._enhancement_artists = []
         for region in fields["regions"]:
-            bounds = physical_bounds(context, region["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked())
+            bounds = physical_bounds(context, region["bounds"])
             x0, x1, y0, y1 = bounds
             patch = Rectangle((x0, y0), x1-x0, y1-y0, fill=False, edgecolor=theme.ACCENT,
                               linewidth=1.2, linestyle="--" if not region["enabled"] else "-", zorder=80)
@@ -934,14 +934,14 @@ class EnhancementInteractionMixin:
             self.ax_2d, fields["regions"], self.page_render.get_selected_cmap(),
             existing=self.__dict__.get("_enhancement_colorbars", ()))
         if self._enhancement_selector is not None and active:
-            self._enhancement_selector.sync_bounds(physical_bounds(context, active["bounds"], e_flip=self.timeline_bar.switch_flip.isChecked()))
+            self._enhancement_selector.sync_bounds(physical_bounds(context, active["bounds"]))
         self.canvas_2d.draw_idle()
 
     def _on_enhancement_rectangle(self, press, release):
         region = self._enhancement_selected()
         if region and all(v is not None for v in (press.xdata, release.xdata, press.ydata, release.ydata)):
             physical = (*sorted((press.xdata, release.xdata)), *sorted((press.ydata, release.ydata)))
-            update_region_bounds(region, logical_bounds(self.current_render_context, physical, e_flip=self.timeline_bar.switch_flip.isChecked()))
+            update_region_bounds(region, logical_bounds(self.current_render_context, physical))
             self._enhancement_state()["revision"] += 1
             QTimer.singleShot(0, self._enhancement_refresh)
 
@@ -952,10 +952,9 @@ class EnhancementInteractionMixin:
         if (not state or not context or context.get("view") != "2d"
                 or xdata is None or ydata is None):
             return None
-        e_flip = self.timeline_bar.switch_flip.isChecked()
         for region in reversed(self._enhancement_outline_regions(
                 matching_regions(context, state["regions"]))):
-            x0, x1, y0, y1 = physical_bounds(context, region["bounds"], e_flip=e_flip)
+            x0, x1, y0, y1 = physical_bounds(context, region["bounds"])
             if x0 <= xdata <= x1 and y0 <= ydata <= y1:
                 return region
         return None

@@ -344,9 +344,11 @@ class PluginSession:
         bounds = render_context.get("data_bounds") if render_context else None
         e_bounds = (int(bounds[4]), int(bounds[5])) if bounds is not None and len(bounds) >= 6 else None
         try:
+            # 插件拿到的能量轴始终是原始排列（E 翻转只镜像画面），倍率与体素
+            # 一一对应，不需要再按显示方向倒序。
             aligned = align_multiplier_to_voxels(
                 combined,
-                flipped=bool(context.display_e_flip),
+                flipped=False,
                 e_bounds=e_bounds,
                 stride=int(stride),
             )
