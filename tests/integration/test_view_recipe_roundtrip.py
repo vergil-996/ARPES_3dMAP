@@ -36,6 +36,7 @@ class RecipeRoundtripTests(unittest.TestCase):
     def save(self, snapshot=None):
         snapshot = snapshot or capture_snapshot(self.window)
         self.assertIsNotNone(snapshot.view_recipe, snapshot.recipe_error)
+        self.assertTrue(all("path" not in source for source in snapshot.view_recipe["sources"].values()))
         path = self.path.parent / "figure.png.bsview.json"
         path.write_text(ViewRecipeDocument(snapshot.view_recipe).dumps(), encoding="utf-8")
         return path, snapshot
@@ -58,7 +59,9 @@ class RecipeRoundtripTests(unittest.TestCase):
         path.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
         other = control_window()
         self.addCleanup(other.close)
-        self.assertTrue(other._load_view_recipe(path, confirm=False))
+        self.assertTrue(other._load_view_recipe(
+            path, confirm=False, relocate=lambda _: str(moved)
+        ))
         self.assertEqual(other.timeline_bar.slider_time.value(), 2)
         self.assertEqual(other._get_display_levels(), w._get_display_levels())
         restored_key = axis_title_key(other.left_workspace.home_page_id, "3d", ("X", "Y", "E"))
@@ -82,7 +85,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         path, snapshot = self.save()
         self.assertEqual({p["title"] for p in snapshot.view_recipe["pages"]}, {"原始视图", "用户命名的积分"})
         w.left_workspace.activate_page(home_id)
-        self.assertTrue(w._load_view_recipe(path, confirm=False))
+        self.assertTrue(w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path)))
         # 复现文件作为新数据源打开：页面 ID 重新分配，页面数量与目标页保持。
         self.assertEqual(len(w.left_workspace.page_specs), 2)
         self.assertEqual(w.active_page_spec.title, "用户命名的积分")
@@ -95,7 +98,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         old_pages = list(self.window.left_workspace.page_specs)
         synthetic_npz(self.path, seed=7)
         with self.assertRaisesRegex(RecipeError, "SHA-256"):
-            self.window._load_view_recipe(path, confirm=False)
+            self.window._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertIs(self.window.core.raw_data, original)
         self.assertEqual(list(self.window.left_workspace.page_specs), old_pages)
 
@@ -150,7 +153,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         path, before = self.save()
         other = control_window()
         self.addCleanup(other.close)
-        other._load_view_recipe(path, confirm=False)
+        other._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertEqual(other.global_denoise_methods, methods)
         np.testing.assert_allclose(other.current_render_context["data"], before.payload["volume"], rtol=1e-6)
 
@@ -165,7 +168,7 @@ class RecipeRoundtripTests(unittest.TestCase):
                                data_scope_id=scope.scope_id)
         w.left_workspace.add_page(page)
         path, before = self.save()
-        w._load_view_recipe(path, confirm=False)
+        w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertEqual(w.active_page_spec.data_scope_id, scope.scope_id)
         self.assertEqual(w.data_scopes[scope.scope_id], scope)
         after = capture_snapshot(w)
@@ -193,7 +196,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         self.assertEqual(len(snapshot.view_recipe["sources"]), 2)
         self.assertIn(frozen_id, snapshot.view_recipe["recipes"])
         self.path.unlink()  # Auxiliary data is not required to view frozen curves.
-        w._load_view_recipe(path, confirm=False)
+        w._load_view_recipe(path, confirm=False, relocate=lambda _: str(second))
         self.assertEqual(w.active_page_spec.page_kind, "log_curve")
         for a, b in zip(before["curves"], w.current_render_context["curves"]):
             np.testing.assert_allclose(a["y_data"], b["y_data"], equal_nan=True)
@@ -217,7 +220,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         path, before = self.save()
         target = next(p for p in before.view_recipe["pages"] if p["page_id"] == "plugin")
         self.assertEqual(target["params"]["derived_params"], {"step": 1})
-        w._load_view_recipe(path, confirm=False)
+        w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertTrue(w.current_render_context["restored_snapshot"])
         self.assertIn("无法重新计算", w.left_workspace.scope_label.text())
         np.testing.assert_allclose(w.current_render_context["raw_curves"], context["raw_curves"])
@@ -233,7 +236,7 @@ class RecipeRoundtripTests(unittest.TestCase):
             raise RuntimeError("commit failed")
         with patch.object(self.window, "_apply_recipe_workspace", side_effect=fail_after_apply):
             with self.assertRaisesRegex(RuntimeError, "commit failed"):
-                self.window._load_view_recipe(path, confirm=False)
+                self.window._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertIs(self.window.core, original)
         self.assertEqual(list(self.window.left_workspace.page_specs), pages)
 
@@ -244,7 +247,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         document["view_state"]["opacity_multiplier"] = weights.tolist()
         document["state_digest"] = state_digest(document)
         path.write_text(ViewRecipeDocument(document).dumps(), encoding="utf-8")
-        self.window._load_view_recipe(path, confirm=False)
+        self.window._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         with patch.object(self.window.plugin_session, "voxel_multiplier", side_effect=AssertionError("live plugin called")):
             _, actual = self.window._plugin_render_context(self.window.current_render_context)
             np.testing.assert_allclose(actual, weights)
@@ -273,7 +276,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         self.assertIsNotNone(pid)
         path, _ = self.save()
         with patch.object(record.instance, "compute_derived_result", wraps=record.instance.compute_derived_result) as compute:
-            w._load_view_recipe(path, confirm=False)
+            w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
             self.assertGreaterEqual(compute.call_count, 1)
         self.assertFalse(w.active_page_spec.params.get("_restored_result"))
 

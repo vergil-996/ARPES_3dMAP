@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from bandscope.core.analyzer_core import AnalyzerCore
-from bandscope.core.view_recipe import RecipeError, ViewRecipeDocument, plain, resolve_source
+from bandscope.core.view_recipe import RecipeError, ViewRecipeDocument, plain
 from tests.support.view_recipe import recipe_document, synthetic_npz
 
 
@@ -19,14 +19,14 @@ class ViewRecipeTests(unittest.TestCase):
         synthetic_npz(self.path)
         self.core, self.doc = recipe_document(self.path)
 
-    def test_json_roundtrip_and_editable_relative_path(self):
-        self.doc["sources"][self.doc["primary_source_id"]]["path"] = self.path.name
+    def test_json_roundtrip_omits_source_paths_even_for_legacy_documents(self):
         path = self.path.parent / "view.bsview.json"
         path.write_text(ViewRecipeDocument(self.doc).dumps(), encoding="utf-8")
+        content = path.read_text(encoding="utf-8")
         loaded = ViewRecipeDocument.load(path).data
-        source = loaded["sources"][loaded["primary_source_id"]]
-        self.assertEqual(resolve_source(source, path).resolve(), self.path.resolve())
-        self.assertIn("原始视图", path.read_text(encoding="utf-8"))
+        self.assertNotIn("path", loaded["sources"][loaded["primary_source_id"]])
+        self.assertNotIn(str(self.path), content)
+        self.assertIn("原始视图", content)
 
     def test_wrong_schema_duplicate_ids_and_changed_params_rejected(self):
         variants = []

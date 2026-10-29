@@ -43,6 +43,7 @@ from bandscope.extensions.api import (
 )
 from bandscope.extensions.derived_host import DerivedPageController
 from bandscope.extensions.plugin_manager import PluginManager
+from bandscope.core.axis_units import resolve_axis_unit
 
 #: 每页插件参数在 ``spec.params`` 里的键。
 PAGE_STATE_KEY = "plugins"
@@ -577,15 +578,16 @@ class PluginSession:
 
     @staticmethod
     def _coordinate_meta(window, key: str):
-        """坐标键对应的单位元数据；只如实转述，缺单位不猜。"""
+        """坐标键对应的单位元数据；只如实转述，缺单位不猜。
+
+        时间轴例外：来源没声明单位时按 fs 转述（``core.axis_units`` 的约定）。
+        """
         core = getattr(window, "core", None)
         sources = dict(getattr(core, "coord_sources", {}) or {})
         units = dict(getattr(core, "coord_units", {}) or {})
         if str(sources.get(key, "index")) != SOURCE_FILE:
             return "index", None
-        raw_unit = units.get(key)
-        unit = str(raw_unit).strip() if raw_unit else ""
-        return SOURCE_FILE, (unit or None)
+        return SOURCE_FILE, (resolve_axis_unit(key, units.get(key)) or None)
 
     @staticmethod
     def _current_frame(window):

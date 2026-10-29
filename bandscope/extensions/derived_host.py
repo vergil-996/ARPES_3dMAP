@@ -36,6 +36,7 @@ from bandscope.extensions.api import (
     read_only_array,
     validate_derived_waterfall,
 )
+from bandscope.core.axis_units import resolve_axis_unit
 
 #: 派生结果页的占位页面类型；宿主按能力处理，不识别具体插件 ID。
 DERIVED_PAGE_KIND = "plugin_derived"
@@ -330,9 +331,8 @@ class DerivedPageController:
         sources = dict(getattr(core, "coord_sources", {}) or {})
         units = dict(getattr(core, "coord_units", {}) or {})
         source = str(sources.get(key, "index"))
-        unit = ""
-        if source == SOURCE_FILE:
-            unit = str(units.get(key) or "").strip()
+        # 时间轴缺单位时按 fs 转述；其它轴仍只转述显式元数据。
+        unit = resolve_axis_unit(key, units.get(key)) if source == SOURCE_FILE else ""
         return DerivedAxis(
             key=str(key),
             label=str(label),

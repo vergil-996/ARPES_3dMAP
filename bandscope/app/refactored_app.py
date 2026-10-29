@@ -64,6 +64,7 @@ from bandscope.app.view_recipe_integration import ViewRecipeMixin
 from bandscope.core.crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval, AxisSpace, nearest_index
+from bandscope.core.axis_units import resolve_axis_unit
 from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
 from bandscope.ui.blank_control_page import BlankControlPage
 from bandscope.core.data_trans import convert as convert_mat_to_npz
@@ -4741,7 +4742,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             "x_data": coords["delay"],
             "y_data": self._compute_slice_dos_for_spec(spec, raw_data, coords),
             "title": "Slice Integrated Intensity vs Time",
-            "xlabel": "Delay (ps)",
+            "xlabel": self._axis_label_text("delay"),
         }
 
     def _compute_slice_dos_for_spec(self, spec, raw_data, coords):
@@ -6051,7 +6052,15 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
     def _configure_loaded_time_controls(self, info):
         t_max = info[3] - 1
         slider_max = max(t_max, 1)
-        time_func = lambda value: f"Delay: {self.core.coords['delay'][min(int(value), len(self.core.coords['delay']) - 1)]:.4f} fs"
+        # 时间轴缺单位元数据时按 fs 显示；文件声明了单位就如实用它。
+        delay_unit = resolve_axis_unit(
+            "delay", (getattr(self.core, "coord_units", None) or {}).get("delay")
+        )
+        unit_suffix = f" {delay_unit}" if delay_unit else ""
+        time_func = lambda value: (
+            f"Delay: {self.core.coords['delay'][min(int(value), len(self.core.coords['delay']) - 1)]:.4f}"
+            f"{unit_suffix}"
+        )
 
         self.timeline_bar.slider_time.setRange(0, slider_max)
         self.timeline_bar.slider_time.setValue(0)
@@ -7470,7 +7479,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         return info["x_key"], info["y_key"]
 
     def _axis_label_text(self, axis_key):
-        """坐标标签规则与导出共用一份：单位缺失不猜，索引回退标 index。"""
+        """坐标标签规则与导出共用一份：单位缺失不猜，索引回退标 index。
+
+        时间轴例外：来源没声明单位时按 fs（见 ``bandscope.core.axis_units``）。
+        """
         core = getattr(self, "core", None)
         sources = dict(getattr(core, "coord_sources", {}) or {})
         units = dict(getattr(core, "coord_units", {}) or {})

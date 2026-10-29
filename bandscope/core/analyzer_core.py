@@ -35,6 +35,8 @@ class AnalyzerCore(QObject):
         # 坐标来源与单位可信度（科研导出用）：
         # coord_sources[axis] = 'file'（文件提供坐标数组）/ 'index'（索引回退）；
         # coord_units[axis] = 显式单位元数据（如 'eV'、'Å⁻¹'），没有则为 None。
+        # 时间轴缺单位时不在这里补 fs：source_layout 要与历史复现记录逐字一致，
+        # 默认单位由 axis_units.resolve_axis_unit 在显示、导出与插件边界补齐。
         self.coord_sources = {}
         self.coord_units = {}
         self.source_identity = None

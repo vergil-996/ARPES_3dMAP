@@ -188,6 +188,11 @@ class LabelHonestyTests(unittest.TestCase):
         self.assertEqual(axis_label("E", "file", None), "E")
         self.assertEqual(axis_label("X", "file", ""), "kx")
 
+    def test_time_axis_defaults_to_fs_without_metadata(self):
+        # 实验室约定：时间轴来源没声明单位时按 fs 标注；显式单位优先。
+        self.assertEqual(axis_label("delay", "file", None), "Delay (fs)")
+        self.assertEqual(axis_label("delay", "file", "ps"), "Delay (ps)")
+
     def test_index_fallback_never_fakes_units(self):
         self.assertEqual(axis_label("E", "index"), "E (index)")
         self.assertEqual(axis_label("X", "index"), "kx (index)")

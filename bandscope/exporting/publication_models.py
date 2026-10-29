@@ -9,12 +9,16 @@
   恢复样式默认不重置它们。
 - 坐标/单位标签必须诚实：有显式单位元数据才标单位；有坐标无数值单位时
   不猜单位；缺失坐标（索引回退）时使用中性 index 标签，不编造 eV/Å⁻¹。
+  唯一例外是时间轴：来源没声明单位时按 fs 标注（实验室约定，见
+  ``bandscope.core.axis_units``）。
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Mapping, Optional, Tuple
+
+from bandscope.core.axis_units import resolve_axis_unit
 
 STYLE_SCHEMA_VERSION = 1
 SETTINGS_PREFIX = "publication_export/v1"
@@ -455,25 +459,18 @@ _AXIS_BASE_NAMES = {
     "delay": ("Delay", "Delay (index)"),
 }
 
-_AXIS_DEFAULT_UNITS = {
-    "X": None,
-    "Y": None,
-    "E": None,
-    "delay": None,
-}
-
 
 def axis_label(axis_key: str, source: str, unit: Optional[str] = None) -> str:
     """按坐标来源生成轴标签。
 
     - source == "file" 且有显式单位元数据 → "kx (Å⁻¹)" 形式；
-    - source == "file" 但无单位 → 只写 "kx"/"E"，不猜单位；
+    - source == "file" 但无单位 → 只写 "kx"/"E"；时间轴例外，缺单位按 fs；
     - 其它（索引回退）→ 中性 index 标签，绝不编造 eV/Å⁻¹/fs。
     """
     base, index_name = _AXIS_BASE_NAMES.get(axis_key, (str(axis_key), f"{axis_key} (index)"))
     if source != "file":
         return index_name
-    unit = (unit or "").strip() or _AXIS_DEFAULT_UNITS.get(axis_key)
+    unit = resolve_axis_unit(axis_key, unit)
     if unit:
         return f"{base} ({unit})"
     return base

@@ -62,8 +62,9 @@ def physical_decimals(step):
 class AxisSpace:
     """一根轴的物理空间描述：范围、采样坐标、显示标签与单位。
 
-    单位只复用数据元信息：文件声明了就用，没声明就不猜。坐标本身是索引
-    回退出来的（``coord_sources`` 标为 ``index``）时，标签明确标注 ``index``。
+    单位只复用数据元信息：文件声明了就用，没声明就不猜（时间轴由调用方按
+    ``axis_units.resolve_axis_unit`` 补默认 fs）。坐标本身是索引回退出来的
+    （``coord_sources`` 标为 ``index``）时，标签明确标注 ``index``。
     """
 
     __slots__ = ("key", "label", "unit", "source", "coords", "minimum", "maximum", "step")

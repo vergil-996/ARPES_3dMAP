@@ -95,7 +95,9 @@ def main():
         path = args.output_dir / "view_3d.png"
         export_pair(snap, resolve_style("3d", "3d_boxed"), {},
                     OutputOptions(dpi=150), str(path))
-        window._load_view_recipe(str(path) + ".bsview.json", confirm=False)
+        window._load_view_recipe(
+            str(path) + ".bsview.json", confirm=False, relocate=lambda _: str(args.data)
+        )
         wait(verify_3d)
 
     def verify_3d():
@@ -120,7 +122,9 @@ def main():
         path = args.output_dir / "view_2d.png"
         export_pair(snap, resolve_style("2d", "2d_boxed"), {"title_text": "Recipe validation"},
                     OutputOptions(dpi=150), str(path))
-        window._load_view_recipe(str(path) + ".bsview.json", confirm=False)
+        window._load_view_recipe(
+            str(path) + ".bsview.json", confirm=False, relocate=lambda _: str(args.data)
+        )
         wait(verify_2d)
 
     def verify_2d():

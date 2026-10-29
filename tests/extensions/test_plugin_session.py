@@ -97,6 +97,38 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(EnergyAxisSpec(np.array([1.0]), "eV", SOURCE_FILE).sample_spacing(), 0.0)
 
 
+class CoordinateMetaTests(unittest.TestCase):
+    """快照侧的坐标单位：时间轴缺省 fs，其它轴仍只转述显式元数据。"""
+
+    @staticmethod
+    def _window(sources, units):
+        return SimpleNamespace(
+            core=SimpleNamespace(coord_sources=sources, coord_units=units)
+        )
+
+    def test_time_axis_without_metadata_is_reported_as_fs(self):
+        window = self._window({"delay": SOURCE_FILE}, {"delay": None})
+        self.assertEqual(
+            PluginSession._coordinate_meta(window, "delay"), (SOURCE_FILE, "fs")
+        )
+
+    def test_explicit_time_unit_is_kept(self):
+        window = self._window({"delay": SOURCE_FILE}, {"delay": "ps"})
+        self.assertEqual(
+            PluginSession._coordinate_meta(window, "delay"), (SOURCE_FILE, "ps")
+        )
+
+    def test_index_delay_never_claims_a_unit(self):
+        window = self._window({"delay": SOURCE_INDEX}, {"delay": None})
+        self.assertEqual(
+            PluginSession._coordinate_meta(window, "delay"), (SOURCE_INDEX, None)
+        )
+
+    def test_other_axes_stay_strict(self):
+        window = self._window({"E": SOURCE_FILE}, {"E": None})
+        self.assertEqual(PluginSession._coordinate_meta(window, "E"), (SOURCE_FILE, None))
+
+
 def make_window(*, energy, unit="eV", source=SOURCE_FILE, flip=False, strides=()):
     """桩窗口：只提供 PluginSession 真正读取的属性。"""
     coords = {"E": np.asarray(energy, dtype=np.float64)}

@@ -154,8 +154,6 @@ class ViewRecipeDocument:
             raise RecipeError("缺少主原始数据来源。")
         for sid, source in sources.items():
             _object(source, "数据来源")
-            if not isinstance(source.get("path"), str) or not source["path"]:
-                raise RecipeError("数据来源缺少可编辑的 path。")
             if len(str(source.get("sha256", ""))) != 64 or source.get("source_id") != sid:
                 raise RecipeError("数据来源摘要无效。")
             _object(source.get("layout"), "NPZ 解析信息")
@@ -214,13 +212,16 @@ class ViewRecipeDocument:
         for name in ("environment", "view_state", "scopes", "publication"):
             _object(d.get(name), name)
         if d.get("state_digest") != state_digest(d):
-            raise RecipeError("科学参数或结果已被编辑；首版支持修改 path，其余修改请在软件内完成后重新导出。")
+            raise RecipeError("科学参数或结果已被编辑；请在软件内修改后重新导出。")
         plain(d)
         return self
 
     def dumps(self):
         self.validate()
-        return json.dumps(plain(self.data), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        document = copy.deepcopy(self.data)
+        for source in document.get("sources", {}).values():
+            source.pop("path", None)
+        return json.dumps(plain(document), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
     @classmethod
     def load(cls, path):
@@ -239,11 +240,6 @@ class ViewRecipeDocument:
             return cls(data).validate()
         except (OSError, ValueError, TypeError, RecursionError) as exc:
             raise RecipeError(f"无法读取复现文件：{exc}") from exc
-
-
-def resolve_source(source, recipe_path):
-    path = Path(source["path"])
-    return path if path.is_absolute() else Path(recipe_path).resolve().parent / path
 
 
 def sidecar_path(image_path):

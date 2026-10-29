@@ -36,6 +36,7 @@ class RecipePairExportTests(unittest.TestCase):
         d = ViewRecipeDocument.load(sidecar_path(self.path)).data
         self.assertEqual(self.path.read_bytes(), b"new picture")
         self.assertEqual(d["publication"]["overrides"]["title_text"], "new title")
+        self.assertTrue(all("path" not in source for source in d["sources"].values()))
         self.assertEqual(self.snapshot.view_recipe, frozen)
 
     def test_second_replace_failure_rolls_back_both_existing_files(self):

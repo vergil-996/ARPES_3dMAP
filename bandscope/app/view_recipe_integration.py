@@ -12,7 +12,7 @@ import numpy as np
 
 from bandscope.core.view_recipe import (
     FORMAT, SCHEMA_VERSION, ProvenanceStore, RecipeError, ViewRecipeDocument,
-    digest, plain, resolve_source, state_digest,
+    digest, plain, state_digest,
 )
 from bandscope.core.data_scope import DataScopeDescriptor, ScopedDataVolume
 from bandscope.processing.compute_backends import ArrayLRUCache, BackendManager
@@ -210,6 +210,8 @@ class ViewRecipeMixin:
                 raise RecipeError(f"页面 {item.title} 的 ROI 来源丢失。")
             scopes[scope.scope_id] = asdict(scope)
         sources, nodes = self._recipe_store().closure(roots)
+        for source in sources.values():
+            source.pop("path", None)
         primary = self.core.source_identity.descriptor(self.core.source_layout)["source_id"]
         camera_pose = self._current_camera_view_pose() if snapshot.camera else None
         view = plain({"camera": snapshot.camera,
@@ -260,16 +262,13 @@ class ViewRecipeMixin:
         from bandscope.core.source_session import ENTRY_VIEW_RECIPE
         document = ViewRecipeDocument.load(path).data
         source = document["sources"][document["primary_source_id"]]
-        source_path = resolve_source(source, path)
-        if not source_path.is_file():
-            if relocate is None:
-                replacement, _ = QFileDialog.getOpenFileName(
-                    self, "重新定位原始 NPZ", str(source_path), "NumPy Files (*.npz)")
-            else:
-                replacement = relocate(source)
-            if not replacement:
-                return False
-            source_path = replacement
+        if relocate is None:
+            source_path, _ = QFileDialog.getOpenFileName(
+                self, "选择原始 NPZ", "", "NumPy Files (*.npz)")
+        else:
+            source_path = relocate(source)
+        if not source_path:
+            return False
         core = AnalyzerCore()
         success, info = core.load_npz(str(source_path), layout=source["layout"])
         if not success:

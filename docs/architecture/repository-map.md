@@ -5,7 +5,7 @@
 | 位置 | 职责与现有模块 |
 |---|---|
 | `bandscope/app/` | `startup` 启动；`refactored_app` 主窗口与总协调；`source_workspace` 多数据源会话的换入换出与新增 / 切换 / 关闭事务；`view_recipe_integration` 复现文件预检与恢复；`crop_integration` 裁剪接入；`qt_bootstrap` Qt 配置 |
-| `bandscope/core/` | `analyzer_core` 数据加载；`source_session` 数据源会话与页面归属；`axis_mapping` 坐标映射；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型 |
+| `bandscope/core/` | `analyzer_core` 数据加载；`source_session` 数据源会话与页面归属；`axis_mapping` 坐标映射；`axis_units` 坐标单位约定（时间轴缺省 fs）；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型 |
 | `bandscope/processing/` | `compute_backends` 计算后端；`denoise_config` 参数；`denoise_engines` 去噪算法 |
 | `bandscope/rendering/` | `render_core` 显示及体渲染；`refresh_pipeline` 刷新、任务和缓存失效协调 |
 | `bandscope/ui/` | 控制页面、相机与裁剪控件、时间轴、数据源切换器、结果工作区、主题、弹层与提示 |

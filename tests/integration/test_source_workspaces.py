@@ -328,7 +328,9 @@ class _WorkspaceFixture(unittest.TestCase):
         recipe_path.write_text(ViewRecipeDocument(document).dumps(), encoding="utf-8")
         old_home = self.window.left_workspace.home_page_id
 
-        self.assertTrue(self.window._load_view_recipe(recipe_path, confirm=False))
+        self.assertTrue(self.window._load_view_recipe(
+            recipe_path, confirm=False, relocate=lambda _: str(self.first_path)
+        ))
 
         manager = self.window.source_manager
         self.assertEqual(len(manager), 2)
@@ -343,7 +345,9 @@ class _WorkspaceFixture(unittest.TestCase):
 
         # 同一个复现文件再打开一次：仍是新增数据源，页面 ID 再次重新分配。
         first_import_pages = set(self.window.left_workspace.page_specs)
-        self.assertTrue(self.window._load_view_recipe(recipe_path, confirm=False))
+        self.assertTrue(self.window._load_view_recipe(
+            recipe_path, confirm=False, relocate=lambda _: str(self.first_path)
+        ))
         self.assertEqual(len(manager), 3)
         self.assertEqual(manager.alias_for(manager.active_id), "figure.png_2")
         self.assertFalse(first_import_pages & set(self.window.left_workspace.page_specs))
