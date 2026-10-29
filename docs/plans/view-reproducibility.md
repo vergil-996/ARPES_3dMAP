@@ -72,6 +72,7 @@ JSON 使用缩进和中文直写；曲线缺测值保存为 `null`。数据来�
 - 真实数据：`python scripts/validation/verify_view_recipe.py`，使用默认 `.local/data/WSe2_step.npz`，Windows 原生窗口、隔离用户设置与插件；12 项自动检查通过，包含 3D/2D 数值、完整相机、色阶、目标树节点、默认开关及出版草稿往返。产物和报告位于 `.local/outputs/view_recipe/`，日志位于 `.local/logs/view-recipe-native.log`，均不提交。
 - 截图复核：已查看恢复后的 2D 主窗口、出版面板和单独捕获的 VTK 3D 场景，确认目标树、控件、默认勾选项和预览可见。Qt 主窗口抓图不能代替原生 VTK 场景抓图；验证脚本已单独保存 `restored_3d_scene.png` 并检查场景非空。
 - 多源兼容（2026-10-20，v1.16.0）：复现文件改为新增独立数据源，页面 ID 导入时重新分配；全量回归 1385 项通过，既有复现真实窗口脚本 12 项通过，详见 [多数据源工作区](multi-data-source-workspaces.md)。
-- 数据源路径移除（当前源码）：捕获与 JSON 序列化均剔除来源路径，旧版路径不再用于自动定位，每次加载强制选择主原始 NPZ。36 项受影响测试通过；全量回归 1460 项通过（77.420 秒），日志 `.local/logs/view-recipe-source-selection-full.log`；真实 WSe₂ 窗口验证 12 项通过，实际导出 JSON 无 `path` 字段，日志 `.local/logs/view-recipe-source-selection-native.log`。编译与差异检查通过。
+- 数据源路径移除（v1.17.4）：捕获与 JSON 序列化均剔除来源路径，旧版路径不再用于自动定位，每次加载强制选择主原始 NPZ。36 项受影响测试通过；全量回归 1460 项通过（77.420 秒），日志 `.local/logs/view-recipe-source-selection-full.log`；真实 WSe₂ 窗口验证 12 项通过，实际导出 JSON 无 `path` 字段，日志 `.local/logs/view-recipe-source-selection-native.log`。编译与差异检查通过。
+- 发布（2026-10-29，v1.17.4）：GitHub Release CI 全部成功（run 40807991538），安装包按 `.sha256` 边车完整下载校验、插件包与 `plugins-index.json` 验签通过；MatElab 发布记录「BandScope v1.17.4」已创建，只读元数据核对与 CI 边车一致。详见 [MatElab 更新源](matelab-update-source.md)。
 - 未执行：维护者对原生打开/保存、强制数据源选择、覆盖确认及日常鼠标交互的人工验收；冻结包和安装器验证。本任务未调整打包或插件加载路径。
-- 下一步：维护者完成上述交互验收；发行时依既有发布流程验证产物。本记录作为唯一状态主记录，经交接索引路由；全部事项关闭后连同验收材料归档。
+- 下一步：维护者完成上述交互验收；代码、自动化与两源发布已完成。本记录作为唯一状态主记录，经交接索引路由；全部事项关闭后连同验收材料归档。
