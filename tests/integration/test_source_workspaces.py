@@ -159,6 +159,53 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertTrue(self.window.activate_source(second_id))
         self.assertEqual(self.window.timeline_bar.slider_time.value(), 2)
 
+    def test_group_copy_is_global_and_activation_restores_its_owner_source(self):
+        first_id = self.load_first()
+        workspace = self.window.left_workspace
+        original = workspace.current_spec()
+        group = workspace.create_group("常用页面")
+
+        copied = workspace.copy_page_to_group(original.page_id, group.group_id)
+
+        self.assertEqual(workspace.current_page_id, copied.page_id)
+        self.assertEqual(self.window.active_page_spec.page_id, copied.page_id)
+        self.assertIn(original.page_id, workspace.page_tree._items)
+        self.assertNotIn(copied.page_id, workspace.page_tree._items)
+        self.assertEqual(workspace.page_tree.group_page_ids(group.group_id), [copied.page_id])
+
+        self.window.load_data(str(self.second_path))
+        second_id = self.window.source_manager.active_id
+
+        self.assertNotEqual(second_id, first_id)
+        self.assertNotEqual(workspace.current_page_id, copied.page_id)
+        self.assertIs(workspace.page_by_id(copied.page_id), copied)
+        self.assertNotIn(original.page_id, workspace.page_specs)
+        self.assertEqual([item.title for item in workspace.groups], ["常用页面"])
+        self.assertEqual(workspace.page_tree.group_page_ids(group.group_id), [copied.page_id])
+
+        workspace._on_tree_page_activated(copied.page_id)
+
+        self.assertEqual(self.window.source_manager.active_id, first_id)
+        self.assertEqual(workspace.current_page_id, copied.page_id)
+        self.assertEqual(self.window.active_page_spec.page_id, copied.page_id)
+        self.assertEqual(self.window.source_manager.owner_of(copied.page_id), first_id)
+        self.assertIn(original.page_id, workspace.page_specs)
+
+    def test_closing_a_source_removes_only_its_own_group_copies(self):
+        first_id = self.load_first()
+        workspace = self.window.left_workspace
+        group = workspace.create_group("全局分组")
+        first_copy = workspace.copy_page_to_group(workspace.home_page_id, group.group_id)
+        self.window.load_data(str(self.second_path))
+        second_copy = workspace.copy_page_to_group(workspace.home_page_id, group.group_id)
+
+        self.assertTrue(self.window.close_source(first_id))
+
+        self.assertNotIn(first_copy.page_id, workspace.page_specs)
+        self.assertIn(second_copy.page_id, workspace.page_specs)
+        self.assertEqual(workspace.page_tree.group_page_ids(group.group_id), [second_copy.page_id])
+        self.assertEqual([item.title for item in workspace.groups], ["全局分组"])
+
     def test_switching_clears_pending_denoise_but_keeps_the_configuration(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
 

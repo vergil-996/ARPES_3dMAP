@@ -3,12 +3,15 @@
 
 页面身份一律是 ``page_id``（随机 UUID，主页固定为 ``home``）；来源关系走
 ``AnalysisPageSpec.source_page_id``，树的父子结构由它推导，排序由 ``_tab_order``
-（会话内也跨重启保存，见 ``_save_tab_order``）决定。
+（会话内也跨重启保存，见 ``_save_tab_order``）决定。自定义分组是应用级区域，
+分组页面是带新 ``page_id`` 的副本；切换数据源只换下来源树，分组保持不变。
 
-改名、删除、排序都先在本模块落地，再通过信号通知宿主：
+改名、删除、排序和分组复制都先在本模块落地，再通过信号通知宿主：
 ``page_closed`` 逐页发出（先子后父），单页与多页删除均直接执行。
 """
+import copy
 import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -18,6 +21,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -28,7 +32,7 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
-from bandscope.ui.page_tree import PageTreeEntry, PageTreePanel
+from bandscope.ui.page_tree import PageGroupEntry, PageTreeEntry, PageTreePanel
 
 #: 页面树初始宽度、最小宽度，以及画布至少保留的宽度。
 NAV_INITIAL_WIDTH = 240
@@ -143,6 +147,12 @@ class PageTitleLabel(QLabel):
         event.accept()
 
 
+@dataclass(frozen=True)
+class PageGroup:
+    group_id: str
+    title: str
+
+
 @dataclass
 class AnalysisPageSpec:
     page_id: str
@@ -159,11 +169,15 @@ class AnalysisPageSpec:
     auto_title: Optional[str] = None
     #: 用户是否改过名。改过名后自动命名只更新 ``auto_title``，不动显示名。
     title_overridden: bool = False
+    #: 仅分组副本有值；普通页面仍按来源关系显示在原树中。
+    group_id: Optional[str] = None
 
 
 class ResultWorkspace(QWidget):
     page_added = pyqtSignal(str)
     page_activated = pyqtSignal(str)
+    #: 全局分组副本激活前，由宿主确认并切换到其所属数据源。
+    group_page_activation_requested = pyqtSignal(str)
     page_closed = pyqtSignal(str)
     #: 删除左侧根页面 = 关闭整份数据源；由宿主接管，不做逐页删除。
     source_close_requested = pyqtSignal(str)
@@ -183,6 +197,7 @@ class ResultWorkspace(QWidget):
         self.title_to_page_id: Dict[str, str] = {}
         self.activation_history = []
         self.children_by_parent: Dict[Optional[str], list] = {}
+        self._groups: List[PageGroup] = []
 
         self.settings = QSettings("ARPES", "ARPES_3dMAP")
         raw_order = self.settings.value("result_workspace/tab_order", "", type=str)
@@ -243,6 +258,10 @@ class ResultWorkspace(QWidget):
         self.page_tree.delete_requested.connect(self.delete_page)
         self.page_tree.pages_delete_requested.connect(self.delete_pages)
         self.page_tree.reorder_requested.connect(self.move_page_within_siblings)
+        self.page_tree.group_create_requested.connect(self.request_create_group)
+        self.page_tree.group_rename_requested.connect(self.request_rename_group)
+        self.page_tree.group_delete_requested.connect(self.delete_group)
+        self.page_tree.group_copy_page_requested.connect(self.copy_page_to_group)
 
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.setObjectName("result_splitter")
@@ -392,13 +411,110 @@ class ResultWorkspace(QWidget):
             # 新页面自动展开祖先并定位；被搜索隐藏时先清空搜索。
             self.page_tree.reveal_page(spec.page_id)
 
+    # ------------------------------------------------------------------
+    # 自定义分组与页面副本
+    # ------------------------------------------------------------------
+    @property
+    def groups(self):
+        return tuple(self._groups)
+
+    def group_by_id(self, group_id) -> Optional[PageGroup]:
+        return next((group for group in self._groups if group.group_id == group_id), None)
+
+    def create_group(self, title="新建分组") -> PageGroup:
+        name = str(title or "").strip() or "新建分组"
+        name = unique_title_among((group.title for group in self._groups), name)
+        group = PageGroup(uuid.uuid4().hex, name)
+        self._groups.append(group)
+        self._refresh_navigation_layout()
+        return group
+
+    def request_create_group(self):
+        title, accepted = QInputDialog.getText(
+            self, "新建分组", "分组名称：", text="新建分组"
+        )
+        if accepted:
+            return self.create_group(title)
+        return None
+
+    def rename_group(self, group_id, title) -> Optional[str]:
+        group = self.group_by_id(group_id)
+        if group is None:
+            return None
+        name = str(title or "").strip()
+        if not name:
+            return group.title
+        name = unique_title_among(
+            (item.title for item in self._groups if item.group_id != group_id), name
+        )
+        index = self._groups.index(group)
+        self._groups[index] = PageGroup(group.group_id, name)
+        self._refresh_navigation_layout()
+        return name
+
+    def request_rename_group(self, group_id):
+        group = self.group_by_id(group_id)
+        if group is None:
+            return None
+        title, accepted = QInputDialog.getText(
+            self, "重命名分组", "分组名称：", text=group.title
+        )
+        if accepted:
+            return self.rename_group(group_id, title)
+        return None
+
+    def delete_group(self, group_id) -> bool:
+        group = self.group_by_id(group_id)
+        if group is None:
+            return False
+        page_ids = [
+            page_id for page_id, spec in self.page_specs.items() if spec.group_id == group_id
+        ]
+        if page_ids:
+            self.delete_pages(page_ids)
+        self._groups = [item for item in self._groups if item.group_id != group_id]
+        self._refresh_navigation_layout()
+        return True
+
+    def copy_page_to_group(self, page_id, group_id) -> Optional[AnalysisPageSpec]:
+        source = self.page_specs.get(page_id)
+        if source is None or self.group_by_id(group_id) is None:
+            return None
+        copied = copy.deepcopy(source)
+        copied.page_id = uuid.uuid4().hex
+        while copied.page_id in self.page_specs:
+            copied.page_id = uuid.uuid4().hex
+        copied.title = self.unique_page_title(f"{source.title} 副本")
+        copied.activation_seq = 0
+        copied.closeable = True
+        copied.group_id = str(group_id)
+        self.add_page(copied)
+        return copied
+
+    def _group_page_specs(self) -> Dict[str, AnalysisPageSpec]:
+        return {
+            page_id: spec
+            for page_id, spec in self.page_specs.items()
+            if spec.group_id is not None
+        }
+
+    def _group_tab_order(self) -> List[str]:
+        group_pages = self._group_page_specs()
+        return [page_id for page_id in self._tab_order if page_id in group_pages]
+
     def replace_pages(self, pages, home_page_id, target_page_id):
         """Install a validated tree without activation callbacks or global preferences."""
         blocked = self.blockSignals(True)
         try:
-            self.page_specs = {p.page_id: p for p in pages}
+            group_pages = self._group_page_specs()
+            group_order = self._group_tab_order()
+            for page in pages:
+                page.group_id = None
+            self.page_specs = {**group_pages, **{p.page_id: p for p in pages}}
             self.home_page_id = home_page_id
-            self._tab_order = [p.page_id for p in pages if p.page_id != home_page_id]
+            self._tab_order = [
+                p.page_id for p in pages if p.page_id != home_page_id
+            ] + group_order
             self.activation_history = []
             self._rebuild_title_index()
             self.page_tree.clear_search()
@@ -408,40 +524,53 @@ class ResultWorkspace(QWidget):
             self.blockSignals(blocked)
 
     # ------------------------------------------------------------------
-    # 多数据源：整份工作区换入换出
+    # 多数据源：来源树换入换出，全局分组保持不动
     # ------------------------------------------------------------------
     def export_source_state(self) -> dict:
-        """捕获当前数据源的页面树与导航状态。
-
-        页面对象按引用交出：它们只属于这份数据源，不做深拷贝（内存保留）。
-        """
+        """只捕获当前数据源的来源树；全局分组不进入会话状态包。"""
+        local_pages = {
+            page_id: spec
+            for page_id, spec in self.page_specs.items()
+            if spec.group_id is None
+        }
+        current_id = self.current_page_id
+        if current_id not in local_pages:
+            current_id = self.home_page_id
         return {
-            "pages": list(self.page_specs.values()),
-            "order": list(self._tab_order),
+            "pages": list(local_pages.values()),
+            "order": [page_id for page_id in self._tab_order if page_id in local_pages],
             "home": self.home_page_id,
-            "current": self.current_page_id,
+            "current": current_id,
             "activation_seq": int(self.activation_counter),
-            "history": list(self.activation_history),
+            "history": [
+                page_id for page_id in self.activation_history if page_id in local_pages
+            ],
             "navigation": self.page_tree.export_navigation_state(),
         }
 
     def install_source_state(self, state) -> Optional[AnalysisPageSpec]:
-        """安装另一份数据源的页面树；不发出激活回调，由宿主统一激活一次。"""
+        """安装另一份数据源的来源树，保留当前全局分组及其页面。"""
         state = state or {}
-        pages = [page for page in state.get("pages") or ()]
-        self.page_specs = {page.page_id: page for page in pages}
-        self.home_page_id = state.get("home") if state.get("home") in self.page_specs else None
+        group_pages = self._group_page_specs()
+        group_order = self._group_tab_order()
+        pages = [
+            page for page in state.get("pages") or () if page.group_id is None
+        ]
+        local_pages = {page.page_id: page for page in pages}
+        self.page_specs = {**group_pages, **local_pages}
+        self.home_page_id = state.get("home") if state.get("home") in local_pages else None
         self._tab_order = [
             page_id
             for page_id in state.get("order") or ()
-            if page_id in self.page_specs and page_id != self.home_page_id
-        ]
+            if page_id in local_pages and page_id != self.home_page_id
+        ] + group_order
         self.activation_history = [
             page_id
             for page_id in state.get("history") or ()
-            if page_id in self.page_specs
+            if page_id in local_pages
         ]
         self.activation_counter = max(
+            int(self.activation_counter),
             int(state.get("activation_seq") or 0),
             max((int(page.activation_seq) for page in pages), default=0),
         )
@@ -458,15 +587,13 @@ class ResultWorkspace(QWidget):
         return self.current_spec()
 
     def detach_source_state(self) -> dict:
-        """把页面树整体摘下并返回其状态；不发 ``page_closed``。
-
-        切源 / 新增源用它：旧页面没有删除，只是暂时不显示。
-        """
+        """摘下来源树并保留全局分组；不发 ``page_closed``。"""
         state = self.export_source_state()
-        self.page_specs = {}
+        group_pages = self._group_page_specs()
+        self.page_specs = group_pages
         self.home_page_id = None
         self.current_page_id = None
-        self._tab_order = []
+        self._tab_order = self._group_tab_order()
         self.activation_history = []
         self.activation_counter = 0
         self._rebuild_title_index()
@@ -478,15 +605,15 @@ class ResultWorkspace(QWidget):
         return state
 
     def detach_all_pages(self) -> List[str]:
-        """源级关闭：先摘记录再逐页通知，避免逐页删除期间误激活其他页面。
-
-        返回被摘除的页面（先子后父），调用方据此清理全局引用。
-        """
-        removed = self._order_for_removal(list(self.page_specs))
-        self.page_specs = {}
+        """关闭当前源时只摘下来源树页面，全局副本由宿主按页面归属清理。"""
+        group_pages = self._group_page_specs()
+        removed = self._order_for_removal(
+            [page_id for page_id in self.page_specs if page_id not in group_pages]
+        )
+        self.page_specs = group_pages
         self.home_page_id = None
         self.current_page_id = None
-        self._tab_order = []
+        self._tab_order = self._group_tab_order()
         self.activation_history = []
         self.activation_counter = 0
         self._rebuild_title_index()
@@ -616,6 +743,7 @@ class ResultWorkspace(QWidget):
                 scope_label=str(spec.params.get("data_scope_label") or ""),
                 renameable=spec.page_kind != "control_panel",
                 deletable=bool(spec.closeable),
+                group_id=spec.group_id,
             )
             for page_id, spec in self.page_specs.items()
         }
@@ -623,7 +751,10 @@ class ResultWorkspace(QWidget):
     def _refresh_navigation_layout(self):
         self._rebuild_children_map()
         self.page_tree.set_pages(
-            self._page_tree_entries(), self.children_by_parent, self.current_page_id
+            self._page_tree_entries(),
+            self.children_by_parent,
+            self.current_page_id,
+            [PageGroupEntry(group.group_id, group.title) for group in self._groups],
         )
 
     def refresh_navigation(self):
@@ -646,8 +777,13 @@ class ResultWorkspace(QWidget):
     # 激活与页眉
     # ------------------------------------------------------------------
     def _on_tree_page_activated(self, page_id):
-        if page_id in self.page_specs:
-            self.activate_page(page_id)
+        spec = self.page_specs.get(page_id)
+        if spec is None:
+            return
+        if spec.group_id is not None:
+            self.group_page_activation_requested.emit(page_id)
+            return
+        self.activate_page(page_id)
 
     def _scroll_active_page_into_view(self):
         self.page_tree.set_current_page(self.current_page_id)
@@ -908,9 +1044,13 @@ class ResultWorkspace(QWidget):
             self.delete_page(self.current_page_id)
 
     def reset_to_home(self):
-        """换数据时的内部复位：直接清到只剩主页。"""
+        """换数据时清下来源树，保留应用级分组及其副本。"""
         home_id = self.home_page_id
-        removable = [pid for pid in self._ordered_page_ids() if pid != home_id]
+        removable = [
+            pid
+            for pid in self._ordered_page_ids()
+            if pid != home_id and self.page_specs[pid].group_id is None
+        ]
         self._apply_delete(removable, home_id)
 
         if home_id is not None and home_id in self.page_specs:

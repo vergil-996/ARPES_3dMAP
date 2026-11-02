@@ -2019,6 +2019,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
 
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
+        self.left_workspace.group_page_activation_requested.connect(
+            self._on_group_page_activation_requested
+        )
         self.left_workspace.page_added.connect(self._on_recipe_page_added)
         self.left_workspace.page_added.connect(self._register_page_with_session)
         self.left_workspace.page_closed.connect(self.on_result_page_closed)

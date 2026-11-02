@@ -6,7 +6,8 @@
 - 点击名称切换页面；点击展开箭头只展开/收起，不切页。
 - 右键或 F2 在树内直接改名，Enter 或失焦保存，Esc 取消。
 - 空白处拖动框选，Ctrl/Shift 多选；右键或 Delete 请求删除选中的页面。
-- 拖拽只在同一父节点内排序，父节点携带整支移动。
+- 原树内拖拽只在同一父节点内排序，父节点携带整支移动。
+- 下方分组区域接受原树页面的拖动或 Ctrl+C/Ctrl+V，始终复制并保留原页面。
 - 顶部搜索按名称过滤（不区分大小写），显示命中页面及其祖先；清空后恢复原展开状态与滚动位置。
 
 本模块只负责“怎么显示、怎么操作”，不持有页面记录：``set_pages`` 每次由
@@ -15,16 +16,18 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from PyQt5.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
     QRubberBand,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -78,12 +81,19 @@ class PageTreeEntry:
     scope_label: str = ""
     renameable: bool = True
     deletable: bool = True
+    group_id: Optional[str] = None
 
     def tooltip(self) -> str:
         text = str(self.title)
         if self.scope_label:
             return f"{text}\n数据范围：{self.scope_label}"
         return text
+
+
+@dataclass(frozen=True)
+class PageGroupEntry:
+    group_id: str
+    title: str
 
 
 class InlineRenameEditor(QLineEdit):
@@ -130,6 +140,7 @@ class PageTreeView(QTreeWidget):
     delete_requested = pyqtSignal(str)
     pages_delete_requested = pyqtSignal(list)
     reorder_requested = pyqtSignal(str, str, bool)
+    copy_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -363,6 +374,12 @@ class PageTreeView(QTreeWidget):
     def keyPressEvent(self, event):
         item = self.currentItem()
         key = event.key()
+        if event.modifiers() == Qt.ControlModifier and key == Qt.Key_C:
+            page_id = self.item_page_id(item)
+            if page_id is not None:
+                self.copy_requested.emit(page_id)
+            event.accept()
+            return
         if key in (Qt.Key_Return, Qt.Key_Enter):
             page_id = self.item_page_id(item)
             if page_id is not None:
@@ -398,7 +415,7 @@ class PageTreeView(QTreeWidget):
             return
         self._dragged_item = self.currentItem()
         try:
-            super().startDrag(supported_actions)
+            super().startDrag(Qt.CopyAction | Qt.MoveAction)
         finally:
             self._dragged_item = None
 
@@ -432,12 +449,130 @@ class PageTreeView(QTreeWidget):
         if resolved is None:
             event.ignore()
             return
-        self.reorder_requested.emit(*resolved)
         event.accept()
+        # startDrag 返回前还会清理 InternalMove 的源行，之后再重建才不会误删新行。
+        QTimer.singleShot(0, lambda: self.reorder_requested.emit(*resolved))
+
+
+class PageGroupView(QTreeWidget):
+    """分组区域：接收原树页面的复制投放，不移动来源页面。"""
+
+    GROUP_ROLE = Qt.UserRole + 2
+
+    page_activated = pyqtSignal(str)
+    rename_requested = pyqtSignal(str)
+    delete_requested = pyqtSignal(str)
+    copy_requested = pyqtSignal(str)
+    paste_requested = pyqtSignal(str)
+    group_rename_requested = pyqtSignal(str)
+    group_delete_requested = pyqtSignal(str)
+    page_drop_requested = pyqtSignal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("page_group_tree")
+        self.setHeaderHidden(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setIndentation(16)
+        self.setUniformRowHeights(True)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setExpandsOnDoubleClick(False)
+        self.setAnimated(False)
+        self.setTextElideMode(Qt.ElideNone)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.header().setStretchLastSection(False)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.itemClicked.connect(self._on_item_clicked)
+
+    @staticmethod
+    def item_page_id(item):
+        if item is None:
+            return None
+        page_id = item.data(0, Qt.UserRole)
+        return str(page_id) if page_id else None
+
+    @classmethod
+    def item_group_id(cls, item):
+        if item is None:
+            return None
+        if item.parent() is not None:
+            item = item.parent()
+        group_id = item.data(0, cls.GROUP_ROLE)
+        return str(group_id) if group_id else None
+
+    def resolve_drop(self, source, target):
+        if not isinstance(source, PageTreeView):
+            return None
+        page_id = source.item_page_id(source._dragged_item)
+        group_id = self.item_group_id(target)
+        if not page_id or not group_id:
+            return None
+        return page_id, group_id
+
+    def _accept_external_copy(self, event):
+        resolved = self.resolve_drop(event.source(), self.itemAt(event.pos()))
+        if resolved is None:
+            event.ignore()
+            return None
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        return resolved
+
+    def dragEnterEvent(self, event):
+        if self._accept_external_copy(event) is None:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        self._accept_external_copy(event)
+
+    def dropEvent(self, event):
+        resolved = self._accept_external_copy(event)
+        if resolved is not None:
+            QTimer.singleShot(0, lambda: self.page_drop_requested.emit(*resolved))
+
+    def _on_item_clicked(self, item, _column):
+        page_id = self.item_page_id(item)
+        if page_id is not None:
+            self.page_activated.emit(page_id)
+
+    def keyPressEvent(self, event):
+        item = self.currentItem()
+        page_id = self.item_page_id(item)
+        group_id = self.item_group_id(item)
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C:
+            if page_id:
+                self.copy_requested.emit(page_id)
+            event.accept()
+            return
+        if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_V:
+            if group_id:
+                self.paste_requested.emit(group_id)
+            event.accept()
+            return
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and page_id:
+            self.page_activated.emit(page_id)
+            event.accept()
+            return
+        if event.key() == Qt.Key_Delete and page_id:
+            self.delete_requested.emit(page_id)
+            event.accept()
+            return
+        if event.key() == Qt.Key_F2:
+            if page_id:
+                self.rename_requested.emit(page_id)
+            elif group_id:
+                self.group_rename_requested.emit(group_id)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class PageTreePanel(QWidget):
-    """常驻页面树面板：搜索框 + 树 + 辅助操作。"""
+    """常驻页面树面板：搜索框 + 来源树 + 独立分组区域。"""
 
     page_activated = pyqtSignal(str)
     rename_committed = pyqtSignal(str, str)
@@ -445,6 +580,10 @@ class PageTreePanel(QWidget):
     delete_requested = pyqtSignal(str)
     pages_delete_requested = pyqtSignal(list)
     reorder_requested = pyqtSignal(str, str, bool)
+    group_create_requested = pyqtSignal()
+    group_rename_requested = pyqtSignal(str)
+    group_delete_requested = pyqtSignal(str)
+    group_copy_page_requested = pyqtSignal(str, str)
 
     MAX_DEPTH = 64
 
@@ -455,6 +594,11 @@ class PageTreePanel(QWidget):
         self._children: Dict[Optional[str], List[str]] = {}
         self._parent_of_id: Dict[str, Optional[str]] = {}
         self._items: Dict[str, QTreeWidgetItem] = {}
+        self._groups: List[PageGroupEntry] = []
+        self._group_items: Dict[str, QTreeWidgetItem] = {}
+        self._group_headers: Dict[str, QTreeWidgetItem] = {}
+        self._expanded_group_ids: set = set()
+        self._clipboard_page_id: Optional[str] = None
         self._expanded_ids: set = set()
         self._known_page_ids: set = set()
         self._current_page_id: Optional[str] = None
@@ -483,6 +627,7 @@ class PageTreePanel(QWidget):
         self.tree.delete_requested.connect(self.delete_requested)
         self.tree.pages_delete_requested.connect(self.pages_delete_requested)
         self.tree.reorder_requested.connect(self.reorder_requested)
+        self.tree.copy_requested.connect(self._copy_page)
         self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.itemCollapsed.connect(self._on_item_collapsed)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
@@ -493,6 +638,46 @@ class PageTreePanel(QWidget):
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.hide()
         root.addWidget(self.empty_label)
+
+        group_header = QWidget(self)
+        group_header.setObjectName("page_group_header")
+        header_layout = QHBoxLayout(group_header)
+        header_layout.setContentsMargins(2, 0, 0, 0)
+        header_layout.setSpacing(4)
+        group_label = QLabel("我的分组", group_header)
+        group_label.setObjectName("page_group_label")
+        header_layout.addWidget(group_label, 1)
+        self.new_group_button = QToolButton(group_header)
+        self.new_group_button.setObjectName("new_group_button")
+        self.new_group_button.setText("+")
+        self.new_group_button.setToolTip("新建分组")
+        self.new_group_button.setCursor(Qt.PointingHandCursor)
+        self.new_group_button.setFixedSize(24, 24)
+        self.new_group_button.clicked.connect(self.group_create_requested)
+        header_layout.addWidget(self.new_group_button)
+        root.addWidget(group_header)
+
+        self.group_tree = PageGroupView(self)
+        self.group_tree.page_activated.connect(self.page_activated)
+        self.group_tree.rename_requested.connect(self.begin_rename)
+        self.group_tree.delete_requested.connect(self.delete_requested)
+        self.group_tree.copy_requested.connect(self._copy_page)
+        self.group_tree.paste_requested.connect(self._paste_into_group)
+        self.group_tree.group_rename_requested.connect(self.group_rename_requested)
+        self.group_tree.group_delete_requested.connect(self.group_delete_requested)
+        self.group_tree.page_drop_requested.connect(self.group_copy_page_requested)
+        self.group_tree.customContextMenuRequested.connect(self._on_group_context_menu)
+        self.group_tree.itemExpanded.connect(
+            lambda item: self._expanded_group_ids.add(
+                self.group_tree.item_group_id(item)
+            )
+        )
+        self.group_tree.itemCollapsed.connect(
+            lambda item: self._expanded_group_ids.discard(
+                self.group_tree.item_group_id(item)
+            )
+        )
+        root.addWidget(self.group_tree, 1)
 
         self.setStyleSheet(
             """
@@ -510,22 +695,38 @@ class PageTreePanel(QWidget):
             QLineEdit#page_tree_search:focus {
                 border-color: %(ACC_DIM)s;
             }
-            QTreeWidget#page_tree {
+            QTreeWidget#page_tree, QTreeWidget#page_group_tree {
                 background-color: transparent;
                 color: %(T2)s;
                 border: none;
                 outline: none;
                 font-size: 12px;
             }
-            QTreeWidget#page_tree::item {
+            QTreeWidget#page_tree::item, QTreeWidget#page_group_tree::item {
                 height: 26px;
                 padding: 1px 4px;
                 border-radius: 6px;
             }
-            QTreeWidget#page_tree::item:hover {
+            QTreeWidget#page_tree::item:hover, QTreeWidget#page_group_tree::item:hover {
                 background-color: %(BG3)s;
             }
-            QTreeWidget#page_tree::item:selected {
+            QTreeWidget#page_tree::item:selected, QTreeWidget#page_group_tree::item:selected {
+                background-color: %(ACC_SOFT)s;
+                color: %(T1)s;
+            }
+            QLabel#page_group_label {
+                color: %(T2)s;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QToolButton#new_group_button {
+                background-color: %(BG3)s;
+                color: %(T2)s;
+                border: none;
+                border-radius: 5px;
+                font-size: 16px;
+            }
+            QToolButton#new_group_button:hover {
                 background-color: %(ACC_SOFT)s;
                 color: %(T1)s;
             }
@@ -553,9 +754,10 @@ class PageTreePanel(QWidget):
         entries: Dict[str, PageTreeEntry],
         children_by_parent: Dict[Optional[str], Sequence[str]],
         current_page_id: Optional[str] = None,
+        groups: Sequence[PageGroupEntry] = (),
     ):
-        """重建树，保留展开、滚动、搜索与仍可见的选择。"""
-        signature = self._make_signature(entries, children_by_parent)
+        """重建来源树与分组树，保留展开、滚动、搜索与仍可见的选择。"""
+        signature = self._make_signature(entries, children_by_parent, groups)
         if signature == self._signature:
             self._current_page_id = current_page_id
             self._sync_current_row()
@@ -566,6 +768,7 @@ class PageTreePanel(QWidget):
         focus_id = self.tree.item_page_id(self.tree.currentItem())
         preserve_selection = current_page_id == self._current_page_id
         self._entries = dict(entries)
+        self._groups = list(groups or ())
         self._children = {
             parent_id: [str(pid) for pid in ids if str(pid) in entries]
             for parent_id, ids in children_by_parent.items()
@@ -576,6 +779,7 @@ class PageTreePanel(QWidget):
                 self._parent_of_id.setdefault(page_id, parent_id)
         self._current_page_id = current_page_id
         self._rebuild_tree()
+        self._rebuild_groups()
         if preserve_selection:
             self.tree.clearSelection()
             focus_item = self._items.get(focus_id)
@@ -593,6 +797,15 @@ class PageTreePanel(QWidget):
         """当前可见行顺序；搜索时只算可见行。"""
         return self.tree.visible_page_ids()
 
+    def group_page_ids(self, group_id) -> List[str]:
+        header = self._group_headers.get(group_id)
+        if header is None:
+            return []
+        return [
+            self.group_tree.item_page_id(header.child(index))
+            for index in range(header.childCount())
+        ]
+
     def set_current_page(self, page_id: Optional[str]):
         """高亮当前页；页面被搜索隐藏时先清空搜索再定位。"""
         self._current_page_id = page_id
@@ -606,6 +819,16 @@ class PageTreePanel(QWidget):
     def reveal_page(self, page_id: Optional[str]):
         """展开祖先并滚动到该页；页面被搜索隐藏时先清空搜索。"""
         if page_id is None:
+            return
+        group_item = self._group_items.get(page_id)
+        if group_item is not None:
+            parent = group_item.parent()
+            if parent is not None:
+                parent.setExpanded(True)
+            self.group_tree.scrollToItem(group_item, QAbstractItemView.PositionAtCenter)
+            self.group_tree.setCurrentItem(
+                group_item, 0, QItemSelectionModel.ClearAndSelect
+            )
             return
         item = self._items.get(page_id)
         if item is None:
@@ -641,6 +864,9 @@ class PageTreePanel(QWidget):
             "expanded": sorted(str(page_id) for page_id in self._expanded_ids),
             "scroll": int(self.tree.verticalScrollBar().value()),
             "selected": [str(page_id) for page_id in self.tree.selected_page_ids()],
+            "expanded_groups": sorted(
+                str(group_id) for group_id in self._expanded_group_ids if group_id
+            ),
         }
 
     def restore_navigation_state(self, state) -> None:
@@ -655,6 +881,12 @@ class PageTreePanel(QWidget):
             self._expanded_ids = {
                 str(page_id) for page_id in state.get("expanded") or () if page_id
             }
+            if "expanded_groups" in state:
+                self._expanded_group_ids = {
+                    str(group_id) for group_id in state.get("expanded_groups") or () if group_id
+                }
+                for group_id, header in self._group_headers.items():
+                    header.setExpanded(group_id in self._expanded_group_ids)
             self._apply_expansion()
             self._apply_filter()
         finally:
@@ -696,7 +928,7 @@ class PageTreePanel(QWidget):
     # ------------------------------------------------------------ 树构建
     def update_entry(self, entry: PageTreeEntry):
         """单行内容刷新：标题、图标、提示；不重建整棵树。"""
-        item = self._items.get(entry.page_id)
+        item = self._items.get(entry.page_id) or self._group_items.get(entry.page_id)
         if item is None:
             return
         self._entries[entry.page_id] = entry
@@ -704,9 +936,9 @@ class PageTreePanel(QWidget):
         item.setIcon(0, page_kind_icon(entry.page_kind))
         item.setToolTip(0, entry.tooltip())
         item.setData(0, Qt.UserRole + 1, entry.deletable)
-        self._signature = self._make_signature(self._entries, self._children)
+        self._signature = self._make_signature(self._entries, self._children, self._groups)
 
-    def _make_signature(self, entries, children_by_parent):
+    def _make_signature(self, entries, children_by_parent, groups=()):
         rows = tuple(
             (
                 page_id,
@@ -715,6 +947,7 @@ class PageTreePanel(QWidget):
                 entry.scope_label,
                 entry.renameable,
                 entry.deletable,
+                entry.group_id,
             )
             for page_id, entry in sorted(entries.items())
         )
@@ -724,7 +957,8 @@ class PageTreePanel(QWidget):
                 children_by_parent.items(), key=lambda pair: str(pair[0])
             )
         )
-        return rows, links
+        group_rows = tuple((group.group_id, group.title) for group in groups)
+        return rows, links, group_rows
 
     def _remember_anchor(self):
         """记下视口顶部那一行，重建后据此还原滚动位置。"""
@@ -765,7 +999,11 @@ class PageTreePanel(QWidget):
             self._build_group(None, 0)
         finally:
             self.tree.blockSignals(False)
-        new_ids = [pid for pid in self._entries if pid not in self._known_page_ids]
+        new_ids = [
+            pid
+            for pid, entry in self._entries.items()
+            if pid not in self._known_page_ids and entry.group_id is None
+        ]
         self._known_page_ids = set(self._entries)
         self._apply_expansion(new_ids)
         self._apply_filter()
@@ -778,12 +1016,46 @@ class PageTreePanel(QWidget):
             self._expand_ancestors(focus_id)
             self._locate(focus_id)
 
+    def _rebuild_groups(self):
+        known_groups = set(self._group_headers)
+        self._expanded_group_ids.update(
+            group.group_id for group in self._groups if group.group_id not in known_groups
+        )
+        self.group_tree.blockSignals(True)
+        try:
+            self.group_tree.clear()
+            self._group_headers = {}
+            self._group_items = {}
+            for group in self._groups:
+                header = QTreeWidgetItem([group.title])
+                header.setData(0, PageGroupView.GROUP_ROLE, group.group_id)
+                header.setToolTip(0, "拖动页面到此处，或复制页面后在此分组中粘贴")
+                header.setFlags(
+                    Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDropEnabled
+                )
+                self.group_tree.addTopLevelItem(header)
+                self._group_headers[group.group_id] = header
+                for entry in self._entries.values():
+                    if entry.group_id != group.group_id:
+                        continue
+                    item = QTreeWidgetItem([entry.title])
+                    item.setData(0, Qt.UserRole, entry.page_id)
+                    item.setData(0, Qt.UserRole + 1, entry.deletable)
+                    item.setIcon(0, page_kind_icon(entry.page_kind))
+                    item.setToolTip(0, entry.tooltip())
+                    item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                    header.addChild(item)
+                    self._group_items[entry.page_id] = item
+                header.setExpanded(group.group_id in self._expanded_group_ids)
+        finally:
+            self.group_tree.blockSignals(False)
+
     def _build_group(self, parent_id: Optional[str], depth: int, parent_item=None):
         if depth > self.MAX_DEPTH:  # 环状来源关系的兜底，避免无限递归
             return
         for page_id in self._ordered_children(parent_id):
             entry = self._entries.get(page_id)
-            if entry is None:
+            if entry is None or entry.group_id is not None:
                 continue
             item = QTreeWidgetItem([entry.title])
             item.setData(0, Qt.UserRole, page_id)
@@ -804,16 +1076,21 @@ class PageTreePanel(QWidget):
             self._build_group(page_id, depth + 1, item)
 
     def _ordered_children(self, parent_id: Optional[str]) -> List[str]:
-        ordered = [pid for pid in self._children.get(parent_id, []) if pid in self._entries]
+        ordered = [
+            pid
+            for pid in self._children.get(parent_id, [])
+            if pid in self._entries and self._entries[pid].group_id is None
+        ]
         if parent_id is not None:
             return ordered
-        # 顶层：来源缺失或来源已不在树里的页面也放上来，保证每页都能看到。
+        # 分组副本不占原树位置；它们的普通后代提升到顶层，避免页面丢失。
         seen = set(ordered)
-        for page_id in self._entries:
-            if page_id in seen:
+        for page_id, entry in self._entries.items():
+            if page_id in seen or entry.group_id is not None:
                 continue
             parent = self._parent_of_id.get(page_id)
-            if parent is None or parent not in self._entries:
+            parent_entry = self._entries.get(parent) if parent is not None else None
+            if parent is None or parent_entry is None or parent_entry.group_id is not None:
                 seen.add(page_id)
                 ordered.append(page_id)
         return ordered
@@ -869,10 +1146,24 @@ class PageTreePanel(QWidget):
 
     def _sync_current_row(self):
         # 活动页面与批量选择是两份状态。刷新同一活动页时不覆盖用户的选择。
+        group_item = self._group_items.get(self._current_page_id)
         if self._current_page_id == self._synced_current_page_id:
+            if group_item is not None and self.group_tree.currentItem() is not group_item:
+                self.group_tree.setCurrentItem(
+                    group_item, 0, QItemSelectionModel.ClearAndSelect
+                )
             return
         self._synced_current_page_id = self._current_page_id
         item = self._items.get(self._current_page_id) if self._current_page_id else None
+        if group_item is not None:
+            self.tree.setCurrentItem(None)
+            self.tree.clearSelection()
+            self.group_tree.setCurrentItem(
+                group_item, 0, QItemSelectionModel.ClearAndSelect
+            )
+            return
+        self.group_tree.setCurrentItem(None)
+        self.group_tree.clearSelection()
         if item is None:
             self.tree.setCurrentItem(None)
             self.tree.clearSelection()
@@ -903,15 +1194,16 @@ class PageTreePanel(QWidget):
         searchable = not self._search_text.strip()
         self.tree.setDragEnabled(searchable)
         self.tree.setAcceptDrops(searchable)
+        source_ids = set(self._items)
         if not query:
             hidden = set()
         else:
             matches = {
                 page_id
-                for page_id, entry in self._entries.items()
-                if query in str(entry.title).lower()
+                for page_id in source_ids
+                if query in str(self._entries[page_id].title).lower()
             }
-            hidden = set(self._entries) - matches
+            hidden = source_ids - matches
             for page_id in list(matches):
                 hidden -= set(self._ancestor_ids(page_id))
 
@@ -925,7 +1217,7 @@ class PageTreePanel(QWidget):
         finally:
             self.tree.blockSignals(False)
 
-        self.empty_label.setVisible(bool(query) and len(hidden) == len(self._entries))
+        self.empty_label.setVisible(bool(query) and hidden == source_ids)
         if query:
             self._sync_current_row()
         else:
@@ -939,17 +1231,21 @@ class PageTreePanel(QWidget):
     def begin_rename(self, page_id) -> bool:
         entry = self._entries.get(page_id)
         item = self._items.get(page_id)
+        view = self.tree
+        if item is None:
+            item = self._group_items.get(page_id)
+            view = self.group_tree
         if entry is None or item is None or not entry.renameable:
             return False
         self._close_editor()
         if item.isHidden():
             self.reveal_page(page_id)
-        self.tree.scrollToItem(item, QAbstractItemView.EnsureVisible)
-        rect = self.tree.visualItemRect(item)
+        view.scrollToItem(item, QAbstractItemView.EnsureVisible)
+        rect = view.visualItemRect(item)
         if not rect.isValid():
             return False
 
-        editor = InlineRenameEditor(self.tree.viewport(), entry.title)
+        editor = InlineRenameEditor(view.viewport(), entry.title)
         editor.setObjectName("page_tree_editor")
         editor.setGeometry(rect.adjusted(1, 1, -1, -1))
         editor.committed.connect(lambda text, pid=page_id: self._commit_rename(pid, text))
@@ -976,6 +1272,18 @@ class PageTreePanel(QWidget):
         editor.setParent(None)
         editor.deleteLater()
 
+    # ------------------------------------------------------------ 复制与粘贴
+    def _copy_page(self, page_id):
+        if page_id in self._entries:
+            self._clipboard_page_id = str(page_id)
+
+    def _paste_into_group(self, group_id):
+        if self._clipboard_page_id not in self._entries:
+            return
+        if group_id not in self._group_headers:
+            return
+        self.group_copy_page_requested.emit(self._clipboard_page_id, str(group_id))
+
     # ------------------------------------------------------------ 右键菜单
     def _on_context_menu(self, pos):
         item = self.tree.row_at(pos)
@@ -1000,6 +1308,10 @@ class PageTreePanel(QWidget):
         restore_action.setEnabled(entry.renameable and len(selected_ids) == 1)
         restore_action.triggered.connect(lambda: self.restore_name_requested.emit(page_id))
 
+        copy_action = menu.addAction("复制页面")
+        copy_action.setEnabled(len(selected_ids) == 1)
+        copy_action.triggered.connect(lambda: self._copy_page(page_id))
+
         menu.addSeparator()
         delete_label = (
             f"删除选中的 {len(deletable_ids)} 个页面" if len(selected_ids) > 1 else "删除页面"
@@ -1010,3 +1322,37 @@ class PageTreePanel(QWidget):
 
         menu.setStyleSheet(theme.context_menu_qss())
         menu.exec_(self.tree.viewport().mapToGlobal(pos))
+
+    def _on_group_context_menu(self, pos):
+        item = self.group_tree.itemAt(pos)
+        page_id = self.group_tree.item_page_id(item)
+        group_id = self.group_tree.item_group_id(item)
+        menu = QMenu(self)
+        if item is None:
+            menu.addAction("新建分组").triggered.connect(self.group_create_requested)
+        elif page_id is None:
+            paste_action = menu.addAction("粘贴页面到此分组")
+            paste_action.setEnabled(self._clipboard_page_id in self._entries)
+            paste_action.triggered.connect(lambda: self._paste_into_group(group_id))
+            menu.addSeparator()
+            menu.addAction("重命名分组").triggered.connect(
+                lambda: self.group_rename_requested.emit(group_id)
+            )
+            menu.addAction("删除分组").triggered.connect(
+                lambda: self.group_delete_requested.emit(group_id)
+            )
+        else:
+            entry = self._entries.get(page_id)
+            menu.addAction("复制页面").triggered.connect(lambda: self._copy_page(page_id))
+            rename_action = menu.addAction("重命名")
+            rename_action.setEnabled(bool(entry and entry.renameable))
+            rename_action.triggered.connect(lambda: self.begin_rename(page_id))
+            restore_action = menu.addAction("恢复自动名称")
+            restore_action.setEnabled(bool(entry and entry.renameable))
+            restore_action.triggered.connect(lambda: self.restore_name_requested.emit(page_id))
+            menu.addSeparator()
+            delete_action = menu.addAction("删除页面")
+            delete_action.setEnabled(bool(entry and entry.deletable))
+            delete_action.triggered.connect(lambda: self.delete_requested.emit(page_id))
+        menu.setStyleSheet(theme.context_menu_qss())
+        menu.exec_(self.group_tree.viewport().mapToGlobal(pos))

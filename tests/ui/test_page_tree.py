@@ -4,6 +4,7 @@
 覆盖设计意图：点击箭头只收展不切页，点击名称才切页；展开状态与滚动位置按
 ``page_id`` 在会话内保留，搜索用的是临时状态、清空后必须还原；排序只动目标
 同级组，跨父节点与搜索期间都不允许；改名去首尾空白、空名保持原名、重名编号。
+自定义分组覆盖拖动与快捷键复制、原页保留、副本独立和跨数据源全局保留。
 """
 import os
 import unittest
@@ -11,8 +12,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QEvent, QPoint, Qt
-from PyQt5.QtGui import QKeyEvent, QMouseEvent
+from PyQt5.QtCore import QEvent, QMimeData, QPoint, Qt
+from PyQt5.QtGui import QDropEvent, QKeyEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidget
 
@@ -575,6 +576,35 @@ class PageTreeReorderTests(_WorkspaceFixture):
             )
         )
 
+    def test_drop_reorders_after_qt_finishes_source_cleanup(self):
+        self.tree._dragged_item = self.item("p4")
+        target = self.item("p1")
+        event = QDropEvent(
+            self.tree.visualItemRect(target).center(),
+            Qt.MoveAction,
+            QMimeData(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+
+        self.tree.dropEvent(event)
+        self.assertTrue(event.isAccepted())
+
+        dragged = self.item("p4")
+        parent = dragged.parent() or self.tree.invisibleRootItem()
+        parent.takeChild(parent.indexOfChild(dragged))
+        self.assertNotIn("p4", self.panel.visible_page_ids())
+
+        QTest.qWait(20)
+
+        self.assertEqual(
+            self.panel.visible_page_ids(), [HOME_ID, "p4", "p1", "p2", "p3"]
+        )
+        self.assertEqual(sibling_titles(self.workspace, HOME_ID), ["D 组", "A 组"])
+        self.assertCountEqual(
+            self.workspace.page_specs, [HOME_ID, "p1", "p2", "p3", "p4"]
+        )
+
     def test_reordering_moves_only_the_target_sibling_group(self):
         self.assertEqual(sibling_titles(self.workspace, HOME_ID), ["A 组", "D 组"])
         self.assertEqual(sibling_titles(self.workspace, "p1"), ["B 组"])
@@ -682,6 +712,128 @@ class PageTreeRenameTests(_WorkspaceFixture):
         self.panel.restore_name_requested.emit("p2")
 
         self.assertEqual(requested, ["p2"])
+
+
+class PageGroupTests(_WorkspaceFixture):
+    def test_new_group_button_creates_a_separate_area_without_changing_the_source_tree(self):
+        before = self.panel.visible_page_ids()
+        with patch(
+            "bandscope.ui.result_workspace.QInputDialog.getText",
+            return_value=("常用页面", True),
+        ):
+            self.panel.new_group_button.click()
+
+        self.assertEqual(self.panel.visible_page_ids(), before)
+        self.assertEqual(self.panel.group_tree.topLevelItemCount(), 1)
+        self.assertEqual(self.panel.group_tree.topLevelItem(0).text(0), "常用页面")
+        self.assertEqual(self.panel.group_page_ids(self.workspace.groups[0].group_id), [])
+
+    def test_copy_creates_an_independent_page_and_keeps_the_original_in_the_tree(self):
+        group = self.workspace.create_group("收藏")
+        original = self.workspace.page_by_id("p2")
+        original.params["nested"] = {"value": 1}
+        original_pages = set(self.workspace.page_specs)
+
+        copied = self.workspace.copy_page_to_group("p2", group.group_id)
+
+        self.assertIsNot(copied, original)
+        self.assertNotEqual(copied.page_id, original.page_id)
+        self.assertEqual(copied.group_id, group.group_id)
+        self.assertIsNone(original.group_id)
+        self.assertEqual(original.title, "B 组")
+        self.assertEqual(copied.title, "B 组 副本")
+        self.assertIn("p2", self.panel._items)
+        self.assertNotIn(copied.page_id, self.panel._items)
+        self.assertEqual(self.panel.group_page_ids(group.group_id), [copied.page_id])
+        self.assertEqual(self.workspace.current_page_id, copied.page_id)
+        self.assertEqual(set(self.workspace.page_specs), original_pages | {copied.page_id})
+        copied.params["nested"]["value"] = 2
+        self.assertEqual(original.params["nested"]["value"], 1)
+
+    def test_ctrl_c_and_ctrl_v_copy_the_page_into_the_target_group(self):
+        group = self.workspace.create_group("快捷分组")
+        self.tree.setCurrentItem(self.item("p2"))
+        self.tree.keyPressEvent(
+            QKeyEvent(QEvent.KeyPress, Qt.Key_C, Qt.ControlModifier)
+        )
+        header = self.panel._group_headers[group.group_id]
+        self.panel.group_tree.setCurrentItem(header)
+
+        self.panel.group_tree.keyPressEvent(
+            QKeyEvent(QEvent.KeyPress, Qt.Key_V, Qt.ControlModifier)
+        )
+
+        copied_ids = self.panel.group_page_ids(group.group_id)
+        self.assertEqual(len(copied_ids), 1)
+        self.assertIn("p2", self.panel.visible_page_ids())
+        self.assertNotEqual(copied_ids[0], "p2")
+
+    def test_dropping_a_source_page_copies_instead_of_moving_it(self):
+        group = self.workspace.create_group("拖放分组")
+        self.tree._dragged_item = self.item("p4")
+        header = self.panel._group_headers[group.group_id]
+        event = QDropEvent(
+            self.panel.group_tree.visualItemRect(header).center(),
+            Qt.CopyAction,
+            QMimeData(),
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+
+        with patch.object(QDropEvent, "source", return_value=self.tree):
+            self.panel.group_tree.dropEvent(event)
+        QTest.qWait(20)
+        self.tree._dragged_item = None
+
+        self.assertTrue(event.isAccepted())
+        copied_ids = self.panel.group_page_ids(group.group_id)
+        self.assertEqual(len(copied_ids), 1)
+        self.assertIn("p4", self.panel.visible_page_ids())
+        self.assertEqual(self.workspace.page_by_id(copied_ids[0]).source_page_id, HOME_ID)
+
+    def test_deleting_the_original_does_not_delete_its_group_copy(self):
+        group = self.workspace.create_group()
+        copied = self.workspace.copy_page_to_group("p2", group.group_id)
+
+        self.workspace.delete_page("p2")
+
+        self.assertNotIn("p2", self.workspace.page_specs)
+        self.assertIn(copied.page_id, self.workspace.page_specs)
+        self.assertEqual(self.panel.group_page_ids(group.group_id), [copied.page_id])
+
+    def test_groups_and_copies_stay_global_across_source_state_roundtrip(self):
+        group = self.workspace.create_group("全局分组")
+        copied = self.workspace.copy_page_to_group("p1", group.group_id)
+        state = self.workspace.export_source_state()
+
+        self.assertNotIn(copied.page_id, {page.page_id for page in state["pages"]})
+        self.assertNotIn("groups", state)
+        self.workspace.detach_source_state()
+        self.assertIs(self.workspace.page_by_id(copied.page_id), copied)
+        self.assertNotIn("p1", self.workspace.page_specs)
+        self.workspace.install_source_state(state)
+
+        self.assertEqual([item.title for item in self.workspace.groups], ["全局分组"])
+        self.assertIs(self.workspace.page_by_id(copied.page_id), copied)
+        self.assertEqual(
+            self.panel.group_page_ids(group.group_id), [copied.page_id]
+        )
+        self.assertIn("p1", self.panel._items)
+        self.assertNotIn(copied.page_id, self.panel._items)
+
+    def test_renaming_and_deleting_a_group_only_removes_its_copies(self):
+        group = self.workspace.create_group("旧名称")
+        copied = self.workspace.copy_page_to_group("p4", group.group_id)
+        closed = []
+        self.workspace.page_closed.connect(closed.append)
+
+        self.assertEqual(self.workspace.rename_group(group.group_id, "  新名称  "), "新名称")
+        self.assertTrue(self.workspace.delete_group(group.group_id))
+
+        self.assertEqual(self.workspace.groups, ())
+        self.assertIn("p4", self.workspace.page_specs)
+        self.assertNotIn(copied.page_id, self.workspace.page_specs)
+        self.assertEqual(closed, [copied.page_id])
 
 
 class PageTreeHelperTests(unittest.TestCase):

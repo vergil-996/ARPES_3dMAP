@@ -3,7 +3,8 @@
 主窗口只保留一套控件、渲染器和插件实例；"当前是哪份数据"由
 :class:`~bandscope.core.source_session.SourceSessionManager` 决定。本模块负责：
 
-- 把随数据源变化的窗口状态整体捕获 / 安装（数组按引用保存）；
+- 把随数据源变化的窗口状态整体捕获 / 安装（数组按引用保存）；全局分组及其
+  页面副本不进入会话状态包，切源时保持不变，副本激活时按页面归属切回所属源；
 - 新数据先独立准备，成功后才登记会话；失败不改变已有会话；
 - 切源时先提交当前页、保存旧源状态、失效旧源显示任务与交互对象，再绑定目标
   会话，最后只触发一次页面激活与刷新；
@@ -223,10 +224,12 @@ class SourceWorkspaceMixin:
         session.state = state
         workspace = self.left_workspace
         session.home_page_id = workspace.home_page_id
-        session.target_page_id = workspace.current_page_id
+        session.target_page_id = state["workspace"]["current"]
+        group_pages = workspace._group_page_specs()
         manager.register_pages(
             session.session_id,
-            [page_id for page_id in workspace.page_specs],
+            self._local_workspace_page_ids()
+            + [page_id for page_id in session.page_ids if page_id in group_pages],
             home_page_id=workspace.home_page_id,
         )
         return session
@@ -389,7 +392,7 @@ class SourceWorkspaceMixin:
             session.target_page_id = workspace.current_page_id
             manager.register_pages(
                 session_id,
-                [page_id for page_id in workspace.page_specs],
+                self._local_workspace_page_ids(),
                 home_page_id=workspace.home_page_id,
             )
         except Exception:
@@ -564,8 +567,10 @@ class SourceWorkspaceMixin:
                 self._clear_interaction_objects()
                 self._store_active_session()
                 self.left_workspace.detach_all_pages()
+                self._remove_session_group_pages(session)
                 self._reset_working_state()
             else:
+                self._remove_session_group_pages(session)
                 self._purge_session_pages(session)
             manager.close(session_id)
             self._rebalance_scope_cache_budgets()
@@ -745,6 +750,36 @@ class SourceWorkspaceMixin:
     # ------------------------------------------------------------------
     # 页面归属
     # ------------------------------------------------------------------
+    def _local_workspace_page_ids(self):
+        return [
+            page_id
+            for page_id, spec in self.left_workspace.page_specs.items()
+            if spec.group_id is None
+        ]
+
+    def _remove_session_group_pages(self, session):
+        group_pages = self.left_workspace._group_page_specs()
+        page_ids = [page_id for page_id in session.page_ids if page_id in group_pages]
+        if page_ids:
+            self.left_workspace.delete_pages(page_ids)
+
+    def _on_group_page_activation_requested(self, page_id):
+        workspace = self.left_workspace
+        if page_id not in workspace.page_specs:
+            return
+        manager = self.__dict__.get("source_manager")
+        owner = manager.owner_of(page_id) if manager is not None else None
+        if owner is None or manager.is_active(owner):
+            workspace.activate_page(page_id)
+            return
+        session = manager.get(owner)
+        if session is None or manager.is_closing(owner):
+            return
+        # 安装目标会话时直接选中全局副本，避免先恢复另一页再刷新第二次。
+        session.state.setdefault("workspace", {})["current"] = page_id
+        session.target_page_id = page_id
+        self.activate_source(owner)
+
     def _on_source_close_requested(self, page_id):
         """删除左侧根页面：按页面归属找到会话并关闭整份数据。"""
         manager = self.__dict__.get("source_manager")
