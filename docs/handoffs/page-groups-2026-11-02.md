@@ -1,6 +1,6 @@
 # 我的分组与页面副本
 
-日期：2026-11-02。状态：源码、自动化与真实窗口脚本通过，随 **v1.18.1** 发布；维护者人工交互与冻结包验收未执行。
+日期：2026-11-02。状态：源码、自动化与真实窗口脚本通过，已随 **v1.18.1** 发布到 GitHub 与 MatElab（2026-11-02）；维护者人工交互与冻结包验收未执行。
 
 ## 目标与约束
 
@@ -24,6 +24,7 @@
 - 全量 `python -m unittest discover -s tests -t . -v`：1470 项通过（2026-11-02，82.741 秒），日志 `.local/logs/release-1.18.1-full.log`。
 - 真实窗口（Windows、NVIDIA OpenGL）：`scripts/validation/verify_page_groups.py` 38 项通过，日志 `.local/logs/page-groups-1.18.1-native.log`，截图 `.local/outputs/page-groups-release/`；副本页 3D 场景暗像素 261023，与原页一致。
 - `check_release_version.py v1.18.1`、`verify_plugin_release_flow.py`、`compileall` 通过。
+- Release CI（run 41415852485，21m46s）全部成功；`check_for_update` 从 1.17.4 发现 1.18.1，两个安装包按 `.sha256` 边车完整下载校验一致（CPU `400cae82…`，152,475,883 B；NVIDIA `1f98ace2…`，1,198,996,944 B），插件包与 `plugins-index.json` 验签通过；MatElab 记录「BandScope v1.18.1」（uid `bandscope-release-1.18.1`）已创建。
 - 既有脚本 `scripts/validation/verify_page_tree.py` 在本次运行出现 4 项失败，原因是它自 v1.16.0 动态主页 ID 之后仍按字面 `home` 查找主页（脚本最后更新于 v1.12.5），并非本版回归；该脚本本次未修改，后续补验页面树时需先改为读取 `home_page_id`。
 
 ## 已知边界与下一步
