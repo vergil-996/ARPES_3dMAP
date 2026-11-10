@@ -29,6 +29,15 @@ class TabularExportTests(unittest.TestCase):
             My3DAnalyzer._sanitize_save_path("slice_dos", "Text Files (*.txt)"),
             "slice_dos.txt",
         )
+        for fmt, selected in (
+            ("pdf", "PDF (*.pdf)"),
+            ("svg", "SVG (*.svg)"),
+            ("ai", "Adobe Illustrator (*.ai)"),
+        ):
+            self.assertEqual(
+                My3DAnalyzer._sanitize_save_path(f"figure.png", selected),
+                f"figure.{fmt}",
+            )
 
     def test_find_tabular_primary(self):
         self.assertEqual(

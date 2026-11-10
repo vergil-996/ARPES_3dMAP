@@ -42,9 +42,16 @@ python scripts/validation/verify_multi_source_workspaces.py
 python scripts/validation/verify_plugin_management.py
 python scripts/validation/verify_plugin_release_flow.py
 python scripts/validation/verify_derived_waterfall.py .local/data/<数据>.npz
+python scripts/validation/blender_export_acceptance.py --blender D:/blender/blender.exe
+python scripts/validation/blender_export_acceptance.py --blender D:/blender/blender.exe --data .local/data/WSe2_step.npz
+python scripts/validation/blender_material_acceptance.py --blender D:/blender/blender.exe
+python scripts/validation/blender_material_acceptance.py --blender D:/blender/blender.exe --data .local/data/WSe2_step.npz
+python scripts/validation/blender_project_roundtrip.py --blender D:/blender/blender.exe
+python scripts/validation/blender_dialog_acceptance.py .local/data/WSe2_step.npz --blender D:/blender/blender.exe
+python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blender D:/blender/blender.exe
 ```
 
-`verify_plugin_management.py` 用真实构建的插件包驱动完整窗口（需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`。`verify_derived_waterfall.py` 会把真实构建的 `edc_waterfall` 插件装进隔离扩展根，再用真实窗口验证下拉动作、冻结来源、采样复算、E 翻转前后屏幕/出版图/数值导出一致以及「插件设置」的两个操作。
+`verify_plugin_management.py` 用真实构建的插件包驱动完整窗口（需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`；Blender 冻结验收覆盖导出、回读、显示编辑与原位更新。`blender_dialog_acceptance.py --multi` 重复加载同一文件并跨两个数据源导出，同时检查统一薄层预设、材质与布局设置区移除及八块默认蓝色薄板的实际产物。`blender_material_acceptance.py` 逐个重开并渲染八种薄板材质，另覆盖统一预设、混合材质、两种内部验收布局、数据漫透射采样与纯数据照明、透射滤色、多页独立灯光和 Append 后灯光链接；它和冻结包、人工视觉复核分开记录。`verify_derived_waterfall.py` 会把真实构建的 `edc_waterfall` 插件装进隔离扩展根，再用真实窗口验证下拉动作、冻结来源、采样复算、E 翻转前后屏幕/出版图/数值导出一致以及「插件设置」的两个操作。
 
 使用 `--output-dir <目录>` 指定输出。冒烟脚本另支持 `--size 1280x800`、`--hold`。数据探查和指定控件截图分别使用 `scripts/diagnostics/probe_frame_ranges.py` 与 `scripts/diagnostics/_verify_settled_grab.py`，同样传入 NPZ 路径。
 

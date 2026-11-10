@@ -83,7 +83,7 @@ class RecipeRoundtripTests(unittest.TestCase):
                                       source_page_id=home_id))
         w.left_workspace.add_page(page)
         path, snapshot = self.save()
-        self.assertEqual({p["title"] for p in snapshot.view_recipe["pages"]}, {"原始视图", "用户命名的积分"})
+        self.assertEqual({p["title"] for p in snapshot.view_recipe["pages"]}, {"input", "用户命名的积分"})
         w.left_workspace.activate_page(home_id)
         self.assertTrue(w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path)))
         # 复现文件作为新数据源打开：页面 ID 重新分配，页面数量与目标页保持。

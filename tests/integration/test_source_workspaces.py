@@ -123,6 +123,38 @@ class _WorkspaceFixture(unittest.TestCase):
             ["first", "first_2"],
         )
 
+    def test_home_titles_follow_source_names_in_every_workspace(self):
+        first_id = self.load_first()
+        workspace = self.window.left_workspace
+        self.assertEqual(workspace.home_spec().title, "first")
+        self.assertEqual(workspace.page_title.text(), "first")
+        self.assertEqual(workspace.page_tree.entry_titles(), ["first"])
+
+        self.window.load_data(str(self.second_path))
+        second_id = self.window.source_manager.active_id
+        self.assertEqual(workspace.home_spec().title, "second")
+
+        self.window._commit_source_alias(second_id, "第二份数据")
+        self.assertEqual(workspace.home_spec().title, "第二份数据")
+        self.assertEqual(workspace.page_title.text(), "第二份数据")
+        self.assertEqual(workspace.page_tree.entry_titles(), ["第二份数据"])
+
+        self.window.activate_source(first_id)
+        self.window._commit_source_alias(second_id, "后台数据")
+        second_session = self.window.source_manager.get(second_id)
+        second_home = self.window._session_page_by_id(
+            second_session, second_session.home_page_id
+        )
+        self.assertEqual(second_home.title, "后台数据")
+        self.assertEqual(workspace.home_spec().title, "first")
+
+        self.window.activate_source(second_id)
+        self.assertEqual(workspace.home_spec().title, "后台数据")
+        self.window.load_data(str(self.first_path))
+        self.assertEqual(self.window.source_manager.active().alias, "first_2")
+        self.assertEqual(workspace.home_spec().title, "first_2")
+        self.assertEqual(workspace.page_tree.entry_titles(), ["first_2"])
+
     def test_switching_restores_pages_controls_camera_and_plugin_defaults(self):
         first_id = self.load_first()
         self.window.left_workspace.add_page(
@@ -158,6 +190,53 @@ class _WorkspaceFixture(unittest.TestCase):
 
         self.assertTrue(self.window.activate_source(second_id))
         self.assertEqual(self.window.timeline_bar.slider_time.value(), 2)
+
+    def test_levels_are_isolated_by_source_and_page_with_synchronized_labels(self):
+        first_id = self.load_first()
+        window = self.window
+        workspace = window.left_workspace
+        home_id = workspace.home_page_id
+        sliders = (window.page_render.s_low, window.page_render.s_gamma, window.page_render.s_up)
+
+        def set_levels(levels):
+            for slider, value in zip(sliders, levels):
+                slider.setValue(value)
+
+        def assert_levels(expected):
+            self.assertEqual(window._get_display_levels(), tuple(float(value) for value in expected))
+            self.assertEqual([slider.value() for slider in sliders], list(expected))
+            self.assertEqual(
+                [slider._value_label.text() for slider in sliders],
+                [str(value) for value in expected],
+            )
+
+        set_levels((11, 61, 81))
+        first_result = window._build_time_integral_spec()
+        workspace.add_page(first_result)
+        set_levels((21, 71, 91))
+
+        second_result = window._build_time_integral_spec()
+        workspace.add_page(second_result)
+        set_levels((31, 66, 86))
+        assert_levels((31, 66, 86))
+
+        self.assertTrue(window.load_data(str(self.second_path)))
+        second_id = window.source_manager.active_id
+        assert_levels((0, 50, 100))
+        set_levels((12, 52, 82))
+
+        window.activate_source(first_id)
+        self.assertEqual(workspace.current_page_id, second_result.page_id)
+        assert_levels((31, 66, 86))
+        workspace.activate_page(first_result.page_id)
+        assert_levels((21, 71, 91))
+        workspace.activate_page(home_id)
+        assert_levels((11, 61, 81))
+
+        window.activate_source(second_id)
+        assert_levels((12, 52, 82))
+        window.activate_source(first_id)
+        assert_levels((11, 61, 81))
 
     def test_group_copy_is_global_and_activation_restores_its_owner_source(self):
         first_id = self.load_first()
@@ -386,6 +465,7 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertEqual(Path(active.primary_path).resolve(), self.first_path.resolve())
         new_home = self.window.left_workspace.home_page_id
         self.assertNotEqual(new_home, old_home)
+        self.assertEqual(self.window.left_workspace.home_spec().title, "figure.png")
         # 旧会话仍持有它自己的页面，两个工作区的页面 ID 不重叠。
         self.assertEqual(manager.owner_of(old_home), first_id)
         self.assertEqual(manager.owner_of(new_home), active.session_id)
@@ -397,6 +477,7 @@ class _WorkspaceFixture(unittest.TestCase):
         ))
         self.assertEqual(len(manager), 3)
         self.assertEqual(manager.alias_for(manager.active_id), "figure.png_2")
+        self.assertEqual(self.window.left_workspace.home_spec().title, "figure.png_2")
         self.assertFalse(first_import_pages & set(self.window.left_workspace.page_specs))
         for page_id in first_import_pages:
             self.assertIsNotNone(manager.owner_of(page_id))

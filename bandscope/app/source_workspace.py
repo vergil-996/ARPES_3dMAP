@@ -395,6 +395,7 @@ class SourceWorkspaceMixin:
                 self._local_workspace_page_ids(),
                 home_page_id=workspace.home_page_id,
             )
+            self._sync_source_home_title(session)
         except Exception:
             if session is not None:
                 manager.close(session.session_id)
@@ -602,6 +603,9 @@ class SourceWorkspaceMixin:
         dialog = self.__dict__.get("_publication_dialog")
         if dialog is not None:
             dialog.forget_page(page_id)
+        blender_dialog = self.__dict__.get("_blender_project_dialog")
+        if blender_dialog is not None:
+            blender_dialog.export_panel.refresh_pages()
         controller = self.__dict__.get("crop_controller")
         if controller is not None:
             controller.remove_page(page_id)
@@ -736,6 +740,27 @@ class SourceWorkspaceMixin:
         else:
             bar.switcher.setToolTip("已加载的数据源")
 
+    def _sync_source_home_title(self, session):
+        """同步根页面显示名；非活动源直接更新其保存的工作区状态。"""
+        if session is None:
+            return
+        manager = self.__dict__.get("source_manager")
+        if manager is not None and manager.is_active(session.session_id):
+            workspace = self.left_workspace
+            home = workspace.home_spec()
+            if home is not None:
+                home.auto_title = session.alias
+                workspace.set_page_title(home.page_id, session.alias, auto=True)
+            return
+        workspace = self._session_workspace_state(session)
+        home = self._session_page_by_id(
+            session, session.home_page_id or workspace.get("home")
+        )
+        if home is not None:
+            home.title = session.alias
+            home.auto_title = session.alias
+            home.title_overridden = False
+
     def _commit_source_alias(self, session_id, alias):
         manager = self.__dict__.get("source_manager")
         if manager is None:
@@ -744,6 +769,7 @@ class SourceWorkspaceMixin:
         session = manager.get(session_id)
         if session is not None and final_alias:
             session.state.setdefault("alias", final_alias)
+            self._sync_source_home_title(session)
         self._sync_source_switcher()
         self._update_statusbar()
 

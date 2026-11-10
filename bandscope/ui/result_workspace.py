@@ -3,8 +3,8 @@
 
 页面身份一律是 ``page_id``（随机 UUID，主页固定为 ``home``）；来源关系走
 ``AnalysisPageSpec.source_page_id``，树的父子结构由它推导，排序由 ``_tab_order``
-（会话内也跨重启保存，见 ``_save_tab_order``）决定。自定义分组是应用级区域，
-分组页面是带新 ``page_id`` 的副本；切换数据源只换下来源树，分组保持不变。
+（会话内也跨重启保存，见 ``_save_tab_order``）决定。自定义分组是支持嵌套的
+应用级区域，分组页面是带新 ``page_id`` 的副本；切换数据源只换下来源树，分组保持不变。
 
 改名、删除、排序和分组复制都先在本模块落地，再通过信号通知宿主：
 ``page_closed`` 逐页发出（先子后父），单页与多页删除均直接执行。
@@ -151,6 +151,7 @@ class PageTitleLabel(QLabel):
 class PageGroup:
     group_id: str
     title: str
+    parent_group_id: Optional[str] = None
 
 
 @dataclass
@@ -259,6 +260,7 @@ class ResultWorkspace(QWidget):
         self.page_tree.pages_delete_requested.connect(self.delete_pages)
         self.page_tree.reorder_requested.connect(self.move_page_within_siblings)
         self.page_tree.group_create_requested.connect(self.request_create_group)
+        self.page_tree.subgroup_create_requested.connect(self.request_create_group)
         self.page_tree.group_rename_requested.connect(self.request_rename_group)
         self.page_tree.group_delete_requested.connect(self.delete_group)
         self.page_tree.group_copy_page_requested.connect(self.copy_page_to_group)
@@ -421,20 +423,23 @@ class ResultWorkspace(QWidget):
     def group_by_id(self, group_id) -> Optional[PageGroup]:
         return next((group for group in self._groups if group.group_id == group_id), None)
 
-    def create_group(self, title="新建分组") -> PageGroup:
+    def create_group(self, title="新建分组", parent_group_id=None) -> PageGroup:
+        if parent_group_id is not None and self.group_by_id(parent_group_id) is None:
+            raise ValueError("父分组不存在")
         name = str(title or "").strip() or "新建分组"
         name = unique_title_among((group.title for group in self._groups), name)
-        group = PageGroup(uuid.uuid4().hex, name)
+        group = PageGroup(uuid.uuid4().hex, name, parent_group_id)
         self._groups.append(group)
         self._refresh_navigation_layout()
         return group
 
-    def request_create_group(self):
+    def request_create_group(self, parent_group_id=None):
+        dialog_title = "新建子分组" if parent_group_id is not None else "新建分组"
         title, accepted = QInputDialog.getText(
-            self, "新建分组", "分组名称：", text="新建分组"
+            self, dialog_title, "分组名称：", text="新建分组"
         )
         if accepted:
-            return self.create_group(title)
+            return self.create_group(title, parent_group_id)
         return None
 
     def rename_group(self, group_id, title) -> Optional[str]:
@@ -448,7 +453,7 @@ class ResultWorkspace(QWidget):
             (item.title for item in self._groups if item.group_id != group_id), name
         )
         index = self._groups.index(group)
-        self._groups[index] = PageGroup(group.group_id, name)
+        self._groups[index] = PageGroup(group.group_id, name, group.parent_group_id)
         self._refresh_navigation_layout()
         return name
 
@@ -464,15 +469,30 @@ class ResultWorkspace(QWidget):
         return None
 
     def delete_group(self, group_id) -> bool:
-        group = self.group_by_id(group_id)
-        if group is None:
+        if self.group_by_id(group_id) is None:
             return False
+        branch_ids = set()
+        pending = [group_id]
+        while pending:
+            current_id = pending.pop()
+            if current_id in branch_ids:
+                continue
+            branch_ids.add(current_id)
+            pending.extend(
+                group.group_id
+                for group in self._groups
+                if group.parent_group_id == current_id
+            )
         page_ids = [
-            page_id for page_id, spec in self.page_specs.items() if spec.group_id == group_id
+            page_id
+            for page_id, spec in self.page_specs.items()
+            if spec.group_id in branch_ids
         ]
         if page_ids:
             self.delete_pages(page_ids)
-        self._groups = [item for item in self._groups if item.group_id != group_id]
+        self._groups = [
+            group for group in self._groups if group.group_id not in branch_ids
+        ]
         self._refresh_navigation_layout()
         return True
 
@@ -754,7 +774,10 @@ class ResultWorkspace(QWidget):
             self._page_tree_entries(),
             self.children_by_parent,
             self.current_page_id,
-            [PageGroupEntry(group.group_id, group.title) for group in self._groups],
+            [
+                PageGroupEntry(group.group_id, group.title, group.parent_group_id)
+                for group in self._groups
+            ],
         )
 
     def refresh_navigation(self):

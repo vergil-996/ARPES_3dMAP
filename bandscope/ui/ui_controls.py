@@ -46,7 +46,7 @@ class RotationSpinBox(QDoubleSpinBox):
 
 
 class SyncedSlider(SiSlider):
-    """setValue / setRange 后自动同步滑块视觉位置的 SiSlider。"""
+    """setValue / setRange 后自动同步滑块位置与关联数值标签的 SiSlider。"""
 
     def setValue(self, value):
         super().setValue(value)
@@ -60,6 +60,9 @@ class SyncedSlider(SiSlider):
         minimum = int(self.minimum())
         maximum = int(self.maximum())
         value = int(self.value())
+        label = getattr(self, "_value_label", None)
+        if label is not None:
+            label.setText(str(value))
         progress = 0.0 if maximum == minimum else (value - minimum) / (maximum - minimum)
 
         try:

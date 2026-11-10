@@ -251,6 +251,34 @@ class OrientationPreviewTests(unittest.TestCase):
         self._assert_colorbar_center(65., 50.)
         self.assertEqual(len(self.colorbar_moved), 0)
 
+    def test_text_annotation_drag_has_independent_signals_and_bounds(self):
+        overlay = QPixmap(200, 100)
+        overlay.fill(Qt.transparent)
+        painter = QPainter(overlay)
+        painter.fillRect(QRectF(80, 40, 40, 20), QColor("green"))
+        painter.end()
+        self.label.set_annotation_preview("title", overlay, (.40, .40, .20, .20))
+        moved = QSignalSpy(self.label.annotationMoved)
+        finished = QSignalSpy(self.label.annotationDragFinished)
+
+        self._drag((200, 150), (240, 130))
+        rect = self.label.annotation_rect("title")
+        self.assertAlmostEqual((rect[0] + rect[2] / 2.) * 100., 70.)
+        self.assertAlmostEqual((rect[1] + rect[3] / 2.) * 100., 70.)
+        self.assertEqual(moved[-1][0], "title")
+        self.assertAlmostEqual(moved[-1][1], 70.)
+        self.assertAlmostEqual(moved[-1][2], 70.)
+        self.assertEqual(finished[0][0], "title")
+        self.assertEqual(len(self.moved), 0)
+        self.assertEqual(len(self.colorbar_moved), 0)
+
+        self.label.set_annotation_center("title", 0., 100.)
+        rect = self.label.annotation_rect("title")
+        self.assertAlmostEqual((rect[0] + rect[2] / 2.) * 100., 10.)
+        self.assertAlmostEqual((rect[1] + rect[3] / 2.) * 100., 90.)
+        self.label.clear_annotation("title")
+        self.assertIsNone(self.label.annotation_rect("title"))
+
 
 if __name__ == "__main__":
     unittest.main()

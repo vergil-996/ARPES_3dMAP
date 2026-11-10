@@ -44,6 +44,10 @@ class ControlPageStateTests(unittest.TestCase):
         page.restore_state(expected)
 
         self.assertEqual(page.export_state(), expected)
+        self.assertEqual(
+            [slider._value_label.text() for slider in (page.s_low, page.s_gamma, page.s_up)],
+            ["13", "47", "91"],
+        )
 
     def test_canvas_bar_and_data_state_round_trip_preserves_values(self):
         bar = TimelineBar()

@@ -11,7 +11,7 @@ configure_qt_plugin_path()
 
 import numpy as np
 import vtk
-from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QTimer, Qt
+from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -122,6 +122,9 @@ class QuickCloseMessageBox(QMessageBox):
 
 
 class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
+    refreshFinished = pyqtSignal(object)
+    refreshFailed = pyqtSignal(object, str)
+
     COMPARABLE_1D_PAGE_KINDS = {"slice_dos", "energy_dos", "edc_curve"}
     COMPARISON_PAGE_KIND = "curve_comparison_1d"
     LOG_1D_PAGE_KIND = "log_curve"
@@ -736,6 +739,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.btn_tb_load = _make_tb_btn("加载数据", "primary")
         self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
         self.btn_tb_shot.setToolTip("选择截图样式并预览导出（仅影响截图，不改变左侧视图）")
+        self.btn_tb_blender = _make_tb_btn("导出 Blender 工程", "secondary", 150)
+        self.btn_tb_blender.setToolTip("多页面导出 Blender 工程，或打开已有工程调整显示并原位更新资产")
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
         self.btn_tb_crop = _make_tb_btn("裁剪", "secondary", 80)
         self.btn_tb_crop.setCheckable(True)
@@ -762,6 +767,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self._sync_source_switcher()
         row.addWidget(self.source_switcher_bar)
         row.addWidget(self.btn_tb_shot)
+        row.addWidget(self.btn_tb_blender)
         row.addWidget(self.btn_tb_export)
         row.addWidget(self.btn_tb_crop)
         row.addWidget(self.btn_tb_erase)
@@ -785,6 +791,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
 
         self.btn_tb_load.clicked.connect(self.on_load)
         self.btn_tb_shot.clicked.connect(self.open_publication_dialog)
+        self.btn_tb_blender.clicked.connect(lambda: self.open_blender_project_dialog())
         self.btn_tb_export.clicked.connect(self.export_current_result)
 
     def _build_statusbar(self):
@@ -1727,6 +1734,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             self._render_exact_ready = False
         self._update_export_button_states()
         self._update_render_status("failed", self.backend_manager.selected_backend_name())
+        self._last_refresh_failure = (request, str(message))
+        self.refreshFailed.emit(request, str(message))
         print(f"Refresh failed ({request.page_id}): {message}")
 
     def _finish_ui_refresh(self, request, backend):
@@ -1740,7 +1749,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
                 self._update_render_status("computing", backend)
         else:
             self._update_render_status("preview", backend)
+        self._last_completed_refresh = request
+        self._last_refresh_failure = None
         self._update_export_button_states()
+        self.refreshFinished.emit(request)
 
     def _current_transfer_signature(self):
         effect_signature = self._plugin_effect_signature()
@@ -3748,6 +3760,12 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             desired = ".npz"
         elif "png" in filter_lower:
             desired = ".png"
+        elif "pdf" in filter_lower:
+            desired = ".pdf"
+        elif "svg" in filter_lower:
+            desired = ".svg"
+        elif "*.ai" in filter_lower or "illustrator" in filter_lower:
+            desired = ".ai"
         else:
             desired = ".mat"
 
@@ -6572,6 +6590,25 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             self._show_message(
                 "无法打开截图样式面板", f"{type(exc).__name__}: {exc}", QMessageBox.Warning
             )
+
+    def open_blender_project_dialog(self, blend_path=None):
+        """打开独立 Blender 工程对话框；无数据时也可回读已有工程。"""
+        try:
+            dialog = self.__dict__.get("_blender_project_dialog")
+            if dialog is None:
+                from bandscope.exporting.blender_project_dialog import BlenderProjectDialog
+
+                dialog = BlenderProjectDialog(self)
+                self._blender_project_dialog = dialog
+            if blend_path:
+                return dialog.open_existing(blend_path)
+            dialog.show_export()
+            return True
+        except Exception as exc:  # noqa: BLE001 - Qt 槽不允许异常逃逸
+            self._show_message(
+                "无法打开 Blender 工程对话框", f"{type(exc).__name__}: {exc}", QMessageBox.Warning
+            )
+            return False
 
     def _build_time_integral_spec(self):
         low = self.page_data.s_t_low.value()

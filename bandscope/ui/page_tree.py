@@ -7,7 +7,7 @@
 - 右键或 F2 在树内直接改名，Enter 或失焦保存，Esc 取消。
 - 空白处拖动框选，Ctrl/Shift 多选；右键或 Delete 请求删除选中的页面。
 - 原树内拖拽只在同一父节点内排序，父节点携带整支移动。
-- 下方分组区域接受原树页面的拖动或 Ctrl+C/Ctrl+V，始终复制并保留原页面。
+- 下方分组区域支持嵌套子分组，接受原树页面的拖动或 Ctrl+C/Ctrl+V，始终复制并保留原页面。
 - 顶部搜索按名称过滤（不区分大小写），显示命中页面及其祖先；清空后恢复原展开状态与滚动位置。
 
 本模块只负责“怎么显示、怎么操作”，不持有页面记录：``set_pages`` 每次由
@@ -94,6 +94,7 @@ class PageTreeEntry:
 class PageGroupEntry:
     group_id: str
     title: str
+    parent_group_id: Optional[str] = None
 
 
 class InlineRenameEditor(QLineEdit):
@@ -499,8 +500,10 @@ class PageGroupView(QTreeWidget):
     def item_group_id(cls, item):
         if item is None:
             return None
-        if item.parent() is not None:
+        if cls.item_page_id(item) is not None:
             item = item.parent()
+        if item is None:
+            return None
         group_id = item.data(0, cls.GROUP_ROLE)
         return str(group_id) if group_id else None
 
@@ -581,6 +584,7 @@ class PageTreePanel(QWidget):
     pages_delete_requested = pyqtSignal(list)
     reorder_requested = pyqtSignal(str, str, bool)
     group_create_requested = pyqtSignal()
+    subgroup_create_requested = pyqtSignal(str)
     group_rename_requested = pyqtSignal(str)
     group_delete_requested = pyqtSignal(str)
     group_copy_page_requested = pyqtSignal(str, str)
@@ -957,7 +961,9 @@ class PageTreePanel(QWidget):
                 children_by_parent.items(), key=lambda pair: str(pair[0])
             )
         )
-        group_rows = tuple((group.group_id, group.title) for group in groups)
+        group_rows = tuple(
+            (group.group_id, group.title, group.parent_group_id) for group in groups
+        )
         return rows, links, group_rows
 
     def _remember_anchor(self):
@@ -1018,22 +1024,38 @@ class PageTreePanel(QWidget):
 
     def _rebuild_groups(self):
         known_groups = set(self._group_headers)
-        self._expanded_group_ids.update(
-            group.group_id for group in self._groups if group.group_id not in known_groups
-        )
+        groups_by_id = {group.group_id: group for group in self._groups}
+        children_by_parent = {}
+        for group in self._groups:
+            children_by_parent.setdefault(group.parent_group_id, []).append(group)
+            if group.group_id in known_groups:
+                continue
+            cursor = group
+            visited = set()
+            while cursor is not None and cursor.group_id not in visited:
+                visited.add(cursor.group_id)
+                self._expanded_group_ids.add(cursor.group_id)
+                cursor = groups_by_id.get(cursor.parent_group_id)
+
         self.group_tree.blockSignals(True)
         try:
             self.group_tree.clear()
             self._group_headers = {}
             self._group_items = {}
-            for group in self._groups:
+
+            def build_group(group, parent_item, ancestors):
+                if group.group_id in ancestors or group.group_id in self._group_headers:
+                    return
                 header = QTreeWidgetItem([group.title])
                 header.setData(0, PageGroupView.GROUP_ROLE, group.group_id)
                 header.setToolTip(0, "拖动页面到此处，或复制页面后在此分组中粘贴")
                 header.setFlags(
                     Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDropEnabled
                 )
-                self.group_tree.addTopLevelItem(header)
+                if parent_item is None:
+                    self.group_tree.addTopLevelItem(header)
+                else:
+                    parent_item.addChild(header)
                 self._group_headers[group.group_id] = header
                 for entry in self._entries.values():
                     if entry.group_id != group.group_id:
@@ -1046,7 +1068,21 @@ class PageTreePanel(QWidget):
                     item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                     header.addChild(item)
                     self._group_items[entry.page_id] = item
+                next_ancestors = ancestors | {group.group_id}
+                for child in children_by_parent.get(group.group_id, []):
+                    build_group(child, header, next_ancestors)
                 header.setExpanded(group.group_id in self._expanded_group_ids)
+
+            roots = [
+                group
+                for group in self._groups
+                if group.parent_group_id is None
+                or group.parent_group_id not in groups_by_id
+            ]
+            for group in roots:
+                build_group(group, None, set())
+            for group in self._groups:
+                build_group(group, None, set())
         finally:
             self.group_tree.blockSignals(False)
 
@@ -1331,6 +1367,9 @@ class PageTreePanel(QWidget):
         if item is None:
             menu.addAction("新建分组").triggered.connect(self.group_create_requested)
         elif page_id is None:
+            menu.addAction("新建子分组").triggered.connect(
+                lambda: self.subgroup_create_requested.emit(group_id)
+            )
             paste_action = menu.addAction("粘贴页面到此分组")
             paste_action.setEnabled(self._clipboard_page_id in self._entries)
             paste_action.triggered.connect(lambda: self._paste_into_group(group_id))

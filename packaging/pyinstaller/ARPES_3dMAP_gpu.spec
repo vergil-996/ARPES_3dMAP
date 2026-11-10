@@ -19,7 +19,10 @@ for package in ('siui', 'pyvista', 'pyvistaqt', 'vtk', 'matplotlib', 'cupy', 'cu
 # CUDA wheels expose their headers and DLLs through the ``nvidia`` namespace.
 # Keep that directory layout so cuda-pathfinder can discover it after freezing.
 datas += collect_data_files('nvidia', include_py_files=True)
-datas += [(str(REPO_ROOT / 'assets' / 'app.ico'), 'assets')]
+datas += [
+    (str(REPO_ROOT / 'assets' / 'app.ico'), 'assets'),
+    (str(REPO_ROOT / 'bandscope' / 'exporting' / 'blender_script.py'), 'bandscope/exporting'),
+]
 
 
 def assert_no_extension_sources(analysis):

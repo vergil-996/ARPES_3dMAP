@@ -8,6 +8,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -117,6 +118,43 @@ class OutputOptionsUiTests(unittest.TestCase):
         opaque_pixmap.fill(QColor("#FF0000"))
         self.assertFalse(opaque_pixmap.hasAlphaChannel())
         self.assertIs(_composite_preview(opaque_pixmap, True), opaque_pixmap)
+
+    def test_vector_formats_are_available_and_persisted(self):
+        with patch(
+            "bandscope.exporting.publication_dialog.illustrator_available",
+            return_value=True,
+        ):
+            self.dialog._load_output_options_ui()
+        formats = [
+            self.dialog.combo_format.itemData(index)
+            for index in range(self.dialog.combo_format.count())
+        ]
+        self.assertEqual(formats, ["png", "pdf", "svg", "ai"])
+        self.dialog.combo_format.setCurrentIndex(formats.index("svg"))
+        self.assertEqual(self.dialog._collect_output_options().fmt, "svg")
+        self.assertEqual(load_output_options(self.settings).fmt, "svg")
+
+    def test_ai_falls_back_to_png_when_illustrator_is_unavailable(self):
+        save_output_options(self.settings, OutputOptions(fmt="ai"))
+        with patch(
+            "bandscope.exporting.publication_dialog.illustrator_available",
+            return_value=False,
+        ):
+            self.dialog._load_output_options_ui()
+            self.assertEqual(self.dialog._collect_output_options().fmt, "png")
+        index = self.dialog.combo_format.findData("ai")
+        self.assertFalse(self.dialog.combo_format.model().item(index).isEnabled())
+
+    def test_3d_enables_pdf_and_svg(self):
+        self.dialog.snapshot.view_family = "3d"
+        with patch(
+            "bandscope.exporting.publication_dialog.illustrator_available",
+            return_value=False,
+        ):
+            self.dialog._load_output_options_ui()
+        for fmt in ("pdf", "svg"):
+            index = self.dialog.combo_format.findData(fmt)
+            self.assertTrue(self.dialog.combo_format.model().item(index).isEnabled())
 
 
 if __name__ == "__main__":

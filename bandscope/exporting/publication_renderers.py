@@ -38,6 +38,7 @@ import numpy as np
 
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
 from bandscope.exporting.publication_models import (
+    DRAGGABLE_TEXT_IDS,
     PUB_CURVE_PALETTE,
     PUB_LINESTYLES,
     TITLE_GAP_DEFAULT_MM,
@@ -450,6 +451,8 @@ def _style_axis_labels(ax, style_params, xlabel, ylabel):
         ylabel, fontsize=float(style_params.get("axis_label_size", 7.0)),
         color=ink, fontfamily=family, labelpad=2.0,
     )
+    ax.xaxis.label.set_gid("publication-xlabel")
+    ax.yaxis.label.set_gid("publication-ylabel")
 
 
 def _add_panel_label(ax, overrides, style_params):
@@ -580,13 +583,92 @@ def place_title(fig, plan, width_mm, height_mm, margins, colorbar_layout,
         x_mm, ha = main[2], "right"
     else:
         x_mm, ha = (main[0] + main[2]) / 2.0, "center"
-    fig.text(
+    title = fig.text(
         x_mm / width_mm, y_mm / height_mm, plan["text"],
         ha=ha, va=va,
         fontsize=float(plan["fontsize"]),
         color=plan["color"],
         fontfamily=plan["fontfamily"],
     )
+    title.set_gid("publication-title")
+
+
+def _draggable_text_artists(fig):
+    result = {}
+    artists = list(fig.texts)
+    for ax in fig.axes:
+        artists.extend(ax.texts)
+        artists.extend((ax.xaxis.label, ax.yaxis.label))
+    for artist in artists:
+        gid = str(artist.get_gid() or "")
+        if not gid.startswith("publication-"):
+            continue
+        name = gid[len("publication-"):]
+        if name in DRAGGABLE_TEXT_IDS and artist.get_visible() and artist.get_text().strip():
+            result[name] = artist
+    return result
+
+
+def _copy_text_to_figure(fig, artist):
+    display = artist.get_transform().transform(artist.get_position())
+    x, y = fig.transFigure.inverted().transform(display)
+    copied = fig.text(
+        x, y, artist.get_text(),
+        fontproperties=artist.get_fontproperties(),
+        color=artist.get_color(), alpha=artist.get_alpha(),
+        ha=artist.get_ha(), va=artist.get_va(),
+        rotation=artist.get_rotation(), rotation_mode=artist.get_rotation_mode(),
+        linespacing=getattr(artist, "_linespacing", 1.2), zorder=artist.get_zorder(),
+        clip_on=False,
+    )
+    copied.set_gid(artist.get_gid())
+    return copied
+
+
+def apply_manual_annotation_positions(fig, overrides):
+    """把手动标题位置应用到最终排版，不改变自动布局和科学内容。"""
+    if not any(
+        key in overrides
+        for name in DRAGGABLE_TEXT_IDS
+        for key in (f"{name}_cx", f"{name}_cy")
+    ):
+        return
+    fig.canvas.draw()
+    manual = []
+    for name, artist in _draggable_text_artists(fig).items():
+        cx_key, cy_key = f"{name}_cx", f"{name}_cy"
+        if cx_key not in overrides or cy_key not in overrides:
+            continue
+        try:
+            center = (float(overrides[cx_key]) / 100., float(overrides[cy_key]) / 100.)
+        except (TypeError, ValueError):
+            continue
+        copied = _copy_text_to_figure(fig, artist)
+        artist.set_visible(False)
+        copied.set_position(center)
+        copied.set_ha("center")
+        copied.set_va("center")
+        manual.append(copied)
+    if not manual:
+        return
+    fig.canvas.draw()
+    canvas = fig.bbox
+    for artist in manual:
+        box = artist.get_window_extent()
+        dx = dy = 0.0
+        if box.x0 < canvas.x0:
+            dx = canvas.x0 - box.x0
+        if box.x1 > canvas.x1:
+            dx = canvas.x1 - box.x1
+        if box.y0 < canvas.y0:
+            dy = canvas.y0 - box.y0
+        if box.y1 > canvas.y1:
+            dy = canvas.y1 - box.y1
+        if dx or dy:
+            display = fig.transFigure.transform(artist.get_position())
+            artist.set_position(fig.transFigure.inverted().transform(
+                (display[0] + dx, display[1] + dy)
+            ))
 
 
 def _draw_colorbar(
@@ -836,7 +918,7 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
     ax.set_xlim(ext[0], ext[1])
     ax.set_ylim(ext[2], ext[3])
 
-    max_ticks = int(params.get("max_major_ticks", 5))
+    max_ticks = int(overrides.get("axis_nticks", params.get("max_major_ticks", 5)))
     _apply_formatter(ax.xaxis, nice_ticks(ext[0], ext[1], max_ticks), ext[0], ext[1])
     _apply_formatter(ax.yaxis, nice_ticks(ext[2], ext[3], max_ticks), ext[2], ext[3])
 
@@ -870,6 +952,7 @@ def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
     )
     place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
     _fit_manual_colorbar_to_canvas(fig, overrides)
+    apply_manual_annotation_positions(fig, overrides)
     return fig
 
 
@@ -965,7 +1048,7 @@ def render_1d(snapshot, style, overrides, options, dpi: int, *, presentation=Non
         low, high = ax.get_ylim()
         ax.set_ylim(high, low)
 
-    max_ticks = int(params.get("max_major_ticks", 5))
+    max_ticks = int(overrides.get("axis_nticks", params.get("max_major_ticks", 5)))
     x0, x1 = ax.get_xlim()
     y0, y1 = ax.get_ylim()
     _apply_formatter(ax.xaxis, nice_ticks(x0, x1, max_ticks), x0, x1)
@@ -1002,6 +1085,7 @@ def render_1d(snapshot, style, overrides, options, dpi: int, *, presentation=Non
         fig, ax, None, width_mm, height_mm, margins, None, title_plan=title_plan
     )
     place_title(fig, title_plan, width_mm, height_mm, margins, None, overflow)
+    apply_manual_annotation_positions(fig, overrides)
     return fig
 
 
@@ -1311,7 +1395,7 @@ def _axis_value_to_world(axis: int, value: float, snapshot) -> float:
     return float(index) * spacing
 
 
-def _draw_3d_grid(ax_img, renderer, snapshot, style_params):
+def _draw_3d_grid(ax_img, renderer, snapshot, style_params, target_ticks):
     """在三个背向相机的包围盒面上叠加网格线（图像像素坐标系）。
 
     网格线取各轴物理坐标的整读刻度位置，与轴线刻度同源；线宽细于轴线、
@@ -1336,8 +1420,8 @@ def _draw_3d_grid(ax_img, renderer, snapshot, style_params):
         for line_axis in others:
             tick_axis = next(a for a in others if a != line_axis)
             coords = np.asarray(snapshot.coords[axis_keys[tick_axis]], dtype=np.float64)
-            # 与轴线刻度同源（同为 3 档整读刻度），网格线与刻度标签对齐
-            ticks = nice_ticks(float(np.min(coords)), float(np.max(coords)), 3)
+            # 与轴线刻度同源，网格线与刻度标签对齐
+            ticks = nice_ticks(float(np.min(coords)), float(np.max(coords)), target_ticks)
             for value in ticks:
                 world_v = _axis_value_to_world(tick_axis, value, snapshot)
                 p0 = [0.0, 0.0, 0.0]
@@ -1365,6 +1449,7 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
     family_font = style_params.get("font_family", "DejaVu Sans")
     dpi = ax_img.figure.get_dpi()
     tick_len_px = tick_len_pt / 72.0 * dpi
+    target_ticks = int(overrides.get("axis_nticks", style_params.get("max_major_ticks", 3)))
 
     corners, spacing = _box_geometry(snapshot)
     projected = _project_points(renderer, corners)
@@ -1376,7 +1461,7 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
     axes_mode = style_params.get("axes_mode", "tripod")
 
     if bool(overrides.get("show_grid", style_params.get("show_grid", False))):
-        _draw_3d_grid(ax_img, renderer, snapshot, style_params)
+        _draw_3d_grid(ax_img, renderer, snapshot, style_params, target_ticks)
 
     if show_box or axes_mode == "box":
         # 隐藏远离相机的角点相连的三条边（盒框剪影规则）
@@ -1419,7 +1504,7 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
 
         coords = np.asarray(snapshot.coords[("X", "Y", "E")[axis]], dtype=np.float64)
         lo, hi = float(np.min(coords)), float(np.max(coords))
-        ticks = nice_ticks(lo, hi, 3)
+        ticks = nice_ticks(lo, hi, target_ticks)
         labels, offset = format_tick_labels(ticks, lo, hi)
         label_gap_px = (tick_len_pt + 2.0) / 72.0 * dpi
         name_gap_px = (tick_len_pt + 15.0) / 72.0 * dpi
@@ -1448,6 +1533,7 @@ def _draw_3d_axes(ax_img, renderer, snapshot, style_params, overrides):
             name_pos[0], name_pos[1], axis_titles[axis],
             fontsize=label_size, color=ink, fontfamily=family_font,
             ha="center", va="center", rotation=angle, rotation_mode="anchor", zorder=5,
+            gid=f"publication-{('xlabel', 'ylabel', 'zlabel')[axis]}",
         )
 
 
@@ -1693,6 +1779,7 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
         _draw_3d_orientation(
             fig, snapshot, params, overrides, main_rect, width_mm, height_mm,
         )
+    apply_manual_annotation_positions(fig, overrides)
     return fig
 
 
@@ -1814,22 +1901,30 @@ def background_kwargs(options, figure=None) -> Dict[str, Any]:
 def save_figure(fig: Figure, path: str, options) -> None:
     """原子保存：同目录临时文件 → 校验 → os.replace。失败保留旧文件。"""
     fmt = str(options.fmt).lower()
-    if fmt not in ("png", "pdf"):
+    if fmt not in ("png", "pdf", "svg", "ai"):
         raise RenderError(f"不支持的输出格式：{fmt}")
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
     kwargs = background_kwargs(options, fig)
+    temporary_suffix = ".ai" if fmt == "ai" else ".pubtmp"
     tmp_path = os.path.join(
-        directory, f".{os.path.basename(path)}.{os.getpid()}.pubtmp"
+        directory, f".{os.path.basename(path)}.{os.getpid()}{temporary_suffix}"
     )
+    pdf_tmp_path = tmp_path + ".pdf"
     try:
         with RENDER_LOCK:
-            if fmt == "pdf":
-                # TrueType 子集嵌入，文字保持可选中；rc_context 仅作用于本作用域
+            if fmt in ("pdf", "ai"):
+                target = pdf_tmp_path if fmt == "ai" else tmp_path
                 with matplotlib.rc_context({"pdf.fonttype": 42}):
-                    fig.savefig(tmp_path, format="pdf", **kwargs)
+                    fig.savefig(target, format="pdf", **kwargs)
+            elif fmt == "svg":
+                with matplotlib.rc_context({"svg.fonttype": "none"}):
+                    fig.savefig(tmp_path, format="svg", **kwargs)
             else:
                 fig.savefig(tmp_path, format="png", dpi=int(options.dpi), **kwargs)
+        if fmt == "ai":
+            from bandscope.exporting.illustrator_export import convert_pdf_to_ai
+            convert_pdf_to_ai(pdf_tmp_path, tmp_path)
         if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) <= 0:
             raise RenderError("写入产物为空。")
         # Windows 上目标文件可能被杀毒/索引/预览短暂占用：有限次重试替换
@@ -1845,9 +1940,16 @@ def save_figure(fig: Figure, path: str, options) -> None:
         if last_error is not None:
             raise last_error
     except Exception:
+        for temporary in (tmp_path, pdf_tmp_path):
+            try:
+                if os.path.isfile(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
+        raise
+    finally:
         try:
-            if os.path.isfile(tmp_path):
-                os.remove(tmp_path)
+            if os.path.isfile(pdf_tmp_path):
+                os.remove(pdf_tmp_path)
         except OSError:
             pass
-        raise

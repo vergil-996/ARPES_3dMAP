@@ -24,7 +24,10 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 # Ed25519 验签（阶段 D）：cryptography 带 Rust 扩展模块，整包收集。
 tmp_ret = collect_all('cryptography')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-datas += [(str(REPO_ROOT / 'assets' / 'app.ico'), 'assets')]
+datas += [
+    (str(REPO_ROOT / 'assets' / 'app.ico'), 'assets'),
+    (str(REPO_ROOT / 'bandscope' / 'exporting' / 'blender_script.py'), 'bandscope/exporting'),
+]
 
 
 def assert_no_extension_sources(analysis):

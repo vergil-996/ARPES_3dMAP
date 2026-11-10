@@ -185,6 +185,10 @@ def capture_snapshot(window) -> PublicationSnapshot:
         coord_units=units,
         source_desc=_build_source_desc(window, spec, render_context),
         source_revision=source_revision(window, spec),
+        source_session_id=(
+            window.__dict__.get("source_manager").active_id
+            if window.__dict__.get("source_manager") is not None else None
+        ),
     )
     if spec.page_kind == "home" and window.core.has_time_axis:
         try:
@@ -591,7 +595,7 @@ def default_filename(snapshot, style, options: OutputOptions) -> str:
 def render_and_save(snapshot, style, overrides, options: OutputOptions, path: str, *, presentation=None) -> None:
     """同一 renderer 生成正式文件；原子写入；失败不损坏旧文件。"""
     if options.fmt not in FAMILY_FORMATS.get(snapshot.view_family, ("png",)):
-        raise ExportError(f"当前视图族首版不支持 {options.fmt.upper()} 输出。")
+        raise ExportError(f"当前视图族不支持 {options.fmt.upper()} 输出。")
     kwargs = {"presentation": presentation} if presentation is not None else {}
     fig = render_snapshot(snapshot, style, overrides, options, dpi=int(options.dpi), **kwargs)
     try:

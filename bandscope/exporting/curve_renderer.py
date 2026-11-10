@@ -250,7 +250,8 @@ def render_presentation(snapshot, style, overrides, options, dpi, presentation):
             getattr(ax, f"invert_{name}axis")()
         lo, hi = getattr(ax, f"get_{name}lim")()
         axis = getattr(ax, f"{name}axis")
-        base._apply_formatter(axis, base.nice_ticks(lo, hi, p.figure.get(f"{name}_ticks", params.get("max_major_ticks", 5))), lo, hi)
+        default_ticks = int(overrides.get("axis_nticks", params.get("max_major_ticks", 5)))
+        base._apply_formatter(axis, base.nice_ticks(lo, hi, p.figure.get(f"{name}_ticks", default_ticks)), lo, hi)
         if p.figure.get(f"{name}_minor", False):
             axis.set_minor_locator(AutoMinorLocator())
     base._style_axes_frame(ax, params, overrides, "1d")
@@ -305,4 +306,5 @@ def render_presentation(snapshot, style, overrides, options, dpi, presentation):
         if box.x0 < canvas.x0 - 1 or box.x1 > canvas.x1 + 1 or box.y0 < canvas.y0 - 1 or box.y1 > canvas.y1 + 1:
             fig.clear()
             raise base.RenderError("图例或标签超出画布；请减少列数/字号、使用稀疏标签或增大图片尺寸。")
+    base.apply_manual_annotation_positions(fig, overrides)
     return fig

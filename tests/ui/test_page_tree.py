@@ -728,6 +728,70 @@ class PageGroupTests(_WorkspaceFixture):
         self.assertEqual(self.panel.group_tree.topLevelItem(0).text(0), "常用页面")
         self.assertEqual(self.panel.group_page_ids(self.workspace.groups[0].group_id), [])
 
+    def test_group_context_menu_creates_a_nested_group(self):
+        parent = self.workspace.create_group("父分组")
+        parent_item = self.panel._group_headers[parent.group_id]
+
+        def execute(menu, _pos):
+            action = next(action for action in menu.actions() if action.text() == "新建子分组")
+            action.trigger()
+
+        with patch(
+            "bandscope.ui.result_workspace.QInputDialog.getText",
+            return_value=("子分组", True),
+        ), patch.object(QMenu, "exec_", new=execute):
+            self.panel._on_group_context_menu(
+                self.panel.group_tree.visualItemRect(parent_item).center()
+            )
+
+        child = self.workspace.groups[-1]
+        self.assertEqual(child.parent_group_id, parent.group_id)
+        child_item = self.panel._group_headers[child.group_id]
+        self.assertIs(child_item.parent(), self.panel._group_headers[parent.group_id])
+        self.assertEqual(self.panel.group_tree.item_group_id(child_item), child.group_id)
+        self.assertTrue(self.panel._group_headers[parent.group_id].isExpanded())
+
+    def test_nested_group_accepts_copies_and_survives_source_switching(self):
+        parent = self.workspace.create_group("父分组")
+        child = self.workspace.create_group("子分组", parent.group_id)
+        copied = self.workspace.copy_page_to_group("p2", child.group_id)
+
+        self.tree._dragged_item = self.item("p4")
+        child_item = self.panel._group_headers[child.group_id]
+        self.assertEqual(
+            self.panel.group_tree.resolve_drop(self.tree, child_item),
+            ("p4", child.group_id),
+        )
+        self.tree._dragged_item = None
+        self.assertEqual(self.panel.group_page_ids(child.group_id), [copied.page_id])
+        self.assertIs(self.panel._group_items[copied.page_id].parent(), child_item)
+
+        state = self.workspace.export_source_state()
+        self.workspace.detach_source_state()
+        self.workspace.install_source_state(state)
+
+        self.assertIs(self.workspace.page_by_id(copied.page_id), copied)
+        self.assertEqual(self.workspace.group_by_id(child.group_id).parent_group_id, parent.group_id)
+        self.assertEqual(self.panel.group_page_ids(child.group_id), [copied.page_id])
+        self.assertIn("p2", self.panel._items)
+
+    def test_deleting_a_parent_group_removes_its_whole_nested_branch(self):
+        parent = self.workspace.create_group("父分组")
+        child = self.workspace.create_group("子分组", parent.group_id)
+        grandchild = self.workspace.create_group("孙分组", child.group_id)
+        other = self.workspace.create_group("其他分组")
+        removed = self.workspace.copy_page_to_group("p2", grandchild.group_id)
+        kept = self.workspace.copy_page_to_group("p4", other.group_id)
+
+        self.assertTrue(self.workspace.delete_group(parent.group_id))
+
+        self.assertEqual(self.workspace.groups, (other,))
+        self.assertNotIn(removed.page_id, self.workspace.page_specs)
+        self.assertIn(kept.page_id, self.workspace.page_specs)
+        self.assertIn("p2", self.workspace.page_specs)
+        self.assertEqual(self.panel.group_page_ids(other.group_id), [kept.page_id])
+        self.assertEqual(self.panel.group_tree.topLevelItemCount(), 1)
+
     def test_copy_creates_an_independent_page_and_keeps_the_original_in_the_tree(self):
         group = self.workspace.create_group("收藏")
         original = self.workspace.page_by_id("p2")

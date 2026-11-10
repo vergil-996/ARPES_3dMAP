@@ -43,12 +43,8 @@ FAMILY_DEFAULT_SIZE_MM = {
 
 FAMILY_LABELS = {"3d": "3D 视图", "2d": "2D 视图", "1d": "1D 视图"}
 
-# 各视图族支持的输出格式（首版：全部 PNG；1D/2D 另支持 PDF；3D PDF 禁用）
-FAMILY_FORMATS = {
-    "3d": ("png",),
-    "2d": ("png", "pdf"),
-    "1d": ("png", "pdf"),
-}
+OUTPUT_FORMATS = ("png", "pdf", "svg", "ai")
+FAMILY_FORMATS = {family: OUTPUT_FORMATS for family in FAMILY_LABELS}
 
 
 def view_family_for(view: str) -> Optional[str]:
@@ -68,7 +64,7 @@ class OutputOptions:
     height_mm: Optional[float] = None
     dpi: int = 600
     fmt: str = "png"
-    # 透明背景：导出时不填充白底。PNG 写入 alpha 通道，PDF 页面底色留空，
+    # 透明背景：导出时不填充白底。PNG 写入 alpha 通道，PDF/SVG 页面底色留空，
     # 便于直接叠到深色幻灯片或后期排版里。
     transparent: bool = False
 
@@ -135,7 +131,7 @@ class OutputOptions:
             height = None
         if not (72 <= dpi <= 2400):
             dpi = 600
-        if fmt not in ("png", "pdf"):
+        if fmt not in OUTPUT_FORMATS:
             fmt = "png"
         return OutputOptions(
             width_mm=width, height_mm=height, dpi=dpi, fmt=fmt,
@@ -349,6 +345,7 @@ _OVERRIDE_SCHEMA = {
     "colorbar_cx": ("float", (0.0, 100.0)),
     "colorbar_cy": ("float", (0.0, 100.0)),
     "frame_mode": ("choice", ("box", "open")),
+    "axis_nticks": ("int", (2, 8)),
     "tick_direction": ("choice", ("in", "out")),
     "tick_color": ("choice", ("#000000", "#ffffff")),
     "show_box": ("bool", None),
@@ -378,6 +375,11 @@ _OVERRIDE_SCHEMA = {
 
 # 标题与相邻内容之间的默认距离（毫米）；与 _OVERRIDE_SCHEMA 的缺省语义一致
 TITLE_GAP_DEFAULT_MM = 1.5
+
+DRAGGABLE_TEXT_IDS = ("title", "xlabel", "ylabel", "zlabel")
+for _name in DRAGGABLE_TEXT_IDS:
+    _OVERRIDE_SCHEMA[f"{_name}_cx"] = ("float", (0.0, 100.0))
+    _OVERRIDE_SCHEMA[f"{_name}_cy"] = ("float", (0.0, 100.0))
 
 # 色条相关微调只对有色条的视图族有意义
 _COLORBAR_OVERRIDE_KEYS = {
@@ -409,7 +411,7 @@ def validate_overrides(family: str, overrides: Optional[Mapping[str, Any]]) -> D
             continue
         if key == "body_size" and family != "3d":
             continue
-        if key == "zlabel_text" and family != "3d":
+        if key in ("zlabel_text", "zlabel_cx", "zlabel_cy") and family != "3d":
             continue  # 第三条轴名只存在于 3D 视图
         if kind == "bool":
             clean[key] = bool(value)
@@ -612,6 +614,7 @@ class PublicationSnapshot:
     source_desc: str = ""
     home_frame_index: Optional[int] = None
     source_revision: Tuple = ()
+    source_session_id: Optional[str] = None
     view_recipe: Optional[Dict[str, Any]] = None
     recipe_error: str = ""
 

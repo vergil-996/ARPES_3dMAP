@@ -8,7 +8,7 @@
   直接占用原时间轴的位置，左侧不留空位。
 - 左起第二组：时间轴（滑条 + 帧号输入框 + 提示 + 总帧数），按数据显隐；
   与位置滑条同排时两者共享富余宽度。
-- 右侧：显示坐标 / E轴翻转 开关与 Z 轴旋转输入框，常驻右对齐。宽度不够时
+- 右侧：显示坐标 / 图像翻转 开关与 Z 轴旋转输入框，常驻右对齐。宽度不够时
   整组下移到第二行，底条高度同步增加。
 
 主窗口的所有信号、快捷键和按结果页保存的控件状态都指向这里的同名属性
@@ -183,7 +183,7 @@ class TimelineBar(QFrame):
         # 分组收起后这个 Expanding 空隙才撑住整行，右侧控件不会左移。
         layout.addStretch()
 
-        # —— 右：画布视图控件（显示坐标 / E轴翻转 / Z轴旋转），默认右对齐 ——
+        # —— 右：画布视图控件（显示坐标 / 图像翻转 / Z轴旋转），默认右对齐 ——
         self.view_controls = QWidget(self)
         self.view_controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self._view_layout = QHBoxLayout(self.view_controls)
@@ -285,7 +285,7 @@ class TimelineBar(QFrame):
 
         self.switch_flip = SyncedSwitch(self.view_controls)
         self.switch_flip.setFixedSize(self.SWITCH_WIDTH, self.SWITCH_HEIGHT)
-        self.switch_flip.setToolTip("翻转 E 轴（能量）显示方向")
+        self.switch_flip.setToolTip("翻转图像显示方向")
 
         self.edit_rotation = RotationSpinBox(self.view_controls)
         self.edit_rotation.setAccessibleName("Z轴旋转角度")
@@ -297,7 +297,7 @@ class TimelineBar(QFrame):
         self.edit_rotation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.edit_rotation.setToolTip("在 Kx-Ky 平面内旋转 3D 数据体（-360° ~ 360°）")
 
-        for switch, text in ((self.switch_axes, "显示坐标"), (self.switch_flip, "E轴翻转")):
+        for switch, text in ((self.switch_axes, "显示坐标"), (self.switch_flip, "图像翻转")):
             label = SiLabel(text, self.view_controls)
             label.setStyleSheet(theme.field_label_qss())
             self._view_layout.addWidget(label, 0, Qt.AlignVCenter)

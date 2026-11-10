@@ -8,6 +8,8 @@ from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import QLabel
 
+from bandscope.exporting.publication_models import DRAGGABLE_TEXT_IDS
+
 
 @dataclass
 class _PreviewLayer:
@@ -29,10 +31,13 @@ class OrientationPreviewLabel(QLabel):
     orientationDragFinished = pyqtSignal()
     colorbarMoved = pyqtSignal(float, float)
     colorbarDragFinished = pyqtSignal()
+    annotationMoved = pyqtSignal(str, float, float)
+    annotationDragFinished = pyqtSignal(str)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._layers = {name: _PreviewLayer() for name in ("colorbar", "orientation")}
+        names = ("colorbar", *DRAGGABLE_TEXT_IDS, "orientation")
+        self._layers = {name: _PreviewLayer() for name in names}
         self._drag = None
         self.setMouseTracking(True)
 
@@ -43,6 +48,9 @@ class OrientationPreviewLabel(QLabel):
     def set_colorbar_preview(self, overlay: QPixmap, rect: tuple, bounds: tuple | None = None):
         """Use the colorbar rect for its center, and bounds for its labels too."""
         self._set_layer("colorbar", overlay, rect, rect if bounds is None else bounds)
+
+    def set_annotation_preview(self, name, overlay: QPixmap, rect: tuple):
+        self._set_layer(name, overlay, rect, rect)
 
     @staticmethod
     def _valid_rect(rect):
@@ -76,6 +84,9 @@ class OrientationPreviewLabel(QLabel):
     def clear_colorbar(self):
         self._clear_layer("colorbar")
 
+    def clear_annotation(self, name):
+        self._clear_layer(name)
+
     def _clear_layer(self, name):
         layer = self._layers[name]
         layer.pixmap = QPixmap()
@@ -90,6 +101,9 @@ class OrientationPreviewLabel(QLabel):
     def set_colorbar_interactive(self, enabled: bool):
         self._set_interactive("colorbar", enabled)
 
+    def set_annotation_interactive(self, name, enabled: bool):
+        self._set_interactive(name, enabled)
+
     def _set_interactive(self, name, enabled):
         self._layers[name].interactive = bool(enabled)
         if not enabled:
@@ -102,11 +116,17 @@ class OrientationPreviewLabel(QLabel):
     def colorbar_rect(self):
         return self._layers["colorbar"].rect
 
+    def annotation_rect(self, name):
+        return self._layers[name].rect
+
     def set_orientation_center(self, cx_percent: float, cy_percent: float):
         self._set_center("orientation", cx_percent, cy_percent)
 
     def set_colorbar_center(self, cx_percent: float, cy_percent: float):
         self._set_center("colorbar", cx_percent, cy_percent)
+
+    def set_annotation_center(self, name, cx_percent: float, cy_percent: float):
+        self._set_center(name, cx_percent, cy_percent)
 
     def _set_center(self, name, cx_percent, cy_percent):
         layer = self._layers[name]
@@ -176,8 +196,9 @@ class OrientationPreviewLabel(QLabel):
                 and layer.rect is not None and not layer.pixmap.isNull())
 
     def _hit_layer(self, position):
-        # Match drawing order: the orientation marker sits over the colorbar.
-        return next((name for name in ("orientation", "colorbar")
+        # Match drawing order: later layers receive the hit first.
+        names = ("colorbar", *DRAGGABLE_TEXT_IDS, "orientation")
+        return next((name for name in reversed(names)
                      if self._can_drag(name)
                      and self._layer_widget_rect(name).contains(QPointF(position))), None)
 
@@ -193,8 +214,13 @@ class OrientationPreviewLabel(QLabel):
         if not all(math.isclose(before, after, rel_tol=0., abs_tol=1e-12)
                    for before, after in zip(previous, rect)):
             x, y, width, height = rect
-            signal = self.orientationMoved if name == "orientation" else self.colorbarMoved
-            signal.emit((x + width / 2.) * 100., (y + height / 2.) * 100.)
+            cx, cy = (x + width / 2.) * 100., (y + height / 2.) * 100.
+            if name == "orientation":
+                self.orientationMoved.emit(cx, cy)
+            elif name == "colorbar":
+                self.colorbarMoved.emit(cx, cy)
+            else:
+                self.annotationMoved.emit(name, cx, cy)
 
     def mousePressEvent(self, event):
         name = self._hit_layer(event.pos())
@@ -223,9 +249,12 @@ class OrientationPreviewLabel(QLabel):
             self._drag = None
             hit = self._hit_layer(event.pos()) is not None
             self.setCursor(Qt.OpenHandCursor if hit else Qt.ArrowCursor)
-            signal = (self.orientationDragFinished if name == "orientation"
-                      else self.colorbarDragFinished)
-            signal.emit()
+            if name == "orientation":
+                self.orientationDragFinished.emit()
+            elif name == "colorbar":
+                self.colorbarDragFinished.emit()
+            else:
+                self.annotationDragFinished.emit(name)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -245,7 +274,7 @@ class OrientationPreviewLabel(QLabel):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            for name in ("colorbar", "orientation"):
+            for name in ("colorbar", *DRAGGABLE_TEXT_IDS, "orientation"):
                 layer = self._layers[name]
                 target = self._layer_widget_rect(name)
                 if not target.isEmpty() and not layer.pixmap.isNull():

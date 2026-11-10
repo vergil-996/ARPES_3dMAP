@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""图片导出：样式选择面板（卡片预览 / 草稿语义 / 视图族记忆）。
+"""数据导出：图片样式面板。
 
-交互约定（plan v2 §4.1/§4.2）：
+图片交互约定（plan v2 §4.1/§4.2）：
 
 - 面板只打开一个实例；打开时冻结快照，顶部展示来源页/帧与结果类型。
 - 卡片与大图预览由同一份快照、同一 renderer 生成，仅 dpi 不同。
@@ -62,6 +62,7 @@ from bandscope.exporting.publication_models import (
     FAMILY_LABELS,
     ENGLISH_FONTS,
     CHINESE_FONTS,
+    DRAGGABLE_TEXT_IDS,
     FONT_DEFAULTS,
     TITLE_GAP_DEFAULT_MM,
     OutputOptions,
@@ -73,6 +74,8 @@ from bandscope.exporting.publication_models import (
 from bandscope.exporting.publication_renderers import (
     RENDER_LOCK,
     RenderError,
+    _copy_text_to_figure,
+    _draggable_text_artists,
     background_kwargs,
     default_colorbar_center,
     colorbar_preview_geometry,
@@ -80,6 +83,7 @@ from bandscope.exporting.publication_renderers import (
     render_snapshot,
 )
 from bandscope.exporting.orientation_preview import OrientationPreviewLabel
+from bandscope.exporting.illustrator_export import IllustratorError, illustrator_available
 from bandscope.exporting.curve_presentation import (
     Figure1DPresentation, publication_session, source_revision,
     load_presentation, save_presentation,
@@ -131,22 +135,25 @@ def _composite_preview(pixmap: QPixmap, transparent: bool) -> QPixmap:
 
 
 def _draggable_preview_layers(fig, options, *, include_colorbar=True):
-    """同一 Figure 分离静态底图、方向标和包含刻度/标题的色条层。"""
+    """同一 Figure 分离静态底图、可拖动文字、方向标和色条层。"""
     marker = next((ax for ax in fig.axes if ax.get_label() == "orientation"), None)
     cbar = next((ax for ax in fig.axes if ax.get_label() == "publication-colorbar"), None)
     if not include_colorbar:
         cbar = None
-    if marker is None and cbar is None:
-        return None
     with RENDER_LOCK:
+        fig.canvas.draw()
+        texts = _draggable_text_artists(fig)
+        if marker is None and cbar is None and not texts:
+            return None
         result = {}
         geometry = colorbar_preview_geometry(fig) if cbar is not None else None
         artists = list(fig.axes) + list(fig.texts) + list(fig.legends) + list(fig.artists)
         visibility = [(artist, artist.get_visible()) for artist in artists]
+        text_visibility = [(artist, artist.get_visible()) for artist in texts.values()]
         try:
-            for ax in (marker, cbar):
-                if ax is not None:
-                    ax.set_visible(False)
+            for artist in (marker, cbar, *texts.values()):
+                if artist is not None:
+                    artist.set_visible(False)
             background = io.BytesIO()
             fig.savefig(background, format="png", dpi=int(fig.get_dpi()),
                         **background_kwargs(options))
@@ -164,15 +171,35 @@ def _draggable_preview_layers(fig, options, *, include_colorbar=True):
                 else:
                     rect = tuple(float(v) for v in marker.get_position().bounds)
                     result[name] = (rect, overlay.getvalue())
+            for name, artist in texts.items():
+                copied = _copy_text_to_figure(fig, artist)
+                try:
+                    for target, _visible in visibility:
+                        target.set_visible(False)
+                    copied.set_visible(True)
+                    fig.canvas.draw()
+                    box = copied.get_window_extent()
+                    canvas = fig.bbox
+                    rect = (
+                        (box.x0 - canvas.x0) / canvas.width,
+                        (box.y0 - canvas.y0) / canvas.height,
+                        box.width / canvas.width, box.height / canvas.height,
+                    )
+                    overlay = io.BytesIO()
+                    fig.savefig(overlay, format="png", dpi=int(fig.get_dpi()),
+                                transparent=True, facecolor="none")
+                    result[name] = (rect, overlay.getvalue())
+                finally:
+                    copied.remove()
             return result
         finally:
-            for artist, visible in visibility:
+            for artist, visible in (*visibility, *text_visibility):
                 artist.set_visible(visible)
 
 
 def _orientation_preview_layers(fig, options):
     layers = _draggable_preview_layers(fig, options, include_colorbar=False)
-    if layers is None:
+    if layers is None or "orientation" not in layers:
         return None
     rect, overlay = layers["orientation"]
     return rect, layers["background"], overlay
@@ -295,7 +322,7 @@ class PublicationExportDialog(QDialog):
     def __init__(self, window):
         super().__init__(window)
         self.main_window = window
-        self.setWindowTitle("图片导出 · 截图样式")
+        self.setWindowTitle("数据导出 · 截图样式")
         self.setModal(False)
         self.resize(880, 780)
         self.setStyleSheet(
@@ -327,6 +354,7 @@ class PublicationExportDialog(QDialog):
         self._orientation_position_dirty = False
         self._orientation_drag_active = False
         self._colorbar_drag_active = False
+        self._annotation_drag_active = None
         # 色带几何参数按位置（right/left/top/bottom）分别记忆：切换位置时
         # 收存旧位置的一套、换入新位置的一套；导出/提交/换样式/换快照/关闭时清空
         self._cbar_pos_memory: Dict[str, Dict[str, Any]] = {}
@@ -354,7 +382,7 @@ class PublicationExportDialog(QDialog):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
-        self.title_label = QLabel("图片导出")
+        self.title_label = QLabel("数据导出")
         self.title_label.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {theme.TEXT_1};")
         header.addWidget(self.title_label)
         header.addStretch(1)
@@ -369,9 +397,9 @@ class PublicationExportDialog(QDialog):
         self.source_label = QLabel("")
         self.source_label.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
         layout.addWidget(self.source_label)
-        note = QLabel("仅影响截图输出，不改变左侧视图、数据、相机与色阶锁定。")
-        note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
-        layout.addWidget(note)
+        self.mode_note = QLabel("仅影响导出，不改变左侧视图、数据、相机与色阶锁定。")
+        self.mode_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
+        layout.addWidget(self.mode_note)
 
         # 样式卡片
         self.cards_row = QHBoxLayout()
@@ -382,7 +410,8 @@ class PublicationExportDialog(QDialog):
         layout.addLayout(self.cards_row)
 
         # 大图预览
-        preview_header = QHBoxLayout()
+        self.preview_header = QHBoxLayout()
+        preview_header = self.preview_header
         self.preview_title = QLabel("预览")
         self.preview_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {theme.TEXT_1};")
         preview_header.addWidget(self.preview_title)
@@ -407,6 +436,12 @@ class PublicationExportDialog(QDialog):
         self.preview_label.orientationDragFinished.connect(self._on_orientation_drag_finished)
         self.preview_label.colorbarMoved.connect(self._on_colorbar_dragged)
         self.preview_label.colorbarDragFinished.connect(self._on_colorbar_drag_finished)
+        self.preview_label.annotationMoved.connect(self._on_annotation_dragged)
+        self.preview_label.annotationDragFinished.connect(self._on_annotation_drag_finished)
+        self.preview_label.setToolTip(
+            "可直接拖动图标题、轴标题、色条和三轴方向标；松开后更新完整预览。\n"
+            "恢复该样式默认值可回到全部自动位置。"
+        )
         self.preview_label.setStyleSheet(f"color: {theme.TEXT_2}; background: transparent;")
         self.preview_scroll.setWidget(self.preview_label)
         self.preview_splitter = QSplitter(Qt.Horizontal)
@@ -573,6 +608,20 @@ class PublicationExportDialog(QDialog):
         orientation_layout.addStretch(1)
         tune_layout.addWidget(self.orientation_row)
 
+        self.axis_ticks_row = QHBoxLayout()
+        self.axis_ticks_row.addWidget(QLabel("坐标轴刻度"))
+        self.axis_ticks_row.addWidget(QLabel("数量"))
+        self.spin_axis_nticks = QSpinBox()
+        self.spin_axis_nticks.setRange(2, 8)
+        self.spin_axis_nticks.setValue(5)
+        self.spin_axis_nticks.setToolTip(
+            "坐标轴主刻度的目标数量；自动选取好读数值，实际数量可能略有调整。\n"
+            "1D 在“坐标”页单独设置的横轴或纵轴数量优先。"
+        )
+        self.axis_ticks_row.addWidget(self.spin_axis_nticks)
+        self.axis_ticks_row.addStretch(1)
+        tune_layout.addLayout(self.axis_ticks_row)
+
         self.tick_row = QWidget()
         tick_layout = QHBoxLayout(self.tick_row)
         tick_layout.setContentsMargins(0, 0, 0, 0)
@@ -710,7 +759,8 @@ class PublicationExportDialog(QDialog):
         layout.addWidget(self.tune_panel)
 
         # 输出
-        output_frame = QFrame(self)
+        self.output_frame = QFrame(self)
+        output_frame = self.output_frame
         output_frame.setStyleSheet(
             f"QFrame {{ background-color: {theme.BG_2}; border: 1px solid {theme.BORDER_HEX}; border-radius: 8px; }}"
         )
@@ -746,7 +796,7 @@ class PublicationExportDialog(QDialog):
         output_row.addWidget(self.combo_format)
         self.chk_transparent = QCheckBox("透明背景")
         self.chk_transparent.setToolTip(
-            "导出时不填充白底：PNG 带 alpha 通道，PDF 页面底色留空。\n"
+            "导出时不填充白底：PNG 带 alpha 通道，PDF/SVG 页面底色留空。\n"
             "预览以棋盘格标示透明区域，导出的文件本身不含棋盘格。"
         )
         output_row.addWidget(self.chk_transparent)
@@ -792,6 +842,7 @@ class PublicationExportDialog(QDialog):
         self.spin_cbar_cx.valueChanged.connect(self._on_center_changed)
         self.spin_cbar_cy.valueChanged.connect(self._on_center_changed)
         self.combo_frame.currentIndexChanged.connect(self._on_tune_changed)
+        self.spin_axis_nticks.valueChanged.connect(self._on_tune_changed)
         self.combo_tick_direction.currentIndexChanged.connect(self._on_tune_changed)
         self.combo_tick_color.currentIndexChanged.connect(self._on_tune_changed)
         self.chk_box.toggled.connect(self._on_tune_changed)
@@ -803,9 +854,9 @@ class PublicationExportDialog(QDialog):
         self.chk_title.toggled.connect(self._on_tune_changed)
         self.edit_title.textChanged.connect(self._on_tune_changed)
         self.btn_title_auto.clicked.connect(self._on_title_auto)
-        self.combo_title_pos.currentIndexChanged.connect(self._on_tune_changed)
-        self.combo_title_align.currentIndexChanged.connect(self._on_tune_changed)
-        self.spin_title_gap.valueChanged.connect(self._on_tune_changed)
+        self.combo_title_pos.currentIndexChanged.connect(self._on_title_layout_changed)
+        self.combo_title_align.currentIndexChanged.connect(self._on_title_layout_changed)
+        self.spin_title_gap.valueChanged.connect(self._on_title_layout_changed)
         self.combo_font_english.currentIndexChanged.connect(self._on_tune_changed)
         self.combo_font_chinese.currentIndexChanged.connect(self._on_tune_changed)
         self.edit_panel_label.textChanged.connect(self._on_tune_changed)
@@ -837,6 +888,16 @@ class PublicationExportDialog(QDialog):
             ("面板编号", self.edit_panel_label, self.frame_row),
             ("坐标边框", self.combo_frame, self.frame_row),
         ])
+        self.title_label.setText("图片导出")
+        for widget, padding in ((self.title_label, 4), (self.btn_update, 24), (self.btn_export, 24)):
+            widget.setMinimumWidth(widget.fontMetrics().horizontalAdvance(widget.text()) + padding)
+            widget.updateGeometry()
+        self._sync_export_button()
+
+    def _sync_export_button(self):
+        self.btn_export.setEnabled(
+            self.snapshot is not None and self._big_ready and self._editor_valid
+        )
 
     # ------------------------------------------------------------- 打开/快照
 
@@ -875,6 +936,8 @@ class PublicationExportDialog(QDialog):
         self._orientation_previews.clear()
         self.preview_label.clear_orientation()
         self.preview_label.clear_colorbar()
+        for name in DRAGGABLE_TEXT_IDS:
+            self.preview_label.clear_annotation(name)
         self._big_ready = False
         family = snapshot.view_family
         self._editor_valid = True
@@ -921,6 +984,7 @@ class PublicationExportDialog(QDialog):
         self._rebuild_cards()
         self._load_output_options_ui()
         self._sync_tune_ui_from_draft()
+        self._sync_export_button()
         self._regenerate_previews()
 
     def _load_committed(self, style_id: str) -> Dict[str, Any]:
@@ -987,7 +1051,7 @@ class PublicationExportDialog(QDialog):
         blockers = [
             (self.chk_cbar,), (self.combo_cbar_pos,), (self.combo_cbar_tick,),
             (self.spin_cbar_nticks,), (self.spin_cbar_len,), (self.chk_cbar_outline,),
-            (self.combo_frame,),
+            (self.combo_frame,), (self.spin_axis_nticks,),
             (self.combo_tick_direction,), (self.combo_tick_color,),
             (self.chk_box,), (self.chk_grid,), (self.chk_title,), (self.edit_panel_label,),
             (self.chk_orientation,),
@@ -1037,6 +1101,10 @@ class PublicationExportDialog(QDialog):
                 self.spin_cbar_cy.setValue(
                     round(float(ov.get("colorbar_cy", center[1])), 2)
                 )
+            default_axis_ticks = params.get(
+                "max_major_ticks", 3 if self.snapshot.view_family == "3d" else 5
+            )
+            self.spin_axis_nticks.setValue(int(ov.get("axis_nticks", default_axis_ticks)))
             frame = ov.get("frame_mode", params.get("frame_mode", "open"))
             self.combo_frame.setCurrentIndex(0 if frame == "box" else 1)
             for key, combo, default in (
@@ -1126,6 +1194,11 @@ class PublicationExportDialog(QDialog):
                     ov["colorbar_cx"] = float(self.spin_cbar_cx.value())
                 if abs(self.spin_cbar_cy.value() - round(center[1], 2)) > 0.004:
                     ov["colorbar_cy"] = float(self.spin_cbar_cy.value())
+        params = self._current_style().params
+        default_axis_ticks = params.get("max_major_ticks", 3 if family == "3d" else 5)
+        axis_nticks = int(self.spin_axis_nticks.value())
+        if axis_nticks != int(default_axis_ticks):
+            ov["axis_nticks"] = axis_nticks
         if family in ("1d", "2d"):
             frame = "box" if self.combo_frame.currentIndex() == 0 else "open"
             if frame != self._current_style().params.get("frame_mode", "open"):
@@ -1174,6 +1247,10 @@ class PublicationExportDialog(QDialog):
             text = edit.text().strip()
             if text != auto.strip():
                 ov[key] = text          # 可能是空串 = 用户明确不要该轴标签
+        for name in DRAGGABLE_TEXT_IDS:
+            for key in (f"{name}_cx", f"{name}_cy"):
+                if key in self._draft_overrides:
+                    ov[key] = self._draft_overrides[key]
         return validate_overrides(family, ov)
 
     def _auto_title(self) -> str:
@@ -1186,6 +1263,11 @@ class PublicationExportDialog(QDialog):
     def _on_title_auto(self, *_args):
         """「自动」按钮：把标题文本框恢复为当前自动标题（即撤销命名覆盖）。"""
         self.edit_title.setText(self._auto_title())
+        self._on_tune_changed()
+
+    def _on_title_layout_changed(self, *_args):
+        self._draft_overrides.pop("title_cx", None)
+        self._draft_overrides.pop("title_cy", None)
         self._on_tune_changed()
 
     def _auto_axis_labels(self) -> Tuple[str, str, str]:
@@ -1291,6 +1373,22 @@ class PublicationExportDialog(QDialog):
     def _on_colorbar_drag_finished(self):
         if self._colorbar_drag_active:
             self._colorbar_drag_active = False
+            self._on_tune_changed()
+
+    def _on_annotation_dragged(self, name, cx, cy):
+        if (self.snapshot is None or name not in DRAGGABLE_TEXT_IDS
+                or (name == "zlabel" and self.snapshot.view_family != "3d")):
+            return
+        self._annotation_drag_active = name
+        self._debounce.stop()
+        self._draft_overrides.update({
+            f"{name}_cx": float(cx), f"{name}_cy": float(cy),
+        })
+        self.btn_export.setEnabled(False)
+
+    def _on_annotation_drag_finished(self, name):
+        if self._annotation_drag_active == name:
+            self._annotation_drag_active = None
             self._on_tune_changed()
 
     def _orientation_default_center(self, overrides):
@@ -1476,7 +1574,9 @@ class PublicationExportDialog(QDialog):
         self._big_ready = False
         self.preview_label.set_orientation_interactive(False)
         self.preview_label.set_colorbar_interactive(False)
-        self.btn_export.setEnabled(False)
+        for name in DRAGGABLE_TEXT_IDS:
+            self.preview_label.set_annotation_interactive(name, False)
+        self._sync_export_button()
 
     def _remember_page(self):
         if self.snapshot is None or self.snapshot.view_family != "1d":
@@ -1494,7 +1594,7 @@ class PublicationExportDialog(QDialog):
 
     def _on_editor_validity(self, valid, message):
         self._editor_valid = valid
-        self.btn_export.setEnabled(valid and self._big_ready)
+        self._sync_export_button()
         if message:
             self.status_label.setText(message)
 
@@ -1589,15 +1689,24 @@ class PublicationExportDialog(QDialog):
 
             self.combo_format.clear()
             formats = FAMILY_FORMATS.get(self.snapshot.view_family, ("png",))
-            self.combo_format.addItem("PNG")
-            pdf_index = self.combo_format.count()
-            self.combo_format.addItem("PDF")
-            model = self.combo_format.model()
-            item = model.item(pdf_index)
-            if "pdf" not in formats:
-                item.setEnabled(False)
-                item.setToolTip("3D 视图首版仅支持 PNG（TIFF/混合 PDF 属后续增强）")
-            self.combo_format.setCurrentIndex(1 if options.fmt == "pdf" and "pdf" in formats else 0)
+            ai_available = illustrator_available()
+            tooltips = {
+                "pdf": "Illustrator 可直接打开；文字、曲线和标注保持矢量，热图与 3D 主体保留栅格。",
+                "svg": "Illustrator 可直接打开；文字保持可编辑，所需字体需在本机安装。",
+                "ai": "通过本机 Adobe Illustrator 将 PDF 转换为原生 .ai 文件。",
+            }
+            for name in formats:
+                self.combo_format.addItem(name.upper(), name)
+                index = self.combo_format.count() - 1
+                item = self.combo_format.model().item(index)
+                item.setToolTip(tooltips.get(name, "高分辨率位图。"))
+                if name == "ai" and not ai_available:
+                    item.setEnabled(False)
+                    item.setToolTip("未检测到 Adobe Illustrator；可使用 PDF 或 SVG 导出。")
+            selected_index = self.combo_format.findData(options.fmt)
+            if options.fmt == "ai" and not ai_available:
+                selected_index = 0
+            self.combo_format.setCurrentIndex(max(0, selected_index))
         finally:
             for w in widgets:
                 w.blockSignals(False)
@@ -1607,7 +1716,9 @@ class PublicationExportDialog(QDialog):
         width = 89.0 if width_idx == 0 else (183.0 if width_idx == 1 else float(self.spin_width.value()))
         dpi_idx = self.combo_dpi.currentIndex()
         dpi = 300 if dpi_idx == 0 else (600 if dpi_idx == 1 else int(self.spin_dpi.value()))
-        fmt = "pdf" if self.combo_format.currentIndex() == 1 else "png"
+        fmt = str(self.combo_format.currentData() or "png")
+        if fmt == "ai" and not illustrator_available():
+            fmt = "png"
         formats = FAMILY_FORMATS.get(self.snapshot.view_family, ("png",))
         if fmt not in formats:
             fmt = "png"
@@ -1677,7 +1788,9 @@ class PublicationExportDialog(QDialog):
         self._big_ready = False
         self.preview_label.set_orientation_interactive(False)
         self.preview_label.set_colorbar_interactive(False)
-        self.btn_export.setEnabled(False)
+        for name in DRAGGABLE_TEXT_IDS:
+            self.preview_label.set_annotation_interactive(name, False)
+        self._sync_export_button()
         options = self._collect_output_options()
         family = self.snapshot.view_family
         styles = styles_for_family(family)
@@ -1797,6 +1910,8 @@ class PublicationExportDialog(QDialog):
         if dpi == LARGE_DPI and style_id == self._draft_style_id:
             self.preview_label.clear_orientation()
             self.preview_label.clear_colorbar()
+            for name in DRAGGABLE_TEXT_IDS:
+                self.preview_label.clear_annotation(name)
             if orientation is None:
                 self._set_big_preview(pixmap)
             else:
@@ -1820,10 +1935,21 @@ class PublicationExportDialog(QDialog):
                     marker_pixmap.loadFromData(overlay)
                     self.preview_label.set_orientation_preview(marker_pixmap, rect)
                     self._sync_orientation_center_from_preview(rect)
+                for name in DRAGGABLE_TEXT_IDS:
+                    if name not in orientation:
+                        continue
+                    rect, overlay = orientation[name]
+                    text_pixmap = QPixmap()
+                    text_pixmap.loadFromData(overlay)
+                    self.preview_label.set_annotation_preview(name, text_pixmap, rect)
             self._big_ready = True
             self.preview_label.set_orientation_interactive(self.preview_label.orientation_rect() is not None)
             self.preview_label.set_colorbar_interactive(self.preview_label.colorbar_rect() is not None)
-            self.btn_export.setEnabled(self._editor_valid)
+            for name in DRAGGABLE_TEXT_IDS:
+                self.preview_label.set_annotation_interactive(
+                    name, self.preview_label.annotation_rect(name) is not None
+                )
+            self._sync_export_button()
             style_name = self._current_style().full_name
             self.status_label.setText(f"预览就绪：{style_name}（与导出文件同一排版）")
 
@@ -1927,7 +2053,10 @@ class PublicationExportDialog(QDialog):
             return  # 正式预览未就绪时不可导出
         style = self._current_style()
         options = self._collect_output_options()
-        filters = "PNG (*.png)" if options.fmt == "png" else "PDF (*.pdf)"
+        filters = {
+            "png": "PNG (*.png)", "pdf": "PDF (*.pdf)",
+            "svg": "SVG (*.svg)", "ai": "Adobe Illustrator (*.ai)",
+        }[options.fmt]
         default_name = default_filename(self.snapshot, style, options)
         path, selected = QFileDialog.getSaveFileName(
             self, "导出图片", default_name, filters
@@ -1944,7 +2073,7 @@ class PublicationExportDialog(QDialog):
 
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         self.btn_export.setEnabled(False)
-        self.status_label.setText("正在渲染并写入文件…")
+        self.status_label.setText("正在渲染并调用 Illustrator…" if options.fmt == "ai" else "正在渲染并写入文件…")
         QApplication.processEvents()
         try:
             kwargs = {"presentation": self.presentation.clone()} if self.snapshot.view_family == "1d" else {}
@@ -1953,7 +2082,7 @@ class PublicationExportDialog(QDialog):
                             render=render_and_save, **kwargs)
             else:
                 render_and_save(self.snapshot, style, self._draft_overrides, options, path, **kwargs)
-        except (ExportError, RenderError, OSError, ValueError, RecipeError) as exc:
+        except (ExportError, RenderError, IllustratorError, OSError, ValueError, RecipeError) as exc:
             self.status_label.setText(f"导出失败：{exc}")
             self.main_window._show_message("导出失败", str(exc))
             return  # 不提交草稿，不提示成功
@@ -1965,7 +2094,7 @@ class PublicationExportDialog(QDialog):
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.btn_export.setEnabled(self._big_ready and self._editor_valid)
+            self._sync_export_button()
 
         commit_style(
             self.main_window.settings,

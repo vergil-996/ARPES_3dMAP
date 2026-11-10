@@ -8,6 +8,7 @@
 | 配置环境、运行测试或真实窗口验收 | [开发与测试](development/testing.md) |
 | 插件业务或宿主公开接口 | [插件开发](development/plugins.md) |
 | 构建、签名、发布和安装包验证 | [构建与发布](development/releasing.md) |
+| Blender 工程导出、回读、原位更新与真实验收 | [Blender 工程导出与回读](development/blender-export.md) |
 | 接续尚待实施的工作 | [当前计划](plans/README.md) |
 | 接续开放问题、发布跟进或剩余验收 | [当前交接](handoffs/README.md) |
 
