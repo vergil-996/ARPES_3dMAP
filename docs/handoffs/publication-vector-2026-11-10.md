@@ -22,11 +22,10 @@
 
 - 全量 `python -m unittest discover -s tests -t .`：**1598 项通过**（2026-11-10，86.917 秒），日志 `.local/logs/release-1.19.0-full.log`。
 - 出版图自动化覆盖：四种格式可选与持久化、AI 缺失时禁用并回退 PNG、3D 的 PDF／SVG、标题与轴名拖动图层及画布边界、2D／1D／3D 刻度数量与 1D 单独设置优先；`export_acceptance.py` 的格式说明同步更新。
-- Release CI（run 42771656733）通过；GitHub Release v1.19.0 的 `.sha256` 边车与 Release 元数据摘要一致（CPU／NVIDIA）。安装包完整下载校验未执行，见下节。
+- Release CI（run 42771656733）通过；GitHub Release v1.19.0 的 `.sha256` 边车与 Release 元数据摘要一致（CPU／NVIDIA），两个安装包后续已完整下载并按边车校验一致。
 
 ## 未执行 / 下一步
 
 - 维护者人工视觉：SVG／PDF 在 Illustrator 中的文字可编辑性、矢量观感，以及拖动位置与导出一致性。
 - `.ai` 的真实转换未执行（需要本机安装 Illustrator）；无 Illustrator 时的禁用与回退只由自动化覆盖。
 - 冻结安装包与安装器验收。
-- 安装包完整下载校验：验证时经本机代理的吞吐降到约 35 KB/s（CPU 仅到 28 MB），未完成下载，不写成已通过。
