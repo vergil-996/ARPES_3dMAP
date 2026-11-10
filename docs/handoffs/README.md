@@ -8,9 +8,9 @@
 
 | 事项与适用范围 | 需要继续确认的内容 | 状态主记录 |
 | --- | --- | --- |
-| 我的分组与页面副本（v1.18.1 已发布 GitHub 与 MatElab；v1.19.0 起支持嵌套子分组） | 拖动 / 粘贴手感、窄栏与多分组布局、真实数据跨源激活；嵌套子分组的深层布局；冻结包与安装器验收；分组不跨重启保留 | [我的分组与页面副本](page-groups-2026-11-02.md) |
-| Blender 工程导出与八材质薄板（v1.19.0 已发布 GitHub） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
-| 出版图矢量输出与文字拖动（v1.19.0 已发布 GitHub） | 维护者人工视觉（SVG／PDF 矢量文字、拖动位置）；Illustrator 实机 `.ai` 转换；冻结包与安装器验收 | [出版图矢量输出](publication-vector-2026-11-10.md) |
+| 我的分组与页面副本（v1.18.1／v1.19.0 已发布 GitHub 与 MatElab） | 拖动 / 粘贴手感、窄栏与多分组布局、真实数据跨源激活；嵌套子分组的深层布局；冻结包与安装器验收；分组不跨重启保留 | [我的分组与页面副本](page-groups-2026-11-02.md) |
+| Blender 工程导出与八材质薄板（v1.19.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
+| 出版图矢量输出与文字拖动（v1.19.0 已发布 GitHub 与 MatElab） | 维护者人工视觉（SVG／PDF 矢量文字、拖动位置）；Illustrator 实机 `.ai` 转换；冻结包与安装器验收 | [出版图矢量输出](publication-vector-2026-11-10.md) |
 | 截图方向标与色条拖动（v1.17.2 已发布 GitHub 与 MatElab） | 人工交互及发行包验收；大数据体与原坐标轴同开时的布局边界验证见主记录 | [截图方向标与色条拖动](screenshot-orientation.md) |
 | 视图复现文件（v1.17.4 已发布 GitHub 与 MatElab） | 原生文件对话框、强制数据源选择及维护者交互验收；实现、自动化/真实数据检查与发布验证见主记录 | [视图复现文件](../plans/view-reproducibility.md) |
 | E 轴翻转（2026-10-21 改为显示镜像；v1.17.1 已发布 GitHub 与 MatElab） | 维护者人工确认各视图翻转观感与出版图；冻结包验收 | [E 翻转验收](e-axis-consistency-acceptance.md) |
