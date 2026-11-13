@@ -9,12 +9,12 @@
 | 事项与适用范围 | 需要继续确认的内容 | 状态主记录 |
 | --- | --- | --- |
 | 我的分组与页面副本（v1.18.1／v1.19.0 已发布 GitHub 与 MatElab） | 拖动 / 粘贴手感、窄栏与多分组布局、真实数据跨源激活；嵌套子分组的深层布局；冻结包与安装器验收；分组不跨重启保留 | [我的分组与页面副本](page-groups-2026-11-02.md) |
-| Blender 工程导出与八材质薄板（v1.19.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
-| Blender 数据体两种外观（schema 11 源码与开发冻结包已验收） | 维护者人工视觉复核：灰白合成体高光截断、内部连续性、遮蔽、偏色、弱带去噪及多页／Append 观感；不包含发布 | [柔和受光实施与验收](../plans/blender-volume-lighting.md) |
+| Blender 工程导出与八材质薄板（v1.19.0／v1.20.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
+| Blender 数据体两种外观（v1.20.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：灰白合成体高光截断、内部连续性、遮蔽、偏色、弱带去噪及多页／Append 观感 | [柔和受光实施与验收](../plans/blender-volume-lighting.md) |
 | 出版图矢量输出与文字拖动（v1.19.0 已发布 GitHub 与 MatElab） | 维护者人工视觉（SVG／PDF 矢量文字、拖动位置）；Illustrator 实机 `.ai` 转换；冻结包与安装器验收 | [出版图矢量输出](publication-vector-2026-11-10.md) |
 | 截图方向标与色条拖动（v1.17.2 已发布 GitHub 与 MatElab） | 人工交互及发行包验收；大数据体与原坐标轴同开时的布局边界验证见主记录 | [截图方向标与色条拖动](screenshot-orientation.md) |
 | 视图复现文件（v1.17.4 已发布 GitHub 与 MatElab） | 原生文件对话框、强制数据源选择及维护者交互验收；实现、自动化/真实数据检查与发布验证见主记录 | [视图复现文件](../plans/view-reproducibility.md) |
-| 图片显示缺项与 Blender 配套复现配置（2026-11-12 源码） | 维护者对原生 NPZ 选源、覆盖确认与日常交互的人工验收；冻结包未验收，本轮不发布 | [结果复现配置与 Blender 配套配置](../plans/export-recipe-blender-sidecar.md) |
+| 图片显示缺项与 Blender 配套复现配置（v1.20.0 已发布 GitHub 与 MatElab） | 维护者对原生 NPZ 选源、覆盖确认与日常交互的人工验收；冻结包未验收 | [结果复现配置与 Blender 配套配置](../plans/export-recipe-blender-sidecar.md) |
 | E 轴翻转（2026-10-21 改为显示镜像；v1.17.1 已发布 GitHub 与 MatElab） | 维护者人工确认各视图翻转观感与出版图；冻结包验收 | [E 翻转验收](e-axis-consistency-acceptance.md) |
 | 发行与插件安装（v1.13.0 主记录；v1.14.5 已于 2026-10-19 发布 GitHub 与 MatElab） | CPU/NVIDIA 冻结包、安装器端到端、官方目录在线安装；线上状态在接续发布时核验 | [v1.13.0 发布](v1.13.0-release.md) |
 | 插件管理（v1.12.2 起，按当前源码复核） | C–F 真实窗口交互、旧未签名插件转官方来源的人工复核 | [插件管理实施记录](../plans/plugin-management-entry.md) |
@@ -24,7 +24,7 @@
 | 局部增强（v1.14.3 起：色阶与映射跟随下拉框，「全部显示」时批量调整；2026-10-19 删除入口移至视图右键、下拉框改用 SiliconUI；2026-10-20 新增色带复制/粘贴，v1.15.0） | 人工视觉与拖拽手感验收、实窗 ROI 去噪、冻结包与安装器验收；2026-10-19 的自动化与 2D/3D 实窗命中验证已通过，真实鼠标手测待人工；可编辑下拉框数字键 1-4 冲突已修复；帧时改造已实施（3D 刷新 78.5 → 47.4 ms、空闲 3.9 ms、ROI 去噪后台化），见 [性能计划](../plans/enhancement-render-performance.md) | [控件简化与修复主记录](../plans/enhancement-controls-simplify.md) |
 | 3D 默认视角与 E 轴方向（v1.15.0） | 真实数据人工视觉、底部卡片滚轮布局检查 1 项失败、冻结包与安装器验收 | [相机默认视角交接](camera-e-axis-default-2026-10-20.md) |
 | ARPES 弱信号色阶（2026-10-17 源码修复） | 用户弱带视觉确认、非线性体渲染性能与发行包验收；性能跟进见 [性能计划](../plans/enhancement-render-performance.md) | [色阶映射修复](display-transfer-weak-signals.md) |
-| 体渲染显示与质量（2026-11-10 首期实现） | 维护者人工视觉复核：背景遮挡、弱带观感、体素台阶及 Blender/Cycles 与 VTK 的积分差异；不包含发布 | [体渲染显示与质量改进](../plans/volume-display-quality.md) |
+| 体渲染显示与质量（v1.20.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：背景遮挡、弱带观感、体素台阶及 Blender/Cycles 与 VTK 的积分差异 | [体渲染显示与质量改进](../plans/volume-display-quality.md) |
 | 活动裁剪框（2026-10-13 源码） | 人工手感及 1D / 对比 / 瀑布页视觉复核；Matplotlib 3.11.2 运行与修复后 CI 结果待核实 | [活动裁剪框验收](../archive/crop/interactive-crop-box.md) |
 | 平带增强（现有插件） | 实测数据中的弱带增强效果人工确认 | [平带效果验收方案](../plans/flat_band_opacity_plugin_plan_2026-09-27.md) |
 | 多数据源工作区（2026-10-20 源码与自动化通过，v1.16.0 已发布 GitHub 与 MatElab） | CPU/NVIDIA 路线显存占用与释放对照；切换动画、输入快捷键与根删除的鼠标/键盘人工验收 | [多数据源工作区](../plans/multi-data-source-workspaces.md) |

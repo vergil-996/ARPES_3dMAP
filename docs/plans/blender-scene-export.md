@@ -1,7 +1,7 @@
 # BandScope → Blender 体渲染工程导出
 
 - 日期：2026-11-05。
-- 状态：独立顶部入口、多页面、工程回读和原位显示更新已实现；当前五项预设包含八薄板及十种文本。十种文本的全量回归、真实 Blender／窗口及 CPU／NVIDIA 最终冻结包验收均已通过；仅保留维护者人工视觉复核。本任务不包含发布。
+- 状态：独立顶部入口、多页面、工程回读和原位显示更新已实现；当前五项预设包含八薄板及十种文本。十种文本的全量回归、真实 Blender／窗口及 CPU／NVIDIA 最终冻结包验收均已通过；已随 v1.20.0 发布（2026-11-13，GitHub 与 MatElab）；仅保留维护者人工视觉复核。
 - 负责范围：`bandscope/exporting/` 的场景转换、后台导出和面板接入；`tests/exporting/`、必要的集成测试及 `scripts/validation/` 的验收脚本。
 - 共享文件：`bandscope/exporting/publication_dialog.py`，必要时扩展快照数据契约；CPU／NVIDIA PyInstaller 配置需要收集 Blender 独立脚本资源，由集成任务统一修改。无需新增插件 API 或 OpenVDB 运行依赖。
 - 状态主记录：本文件；计划索引只维护入口。实施后在本文件记录验收结果，全部完成后归档。
