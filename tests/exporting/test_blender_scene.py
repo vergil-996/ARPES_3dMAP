@@ -153,6 +153,7 @@ class BlenderSpatialTests(unittest.TestCase):
         layout = metadata["layout"]
         self.assertEqual(layout["placements"], {
             "coordinates": "left", "guide_frame": "back", "orientation": "top",
+            "text_presets": "bottom",
         })
         data = np.asarray(metadata["blender_grid"]["material_clip_bounds"]).reshape(3, 2)
         coordinates = np.asarray(AXIS_FRAME_BOUNDS).reshape(3, 2) + np.asarray(layout["coordinates"])[:, None]

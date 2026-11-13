@@ -364,9 +364,23 @@ def inspect(args):
     if not scene.render.film_transparent or scene.view_settings.view_transform != "Standard":
         raise RuntimeError("透明背景或 Standard 色彩管理未保留")
     material = volume.data.materials[0]
-    coefficients = next(node for node in material.node_tree.nodes if node.bl_idname == "ShaderNodeVolumeCoefficients")
-    if any(value != 0.0 for value in coefficients.inputs["Scatter Coefficients"].default_value):
-        raise RuntimeError("材质不是无散射设置")
+    nodes = material.node_tree.nodes
+    coefficients = next(node for node in nodes if node.bl_idname == "ShaderNodeVolumeCoefficients")
+    shading = (project.get("project", {}) if "entries" in project else {}).get("volume_shading") or {}
+    volume_mode = shading.get("mode", "emission")
+    scatter_socket = coefficients.inputs["Scatter Coefficients"]
+    amount = nodes.get("Scattering amount")
+    if volume_mode == "emission":
+        if scatter_socket.is_linked:
+            if (scatter_socket.links[0].from_node.name != "Scatter = σ × ω"
+                    or amount is None or abs(float(amount.outputs[0].default_value)) > 1.0e-9):
+                raise RuntimeError("自发光模式的实际散射连接不是零权重")
+        elif any(value != 0.0 for value in scatter_socket.default_value):
+            raise RuntimeError("旧自发光材质不是无散射设置")
+    elif (not scatter_socket.is_linked
+          or scatter_socket.links[0].from_node.name != "Scatter = σ × ω"
+          or amount is None or float(amount.outputs[0].default_value) <= 0.0):
+        raise RuntimeError("柔和受光模式缺少实际散射连接")
     plane = _add_plane() if args.add_plane else None
     render_path = None
     if args.render:
@@ -388,6 +402,8 @@ def inspect(args):
         "auxiliary_plane": plane, "view_transform": scene.view_settings.view_transform,
         "transparent_background": scene.render.film_transparent,
         "density_space": volume.data.render.space,
+        "volume_mode": volume_mode,
+        "scatter_connected": bool(scatter_socket.is_linked),
     }
     Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print("BANDSCOPE_ACCEPTANCE " + json.dumps({

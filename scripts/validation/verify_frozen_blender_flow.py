@@ -47,11 +47,15 @@ def _run():
             BlenderProjectRequest, load_blender_project, update_snapshot_display,
         )
         from bandscope.exporting.publication_models import PublicationSnapshot
-        from bandscope.exporting.publication_renderers import compute_level_info
+        from bandscope.core.display_style import new_display_style, new_render_quality
+        from bandscope.processing.display_transfer import display_level_info
 
         shape = (2, 3, 4)
         volume = np.linspace(0.0, 1.0, 24, dtype=np.float32).reshape(shape)
         levels = (0.0, 60.0, 100.0)
+        display_style = new_display_style(levels, "linear")
+        display_style["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
+        render_quality = new_render_quality()
         camera = {
             "position": (250.0, -350.0, 280.0), "focal_point": (100.0, 100.0, 100.0),
             "view_up": (0.0, 0.0, 1.0), "parallel_projection": True,
@@ -71,7 +75,9 @@ def _run():
                 "clip_render_bounds": None, "include_zero": False, "opacity_mode": "linear",
                 "opacity_multiplier": np.linspace(0.4, 1.0, shape[2]),
                 "show_axes": True, "viewport_aspect": 1.0,
-                "level_info": compute_level_info(volume, levels),
+                "level_info": display_level_info(volume, display_style),
+                "display": {"background_style": display_style, "resolved_range": (0.0, 1.0), "state": None},
+                "render_quality": render_quality,
                 "axis_titles": ["kx", "ky", "E"], "enhancement": None,
             },
         )
@@ -81,6 +87,9 @@ def _run():
         before = hashlib.sha256(output.read_bytes()).hexdigest()
         project = load_blender_project(output)
         restored = project.entries[0].snapshot
+        if (not project.supports_display_styles
+                or restored.payload["display"]["background_style"].get("display_mode") != "independent"):
+            raise RuntimeError("Frozen independent display did not survive schema-11 roundtrip")
         update_snapshot_display(
             restored, cmap_name="viridis", levels_params=(5.0, 65.0, 90.0),
             locked_range=(0.0, 0.8), include_zero=True, opacity_mode="power",
@@ -92,7 +101,8 @@ def _run():
         material_output = Path(config["material_output_blend"])
         expected_materials = {spec.material_id: spec.material_id for spec in MATERIAL_SPECS}
         material_result = BlenderProjectExportJob(
-            BlenderProjectRequest([restored]), config["blender"], material_output, overwrite=True,
+            BlenderProjectRequest([restored], volume_mode="hybrid_lit"),
+            config["blender"], material_output, overwrite=True,
         ).run()
         material_entries = material_result.report.get("entries") or []
         if len(material_entries) != 1:
@@ -108,6 +118,19 @@ def _run():
         scene_metadata = json.loads(
             (material_result.assets_path / "scene.json").read_text(encoding="utf-8")
         )
+        edit = scene_metadata["entries"][0]["bandscope_edit"]
+        if (scene_metadata["schema_version"] != 11 or edit["format_version"] != 2
+                or edit["display_style"].get("display_mode") != "independent"
+                or edit["render_quality"].get("mode") != "explicit"):
+            raise RuntimeError("Frozen schema-11 display edit metadata is incomplete")
+        volume_material = material_entries[0].get("volume_material") or {}
+        volume_lights = material_entries[0].get("volume_lights") or ()
+        if (volume_material.get("mode") != "hybrid_lit"
+                or not volume_material.get("material_validated")
+                or len(volume_lights) != 3
+                or any(light.get("receiver_objects") != ["BandScope Volume"]
+                       for light in volume_lights)):
+            raise RuntimeError("Frozen hybrid-lit material or independent lights are incomplete")
         configured_boxes = scene_metadata["entries"][0]["box_presets"]
         expected_slots = {
             spec.material_id: ("front" if spec.requires_light else "right") for spec in MATERIAL_SPECS
@@ -125,6 +148,17 @@ def _run():
         if any(box["emission"]["effective"]
                for box in boxes.values() if box["material_id"] == "data_translucent"):
             raise RuntimeError("Frozen data-translucent plate emits")
+        from bandscope.exporting.blender_texts import TEXT_CAP_HEIGHT, TEXT_PRESETS
+        text_records = material_entries[0].get("text_presets") or ()
+        actual_texts = [item["preset"] for item in text_records]
+        if (actual_texts != list(TEXT_PRESETS)
+                or any(item["body"] != "A" or not item["font_packed"]
+                       or abs(item["cap_height"] - TEXT_CAP_HEIGHT) > 1e-4 for item in text_records)
+                or len(material_entries[0].get("text_lights") or ()) != 1):
+            raise RuntimeError(f"Frozen text presets differ: {actual_texts}")
+        for relative in scene_metadata["project"]["text_fonts"]["files"]:
+            if not (material_result.assets_path / relative).is_file():
+                raise RuntimeError(f"Frozen font asset missing: {relative}")
         report.update(success=True, meipass=getattr(sys, "_MEIPASS", None),
                       script=str(blender_script_path()), script_exists=blender_script_path().is_file(),
                       blend=str(result.blend_path), assets=str(result.assets_path),
@@ -135,7 +169,14 @@ def _run():
                       material_schema=material_result.report.get("schema_version"),
                       material_layout=material_result.report.get("box_layout", {}).get("id"),
                       material_boxes=actual_materials,
-                      material_lights=sorted(lights))
+                      material_lights=sorted(lights),
+                      default_volume_mode=result.report["entries"][0]["volume_material"]["mode"],
+                      hybrid_volume_mode=volume_material["mode"],
+                      hybrid_volume_light_count=len(volume_lights),
+                      hybrid_volume_bounces=material_result.report.get("volume_bounces"),
+                      text_presets=actual_texts,
+                      text_count=len(actual_texts),
+                      text_fonts_packed=all(item["font_packed"] for item in text_records))
     except Exception as exc:
         report.update(error=f"{type(exc).__name__}: {exc}", traceback=traceback.format_exc())
     Path(config["report"]).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -220,15 +261,22 @@ def main():
             print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
             return 1
         from bandscope.exporting.blender_materials import MATERIAL_SPECS
+        from bandscope.exporting.blender_texts import TEXT_PRESETS
         expected_materials = {spec.material_id: spec.material_id for spec in MATERIAL_SPECS}
         expected_lights = sorted(spec.material_id for spec in MATERIAL_SPECS if spec.requires_light)
-        if (report.get("material_schema") != 8 or report.get("material_layout") != "right_front_groups"
+        if (report.get("material_schema") != 11 or report.get("material_layout") != "right_front_groups"
                 or report.get("material_boxes") != expected_materials
-                or report.get("material_lights") != expected_lights):
+                or report.get("material_lights") != expected_lights
+                or report.get("default_volume_mode") != "emission"
+                or report.get("hybrid_volume_mode") != "hybrid_lit"
+                or report.get("hybrid_volume_light_count") != 3
+                or report.get("hybrid_volume_bounces") != 2
+                or report.get("text_presets") != list(TEXT_PRESETS)
+                or not report.get("text_fonts_packed")):
             print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
             return 1
         print("PASS：冻结进程导出、回读并原位更新，外部 Blender 链路完整", flush=True)
-        print("PASS：冻结进程生成八块默认橙色薄板（schema 8、右侧／前侧分组布局、辅助灯链接）", flush=True)
+        print("PASS：冻结进程生成八块薄板、十种文本及两种数据体外观（schema 11）", flush=True)
 
     inspection = output / f"{exe.stem}-inspection.json"
     render = output / f"{exe.stem}-render.png"
@@ -269,10 +317,12 @@ def main():
     material_summary = json.loads(material_inspection.read_text(encoding="utf-8"))
     entry = material_summary["entries"][0]
     boxes = {box["preset"]: box["material_id"] for box in entry["boxes"]}
-    if (material_summary.get("schema_version") != 8
+    if (material_summary.get("schema_version") != 11
             or material_summary["layout"]["id"] != "right_front_groups"
             or boxes != expected_materials
             or {light["preset"] for light in entry["lights"]} != set(expected_lights)
+            or entry["volume_material"]["mode"] != "hybrid_lit"
+            or entry.get("volume_light_count") != 3
             or any(box["intersects_data"] for box in entry["boxes"])):
         print(json.dumps(material_summary, ensure_ascii=False, indent=2), flush=True)
         print("FAIL：冻结八材质工程的重开报告不符合契约", flush=True)

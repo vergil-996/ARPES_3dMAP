@@ -12,7 +12,18 @@ from matplotlib import colormaps
 from bandscope.exporting.publication_renderers import (
     _orientation_axis_order, compute_level_info,
 )
-from bandscope.processing.display_transfer import channels, volume_unit_distance
+from bandscope.core.display_style import (
+    is_independent,
+    legacy_display_style,
+    legacy_render_quality,
+    resolved_display_style,
+    resolved_render_quality,
+)
+from bandscope.processing.display_transfer import (
+    channels,
+    volume_display_unit_distance,
+    volume_unit_distance,
+)
 
 # 2: 增加始终生成的 guide_frame 元数据与辅助盒框契约。
 # 3: 增加默认可见、独立于主视图坐标轴开关的 axis_indicator 三轴方向标。
@@ -20,7 +31,11 @@ from bandscope.processing.display_transfer import channels, volume_unit_distance
 # 6: 以数据体中心为基准的六方位布局，现有三组分别占左、后、上。
 # 7: 工程—条目契约、独立资产目录、六项可选预设与可回读的显示编辑状态。
 # 8: 逐薄板八材质、两种薄板布局、配套 Cycles 灯光与推荐采样；工程 schema 7 仍可回读。
-BLENDER_SCENE_SCHEMA = 8
+# 9: 十种统一大写 A 的可编辑文本样式、打包字体、下方两行五列布局与独立辅助灯。
+# 10: 独立归一化、颜色／透明度样式与渲染质量；schema 7–9 更新保持旧模式。
+# 11: 可选混合受光数据体材质与逐条目灯光；density 统一描述为总消光系数。
+BLENDER_SCENE_SCHEMA = 11
+BLENDER_DISPLAY_EDIT_FORMAT = 2
 DISPLAY_TO_BLENDER = 0.01
 ALPHA_CAP = 1.0 - 1.0e-6
 DEFAULT_RENDER_LONG_EDGE = 1920
@@ -52,7 +67,10 @@ def separated_layout(data_bounds):
             slots[name] = position.tolist()
     return {
         "data": [0.0, 0.0, 0.0], "center": center.tolist(), "slots": slots,
-        "placements": {"coordinates": "left", "guide_frame": "back", "orientation": "top"},
+        "placements": {
+            "coordinates": "left", "guide_frame": "back", "orientation": "top",
+            "text_presets": "bottom",
+        },
         "coordinates": slots["left"],
         "guide_frame": (np.asarray(slots["back"]) - bounds.mean(axis=1)).tolist(),
         "orientation": (np.asarray(slots["top"]) - 0.5).tolist(),
@@ -148,6 +166,9 @@ class BlenderSceneData:
     include_zero: bool
     opacity_mode: str
     baked_effects: Tuple[str, ...]
+    display_style: Dict[str, Any]
+    render_quality: Dict[str, Any]
+    resolved_range: Optional[Tuple[float, float]]
 
     @property
     def shape(self) -> Tuple[int, int, int]:
@@ -172,7 +193,7 @@ class BlenderSceneData:
                 "intensity": "processed float32; NaN/Inf retained in NPZ only",
                 "display_color": "linear RGB float32, converted from the BandScope sRGB palette",
                 "alpha": "final display alpha before geometric clipping",
-                "density": "absorption coefficient in object-space Blender units; clipped",
+                "density": "total extinction coefficient in object-space Blender units; clipped",
             },
             "display_mapping": {
                 "source_space": "BandScope 0..200 display coordinates",
@@ -228,21 +249,29 @@ class BlenderSceneData:
             "pixel_aspect": [1.0, 1.0],
             "opacity": {
                 "mode": self.opacity_mode,
+                "display_mode": self.display_style.get("display_mode", "legacy"),
                 "unit_distance_display": self.unit_distance_display,
                 "unit_distance_blender": self.unit_distance_blender,
                 "alpha_cap": ALPHA_CAP,
                 "formula": "sigma = -log(1-alpha)/unit_distance_blender",
+                "independent_parameters": dict(self.display_style.get("opacity") or {}),
             },
             "level_info": dict(self.level_info),
             "bandscope_edit": {
-                "format_version": 1,
+                "format_version": BLENDER_DISPLAY_EDIT_FORMAT,
                 "cmap_name": self.cmap_name,
                 "levels_params": list(self.levels_params),
                 "locked_range": list(self.locked_range) if self.locked_range is not None else None,
                 "include_zero": bool(self.include_zero),
                 "opacity_mode": self.opacity_mode,
+                "display_style": dict(self.display_style),
+                "render_quality": dict(self.render_quality),
+                "resolved_range": list(self.resolved_range) if self.resolved_range is not None else None,
                 "editable": True,
-                "capabilities": ["colormap", "levels", "locked_range", "include_zero", "opacity_mode"],
+                "capabilities": [
+                    "colormap", "levels", "locked_range", "include_zero", "opacity_mode",
+                    "normalization", "independent_opacity", "render_quality",
+                ],
                 "baked_effects": list(self.baked_effects),
                 "baked_effects_warning": (
                     "局部增强或插件透明度倍率已烘焙到体素；编辑显示参数会丢弃这些效果。"
@@ -385,16 +414,22 @@ def _srgb_to_linear(values: np.ndarray) -> np.ndarray:
     return np.where(values <= 0.04045, values / 12.92, ((values + 0.055) / 1.055) ** 2.4)
 
 
-def _display_channels(snapshot, volume: np.ndarray, level_info: Mapping[str, float]):
+def _display_channels(snapshot, volume: np.ndarray, level_info: Mapping[str, float],
+                      display_style=None, unit_distance=None):
     payload = snapshot.payload
     enhancement = payload.get("enhancement")
-    if enhancement is not None and enhancement.get("active"):
+    style = display_style or (payload.get("display") or {}).get("background_style")
+    independent = is_independent(style)
+    if enhancement is not None and (enhancement.get("active") or independent):
         color = np.asarray(enhancement["color"], dtype=np.float32)
         alpha = np.asarray(enhancement["alpha"], dtype=np.float32)
         if color.shape != volume.shape or alpha.shape != volume.shape:
             raise BlenderSceneError("局部增强通道与冻结体数据形状不一致。")
     else:
-        color, alpha = channels(volume, level_info, payload.get("opacity_mode", "linear"))
+        color, alpha = channels(
+            volume, level_info, payload.get("opacity_mode", "linear"),
+            style=style, unit_distance=unit_distance,
+        )
     multiplier = payload.get("opacity_multiplier")
     if multiplier is not None:
         multiplier = np.asarray(multiplier, dtype=np.float32).reshape(-1)
@@ -441,11 +476,23 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
     )))
     if len(spacing) != 3 or not np.all(np.isfinite(spacing)) or any(v <= 0 for v in spacing):
         raise BlenderSceneError("体数据间距必须为三个正有限数。")
+    display = payload.get("display") or {}
+    display_style = display.get("background_style") or legacy_display_style(
+        snapshot.levels_params, payload.get("opacity_mode", "linear"),
+    )
+    display_style = resolved_display_style(display_style)
+    resolved_range = display.get("resolved_range")
     level_info = dict(payload.get("level_info") or compute_level_info(
         volume, snapshot.levels_params, include_zero=bool(payload.get("include_zero", False)),
-        locked_range=snapshot.locked_range,
+        locked_range=snapshot.locked_range, style=display_style, resolved_range=resolved_range,
     ))
-    color_coordinates, alpha = _display_channels(snapshot, volume, level_info)
+    if resolved_range is None:
+        resolved_range = (level_info["data_min"], level_info["data_max"])
+    unit_display = (volume_display_unit_distance(full_shape) if is_independent(display_style)
+                    else volume_unit_distance(volume.shape, full_shape))
+    color_coordinates, alpha = _display_channels(
+        snapshot, volume, level_info, display_style, unit_display,
+    )
     display_color = _palette_linear(color_coordinates, snapshot.cmap_name)
     display_color[~np.isfinite(volume)] = 0.0
     origin = np.asarray([data_bounds[2 * axis] * spacing[axis] for axis in range(3)], dtype=np.float64)
@@ -465,7 +512,6 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
         shape = [1, 1, 1]
         shape[axis] = -1
         clipped_alpha *= inside.reshape(shape)
-    unit_display = volume_unit_distance(volume.shape, full_shape)
     if not math.isfinite(unit_display) or unit_display <= 0:
         unit_display = max(spacing)
     unit_blender = unit_display * DISPLAY_TO_BLENDER
@@ -526,11 +572,14 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
         locked_range=(tuple(float(value) for value in snapshot.locked_range)
                       if snapshot.locked_range is not None else None),
         include_zero=bool(payload.get("include_zero", False)),
-        opacity_mode=str(payload.get("opacity_mode", "linear")),
+        opacity_mode=str(display_style["opacity_mode"]),
         baked_effects=tuple(
             name for name, present in (
                 ("local_enhancement", bool((payload.get("enhancement") or {}).get("active"))),
                 ("opacity_multiplier", payload.get("opacity_multiplier") is not None),
             ) if present
         ),
+        display_style=display_style,
+        render_quality=resolved_render_quality(payload.get("render_quality")),
+        resolved_range=tuple(float(value) for value in resolved_range),
     )

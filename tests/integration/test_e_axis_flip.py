@@ -140,6 +140,43 @@ class EAxisFlipTests(unittest.TestCase):
         np.testing.assert_array_equal(waterfall["raw_curves"], [[10.0, 20.0, 30.0]])
         self.assertTrue(waterfall["display_e_flip"])
 
+    def test_1d_energy_flip_is_stable_across_repeated_color_refreshes(self):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.fig = Figure(figsize=(4, 3), dpi=100)
+        analyzer.canvas_2d = FigureCanvasAgg(analyzer.fig)
+        analyzer.ax_2d = analyzer.fig.add_subplot(111)
+        context = {
+            "view": "1d",
+            "title": "EDC",
+            "xlabel": "Energy (eV)",
+            "ylabel": "Intensity (a.u.)",
+            "x_data": np.asarray([-0.2, -0.1, 0.0]),
+            "y_data": np.asarray([1.0, 2.0, 3.0]),
+            "display_e_flip": False,
+        }
+        analyzer._render_1d_plot(context)
+        self.assertFalse(analyzer.ax_2d.xaxis_inverted())
+
+        context["display_e_flip"] = True
+        for refresh in range(5):
+            with self.subTest(flipped=True, refresh=refresh):
+                analyzer._render_1d_plot(context)
+                self.assertTrue(analyzer.ax_2d.xaxis_inverted())
+
+        context["x_data"] = np.asarray([-0.4, -0.2, 0.1])
+        analyzer._render_1d_plot(context)
+        self.assertLess(min(analyzer.ax_2d.get_xlim()), -0.4)
+        self.assertGreater(max(analyzer.ax_2d.get_xlim()), 0.1)
+
+        context["display_e_flip"] = False
+        for refresh in range(2):
+            with self.subTest(flipped=False, refresh=refresh):
+                analyzer._render_1d_plot(context)
+                self.assertFalse(analyzer.ax_2d.xaxis_inverted())
+
     def test_non_energy_1d_curve_is_unchanged(self):
         analyzer = self._analyzer()
         context = {

@@ -117,9 +117,74 @@ def project_report_boxes(metadata, entry_id):
     return boxes, lights
 
 
+def project_report_texts(metadata, entry_id):
+    """Build the schema-9 text/font/light section of a fake Blender reopen report."""
+    scene = next(entry for entry in metadata["entries"] if entry["entry_id"] == entry_id)
+    project = metadata["project"]
+    if not project["presets"].get("text_presets"):
+        return [], []
+    records = [{
+        "preset": item["preset"], "object": item["object"],
+        "data": item["object"] + " data", "material": item["material"],
+        "kind": item["kind"], "body": "A", "parent": scene["composition"]["parent"],
+        "collection": scene["text_layout"]["collection"],
+        "font": item["font"].rsplit("/", 1)[-1],
+        "font_filepath": f"//{project['assets']['directory']}/{item['font']}",
+        "font_packed": True, "cap_height": scene["text_layout"]["cap_height"],
+        "center": list(item["center"]), "row": item["row"], "column": item["column"],
+        "fill_mode": item["fill_mode"], "extrude": item["extrude"],
+        "bevel_depth": item["bevel_depth"], "material_validated": True,
+    } for item in scene["text_presets"]]
+    lighting = scene["text_lighting"]
+    source = lighting["lights"][0]
+    lights = [{
+        "object": source["object"], "type": "AREA", "energy": source["energy"],
+        "size": source["size"], "parent": scene["composition"]["parent"],
+        "receiver_collection": lighting["receiver_collection"], "receiver_count": 10,
+    }]
+    return records, lights
+
+
+def project_report_volume(metadata, entry_id):
+    scene = next(entry for entry in metadata["entries"] if entry["entry_id"] == entry_id)
+    shading = metadata["project"]["volume_shading"]
+    parameters = shading["parameters"]
+    material = {
+        "material": "BandScope volume material " + entry_id,
+        "mode": shading["mode"],
+        "parameters": {
+            name: parameters[name] for name in (
+                "density_multiplier", "scattering_amount", "emission_compensation", "anisotropy",
+            )
+        },
+        "color_adjustment": list(parameters["color_adjustment"]),
+        "connections": {
+            "Absorption Coefficients": "Absorption = σ × (1 − ω)",
+            "Scatter Coefficients": "Scatter = σ × ω",
+            "Emission Coefficients": "Emission = compensation × σ × color",
+        },
+        "conserves_extinction": True,
+        "zero_density_safe": True,
+        "no_scattering": shading["mode"] == "emission",
+        "material_validated": True,
+    }
+    lighting = scene["volume_lighting"]
+    lights = [{
+        "role": light["role"], "object": light["object"], "type": "AREA",
+        "energy": light["energy"], "size": light["size"],
+        "color": list(light["color"]), "position": list(light["position"]),
+        "target": list(light["target"]), "parent": scene["composition"]["parent"],
+        "collection": lighting["collection"],
+        "receiver_collection": lighting["receiver_collection"],
+        "receiver_objects": [scene["composition"]["volume"]],
+        "camera_bound": False,
+    } for light in lighting["lights"]]
+    return material, lights
+
+
 def write_fake_blender_project(root, snapshots=None, *, presets=None, name="合成工程",
-                               box_settings=None, box_layout=None):
-    """Write schema-8 assets and a header-only blend placeholder for host-side tests."""
+                               box_settings=None, box_layout=None, volume_mode="emission"):
+    """Write schema-11 assets and a header-only blend placeholder for host-side tests."""
     import json
     from pathlib import Path
 
@@ -131,6 +196,7 @@ def write_fake_blender_project(root, snapshots=None, *, presets=None, name="合�
     snapshots = list(snapshots or [make_blender_snapshot()])
     request = BlenderProjectRequest(
         snapshots, presets, box_settings=box_settings, box_layout=box_layout,
+        volume_mode=volume_mode,
     )
     blend = root / f"{name}.blend"
     assets = root / f"{name}.assets"
@@ -149,6 +215,15 @@ def write_fake_blender_project(root, snapshots=None, *, presets=None, name="合�
         (directory / "volume.vdb").write_bytes(b"VDB-" + entry.entry_id.encode("utf-8"))
         items.append((entry, metadata))
     metadata = make_project_metadata(items, request, assets.name)
+    fonts = metadata["project"]["text_fonts"]
+    for relative in fonts["files"]:
+        path = assets.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"FONT-" + relative.rsplit("/", 1)[-1].encode("ascii"))
+    if fonts.get("license"):
+        license_path = assets.joinpath(*fonts["license"].split("/"))
+        license_path.parent.mkdir(parents=True, exist_ok=True)
+        license_path.write_text("DejaVu font license placeholder for synthetic tests", encoding="utf-8")
     (assets / "scene.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     (assets / "README.txt").write_text(project_usage_text(metadata, assets.name), encoding="utf-8")
     blend.write_bytes(b"BLENDER-fake")

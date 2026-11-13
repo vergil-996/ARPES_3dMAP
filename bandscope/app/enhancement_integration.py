@@ -9,11 +9,16 @@ from PyQt5.QtWidgets import QAction
 from matplotlib.patches import Rectangle
 
 from bandscope.core.local_enhancement import (
-    DEFAULT_STYLE, STATE_KEY, EnhancementRegion, adapt_regions, defer_range_locks,
-    geometry, logical_bounds, matching_regions, physical_bounds, region_slices, update_region_bounds,
+    DEFAULT_STYLE, RENDER_QUALITY_KEY, STATE_KEY, EnhancementRegion, adapt_regions, defer_range_locks,
+    ensure_display_state, geometry, logical_bounds, matching_regions, physical_bounds,
+    region_slices, update_region_bounds,
 )
 from bandscope.core.data_scope import DataScopeDescriptor
-from bandscope.processing.local_enhancement import resolve_display
+from bandscope.core.display_style import (
+    INDEPENDENT_MODE, is_independent, legacy_render_quality,
+    new_render_quality, with_display_mode,
+)
+from bandscope.processing.local_enhancement import cached_finite_range, finite_range, resolve_display
 from bandscope.rendering.local_enhancement import (
     add_region_scalar_bars_3d, draw_region_colorbars_2d, enhancement_legend,
 )
@@ -102,6 +107,28 @@ class _EnhancementRoiTask(QRunnable):
             self.host._enhancement_roi_result = (self.token, self.source_id, self.version, outcome)
 
 
+class _DisplayStatsTask(QRunnable):
+    def __init__(self, host, token, signature, requests):
+        super().__init__()
+        self.host = host
+        self.token = token
+        self.signature = signature
+        self.requests = requests
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            for values, style, include_zero, actual in self.requests:
+                finite_range(values, style, include_zero=include_zero)
+                if actual:
+                    finite_range(values)
+            outcome = ("ok", None)
+        except Exception as exc:
+            outcome = ("error", f"{type(exc).__name__}: {exc}")
+        with self.host._display_stats_lock:
+            self.host._display_stats_result = (self.token, self.signature, outcome)
+
+
 class EnhancementInteractionMixin:
     def _init_enhancement(self):
         self._enhancement_selector = None
@@ -125,6 +152,15 @@ class EnhancementInteractionMixin:
         self._enhancement_roi_task = None
         self._enhancement_roi_result = None
         self._enhancement_roi_disabled = False
+        self._display_stats_pool = None
+        self._display_stats_timer = None
+        self._display_stats_lock = threading.Lock()
+        self._display_stats_token = 0
+        self._display_stats_job = None
+        self._display_stats_task = None
+        self._display_stats_result = None
+        self._display_stats_signature = None
+        self._display_stats_pending_signature = None
         # 左侧视图右键命中的区域：菜单据此提供「删除当前区域」。
         self._enhancement_context_target = None
         # 色带复制/粘贴：剪贴板只保存色阶映射（不含范围、锁定与透明度映射），
@@ -137,6 +173,8 @@ class EnhancementInteractionMixin:
         combo.target_changed.connect(self._select_enhancement_target)
         combo.rename_committed.connect(self._rename_enhancement_region)
         self.page_render.btn_lock.toggled.connect(self.on_toggle_color_lock)
+        self.page_render.display_mode_changed.connect(self._on_display_mode_changed)
+        self.page_render.display_value_changed.connect(self._on_display_values_changed)
         self.canvas_2d.mpl_connect("button_press_event", self._pick_enhancement_region)
 
     def _enhancement_spec(self):
@@ -156,8 +194,17 @@ class EnhancementInteractionMixin:
                 state["revision"] = state.get("revision", 0) + 1
         return state
 
+    def _ensure_page_display_state(self, spec, *, legacy=None):
+        if spec is None:
+            return None
+        if legacy is None:
+            legacy = bool(spec.params.get("_legacy_display", False))
+        return ensure_display_state(spec, legacy=bool(legacy))
+
     def _inherit_enhancement_state(self, spec):
-        if spec.page_kind not in {"home", "time_integral", "axis_integral", "axis_integral_crop", "second_derivative"} or STATE_KEY in spec.params:
+        kinds = {"home", "time_integral", "axis_integral", "axis_integral_crop",
+                 "second_derivative", "plugin_derived"}
+        if spec.page_kind not in kinds:
             return
         workspace = self.__dict__.get("left_workspace")
         source = self._enhancement_spec()
@@ -167,14 +214,25 @@ class EnhancementInteractionMixin:
             state = self._enhancement_state(source) if source is not None else None
         if not state or source is spec:
             return
-        if source is self._enhancement_spec() and "_enhancement_artists" in self.__dict__:
-            self._commit_enhancement_controls()
-        inherited = copy.deepcopy(state)
-        defer_range_locks(inherited)
-        spec.params[STATE_KEY] = inherited
+        if STATE_KEY not in spec.params:
+            if source is self._enhancement_spec() and "_enhancement_artists" in self.__dict__:
+                self._commit_enhancement_controls()
+            inherited = copy.deepcopy(state)
+            defer_range_locks(inherited)
+            spec.params[STATE_KEY] = inherited
+        if RENDER_QUALITY_KEY in source.params:
+            spec.params[RENDER_QUALITY_KEY] = copy.deepcopy(source.params[RENDER_QUALITY_KEY])
 
     def _enhancement_ui_style(self):
-        return {"levels": tuple(float(s.value()) for s in (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up)),
+        getter = getattr(self.page_render, "get_display_style", None)
+        if getter is not None:
+            return getter()
+        if all(hasattr(self.page_render, name) for name in ("s_low", "s_gamma", "s_up")):
+            levels = tuple(float(s.value()) for s in (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up))
+        else:
+            levels_getter = getattr(self, "_get_display_levels", None)
+            levels = tuple(levels_getter()) if levels_getter is not None else (0.0, 50.0, 100.0)
+        return {"levels": levels,
                 "opacity_mode": str(self.page_render.combo_map.currentText()) if hasattr(self.page_render, "combo_map") else "线性"}
 
     def _enhancement_background_style(self):
@@ -221,26 +279,82 @@ class EnhancementInteractionMixin:
             for key, value in zip(("s_low", "s_gamma", "s_up"), style["levels"]):
                 render_state[key] = dict(render_state[key], value=int(value))
             render_state["combo_map"] = style["opacity_mode"]
+            render_state["display_style"] = copy.deepcopy(style)
+            spec = self._enhancement_spec()
+            render_state["render_quality"] = copy.deepcopy(spec.params.get(RENDER_QUALITY_KEY))
+            cached = self.__dict__.get("_enhancement_cache")
+            if cached is not None and cached[1] is not None:
+                render_state["display_range"] = tuple(cached[1]["background_range"])
+            elif VisualEngine.locked_data_range() is not None:
+                render_state["display_range"] = tuple(VisualEngine.locked_data_range())
+            else:
+                render_state["display_range"] = None
         return render_state
 
+    def _display_range_for_target(self, state):
+        cached = self.__dict__.get("_enhancement_cache")
+        fields = cached[1] if cached is not None else None
+        if fields is None:
+            return None
+        region = None if state.get("show_all_regions") else self._enhancement_selected()
+        if region is not None:
+            record = next((item for item in fields["regions"]
+                           if item["region_id"] == region["region_id"]), None)
+            if record is not None:
+                return record.get("data_range")
+        return fields.get("background_range")
+
     def _restore_enhancement_style(self):
-        """回显当前调整对象的色阶与强度映射，不触发参数提交。"""
+        """回显当前调整对象的完整显示样式，不触发参数提交。"""
         state = self._enhancement_state()
         if not state:
             return
         region = None if state.get("show_all_regions") else self._enhancement_selected()
         style = (state.get("common_style", DEFAULT_STYLE) if region and state.get("common")
                  else region.get("style", DEFAULT_STYLE) if region else state["background"])
-        widgets = (self.page_render.s_low, self.page_render.s_gamma, self.page_render.s_up, self.page_render.combo_map)
-        blockers = [QSignalBlocker(w) for w in widgets]
-        for slider, value in zip(widgets[:3], style["levels"]):
-            slider.setValue(int(value))
-            sync_slider_visual(slider)
-        index = combo_index_for_text(widgets[3], style["opacity_mode"])
-        if index >= 0:
-            widgets[3].setCurrentIndex(index)
-        del blockers
+        spec = self._enhancement_spec()
+        context = self.__dict__.get("current_render_context") or {}
+        self.page_render.set_display_style(
+            style,
+            spec.params.get(RENDER_QUALITY_KEY),
+            resolved_range=self._display_range_for_target(state),
+            view=context.get("view", "3d"),
+        )
         self._enhancement_restored_style = copy.deepcopy(self._enhancement_ui_style())
+
+    def _commit_render_quality(self):
+        spec = self._enhancement_spec()
+        if spec is None:
+            return False
+        quality = self.page_render.get_render_quality()
+        if spec.params.get(RENDER_QUALITY_KEY) == quality:
+            return False
+        spec.params[RENDER_QUALITY_KEY] = copy.deepcopy(quality)
+        return True
+
+    def _on_display_values_changed(self):
+        if getattr(self, "_syncing_controls", False):
+            return
+        self._commit_render_quality()
+        self.schedule_render_levels_refresh(None)
+
+    def _on_display_mode_changed(self, mode):
+        state = self._enhancement_state()
+        if state is None or getattr(self, "_syncing_controls", False):
+            return
+        styles = [(state, "background")]
+        if "common_style" in state:
+            styles.append((state, "common_style"))
+        styles.extend((region, "style") for region in state["regions"])
+        for target, key in styles:
+            target[key] = with_display_mode(target.get(key, DEFAULT_STYLE), mode)
+        state["revision"] = int(state.get("revision", 0)) + 1
+        spec = self._enhancement_spec()
+        spec.params[RENDER_QUALITY_KEY] = (
+            new_render_quality() if mode == INDEPENDENT_MODE else legacy_render_quality()
+        )
+        self._restore_enhancement_style()
+        self._enhancement_refresh()
 
     def _enhancement_refresh(self, *, interactive=False):
         self._enhancement_cache = None
@@ -564,6 +678,123 @@ class EnhancementInteractionMixin:
         if timer is not None:
             timer.stop()
 
+    def _display_statistics_requests(self, context, spec, state):
+        if not state or context is None or context.get("view") not in {"2d", "3d"}:
+            return None, []
+        adapt_regions(context, state)
+        context, region_data = self._enhancement_crop_data(
+            context, spec or self._enhancement_spec(), state, allow_compute=False,
+        )
+        source = np.asarray(context["data"])
+        required = []
+
+        def add(values, style, actual):
+            if not is_independent(style) or values is None:
+                return
+            for with_actual in ((False, True) if actual else (False,)):
+                target_style = None if with_actual else style
+                hit, _result = cached_finite_range(values, target_style)
+                required.append((values, target_style, False, with_actual, hit))
+
+        if VisualEngine.locked_data_range() is None:
+            add(source, state.get("background", DEFAULT_STYLE), False)
+        for region in matching_regions(context, state.get("regions", [])):
+            slices = region_slices(context, region)
+            if slices is None:
+                continue
+            values = region_data.get(region["region_id"], source[slices])
+            style = (state.get("common_style", DEFAULT_STYLE) if state.get("common")
+                     else region.get("style", DEFAULT_STYLE))
+            add(values, style, True)
+        signature = repr([
+            (id(values), tuple(np.shape(values)), repr(style), bool(actual))
+            for values, style, _include_zero, actual, _hit in required
+        ])
+        requests = [
+            (values, style, include_zero, actual)
+            for values, style, include_zero, actual, hit in required if not hit
+        ]
+        return signature, requests
+
+    def _ensure_display_stats_transport(self):
+        if self.__dict__.get("_display_stats_pool") is None:
+            pool = QThreadPool()
+            pool.setMaxThreadCount(1)
+            self._display_stats_pool = pool
+        if self.__dict__.get("_display_stats_timer") is None:
+            timer = QTimer()
+            timer.setInterval(30)
+            timer.timeout.connect(self._poll_display_statistics)
+            self._display_stats_timer = timer
+
+    def _prepare_display_statistics(self, context, spec, state):
+        signature, requests = self._display_statistics_requests(context, spec, state)
+        if signature is None:
+            return False
+        current_signature = self.__dict__.get("_display_stats_signature")
+        job = self.__dict__.get("_display_stats_job")
+        if signature != current_signature:
+            self._display_stats_pending_signature = signature
+            if job is not None:
+                return True
+            self._display_stats_signature = signature
+        if not requests:
+            return False
+        if self.__dict__.get("_display_stats_failed_signature") == signature:
+            return False
+        if self.__dict__.get("_display_stats_job") is not None:
+            return True
+        self._ensure_display_stats_transport()
+        self._display_stats_token = int(self.__dict__.get("_display_stats_token", 0)) + 1
+        token = self._display_stats_token
+        self._display_stats_pending_signature = None
+        self._display_stats_task = _DisplayStatsTask(self, token, signature, requests)
+        self._display_stats_job = token
+        self._display_stats_timer.start()
+        self._display_stats_pool.start(self._display_stats_task)
+        self._render_exact_ready = False
+        update = getattr(self, "_update_export_button_states", None)
+        if callable(update):
+            update()
+        return True
+
+    def _poll_display_statistics(self):
+        lock = self.__dict__.get("_display_stats_lock")
+        if lock is None:
+            return
+        with lock:
+            pending = self.__dict__.get("_display_stats_result")
+            self._display_stats_result = None
+        if pending is None:
+            return
+        token, signature, outcome = pending
+        if self.__dict__.get("_display_stats_job") != token:
+            return
+        timer = self.__dict__.get("_display_stats_timer")
+        if timer is not None:
+            timer.stop()
+        self._display_stats_job = None
+        self._display_stats_task = None
+        if outcome[0] == "error":
+            self._display_stats_failed_signature = signature
+            print(f"Display statistics failed; CPU fallback will be used: {outcome[1]}")
+        self._enhancement_cache = None
+        self.request_refresh(RefreshCause.DISPLAY_MAPPING, RenderQuality.EXACT, immediate=True)
+
+    def _invalidate_display_statistics(self):
+        self._display_stats_token = int(self.__dict__.get("_display_stats_token", 0)) + 1
+        self._display_stats_job = None
+        self._display_stats_task = None
+        self._display_stats_signature = None
+        self._display_stats_pending_signature = None
+        lock = self.__dict__.get("_display_stats_lock")
+        if lock is not None:
+            with lock:
+                self._display_stats_result = None
+        timer = self.__dict__.get("_display_stats_timer")
+        if timer is not None:
+            timer.stop()
+
     def _enhancement_display(self, context, spec=None, *, freeze_pending=True, allow_compute=None):
         state = self._enhancement_state(spec)
         if not state or context is None or context.get("view") not in {"2d", "3d"} or context.get("crop_empty"):
@@ -631,6 +862,10 @@ class EnhancementInteractionMixin:
             state.get("selected_id") if state else None,
             show_all=bool(state and state.get("show_all_regions")),
         )
+        if state:
+            self._restore_enhancement_style()
+        else:
+            self.page_render.set_display_view((context or {}).get("view", "3d"))
         self._sync_color_lock_button()
 
     def _append_enhancement_actions(self, menu, target_region_id=None):
@@ -830,6 +1065,7 @@ class EnhancementInteractionMixin:
         self._enhancement_context_target = None
         self._clear_enhancement_interaction()
         self._invalidate_enhancement_roi()
+        self._invalidate_display_statistics()
         self._enhancement_cache = None
         self._enhancement_roi_data_cache = {}
         # 换数据时释放驻留显存与按数组身份缓存的统计，避免旧体数据继续占用。

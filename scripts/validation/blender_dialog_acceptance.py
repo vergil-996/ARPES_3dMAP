@@ -14,7 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from bandscope.exporting.blender_materials import MATERIAL_SPECS  # noqa: E402
-from bandscope.exporting.blender_project import BOX_GROUP_PRESET, PRESET_KEYS  # noqa: E402
+from bandscope.exporting.blender_project import (  # noqa: E402
+    BOX_GROUP_PRESET, PRESET_KEYS, TEXT_GROUP_PRESET,
+)
 
 
 def main():
@@ -22,6 +24,7 @@ def main():
     parser.add_argument("data", type=Path, nargs="?", default=REPO_ROOT / ".local/data/WSe2_step.npz")
     parser.add_argument("--blender", required=True, type=Path)
     parser.add_argument("--multi", action="store_true", help="重复加载同一文件并跨两个数据源导出")
+    parser.add_argument("--volume-mode", choices=("emission", "hybrid_lit"), default="emission")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / ".local/outputs/blender-dialog-acceptance")
     args = parser.parse_args()
     if not args.data.is_file():
@@ -60,7 +63,10 @@ def main():
     window._show_message = lambda *args: messages.append(args)
     window._toast_success = lambda *_args: None
     window.show()
-    report = {"success": False, "data": str(args.data), "blender": str(args.blender)}
+    report = {
+        "success": False, "data": str(args.data), "blender": str(args.blender),
+        "volume_mode": args.volume_mode,
+    }
     dialog = None
     deadline = time.perf_counter() + 90
 
@@ -82,9 +88,14 @@ def main():
         try:
             panel = dialog.export_panel
             panel.path_edit.setText(str(args.blender.resolve()))
+            mode_index = panel.volume_mode_combo.findData(args.volume_mode)
+            if mode_index < 0:
+                finish(False, f"导出窗口缺少数据体模式 {args.volume_mode}")
+                return
+            panel.volume_mode_combo.setCurrentIndex(mode_index)
             dialog.show()
             dialog.raise_()
-            blend = output / "WSe2-窗口导出.blend"
+            blend = output / f"WSe2-窗口导出-{args.volume_mode}.blend"
             if not panel.start_export(blend, overwrite=True):
                 finish(False, "面板拒绝开始导出：" + panel.detection_label.text())
                 return
@@ -132,16 +143,25 @@ def main():
             panel = dialog.export_panel
             if (set(panel.preset_checks) != set(PRESET_KEYS)
                     or panel.preset_checks[BOX_GROUP_PRESET].text() != "薄层长方体"
+                    or panel.preset_checks[TEXT_GROUP_PRESET].text() != "文本预设"
+                    or not panel.preset_checks[TEXT_GROUP_PRESET].isChecked()
                     or any(hasattr(panel, name) for name in (
                         "material_combos", "parameter_spins", "layout_combo", "material_note",
                     ))):
-                finish(False, "薄层预设未合并，或材质与布局设置区仍存在")
+                finish(False, "薄层／文本预设不符合要求，或材质与布局设置区仍存在")
                 return
             report["thin_box_controls"] = {
                 "preset": panel.preset_checks[BOX_GROUP_PRESET].text(),
                 "checked": panel.preset_checks[BOX_GROUP_PRESET].isChecked(),
                 "material_layout_group_removed": True,
             }
+            report["text_controls"] = {
+                "preset": panel.preset_checks[TEXT_GROUP_PRESET].text(),
+                "checked": True, "style_count": 10,
+            }
+            panel.volume_mode_combo.setCurrentIndex(
+                panel.volume_mode_combo.findData(args.volume_mode)
+            )
             report["selected_pages"] = [list(key) for key in dialog.export_panel.selected_keys()]
             deadline = time.perf_counter() + 180
 
@@ -215,10 +235,18 @@ def main():
     expected_slots = {
         spec.material_id: ("front" if spec.requires_light else "right") for spec in MATERIAL_SPECS
     }
+    if (metadata["schema_version"] != 11
+            or metadata["project"]["volume_shading"]["mode"] != args.volume_mode):
+        print("FAIL：真实窗口产物的 schema 或数据体外观与选择不一致", flush=True)
+        return 1
     if metadata["project"]["box_layout"]["id"] != "right_front_groups":
         print("FAIL：真实窗口产物未使用右侧／前侧分组布局", flush=True)
         return 1
     for entry in metadata["entries"]:
+        expected_volume_lights = 3 if args.volume_mode == "hybrid_lit" else 0
+        if len(entry["volume_lighting"]["lights"]) != expected_volume_lights:
+            print("FAIL：真实窗口产物的数据体灯数量与模式不一致", flush=True)
+            return 1
         boxes = entry["box_presets"]
         if (len(boxes) != 8
                 or {box["material_id"]: box["parameters"] for box in boxes} != expected
@@ -242,7 +270,16 @@ def main():
         if any(abs(front - right - 0.175) > 1e-9 for right, front in zip(right_z, front_z)):
             print("FAIL：两组薄板没有按半层高度错开", flush=True)
             return 1
+        texts = entry.get("text_presets") or ()
+        if (not metadata["project"]["presets"].get(TEXT_GROUP_PRESET) or len(texts) != 10
+                or any(item["body"] != "A" or item["preset_group"] != TEXT_GROUP_PRESET for item in texts)
+                or entry["text_layout"]["cap_height"] > 0.12):
+            print("FAIL：真实窗口产物不符合十种小号大写 A 文本预设契约", flush=True)
+            return 1
     report["inspected_schema"] = metadata["schema_version"]
+    report["inspected_texts"] = [
+        [item["preset"], item["body"]] for entry in metadata["entries"] for item in entry["text_presets"]
+    ]
     report["inspected_layout"] = metadata["project"]["box_layout"]["id"]
     report["inspected_slots"] = expected_slots
     report["front_height_offset"] = 0.175
@@ -253,7 +290,7 @@ def main():
     report["max_projection_error_pixels"] = result["max_projection_error_pixels"]
     (output / "dialog-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
-        f"PASS：真实窗口导出八块默认橙色薄板并由 Blender 重开渲染；"
+        f"PASS：真实窗口导出八块默认橙色薄板与十种小号文本，并由 Blender 重开渲染；"
         f"投影误差 {result['max_projection_error_pixels']:.6f} px",
         flush=True,
     )

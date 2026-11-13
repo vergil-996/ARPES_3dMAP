@@ -25,7 +25,20 @@ from bandscope.exporting.blender_panel import BlenderExportPanel, _BlenderTask
 from bandscope.exporting.blender_project import (
     BlenderProjectError, load_blender_project, update_snapshot_display,
 )
-from bandscope.processing.display_transfer import channels
+from bandscope.processing.display_transfer import channels, volume_display_unit_distance
+from bandscope.core.display_style import (
+    INDEPENDENT_MODE,
+    NORMALIZATION_FULL,
+    NORMALIZATION_MANUAL,
+    NORMALIZATION_PERCENTILE,
+    is_independent,
+    legacy_display_style,
+    legacy_render_quality,
+    new_display_style,
+    new_render_quality,
+    resolved_display_style,
+    resolved_render_quality,
+)
 from bandscope.ui.page_render_control import RenderControlPage
 
 
@@ -97,7 +110,55 @@ class BlenderProjectEditor(QWidget):
         self.opacity_combo = QComboBox()
         for text, value in (("线性", "linear"), ("对数", "log"), ("幂函数", "power"), ("Sigmoid", "sigmoid")):
             self.opacity_combo.addItem(text, value)
-        form.addRow("不透明度映射", self.opacity_combo)
+        self.opacity_label = QLabel("不透明度映射")
+        form.addRow(self.opacity_label, self.opacity_combo)
+        self.display_mode_label = QLabel("兼容映射")
+        form.addRow("显示模式", self.display_mode_label)
+        self.volume_mode_label = QLabel("自发光（emission）")
+        self.volume_mode_label.setWordWrap(True)
+        form.addRow("导出时的数据体外观", self.volume_mode_label)
+        self.independent_rows = []
+        self.quality_rows = []
+
+        def add_independent_row(text, widget, *, quality=False):
+            label = QLabel(text)
+            form.addRow(label, widget)
+            self.independent_rows.append((label, widget))
+            if quality:
+                self.quality_rows.append((label, widget))
+
+        self.normalization_combo = QComboBox()
+        self.normalization_combo.addItem("完整范围", NORMALIZATION_FULL)
+        self.normalization_combo.addItem("百分位范围（P0–P99.5）", NORMALIZATION_PERCENTILE)
+        self.normalization_combo.addItem("手动范围", NORMALIZATION_MANUAL)
+        add_independent_row("归一化策略", self.normalization_combo)
+        self.manual_low = QDoubleSpinBox()
+        self.manual_high = QDoubleSpinBox()
+        for name, spin in (("手动下限", self.manual_low), ("手动上限", self.manual_high)):
+            spin.setRange(-1.0e12, 1.0e12)
+            spin.setDecimals(6)
+            add_independent_row(name, spin)
+        self.opacity_spins = {}
+        for name, text, minimum, maximum, decimals, value in (
+            ("threshold", "阈值（%）", 0.0, 100.0, 3, 0.0),
+            ("transition", "起始过渡宽度（%）", 0.0, 100.0, 1, 0.0),
+            ("gamma", "透明度 Gamma", 0.1, 4.0, 2, 1.4),
+            ("density", "整体密度", 0.0, 100.0, 1, 12.0),
+        ):
+            spin = QDoubleSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setDecimals(decimals)
+            spin.setValue(value)
+            self.opacity_spins[name] = spin
+            add_independent_row(text, spin)
+        self.interpolation_combo = QComboBox()
+        self.interpolation_combo.addItem("线性", "linear")
+        self.interpolation_combo.addItem("最近邻", "nearest")
+        add_independent_row("体插值", self.interpolation_combo, quality=True)
+        self.resting_combo = QComboBox()
+        self.resting_combo.addItem("标准", "standard")
+        self.resting_combo.addItem("精细", "fine")
+        add_independent_row("静止质量", self.resting_combo, quality=True)
         controls.addLayout(form)
         controls.addStretch(1)
         body.addLayout(controls, 1)
@@ -154,7 +215,9 @@ class BlenderProjectEditor(QWidget):
         self._preview_timer.setInterval(180)
         self._preview_timer.timeout.connect(self._refresh_preview)
         for widget in (self.cmap_combo, self.include_zero, self.opacity_combo, *self.level_spins,
-                       self.lock_check, self.lock_low, self.lock_high):
+                       self.lock_check, self.lock_low, self.lock_high, self.normalization_combo,
+                       self.manual_low, self.manual_high, *self.opacity_spins.values(),
+                       self.interpolation_combo, self.resting_combo):
             if isinstance(widget, QComboBox):
                 widget.currentIndexChanged.connect(self._on_display_changed)
             elif isinstance(widget, QCheckBox):
@@ -195,6 +258,10 @@ class BlenderProjectEditor(QWidget):
         self.project = loaded
         self._snapshots = {entry.entry_id: entry.snapshot for entry in loaded.entries}
         self._dirty_ids.clear()
+        shading = loaded.volume_shading
+        self.volume_mode_label.setText(
+            f"{shading['label']}（{shading['mode']}）；切换模式需要重新导出"
+        )
         self.source_label.setText(
             f"工程：{loaded.blend_path}\n权威配置：{loaded.assets_path / 'scene.json'}；"
             "原位更新不会改写 .blend。"
@@ -207,6 +274,9 @@ class BlenderProjectEditor(QWidget):
                 "冻结 3D 结果；不恢复原始数据、时间轴或完整处理链。"
                 "宿主使用 VTK，Cycles 与 VTK 的体积分差异仍需保留。"
             )
+        self.warning_label.setText(
+            self.warning_label.text() + "\n宿主预览不模拟 Blender 材质与灯光；请在 Blender 中查看实际受光。"
+        )
         self._loading = True
         try:
             self.entry_combo.clear()
@@ -257,8 +327,40 @@ class BlenderProjectEditor(QWidget):
             self.lock_high.setValue(float(high))
             index = self.opacity_combo.findData(snapshot.payload.get("opacity_mode", "linear"))
             self.opacity_combo.setCurrentIndex(max(0, index))
+            style = (snapshot.payload.get("display") or {}).get("background_style")
+            if style is None:
+                style = legacy_display_style(snapshot.levels_params, snapshot.payload.get("opacity_mode", "linear"))
+            style = resolved_display_style(style)
+            independent = is_independent(style)
+            extended = style if independent else new_display_style(style["levels"], style["opacity_mode"])
+            normalization = extended["normalization"]
+            index = self.normalization_combo.findData(normalization["mode"])
+            self.normalization_combo.setCurrentIndex(max(0, index))
+            self.manual_low.setValue(float(normalization["manual_range"][0]))
+            self.manual_high.setValue(float(normalization["manual_range"][1]))
+            for name, spin in self.opacity_spins.items():
+                spin.setValue(float(extended["opacity"][name]))
+            quality = resolved_render_quality(snapshot.payload.get("render_quality"))
+            index = self.interpolation_combo.findData(quality["interpolation"])
+            self.interpolation_combo.setCurrentIndex(max(0, index))
+            index = self.resting_combo.findData(quality["resting"])
+            self.resting_combo.setCurrentIndex(max(0, index))
+            self.display_mode_label.setText("独立透明度（schema 10）" if independent else "兼容映射")
+            self._sync_display_mode_rows()
         finally:
             self._loading = previous
+
+    def _sync_display_mode_rows(self):
+        style = (self.current_snapshot.payload.get("display") or {}).get("background_style") if self.current_snapshot else None
+        independent = bool(self.project and self.project.supports_display_styles and is_independent(style))
+        for label, widget in self.independent_rows:
+            label.setVisible(independent)
+            widget.setVisible(independent)
+        self.opacity_label.setVisible(not independent)
+        self.opacity_combo.setVisible(not independent)
+        manual = independent and self.normalization_combo.currentData() == NORMALIZATION_MANUAL
+        self.manual_low.setEnabled(manual)
+        self.manual_high.setEnabled(manual)
 
     def _on_entry_changed(self, *_args):
         if self._loading:
@@ -283,12 +385,35 @@ class BlenderProjectEditor(QWidget):
         cmap = self.cmap_combo.currentText()
         if self.cmap_combo.currentData() == "" and cmap.startswith("请选择色带"):
             cmap = ""
+        levels = tuple(spin.value() for spin in self.level_spins)
+        opacity_mode = str(self.opacity_combo.currentData())
+        snapshot = self.current_snapshot
+        current_style = (snapshot.payload.get("display") or {}).get("background_style") if snapshot else None
+        if self.project and self.project.supports_display_styles and is_independent(current_style):
+            style = new_display_style(levels, opacity_mode)
+            style["normalization"] = {
+                "mode": str(self.normalization_combo.currentData()),
+                "percentiles": (0.0, 99.5),
+                "manual_range": (self.manual_low.value(), self.manual_high.value()),
+            }
+            style["opacity"] = dict(current_style["opacity"])
+            for name, spin in self.opacity_spins.items():
+                style["opacity"][name] = float(spin.value())
+            quality = new_render_quality()
+            quality["interpolation"] = str(self.interpolation_combo.currentData())
+            quality["resting"] = str(self.resting_combo.currentData())
+        else:
+            style = legacy_display_style(levels, opacity_mode)
+            quality = (snapshot.payload.get("render_quality") if snapshot else None) or legacy_render_quality()
+        self._sync_display_mode_rows()
         return {
             "cmap_name": str(cmap),
-            "levels_params": tuple(spin.value() for spin in self.level_spins),
+            "levels_params": levels,
             "locked_range": locked,
             "include_zero": self.include_zero.isChecked(),
-            "opacity_mode": str(self.opacity_combo.currentData()),
+            "opacity_mode": opacity_mode,
+            "display_style": style,
+            "render_quality": quality,
         }
 
     def _store_controls(self):
@@ -354,7 +479,17 @@ class BlenderProjectEditor(QWidget):
 
             volume = np.asarray(snapshot.payload["volume"], dtype=np.float32)
             info = snapshot.payload["level_info"]
-            color, alpha = channels(volume, info, snapshot.payload["opacity_mode"])
+            style = (snapshot.payload.get("display") or {}).get("background_style")
+            independent = is_independent(style)
+            unit_distance = volume_display_unit_distance(snapshot.payload["full_shape"]) if independent else None
+            color, alpha = channels(
+                volume, info, snapshot.payload["opacity_mode"],
+                style=style, unit_distance=unit_distance,
+            )
+            fields = {"background_level_info": info, "color": color, "alpha": alpha,
+                      "independent": independent}
+            if independent:
+                fields["opacity_unit_distance"] = unit_distance
             self._display_token += 1
             self._volume_session.render(
                 volume, snapshot.levels_params, snapshot.payload["opacity_mode"],
@@ -365,8 +500,9 @@ class BlenderProjectEditor(QWidget):
                 include_zero=snapshot.payload.get("include_zero", False),
                 opacity_multiplier=None,
                 axis_titles=snapshot.payload.get("axis_titles"),
-                display_fields={"background_level_info": info, "color": color, "alpha": alpha},
+                display_fields=fields,
                 display_token=self._display_token,
+                quality_config=snapshot.payload.get("render_quality"),
             )
             _apply_snapshot_camera(self._plotter, snapshot.camera)
             self._plotter.render()
@@ -438,7 +574,9 @@ class BlenderProjectEditor(QWidget):
     def _set_busy_widgets(self, busy):
         for widget in (self.entry_combo, self.cmap_combo, self.include_zero, self.opacity_combo,
                        self.path_edit, self.browse_button, *self.level_spins, self.lock_check,
-                       self.lock_low, self.lock_high):
+                       self.lock_low, self.lock_high, self.normalization_combo,
+                       self.manual_low, self.manual_high, *self.opacity_spins.values(),
+                       self.interpolation_combo, self.resting_combo):
             widget.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)
         self.update_button.setEnabled(not busy and bool(self._dirty_ids))
@@ -581,6 +719,7 @@ class BlenderProjectDialog(QDialog):
         self.stack.setCurrentWidget(self.export_scroll)
         self.title_label.setText("Blender 工程导出")
         self.export_panel.refresh_pages()
+        self.export_panel.progress_bar.setValue(0)
         self._sync_buttons()
         self.show()
         self.raise_()

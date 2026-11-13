@@ -15,6 +15,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from bandscope.core.blender_recipe import BlenderRecipeDocument, blender_sidecar_path
 from bandscope.exporting.blender_materials import (
     BOX_LAYOUTS,
     DEFAULT_BOX_LAYOUT,
@@ -28,25 +29,58 @@ from bandscope.exporting.blender_materials import (
 )
 from bandscope.exporting.blender_scene import (
     AXIS_FRAME_BOUNDS,
+    BLENDER_DISPLAY_EDIT_FORMAT,
     DISPLAY_TO_BLENDER,
     BlenderSceneError,
+)
+from bandscope.exporting.blender_volume import (
+    VOLUME_MODE_EMISSION,
+    VOLUME_MODE_HYBRID_LIT,
+    VOLUME_MODE_LABELS,
+    BlenderVolumeError,
+    resolve_volume_mode,
+    resolve_volume_shading,
+)
+from bandscope.core.display_style import (
+    is_independent,
+    legacy_display_style,
+    legacy_render_quality,
+    resolved_display_style,
+    resolved_render_quality,
+)
+from bandscope.exporting.blender_texts import (
+    TEXT_BODY,
+    TEXT_CAP_HEIGHT,
+    TEXT_COLLECTION_NAME,
+    TEXT_COLUMN_SPACING,
+    TEXT_COLUMNS,
+    TEXT_GROUP_PRESET,
+    TEXT_PRESETS,
+    TEXT_ROW_SPACING,
+    text_font_metadata,
+    text_style_summaries,
+    TEXT_STYLES,
 )
 from bandscope.exporting.publication_models import PublicationSnapshot
 from bandscope.exporting.publication_renderers import compute_level_info
 
-BLENDER_PROJECT_SCHEMA = 8
-# schema 7 仍是受支持的多条目工程：回读和原位更新都保留原版本与平面发光长方体，
-# 不能把只更新数组的旧工程伪装成已含八材质和灯光的 schema 8 工程。
+BLENDER_PROJECT_SCHEMA = 11
+BLENDER_PROJECT_BOX_MATERIAL_SCHEMA = 8
+BLENDER_PROJECT_TEXT_SCHEMA = 9
+BLENDER_PROJECT_DISPLAY_SCHEMA = 10
+BLENDER_PROJECT_VOLUME_SCHEMA = 11
+# schema 7–10 回读和原位更新保留原版本及创作内容，不升级为柔和受光。
 BLENDER_PROJECT_MIN_ENTRY_SCHEMA = 7
 BLENDER_PROJECT_FORMAT = "bandscope-blender-project"
-BLENDER_EDIT_FORMAT = 1
+BLENDER_EDIT_FORMAT = BLENDER_DISPLAY_EDIT_FORMAT
 BOX_GROUP_PRESET = "thin_boxes"
-PRESET_KEYS = ("coordinates", "guide_frame", "orientation", BOX_GROUP_PRESET)
+PRESET_KEYS = ("coordinates", "guide_frame", "orientation", BOX_GROUP_PRESET, TEXT_GROUP_PRESET)
 PRESET_LABELS = {
     "coordinates": "坐标轴及文字",
     "guide_frame": "辅助盒框",
     "orientation": "方向标",
     BOX_GROUP_PRESET: "薄层长方体",
+    TEXT_GROUP_PRESET: "文本预设",
 }
 BOX_PRESETS = MATERIAL_IDS
 FRONT_BOX_PRESETS = frozenset(("matte", "satin", "reflection_glass", "optical_glass"))
@@ -89,9 +123,14 @@ class BlenderProjectRequest:
 
     def __init__(self, snapshots: Sequence[Any], presets: Optional[Mapping[str, bool]] = None,
                  *, box_settings: Optional[Mapping[str, Any]] = None,
-                 box_layout: Optional[str] = None):
+                 box_layout: Optional[str] = None, volume_mode=VOLUME_MODE_EMISSION):
         if not snapshots:
             raise BlenderProjectError("至少选择一个 3D 页面。")
+        try:
+            self.volume_mode = resolve_volume_mode(volume_mode)
+            self.volume_shading = resolve_volume_shading(self.volume_mode)
+        except BlenderVolumeError as exc:
+            raise BlenderProjectError(str(exc)) from exc
         entries = []
         used = set()
         for index, value in enumerate(snapshots, 1):
@@ -155,7 +194,8 @@ class BlenderProjectRequest:
 
     @property
     def recommended_samples(self) -> int:
-        return resolved_samples([box.material_id for box in self.boxes.values()])
+        samples = resolved_samples([box.material_id for box in self.boxes.values()])
+        return max(samples, 128) if self.volume_mode == VOLUME_MODE_HYBRID_LIT else samples
 
     def box_settings(self) -> Dict[str, Dict[str, Any]]:
         return {key: box.settings() for key, box in self.boxes.items()}
@@ -164,6 +204,11 @@ class BlenderProjectRequest:
         if not self.presets.get(BOX_GROUP_PRESET):
             return []
         return [self.boxes[key] for key in BOX_PRESETS]
+
+    def enabled_texts(self):
+        if not self.presets.get(TEXT_GROUP_PRESET):
+            return []
+        return list(TEXT_STYLES)
 
     def material_summary(self) -> Dict[str, Dict[str, Any]]:
         result = {}
@@ -181,6 +226,38 @@ class BlenderProjectRequest:
                 "recommended_samples": spec.recommended_samples,
             }
         return result
+
+    def recipe_settings(self):
+        return json.loads(json.dumps({
+            "presets": dict(self.presets),
+            "volume_shading": copy.deepcopy(self.volume_shading),
+            "box_settings": self.box_settings(),
+            "box_layout": self.box_layout,
+            "box_materials": self.material_summary(),
+            "text_styles": text_style_summaries(),
+            "render": {
+                "samples": self.recommended_samples,
+                "volume_bounces": 2 if self.volume_mode == VOLUME_MODE_HYBRID_LIT else 0,
+            },
+        }))
+
+
+def request_from_recipe_settings(settings, snapshots):
+    if not isinstance(settings, Mapping):
+        raise BlenderProjectError("Blender 复现配置的导出设置无效。")
+    try:
+        request = BlenderProjectRequest(
+            snapshots,
+            settings.get("presets"),
+            box_settings=settings.get("box_settings"),
+            box_layout=settings.get("box_layout"),
+            volume_mode=(settings.get("volume_shading") or {}).get("mode"),
+        )
+    except (BlenderProjectError, AttributeError, TypeError, ValueError) as exc:
+        raise BlenderProjectError(f"Blender 复现配置的导出设置无效：{exc}") from exc
+    if settings != request.recipe_settings():
+        raise BlenderProjectError("Blender 复现配置的导出设置与当前版本不一致。")
+    return request
 
 
 @dataclass
@@ -201,6 +278,7 @@ class LoadedBlenderProject:
     fingerprints: Dict[str, Dict[str, int]]
     legacy: bool
     schema_version: int = BLENDER_PROJECT_MIN_ENTRY_SCHEMA
+    recipe: Optional[dict] = None
 
     def entry(self, entry_id) -> BlenderProjectEntry:
         for entry in self.entries:
@@ -211,7 +289,23 @@ class LoadedBlenderProject:
     @property
     def supports_box_materials(self) -> bool:
         project = self.metadata.get("project") or {}
-        return self.schema_version >= BLENDER_PROJECT_SCHEMA and bool(project.get("box_materials"))
+        return self.schema_version >= BLENDER_PROJECT_BOX_MATERIAL_SCHEMA and bool(project.get("box_materials"))
+
+    @property
+    def supports_text_presets(self) -> bool:
+        project = self.metadata.get("project") or {}
+        return self.schema_version >= BLENDER_PROJECT_TEXT_SCHEMA and bool(project.get("text_styles"))
+
+    @property
+    def supports_display_styles(self) -> bool:
+        return self.schema_version >= BLENDER_PROJECT_DISPLAY_SCHEMA
+
+    @property
+    def volume_shading(self):
+        if self.schema_version < BLENDER_PROJECT_VOLUME_SCHEMA:
+            return resolve_volume_shading()
+        record = (self.metadata.get("project") or {}).get("volume_shading") or {}
+        return resolve_volume_shading(record.get("mode"), record.get("parameters"))
 
     @property
     def warnings(self):
@@ -223,6 +317,18 @@ class LoadedBlenderProject:
                 "工程为 schema 7：长方体仍是平面发光材质；原位更新保留原版本、材质和布局，"
                 "不会升级为八材质工程。"
             )
+        elif not self.supports_text_presets:
+            messages.append(
+                "工程为 schema 8：不包含十种文本预设；原位更新保留原版本，"
+                "需要文本预设时请重新导出。"
+            )
+        if not self.legacy and not self.supports_display_styles:
+            messages.append(
+                f"工程为 schema {self.schema_version}：原位更新保留兼容显示；"
+                "需要独立透明度和归一化时请重新导出 schema 10。"
+            )
+        if self.recipe is None:
+            messages.append("未找到 Blender 配套复现配置；现有显示编辑仍可使用，从原始数据重新导出可获得完整复现配置。")
         for entry in self.entries:
             state = entry.snapshot.payload.get("blender_project") or {}
             if state.get("needs_cmap"):
@@ -385,6 +491,138 @@ def _box_lighting_metadata(scene, entry_id, multiple, request):
     }
 
 
+def _text_metadata(scene, entry_id, multiple, request):
+    suffix = _suffix(entry_id, multiple)
+    center = np.asarray(scene["layout"]["slots"]["bottom"], dtype=float)
+    right, up, backward = (
+        np.asarray(value, dtype=float) for value in scene["camera"]["rotation_basis_columns"]
+    )
+    layout = {
+        "enabled": bool(request.presets.get(TEXT_GROUP_PRESET)),
+        "collection": TEXT_COLLECTION_NAME + suffix,
+        "body": TEXT_BODY,
+        "cap_height": TEXT_CAP_HEIGHT,
+        "layout_slot": "bottom",
+        "center": center.tolist(),
+        "right": right.tolist(),
+        "up": up.tolist(),
+        "backward": backward.tolist(),
+        "columns": TEXT_COLUMNS,
+        "rows": 2,
+        "column_spacing": TEXT_COLUMN_SPACING,
+        "row_spacing": TEXT_ROW_SPACING,
+        "camera_facing": True,
+    }
+    records = []
+    for index, style in enumerate(TEXT_STYLES):
+        row, column = divmod(index, TEXT_COLUMNS)
+        position = (
+            center
+            + right * ((column - (TEXT_COLUMNS - 1) / 2.0) * TEXT_COLUMN_SPACING)
+            + up * ((0.5 - row) * TEXT_ROW_SPACING)
+        )
+        record = style.settings()
+        record.update({
+            "preset_group": TEXT_GROUP_PRESET,
+            "object": f"BandScope text {style.style_id}{suffix}",
+            "material": f"BandScope text {style.style_id} material{suffix}",
+            "body": TEXT_BODY,
+            "row": row,
+            "column": column,
+            "center": position.tolist(),
+            "independent_material": True,
+        })
+        records.append(record)
+    lighting = {
+        "enabled": bool(request.presets.get(TEXT_GROUP_PRESET)),
+        "link_method": "cycles_receiver_collection",
+        "collection": f"BandScope text lights{suffix}",
+        "receiver_collection": f"BandScope text receivers{suffix}",
+        "lights": [{
+            "object": f"BandScope text softbox{suffix}",
+            "type": "AREA",
+            "energy": 45.0,
+            "size": 1.8,
+            "distance": 2.0,
+        }],
+        "excluded_from_layout": True,
+    }
+    return layout, records, lighting
+
+
+def _text_points(scene):
+    layout = scene.get("text_layout") or {}
+    if not layout:
+        return []
+    right, up, backward = (np.asarray(layout[key], dtype=float) for key in ("right", "up", "backward"))
+    half_width = TEXT_CAP_HEIGHT * 0.75
+    half_height = TEXT_CAP_HEIGHT * 0.6
+    half_depth = 0.03
+    points = []
+    for record in scene.get("text_presets") or ():
+        center = np.asarray(record["center"], dtype=float)
+        for x, y, z in ((-1, -1, -1), (-1, -1, 1), (-1, 1, -1), (-1, 1, 1),
+                        (1, -1, -1), (1, -1, 1), (1, 1, -1), (1, 1, 1)):
+            points.append(center + right * x * half_width + up * y * half_height + backward * z * half_depth)
+    return points
+
+
+def _volume_lighting_metadata(scene, entry_id, multiple, request):
+    suffix = _suffix(entry_id, multiple)
+    enabled = request.volume_mode == VOLUME_MODE_HYBRID_LIT
+    bounds = np.asarray(scene["blender_grid"]["material_clip_bounds"], dtype=float).reshape(3, 2)
+    center = bounds.mean(axis=1)
+    length = max(float(np.max(bounds[:, 1] - bounds[:, 0])), 0.1)
+    distance = 2.0 * length
+    right, up, backward = (
+        np.asarray(value, dtype=float) for value in scene["camera"]["rotation_basis_columns"]
+    )
+    key_energy = 60.0 * distance * distance
+    definitions = (
+        ("key", "主光", (-1.0, 1.0, 1.5), key_energy),
+        ("fill", "补光", (1.0, 0.3, 1.0), key_energy * 0.25),
+        ("rim", "轮廓光", (0.5, 1.0, -1.0), key_energy * 0.5),
+    )
+    lights = []
+    if enabled:
+        for role, label, components, energy in definitions:
+            direction = right * components[0] + up * components[1] + backward * components[2]
+            direction /= np.linalg.norm(direction)
+            offset = direction * distance
+            lights.append({
+                "role": role,
+                "label": label,
+                "object": f"BandScope volume {role} light{suffix}",
+                "type": "AREA",
+                "color": [1.0, 1.0, 1.0],
+                "energy": float(energy),
+                "size": float(length),
+                "distance": float(distance),
+                "basis_direction": list(components),
+                "position": (center + offset).tolist(),
+                "target": center.tolist(),
+            })
+    return {
+        "enabled": enabled,
+        "link_method": "cycles_receiver_collection",
+        "collection": f"BandScope volume lights{suffix}",
+        "receiver_collection": f"BandScope volume receivers{suffix}",
+        "lights": lights,
+        "center": center.tolist(),
+        "light_size": float(length),
+        "light_distance": float(distance),
+        "camera_basis": {
+            "right": right.tolist(), "up": up.tolist(), "backward": backward.tolist(),
+        },
+        "camera_bound": False,
+        "excluded_from_layout": True,
+        "note": (
+            "Initial positions use the export camera basis; lights are then fixed in entry-local space "
+            "under BandScope Root. Cycles light linking limits direct illumination, not all indirect light."
+        ),
+    }
+
+
 def _shifted(bounds, offset):
     values = np.asarray(bounds, dtype=float).reshape(3, 2)
     return (values + np.asarray(offset, dtype=float).reshape(3, 1)).ravel()
@@ -413,6 +651,11 @@ def entry_local_bounds(scene, presets):
         center = np.asarray(box["center"], dtype=float)
         half = np.asarray(box["size"], dtype=float) * 0.5
         bounds.append(np.column_stack((center - half, center + half)).ravel())
+    if presets.get(TEXT_GROUP_PRESET):
+        points = _text_points(scene)
+        if points:
+            values = np.asarray(points, dtype=float)
+            bounds.append(np.column_stack((values.min(axis=0), values.max(axis=0))).ravel())
     values = np.asarray(bounds, dtype=float).reshape(-1, 6)
     result = []
     for axis in range(3):
@@ -453,6 +696,11 @@ def make_project_metadata(items, request: BlenderProjectRequest, assets_dir_name
                 part["object"] += suffix
         scene["box_presets"] = _box_metadata(scene, entry_id, multiple, request)
         scene["box_lighting"] = _box_lighting_metadata(scene, entry_id, multiple, request)
+        scene["volume_lighting"] = _volume_lighting_metadata(scene, entry_id, multiple, request)
+        text_layout, text_presets, text_lighting = _text_metadata(scene, entry_id, multiple, request)
+        scene["text_layout"] = text_layout
+        scene["text_presets"] = text_presets
+        scene["text_lighting"] = text_lighting
         entries.append(scene)
 
     layout = {"axis": "X", "gap": 1.0, "entries": {}}
@@ -473,10 +721,12 @@ def make_project_metadata(items, request: BlenderProjectRequest, assets_dir_name
         "schema_version": BLENDER_PROJECT_SCHEMA,
         "project": {
             "format": BLENDER_PROJECT_FORMAT,
+            "display_edit_format": BLENDER_EDIT_FORMAT,
             "entry_order": [scene["entry_id"] for scene in entries],
             "assets": {"directory": str(assets_dir_name), "readme": "README.txt"},
             "presets": dict(request.presets),
             "preset_labels": dict(PRESET_LABELS),
+            "volume_shading": copy.deepcopy(request.volume_shading),
             "box_materials": request.material_summary(),
             "box_layout": {
                 "id": request.box_layout,
@@ -490,12 +740,20 @@ def make_project_metadata(items, request: BlenderProjectRequest, assets_dir_name
                 "link_method": "cycles_receiver_collection",
                 "excluded_from_layout": True,
             },
+            "text_styles": text_style_summaries(),
+            "text_fonts": text_font_metadata(request.presets.get(TEXT_GROUP_PRESET)),
+            "text_lighting": {
+                "enabled": any(scene["text_lighting"]["enabled"] for scene in entries),
+                "link_method": "cycles_receiver_collection",
+                "excluded_from_layout": True,
+            },
             "render": {
                 "device": "CPU",
                 "samples": request.recommended_samples,
                 "samples_by_material": {
                     key: request.boxes[key].spec.recommended_samples for key in BOX_PRESETS
                 },
+                "volume_bounces": 2 if request.volume_mode == VOLUME_MODE_HYBRID_LIT else 0,
                 "film_transparent": True,
                 "view_transform": "Standard",
             },
@@ -523,6 +781,7 @@ def _legacy_project_metadata(scene, assets_dir_name):
     entry["box_presets"] = []
     presets = default_presets()
     presets[BOX_GROUP_PRESET] = False
+    presets[TEXT_GROUP_PRESET] = False
     request = BlenderProjectRequest([object()], presets)
     # Reuse only the geometry/layout calculation; do not rewrite legacy asset paths or names.
     probe = make_project_metadata(
@@ -600,6 +859,104 @@ def _validate_box_configuration(metadata):
     return metadata
 
 
+def _validate_text_configuration(metadata):
+    project = metadata.get("project") or {}
+    enabled = bool((project.get("presets") or {}).get(TEXT_GROUP_PRESET))
+    if project.get("text_styles") != text_style_summaries():
+        raise BlenderProjectError("工程缺少完整、一致的十种文本样式配置。")
+    if project.get("text_fonts") != text_font_metadata(enabled):
+        raise BlenderProjectError("工程字体资产记录与文本预设开关不一致。")
+    expected_styles = {style.style_id: style.settings() for style in TEXT_STYLES}
+    for entry in metadata.get("entries") or ():
+        entry_id = entry.get("entry_id")
+        layout = entry.get("text_layout") or {}
+        if (layout.get("body") != TEXT_BODY or layout.get("cap_height") != TEXT_CAP_HEIGHT
+                or layout.get("layout_slot") != "bottom" or layout.get("columns") != TEXT_COLUMNS
+                or layout.get("rows") != 2 or bool(layout.get("enabled")) != enabled):
+            raise BlenderProjectError(f"条目 {entry_id} 的文本布局或字号配置无效。")
+        records = entry.get("text_presets")
+        if not isinstance(records, list) or [item.get("preset") for item in records] != list(TEXT_PRESETS):
+            raise BlenderProjectError(f"条目 {entry_id} 的十种文本预设记录不完整。")
+        names = set()
+        for index, record in enumerate(records):
+            expected = expected_styles[record["preset"]]
+            if any(record.get(key) != value for key, value in expected.items()):
+                raise BlenderProjectError(f"条目 {entry_id} 的文本样式 {record['preset']} 与注册表不一致。")
+            if (record.get("body") != TEXT_BODY or record.get("preset_group") != TEXT_GROUP_PRESET
+                    or record.get("row") != index // TEXT_COLUMNS
+                    or record.get("column") != index % TEXT_COLUMNS):
+                raise BlenderProjectError(f"条目 {entry_id} 的文本 {record['preset']} 不是统一的大写 A 或位置错误。")
+            center = record.get("center")
+            if not isinstance(center, list) or len(center) != 3 or not np.all(
+                    np.isfinite(np.asarray(center, dtype=float))):
+                raise BlenderProjectError(f"条目 {entry_id} 的文本 {record['preset']} 中心无效。")
+            for field in ("object", "material"):
+                name = record.get(field)
+                if not isinstance(name, str) or not name or name in names:
+                    raise BlenderProjectError(f"条目 {entry_id} 的文本对象或材质命名不独立。")
+                names.add(name)
+        lighting = entry.get("text_lighting") or {}
+        if bool(lighting.get("enabled")) != enabled or len(lighting.get("lights") or ()) != 1:
+            raise BlenderProjectError(f"条目 {entry_id} 的文本辅助灯配置无效。")
+    return metadata
+
+
+def _validate_display_configuration(metadata):
+    if (metadata.get("project") or {}).get("display_edit_format") != BLENDER_EDIT_FORMAT:
+        raise BlenderProjectError("schema 10 工程缺少显示编辑格式 2 配置。")
+    for entry in metadata.get("entries") or ():
+        edit = entry.get("bandscope_edit") or {}
+        if edit.get("format_version") != BLENDER_EDIT_FORMAT:
+            raise BlenderProjectError(f"条目 {entry.get('entry_id')} 的显示编辑格式不是 2。")
+        if not isinstance(edit.get("display_style"), dict) or not isinstance(edit.get("render_quality"), dict):
+            raise BlenderProjectError(f"条目 {entry.get('entry_id')} 缺少显示样式或渲染质量。")
+        resolved_display_style(edit["display_style"])
+        resolved_render_quality(edit["render_quality"])
+        data_range = edit.get("resolved_range")
+        if (not isinstance(data_range, (list, tuple)) or len(data_range) != 2
+                or not np.all(np.isfinite(np.asarray(data_range, dtype=float)))):
+            raise BlenderProjectError(f"条目 {entry.get('entry_id')} 的已解析强度范围无效。")
+    return metadata
+
+
+def _validate_volume_configuration(metadata):
+    project = metadata.get("project") or {}
+    record = project.get("volume_shading")
+    if not isinstance(record, Mapping):
+        raise BlenderProjectError("schema 11 工程缺少数据体外观配置。")
+    try:
+        shading = resolve_volume_shading(record.get("mode"), record.get("parameters"))
+    except BlenderVolumeError as exc:
+        raise BlenderProjectError(str(exc)) from exc
+    hybrid = shading["mode"] == VOLUME_MODE_HYBRID_LIT
+    for entry in metadata.get("entries") or ():
+        entry_id = entry.get("entry_id")
+        lighting = entry.get("volume_lighting")
+        if not isinstance(lighting, Mapping) or bool(lighting.get("enabled")) != hybrid:
+            raise BlenderProjectError(f"条目 {entry_id} 的数据体灯组开关与外观模式不一致。")
+        lights = lighting.get("lights")
+        if not isinstance(lights, list) or len(lights) != (3 if hybrid else 0):
+            raise BlenderProjectError(f"条目 {entry_id} 的数据体灯光数量与外观模式不一致。")
+        if hybrid and {light.get("role") for light in lights} != {"key", "fill", "rim"}:
+            raise BlenderProjectError(f"条目 {entry_id} 缺少主光、补光或轮廓光。")
+        for field in ("collection", "receiver_collection"):
+            if not isinstance(lighting.get(field), str) or not lighting[field]:
+                raise BlenderProjectError(f"条目 {entry_id} 的数据体灯光 {field} 无效。")
+        for light in lights:
+            if (light.get("type") != "AREA" or not isinstance(light.get("object"), str)
+                    or not light["object"]):
+                raise BlenderProjectError(f"条目 {entry_id} 的数据体灯对象无效。")
+            for field in ("position", "target", "color"):
+                values = light.get(field)
+                if (not isinstance(values, list) or len(values) != 3
+                        or not np.all(np.isfinite(np.asarray(values, dtype=float)))):
+                    raise BlenderProjectError(f"条目 {entry_id} 的数据体灯 {field} 无效。")
+            if (not np.isfinite(float(light.get("energy", 0.0))) or float(light["energy"]) <= 0.0
+                    or not np.isfinite(float(light.get("size", 0.0))) or float(light["size"]) <= 0.0):
+                raise BlenderProjectError(f"条目 {entry_id} 的数据体灯功率或尺寸无效。")
+    return metadata
+
+
 def canonical_project_metadata(metadata, assets_dir_name):
     version = int(metadata.get("schema_version", 0) or 0)
     if version < 1:
@@ -619,8 +976,14 @@ def canonical_project_metadata(metadata, assets_dir_name):
         ids = [entry.get("entry_id") for entry in entries]
         if any(not isinstance(value, str) or not value for value in ids) or len(set(ids)) != len(ids):
             raise BlenderProjectError("工程条目 ID 缺失或重复。")
-        if version >= BLENDER_PROJECT_SCHEMA:
+        if version >= BLENDER_PROJECT_BOX_MATERIAL_SCHEMA:
             _validate_box_configuration(result)
+        if version >= BLENDER_PROJECT_TEXT_SCHEMA:
+            _validate_text_configuration(result)
+        if version >= BLENDER_PROJECT_DISPLAY_SCHEMA:
+            _validate_display_configuration(result)
+        if version >= BLENDER_PROJECT_VOLUME_SCHEMA:
+            _validate_volume_configuration(result)
         return result
     return _legacy_project_metadata(metadata, assets_dir_name)
 
@@ -655,6 +1018,9 @@ def project_fingerprints(blend_path):
     blend_path = Path(blend_path)
     assets = blend_path.parent / f"{blend_path.stem}.assets"
     result = {"//" + blend_path.name: file_fingerprint(blend_path)}
+    recipe = Path(blender_sidecar_path(blend_path))
+    if recipe.is_file():
+        result["//" + recipe.name] = file_fingerprint(recipe)
     for root, directories, files in os.walk(str(assets)):
         directories.sort()
         for name in sorted(files):
@@ -741,7 +1107,30 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
     baked = list(edit.get("baked_effects") or ())
     if legacy:
         baked = ["unknown_legacy_effects"]
-    computed_info = compute_level_info(volume, levels, include_zero=include_zero, locked_range=locked)
+    display_schema = int(entry.get("schema_version", 0)) >= BLENDER_PROJECT_DISPLAY_SCHEMA
+    if display_schema:
+        display_style = resolved_display_style(edit.get("display_style") or legacy_display_style(
+            levels, opacity_mode,
+        ))
+        levels = tuple(display_style["levels"])
+        opacity_mode = str(display_style["opacity_mode"])
+        render_quality = resolved_render_quality(edit.get("render_quality"))
+        resolved_range = edit.get("resolved_range")
+        if resolved_range is None and info:
+            resolved_range = (info.get("data_min"), info.get("data_max"))
+        if resolved_range is not None:
+            if len(resolved_range) != 2 or not np.all(np.isfinite(np.asarray(resolved_range, dtype=float))):
+                raise BlenderProjectError(f"条目 {entry.get('entry_id')} 的已解析强度范围无效。")
+            resolved_range = tuple(float(value) for value in resolved_range)
+        computed_info = compute_level_info(
+            volume, levels, include_zero=include_zero, locked_range=locked,
+            style=display_style, resolved_range=resolved_range,
+        )
+    else:
+        display_style = legacy_display_style(levels, opacity_mode)
+        render_quality = legacy_render_quality()
+        resolved_range = None
+        computed_info = compute_level_info(volume, levels, include_zero=include_zero, locked_range=locked)
     if info and all(key in info for key in ("black_value", "white_value", "gamma_power")):
         computed_info = info
     clip = tuple(float(value) / DISPLAY_TO_BLENDER + 100.0 for value in grid.get("material_clip_bounds", ()))
@@ -782,6 +1171,13 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
             "show_axes": True,
             "viewport_aspect": float(entry.get("viewport_aspect", 1.0)),
             "level_info": computed_info,
+            "display": {
+                "background_style": display_style,
+                "resolved_range": resolved_range,
+                "state": None,
+                "resolved": True,
+            },
+            "render_quality": render_quality,
             "intensity_label": "Intensity (a.u.)",
             "axis_titles": list(entry.get("axis_titles") or ["X", "Y", "E"]),
             "enhancement": None,
@@ -792,6 +1188,7 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
                 "baked_effects": baked,
                 "needs_cmap": not bool(cmap_name),
                 "frozen_result": True,
+                "display_schema": display_schema,
                 "display_edited": False,
             },
         },
@@ -826,6 +1223,12 @@ def load_blender_project(blend_path) -> LoadedBlenderProject:
         raise BlenderProjectError(f"scene.json 无法读取或不是有效 JSON：{exc}") from exc
     legacy = "entries" not in original
     metadata = canonical_project_metadata(original, assets.name)
+    if int(metadata.get("schema_version", 0)) >= BLENDER_PROJECT_TEXT_SCHEMA:
+        fonts = metadata["project"]["text_fonts"]
+        for relative in fonts["files"]:
+            _safe_asset_path(assets, relative, "文本预设字体")
+        if fonts.get("license"):
+            _safe_asset_path(assets, fonts["license"], "字体许可证")
     entries = []
     for entry in metadata["entries"]:
         entry_id = entry["entry_id"]
@@ -837,30 +1240,79 @@ def load_blender_project(blend_path) -> LoadedBlenderProject:
             entry_id, snapshot, entry, arrays,
             _safe_asset_path(assets, assets_info.get("vdb"), f"条目 {entry_id} VDB"),
         ))
+    recipe_path = Path(blender_sidecar_path(blend_path))
+    recipe = None
+    if recipe_path.is_file():
+        try:
+            recipe = BlenderRecipeDocument.load(recipe_path).data
+        except ValueError as exc:
+            raise BlenderProjectError(str(exc)) from exc
+        if [entry["entry_id"] for entry in recipe["entries"]] != metadata["project"]["entry_order"]:
+            raise BlenderProjectError("Blender 复现配置与工程的条目顺序不一致。")
+        settings_request = request_from_recipe_settings(
+            recipe["export_settings"],
+            [BlenderProjectEntryRequest(entry.snapshot, entry.entry_id) for entry in entries],
+        )
+        project = metadata["project"]
+        settings = settings_request.recipe_settings()
+        if (settings["presets"] != project.get("presets")
+                or settings["volume_shading"] != project.get("volume_shading")
+                or settings["box_layout"] != (project.get("box_layout") or {}).get("id")
+                or settings["box_materials"] != project.get("box_materials")):
+            raise BlenderProjectError("Blender 复现配置与工程的实际导出设置不一致。")
     return LoadedBlenderProject(
         blend_path, assets, metadata, tuple(entries), project_fingerprints(blend_path), legacy,
         schema_version=int(metadata.get("schema_version", BLENDER_PROJECT_MIN_ENTRY_SCHEMA)),
+        recipe=recipe,
     )
 
 
-def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range, include_zero, opacity_mode):
+def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range, include_zero,
+                            opacity_mode, display_style=None, render_quality=None):
     """在冻结条目上重算全局显示，不触碰任何活动数据源的锁定作用域。"""
     if not str(cmap_name).strip():
         raise BlenderProjectError("旧工程缺少 colormap；请先选择色带。")
     levels = tuple(float(value) for value in levels_params)
     if len(levels) != 3:
         raise BlenderProjectError("色阶需要黑点、gamma 和白点三个参数。")
+    state = snapshot.payload.setdefault("blender_project", {})
+    display_schema = bool(state.get("display_schema", False))
+    current = (snapshot.payload.get("display") or {}).get("background_style")
+    if display_style is not None:
+        selected = display_style
+    elif is_independent(current):
+        selected = copy.deepcopy(current)
+        selected["levels"] = levels
+        selected["opacity_mode"] = str(opacity_mode)
+    else:
+        selected = legacy_display_style(levels, opacity_mode)
+    selected = resolved_display_style(selected)
+    if not display_schema and is_independent(selected):
+        raise BlenderProjectError("schema 7–9 工程不能原位启用独立显示，请重新导出 schema 10。")
+    quality = resolved_render_quality(
+        render_quality if render_quality is not None else snapshot.payload.get("render_quality")
+    )
+    if not display_schema and quality["mode"] == "explicit":
+        raise BlenderProjectError("schema 7–9 工程保留原渲染质量，请重新导出后调整质量。")
     snapshot.cmap_name = str(cmap_name)
-    snapshot.levels_params = levels
+    snapshot.levels_params = tuple(selected["levels"])
     snapshot.locked_range = (tuple(float(value) for value in locked_range)
                              if locked_range is not None else None)
     snapshot.payload["include_zero"] = bool(include_zero)
-    snapshot.payload["opacity_mode"] = str(opacity_mode)
+    snapshot.payload["opacity_mode"] = str(selected["opacity_mode"])
     snapshot.payload["level_info"] = compute_level_info(
-        snapshot.payload["volume"], levels, include_zero=bool(include_zero),
-        locked_range=snapshot.locked_range,
+        snapshot.payload["volume"], snapshot.levels_params,
+        include_zero=bool(include_zero), locked_range=snapshot.locked_range,
+        **({"style": selected} if display_schema else {}),
     )
-    state = snapshot.payload.setdefault("blender_project", {})
+    info = snapshot.payload["level_info"]
+    snapshot.payload["display"] = {
+        "background_style": selected,
+        "resolved_range": (info["data_min"], info["data_max"]),
+        "state": None,
+        "resolved": True,
+    }
+    snapshot.payload["render_quality"] = quality
     state["display_edited"] = True
     state["needs_cmap"] = False
     snapshot.payload["enhancement"] = None
@@ -872,9 +1324,26 @@ def merge_updated_entry(original, generated):
     """更新科学数据和编辑状态，保留对象身份、布局、预设、材质与灯光。"""
     result = copy.deepcopy(generated)
     for key in ("entry_id", "assets", "composition", "layout", "box_presets", "box_lighting",
+                "volume_lighting", "text_layout", "text_presets", "text_lighting",
                 "guide_frame", "axis_indicator"):
         if key in original:
             result[key] = copy.deepcopy(original[key])
+    if int(original.get("schema_version", 0)) < BLENDER_PROJECT_DISPLAY_SCHEMA:
+        generated_edit = result.get("bandscope_edit") or {}
+        legacy_keys = {
+            "format_version", "cmap_name", "levels_params", "locked_range", "include_zero",
+            "opacity_mode", "editable", "capabilities", "baked_effects", "baked_effects_warning",
+        }
+        result["bandscope_edit"] = {
+            key: copy.deepcopy(value) for key, value in generated_edit.items() if key in legacy_keys
+        }
+        result["bandscope_edit"]["format_version"] = 1
+        result["bandscope_edit"]["capabilities"] = [
+            "colormap", "levels", "locked_range", "include_zero", "opacity_mode",
+        ]
+        opacity = result.get("opacity") or {}
+        opacity.pop("display_mode", None)
+        opacity.pop("independent_parameters", None)
     previous_edit = original.get("bandscope_edit") or {}
     discarded = list(previous_edit.get("baked_effects") or ())
     if discarded:
@@ -892,7 +1361,7 @@ def merged_project_metadata(project: LoadedBlenderProject, generated_entries):
             raise BlenderProjectError(f"更新条目不属于当前工程：{entry_id}")
         by_id[entry_id] = merge_updated_entry(by_id[entry_id], generated)
     metadata["entries"] = [by_id[entry_id] for entry_id in metadata["project"]["entry_order"]]
-    # 保留原工程版本：schema 7 的原位更新不得被伪装成已含八材质和灯光的 schema 8。
+    # 保留原工程版本：schema 7–10 的原位更新不得补入后续材质、文本、独立显示或数据体灯光。
     project_version = int(project.metadata.get("schema_version", BLENDER_PROJECT_SCHEMA))
     metadata["schema_version"] = project_version
     for entry in metadata["entries"]:

@@ -9,6 +9,7 @@ from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
 
 import bandscope.ui.theme as theme
+from bandscope.core.display_style import resolved_render_quality
 from bandscope.processing import display_transfer
 from bandscope.rendering.color_mapping import LeveledColormap
 
@@ -222,6 +223,34 @@ class VolumeAlphaChannel:
         self.vtk_array.Modified()
         self.volume.mapper.Modified()
         self.applied = (state_prefix, values)
+
+
+def configure_volume_quality(volume, plotter, quality="exact", quality_config=None, *, publication=False):
+    config = resolved_render_quality(quality_config)
+    mapper = volume.mapper
+    interactive = str(getattr(quality, "value", quality)).lower() == "preview"
+    if config["mode"] == "explicit":
+        if config["interpolation"] == "linear":
+            mapper.SetInterpolationModeToLinear()
+        else:
+            mapper.SetInterpolationModeToNearestNeighbor()
+        mapper.SetAutoAdjustSampleDistances(False)
+        mapper.SetInteractiveAdjustSampleDistances(False)
+        if publication:
+            factor = 0.25
+        elif interactive:
+            factor = 2.0
+        else:
+            factor = 0.25 if config["resting"] == "fine" else 0.5
+        spacing = tuple(float(value) for value in mapper.dataset.spacing)
+        mapper.SetSampleDistance(display_transfer.display_unit_distance(spacing) * factor)
+    else:
+        mapper.SetAutoAdjustSampleDistances(True)
+    interactor = getattr(plotter, "iren", None)
+    native = getattr(interactor, "interactor", interactor)
+    if native is not None:
+        native.SetDesiredUpdateRate(15.0 if interactive else 2.0)
+        native.SetStillUpdateRate(2.0)
 
 
 class VisualEngine:
@@ -1176,6 +1205,7 @@ class VolumeRenderSession:
         core_coords=None,
         cmap="magma",
         quality="exact",
+        quality_config=None,
         force_data=False,
         data_bounds=None,
         full_shape=None,
@@ -1287,6 +1317,11 @@ class VolumeRenderSession:
                 self._style_signature = signature if display_fields is None else None
                 if display_fields is not None:
                     self._display_signature = display_signature
+            if display_fields is not None:
+                distance = float(display_fields.get(
+                    "opacity_unit_distance", self.volume.GetProperty().GetScalarOpacityUnitDistance(),
+                ))
+                self.volume.GetProperty().SetScalarOpacityUnitDistance(distance)
             try:
                 scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
                 lut = VisualEngine._3d_colorbar_lut(cmap, self.level_info)
@@ -1311,7 +1346,7 @@ class VolumeRenderSession:
                 pass
         self._update_clipping(clip_ranges)
         self._update_axes(bool(show_axes), core_coords, axis_titles)
-        self._set_interactive_quality(quality)
+        self._set_interactive_quality(quality, quality_config)
 
         if saved_camera is not None:
             try:
@@ -1468,6 +1503,10 @@ class VolumeRenderSession:
                 opacity_function.AddPoint(value, float(opacity))
 
         prop = self.volume.GetProperty()
+        if self._domain_signature is not None:
+            distance = display_transfer.volume_unit_distance(self.shape, self._domain_signature[0])
+            if distance > 0.0:
+                prop.SetScalarOpacityUnitDistance(distance)
         prop.SetColor(color_function)
         try:
             self.volume.mapper.scalar_range = (low, high)
@@ -1543,16 +1582,7 @@ class VolumeRenderSession:
             self.plotter.remove_bounds_axes()
         self._axes_signature = signature
 
-    def _set_interactive_quality(self, quality):
+    def _set_interactive_quality(self, quality, quality_config=None):
         if self.volume is None:
             return
-        try:
-            self.volume.mapper.SetAutoAdjustSampleDistances(True)
-        except Exception:
-            pass
-        interactor = getattr(self.plotter, "iren", None)
-        if interactor is not None:
-            try:
-                interactor.SetDesiredUpdateRate(15.0 if str(quality) == "preview" else 2.0)
-            except Exception:
-                pass
+        configure_volume_quality(self.volume, self.plotter, quality, quality_config)

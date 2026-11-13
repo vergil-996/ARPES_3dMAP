@@ -216,10 +216,19 @@ class RecipeRoundtripTests(unittest.TestCase):
         saved = copy.deepcopy(w._recipe_derived_results[page.page_id])
         page.params["_restored_result"] = saved
         page.params["derived_params"] = {"step": -1}  # A failed edit must not describe the visible result.
+        from bandscope.core.display_style import create_display_state, new_display_style, new_render_quality
+        style = new_display_style()
+        style["opacity"]["density"] = 33.0
+        quality = new_render_quality()
+        quality["interpolation"] = "nearest"
+        page.params["local_enhancement"] = create_display_state(style)
+        page.params["render_quality"] = quality
         w.left_workspace.activate_page(page.page_id)
         path, before = self.save()
         target = next(p for p in before.view_recipe["pages"] if p["page_id"] == "plugin")
         self.assertEqual(target["params"]["derived_params"], {"step": 1})
+        self.assertEqual(target["params"]["local_enhancement"]["background"]["opacity"]["density"], 33.0)
+        self.assertEqual(target["params"]["render_quality"]["interpolation"], "nearest")
         w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
         self.assertTrue(w.current_render_context["restored_snapshot"])
         self.assertIn("无法重新计算", w.left_workspace.scope_label.text())

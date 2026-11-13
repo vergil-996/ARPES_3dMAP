@@ -24,31 +24,38 @@
 - 相机保存方位角、仰角、滚转角、距离，并保存观察中心、完整向量、投影和缩放等参数；鼠标平移后的构图也可恢复。
 - 导出面板使用冻结预览。打开面板后切页或改变帧，当前导出的图片与 JSON 仍对应原预览；点击“更新预览”才同时重新捕获。
 - 内置处理可重新计算。旧式插件分析、缺失或版本不匹配的派生插件使用必要的曲线/派生结果快照，页眉标注“已保存结果（无法重新计算）”；需要插件重新计算的参数编辑被禁用。
-- 已有稳定计算入口的派生插件，在版本、内容摘要、环境和数值检查匹配时可以重算；失败时保留已保存结果。
+- 已有稳定计算入口的派生插件，在版本、内容摘要、环境和数值检查匹配时可以重算；失败时保留已保存结果。插件派生页的科学参数始终来自上次成功计算，计算后修改的当前控件、局部增强、独立显示和渲染质量也会保存；共同祖先与目标页分别保留自己的旋转角。
 - 3D 插件效果保存实际生效的一维倍率，恢复时优先使用这份效果快照。在视图右键菜单选择“使用当前插件重新计算效果”才切换到当前插件；需要已加载插件。
 - 跨文件粘贴的对比曲线保留额外来源和曲线快照。查看这些快照无需额外 NPZ。
 
 科学参数和结果有一致性校验，应在软件内修改后重新导出；不能修改参数却继续沿用原结果快照。复现保证针对数值、参数和排版，不承诺不同 GPU、字体或软件环境下生成完全相同的像素或文件字节。
 
+## Blender 配套复现文件
+
+Blender 导出面板的“同时保存复现文件”同样默认开启并只在本次窗口运行内记忆。`名称.blend.bsview.json` 复用上述单页配方，额外保存来源会话分组、多页顺序、逐页相机与显示状态，以及 Blender 导出设置。它不依赖 `.blend` 或资产目录即可通过“加载数据”打开。
+
+每个原来源会话组都要主动选择一次 NPZ，同组页面共享这次选择；同一文件的独立会话仍分别选择。所有来源选源、身份校验和预计算成功后才整体新增工作区，任一步取消或失败都保留原工作区。恢复后选中首个导出页面，并打开已填好原设置、勾选原页面的 Blender 导出草稿，不自动再次导出。具体工程与分享要求见 [Blender 工程导出与回读](blender-export.md)。
+
 ## 与多数据源工作区的关系
 
-- 每次成功加载 NPZ/MAT 或本格式复现文件都新增一份独立数据源：原有数据、分析页面和处理配置都保留，顶部“加载数据”右侧的下拉框负责切换。下拉框只在有两份及以上数据时展开，默认显示文件名（复现文件去掉 `.bsview.json`）。
+- 每次成功加载 NPZ/MAT 或本格式复现文件都新增一份独立数据源：原有数据、分析页面和处理配置都保留，顶部“加载数据”右侧的下拉框负责切换。下拉框只在有两份及以上数据时展开，默认显示文件名（复现文件去掉 `.bsview.json`）。Blender 多来源配置按原来源会话分别新增数据源，但整批加载是一个事务。
 - 下拉框文字可直接编辑：Enter 或失焦提交，Esc 撤销，空名称恢复默认名，重名自动追加序号。数据源名称同步显示为左侧根页面标题，不改数据文件或导出默认名。
 - 删除左侧根页面（原始视图）等于关闭整份数据源：属于它的派生页、裁剪、轴标题、出版草稿和任务一并清理，然后切换到相邻数据源；最后一份关闭后回到未加载界面。
 - 多数据源会话只保存在内存里：关闭软件后需要重新加载，不提供整套会话的磁盘恢复。切换数据源不卸载原始数组，因此内存占用随打开的数据份数增加。
 
 ## 开发与验证入口
 
-- 格式、数据身份和不可变来源记录：`bandscope/core/view_recipe.py`。
-- 独立预检计算、捕获和新数据源恢复：`bandscope/app/view_recipe_integration.py`。
+- 图片格式、数据身份和不可变来源记录：`bandscope/core/view_recipe.py`；Blender 外层配置与显示覆写：`bandscope/core/blender_recipe.py`。
+- 独立预检计算、捕获和新数据源恢复：`bandscope/app/view_recipe_integration.py`；Blender 多来源合并与整体事务：`bandscope/app/blender_recipe_integration.py`。
 - 数据源会话与切换 / 关闭事务：`bandscope/core/source_session.py`、`bandscope/app/source_workspace.py`、`bandscope/ui/source_switcher.py`。
 - 图片与复现文件配对保存：`bandscope/exporting/recipe_export.py`。
 - 文件包含格式版本、来源表、计算配方、页面树、ROI、全局处理环境、显示状态、必要结果和出版草稿。它只包含声明数据，不反序列化可执行代码。
 
 ```powershell
-python -m unittest tests.core.test_view_recipe tests.exporting.test_recipe_export tests.exporting.test_recipe_export_ui tests.integration.test_view_recipe_roundtrip -v
+python -m unittest tests.core.test_view_recipe tests.core.test_blender_recipe tests.exporting.test_recipe_export tests.exporting.test_recipe_export_ui tests.integration.test_view_recipe_roundtrip tests.integration.test_blender_recipe_roundtrip -v
 python -m unittest discover -s tests -t . -v
 python scripts/validation/verify_view_recipe.py
+python scripts/validation/blender_recipe_acceptance.py --blender D:/blender/blender.exe
 ```
 
-真实窗口脚本默认使用 `.local/data/WSe2_step.npz`，隔离用户设置与插件目录，输出图片、复现文件、截图和 `acceptance.json` 到 `.local/outputs/view_recipe/`。自动化测试全部使用合成数据；真实窗口自动化结果不能代替维护者对原生文件对话框、强制数据源选择和日常鼠标交互的验收。
+真实窗口脚本默认使用 `.local/data/WSe2_step.npz`，隔离用户设置与插件目录，输出图片、复现文件、截图和 `acceptance.json` 到 `.local/outputs/` 对应目录。自动化测试全部使用合成数据；真实窗口自动化结果不能代替维护者对原生文件对话框、强制数据源选择和日常鼠标交互的验收。

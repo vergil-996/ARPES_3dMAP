@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Real Blender multi-entry, four-preset and in-place display-update acceptance."""
+"""Real Blender multi-entry, five-preset and in-place display-update acceptance."""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +21,7 @@ from bandscope.exporting.blender_project import (
     BlenderProjectRequest, load_blender_project, update_snapshot_display,
 )
 from tests.support.blender import make_blender_snapshot
+from bandscope.core.display_style import new_display_style, new_render_quality
 
 
 def _hidden_kwargs():
@@ -83,6 +84,17 @@ def main():
         first.snapshot_id = "multi-first"
         first.source_session_id = "source-a"
         first.source_page_title = "第一页"
+        style = new_display_style(first.levels_params, "linear")
+        style["normalization"]["mode"] = "manual"
+        style["normalization"]["manual_range"] = (
+            first.payload["level_info"]["data_min"], first.payload["level_info"]["data_max"],
+        )
+        style["opacity"].update(threshold=21.739, gamma=1.3, density=40.0, preset="strong")
+        first.payload["display"] = {
+            "background_style": style, "resolved_range": style["normalization"]["manual_range"],
+            "state": None,
+        }
+        first.payload["render_quality"] = new_render_quality()
         second = make_blender_snapshot(cmap_name="viridis", levels=(5.0, 65.0, 95.0), viewport_aspect=1.5)
         second.snapshot_id = "multi-second"
         second.source_session_id = "source-b"
@@ -97,9 +109,18 @@ def main():
             report = run_inspector("check", multi_blend, output / "multi-check.json", render=output / "multi-overview.png")
             if report["entry_count"] != 2 or not report["non_colliding"]:
                 raise RuntimeError("多页条目或布局报告不符")
-            record("多页面、四项预设、独立 VDB/材质与总览相机", "PASS", report["overview_camera"])
+            if report.get("text_count") != 20:
+                raise RuntimeError("多页工程没有生成两组独立的十种文本预设")
+            loaded = load_blender_project(multi_blend)
+            edit = loaded.metadata["entries"][0]["bandscope_edit"]
+            if (loaded.schema_version != 11 or edit.get("format_version") != 2
+                    or edit["display_style"].get("display_mode") != "independent"
+                    or edit["render_quality"].get("mode") != "explicit"):
+                raise RuntimeError("schema 11 独立显示或编辑格式 2 未完整写入／回读")
+            record("多页面、五项预设、独立 VDB/材质/文本与总览相机", "PASS",
+                   f"{report['overview_camera']}；schema 11 独立显示与编辑格式 2 完整")
         except Exception as exc:
-            record("多页面与四预设", "FAIL", f"{type(exc).__name__}: {exc}")
+            record("多页面与五预设", "FAIL", f"{type(exc).__name__}: {exc}")
             print(traceback.format_exc(), flush=True)
 
         partial_presets = {key: False for key in request.presets}
@@ -109,8 +130,10 @@ def main():
             BlenderProjectExportJob(
                 BlenderProjectRequest([first], partial_presets), blender, partial_blend, overwrite=True,
             ).run()
-            run_inspector("check", partial_blend, output / "partial-check.json")
-            record("部分预设只创建勾选对象", "PASS", "坐标轴及八块橙色薄层长方体")
+            partial_report = run_inspector("check", partial_blend, output / "partial-check.json")
+            if partial_report.get("text_count") != 0:
+                raise RuntimeError("关闭文本预设后仍创建了文本对象")
+            record("部分预设只创建勾选对象", "PASS", "坐标轴及八块橙色薄层长方体；无文本或文本字体／灯组")
         except Exception as exc:
             record("部分预设", "FAIL", f"{type(exc).__name__}: {exc}")
             print(traceback.format_exc(), flush=True)
@@ -135,7 +158,9 @@ def main():
                 "check", moved, output / "updated-check.json",
                 render=output / "updated-overview.png", decorations=True,
             )
-            record("目录搬移后回读、显示编辑与原位更新", "PASS", ".blend 摘要不变；VDB 与新 arrays 一致；创作对象保留")
+            if report.get("text_count") != 20:
+                raise RuntimeError("原位更新后十种文本预设没有完整保留")
+            record("目录搬移后回读、显示编辑与原位更新", "PASS", ".blend 摘要不变；VDB 与新 arrays 一致；创作对象和文本保留")
         except Exception as exc:
             record("回读与原位更新", "FAIL", f"{type(exc).__name__}: {exc}")
             print(traceback.format_exc(), flush=True)

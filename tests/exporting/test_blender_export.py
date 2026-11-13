@@ -16,7 +16,9 @@ from bandscope.exporting.blender_export import (
     assets_path_for, blender_script_path, commit_staged_output, detect_blender,
     probe_blender, remember_blender_path, usage_text,
 )
-from tests.support.blender import make_blender_snapshot, project_report_boxes
+from tests.support.blender import (
+    make_blender_snapshot, project_report_boxes, project_report_texts, project_report_volume,
+)
 from tests.support.publication import MemoryPublicationSettings
 
 
@@ -101,7 +103,7 @@ class BlenderDetectionTests(unittest.TestCase):
             capability = {
                 "blender_version": "5.2.3 LTS", "volume_coefficients": True,
                 "object_space_density": True, "cycles": True,
-                "box_materials": True, "light_linking": True,
+                "box_materials": True, "light_linking": True, "text_presets": True,
             }
             completed = subprocess.CompletedProcess(
                 [], 0, stdout=be.CAPABILITY_PREFIX + json.dumps(capability),
@@ -276,18 +278,25 @@ class BlenderJobTests(unittest.TestCase):
                     Path(entry["vdb_path"]).write_bytes(b"VDB-fake")
                     report = _report(final)
                     boxes, lights = project_report_boxes(metadata, entry["entry_id"])
+                    texts, text_lights = project_report_texts(metadata, entry["entry_id"])
+                    volume_material, volume_lights = project_report_volume(metadata, entry["entry_id"])
                     report.update(
                         entry_id=entry["entry_id"],
                         volume_filepath=f"//{final.stem}.assets/entries/{entry['entry_id']}/volume.vdb",
                         coordinates_present=True,
                         box_presets=boxes,
                         box_lights=lights,
+                        volume_material=volume_material,
+                        volume_lights=volume_lights,
+                        text_presets=texts,
+                        text_lights=text_lights,
                         box_layout=metadata["project"]["box_layout"]["id"],
                     )
                     reports.append(report)
                 Path(payload["report_file"]).write_text(json.dumps({
                     "blend_reopened": True,
                     "render_samples": metadata["project"]["render"]["samples"],
+                    "volume_bounces": metadata["project"]["render"]["volume_bounces"],
                     "box_layout": metadata["project"]["box_layout"],
                     "entries": reports,
                 }), encoding="utf-8")

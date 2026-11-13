@@ -77,8 +77,20 @@ def compute_level_info(
     levels_params: Sequence[float],
     include_zero: bool = False,
     locked_range: Optional[Tuple[float, float]] = None,
+    style=None,
+    resolved_range: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, float]:
     """与 VisualEngine._level_info 数值一致，但不读写任何类级共享状态。"""
+    if style is not None or resolved_range is not None:
+        from bandscope.core.display_style import legacy_display_style
+        from bandscope.processing.display_transfer import display_level_info, level_info
+
+        selected = legacy_display_style(levels_params) if style is None else style
+        if resolved_range is None:
+            return display_level_info(
+                data, selected, locked_range=locked_range, include_zero=include_zero,
+            )
+        return level_info(resolved_range, selected["levels"])
     black, gamma, white = (float(v) for v in levels_params)
     if locked_range is not None:
         d_min, d_max = float(locked_range[0]), float(locked_range[1])
@@ -1667,19 +1679,33 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
                 level_info,
             )
         enhancement = snapshot.payload.get("enhancement")
-        if (enhancement is not None and enhancement["active"]) or float(level_info["gamma_power"]) != 1.:
+        display_style = (snapshot.payload.get("display") or {}).get("background_style")
+        from bandscope.core.display_style import is_independent
+        independent = is_independent(display_style)
+        if ((enhancement is not None and (enhancement["active"] or independent))
+                or float(level_info["gamma_power"]) != 1.):
             from bandscope.rendering.render_core import VolumeAlphaChannel
             from bandscope.rendering.local_enhancement import apply_volume_display
-            from bandscope.processing.display_transfer import channels
+            from bandscope.processing.display_transfer import channels, volume_display_unit_distance
             if alpha_channel is not None:
                 alpha_channel.detach()
-            if enhancement is not None and enhancement["active"]:
+            if enhancement is not None and (enhancement["active"] or independent):
                 color, alpha = enhancement["color"], enhancement["alpha"]
             else:
-                color, alpha = channels(volume, level_info, snapshot.payload["opacity_mode"])
+                color, alpha = channels(
+                    volume, level_info, snapshot.payload["opacity_mode"], style=display_style,
+                    unit_distance=volume_display_unit_distance(snapshot.payload["full_shape"]),
+                )
             alpha_channel = VolumeAlphaChannel(volume_actor, grid, color)
             apply_volume_display(alpha_channel, color, alpha, snapshot.cmap_name, opacity_multiplier)
-            # 截图不画区域边框和编号；增强只体现在体素颜色/alpha 上。
+            if independent:
+                volume_actor.GetProperty().SetScalarOpacityUnitDistance(
+                    volume_display_unit_distance(snapshot.payload["full_shape"])
+                )
+        from bandscope.rendering.render_core import configure_volume_quality
+        configure_volume_quality(
+            volume_actor, plotter, "fine", snapshot.payload.get("render_quality"), publication=True,
+        )
         clip = snapshot.payload.get("clip_render_bounds")
         if clip is not None:
             _apply_clipping_planes(plotter, clip)

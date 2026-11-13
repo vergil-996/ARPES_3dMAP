@@ -84,6 +84,17 @@ def capabilities():
         linking = getattr(light_object, "light_linking", None)
         receiver = getattr(linking, "receiver_collection", None)
         light_linking = linking is not None and hasattr(linking, "receiver_collection")
+        text_curve = bpy.data.curves.new("BandScope text capability probe", "FONT")
+        try:
+            text_curve.body = "A"
+            text_curve.dimensions = "2D"
+            text_curve.fill_mode = "NONE"
+            text_curve.bevel_depth = 0.001
+            text_curve.fill_mode = "BOTH"
+            text_curve.extrude = 0.001
+            text_presets = hasattr(bpy.data.fonts[0], "pack")
+        finally:
+            bpy.data.curves.remove(text_curve)
         return {
             "blender_version": bpy.app.version_string,
             "openvdb_module": openvdb.__name__,
@@ -94,6 +105,7 @@ def capabilities():
             "box_materials": True,
             "material_nodes": sorted(MATERIAL_NODE_INPUTS),
             "light_linking": bool(light_linking),
+            "text_presets": bool(text_presets),
         }
     finally:
         if light_object is not None:
@@ -147,30 +159,81 @@ def math_node(nodes, links, operation, left=None, right=None, name=None):
     return node.outputs[0]
 
 
-def build_material(volume_bounds):
-    material = bpy.data.materials.new("BandScope · absorption + emission")
+def build_material(volume_bounds, volume_shading=None):
+    shading = volume_shading or {"mode": "emission", "parameters": {}}
+    mode = str(shading.get("mode") or "emission")
+    if mode not in {"emission", "hybrid_lit"}:
+        raise RuntimeError(f"未知数据体外观模式：{mode!r}")
+    parameters = shading.get("parameters") or {}
+    hybrid = mode == "hybrid_lit"
+    scattering_amount = float(parameters.get("scattering_amount", 0.65 if hybrid else 0.0))
+    emission_compensation = float(parameters.get("emission_compensation", 0.15 if hybrid else 1.0))
+    anisotropy = float(parameters.get("anisotropy", 0.0))
+    density_multiplier = float(parameters.get("density_multiplier", 1.0))
+    color_adjustment = tuple(float(value) for value in parameters.get(
+        "color_adjustment", (1.0, 1.0, 1.0),
+    ))
+    if (not 0.0 <= scattering_amount <= 1.0 or emission_compensation < 0.0
+            or density_multiplier < 0.0 or len(color_adjustment) != 3):
+        raise RuntimeError("数据体材质参数超出允许范围。")
+
+    material = bpy.data.materials.new(
+        "BandScope · hybrid scattering + emission" if hybrid
+        else "BandScope · absorption + emission"
+    )
     material.use_nodes = True
     nodes = material.node_tree.nodes
     links = material.node_tree.links
     nodes.clear()
     output = nodes.new("ShaderNodeOutputMaterial")
-    output.location = (1100, 100)
+    output.location = (1500, 100)
     coefficients = nodes.new("ShaderNodeVolumeCoefficients")
-    coefficients.location = (850, 100)
-    coefficients.label = "No scattering: absorption + emission"
-    coefficients.inputs["Scatter Coefficients"].default_value = (0.0, 0.0, 0.0)
-    coefficients.inputs["Anisotropy"].default_value = 0.0
+    coefficients.name = "Volume Coefficients"
+    coefficients.location = (1250, 100)
+    coefficients.label = (
+        "Hybrid: absorption + scatter = σ; weak emission" if hybrid
+        else "No scattering: absorption + emission"
+    )
     links.new(coefficients.outputs["Volume"], output.inputs["Volume"])
+
+    def value_node(name, value, location):
+        node = nodes.new("ShaderNodeValue")
+        node.name = name
+        node.label = name
+        node.outputs[0].default_value = float(value)
+        node.location = location
+        return node.outputs[0]
+
+    def vector_node(operation, first, second=None, scale=None, name=None):
+        node = nodes.new("ShaderNodeVectorMath")
+        node.operation = operation
+        if name:
+            node.name = name
+            node.label = name
+        if hasattr(first, "node"):
+            links.new(first, node.inputs[0])
+        else:
+            node.inputs[0].default_value = first
+        if second is not None:
+            if hasattr(second, "node"):
+                links.new(second, node.inputs[1])
+            else:
+                node.inputs[1].default_value = second
+        if scale is not None:
+            if hasattr(scale, "node"):
+                links.new(scale, node.inputs["Scale"])
+            else:
+                node.inputs["Scale"].default_value = scale
+        return node.outputs["Vector"]
 
     info = nodes.new("ShaderNodeVolumeInfo")
     info.location = (-1000, 350)
     info.label = "OpenVDB density + linear color"
-    multiplier = nodes.new("ShaderNodeValue")
-    multiplier.name = "Density multiplier"
-    multiplier.label = "Density multiplier"
-    multiplier.outputs[0].default_value = 1.0
-    multiplier.location = (-1000, 100)
-    density = math_node(nodes, links, "MULTIPLY", info.outputs["Density"], multiplier.outputs[0], "VDB density × multiplier")
+    multiplier = value_node("Density multiplier", density_multiplier, (-1000, 100))
+    density = math_node(
+        nodes, links, "MULTIPLY", info.outputs["Density"], multiplier,
+        "VDB density × multiplier",
+    )
 
     coordinates = nodes.new("ShaderNodeTexCoord")
     coordinates.location = (-1400, -350)
@@ -185,34 +248,52 @@ def build_material(volume_bounds):
         masks.append(math_node(nodes, links, "MULTIPLY", low, high, f"{axis} scientific bounds"))
     mask = math_node(nodes, links, "MULTIPLY", masks[0], masks[1], "XY bounds")
     mask = math_node(nodes, links, "MULTIPLY", mask, masks[2], "Exact data and crop bounds")
-    density = math_node(nodes, links, "MULTIPLY", density, mask, "Clipped absorption density")
+    density = math_node(nodes, links, "MULTIPLY", density, mask, "Clipped total extinction")
 
     adjust = nodes.new("ShaderNodeMixRGB")
     adjust.name = "Color adjustment"
     adjust.label = "Color adjustment · linear RGB multiply"
     adjust.blend_type = "MULTIPLY"
     adjust.inputs[0].default_value = 1.0
-    adjust.inputs[2].default_value = (1.0, 1.0, 1.0, 1.0)
+    adjust.inputs[2].default_value = (*color_adjustment, 1.0)
     adjust.location = (-650, 500)
     links.new(info.outputs["Color"], adjust.inputs[1])
 
-    absorption = nodes.new("ShaderNodeVectorMath")
-    absorption.operation = "SCALE"
-    absorption.location = (350, 50)
-    absorption.label = "σ = -log(1-α) / unit distance"
-    absorption.inputs[0].default_value = (1.0, 1.0, 1.0)
-    links.new(density, absorption.inputs["Scale"])
-    emission = nodes.new("ShaderNodeVectorMath")
-    emission.operation = "SCALE"
-    emission.location = (350, 350)
-    emission.label = "Emission = σ × linear color"
-    links.new(adjust.outputs[0], emission.inputs[0])
-    links.new(density, emission.inputs["Scale"])
-    links.new(absorption.outputs["Vector"], coefficients.inputs["Absorption Coefficients"])
-    links.new(emission.outputs["Vector"], coefficients.inputs["Emission Coefficients"])
+    amount = value_node("Scattering amount", scattering_amount, (-650, 800))
+    compensation = value_node("Emission compensation", emission_compensation, (-400, 800))
+    anisotropy_value = value_node("Anisotropy", anisotropy, (950, -150))
+    links.new(anisotropy_value, coefficients.inputs["Anisotropy"])
+    lower = vector_node("MAXIMUM", adjust.outputs[0], (0.0, 0.0, 0.0), name="Color lower clamp")
+    clamped = vector_node("MINIMUM", lower, (1.0, 1.0, 1.0), name="Color upper clamp")
+    albedo = vector_node(
+        "SCALE", clamped, scale=amount,
+        name="Scattering albedo = amount × clamp(color)",
+    )
+    scatter = vector_node("SCALE", albedo, scale=density, name="Scatter = σ × ω")
+    remaining = vector_node(
+        "SUBTRACT", (1.0, 1.0, 1.0), albedo,
+        name="Absorption fraction = 1 − ω",
+    )
+    absorption = vector_node(
+        "SCALE", remaining, scale=density,
+        name="Absorption = σ × (1 − ω)",
+    )
+    emission_density = math_node(
+        nodes, links, "MULTIPLY", density, compensation,
+        "Emission density = σ × compensation",
+    )
+    emission = vector_node(
+        "SCALE", adjust.outputs[0], scale=emission_density,
+        name="Emission = compensation × σ × color",
+    )
+    links.new(absorption, coefficients.inputs["Absorption Coefficients"])
+    links.new(scatter, coefficients.inputs["Scatter Coefficients"])
+    links.new(emission, coefficients.inputs["Emission Coefficients"])
 
     for index, node in enumerate(node for node in nodes if node.bl_idname == "ShaderNodeMath"):
         node.location = (-650 + (index % 4) * 210, -100 - (index // 4) * 190)
+    for index, node in enumerate(node for node in nodes if node.bl_idname == "ShaderNodeVectorMath"):
+        node.location = (100 + (index % 3) * 300, 450 - (index // 3) * 260)
     return material
 
 
@@ -320,6 +401,144 @@ def text_object(name, body, location, size, material, target, parent, camera):
     obj.rotation_euler = camera.rotation_euler
     curve.materials.append(material)
     return obj
+
+
+_TEXT_FONT_CACHE = {}
+
+
+def create_text_material(settings):
+    material = bpy.data.materials.new(settings["material"])
+    material.use_nodes = True
+    if hasattr(material, "surface_render_method"):
+        material.surface_render_method = "DITHERED"
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+    output = nodes.new("ShaderNodeOutputMaterial")
+    output.name = "BandScope Text Output"
+    output.location = (520, 80)
+    kind = settings["kind"]
+    color = (*settings["color"], 1.0)
+    if kind in {"flat", "outline", "emission"}:
+        shader = nodes.new("ShaderNodeEmission")
+        shader.name = "BandScope Text Emission"
+        shader.inputs["Color"].default_value = color
+        shader.inputs["Strength"].default_value = float(settings["emission_strength"])
+        links.new(shader.outputs[0], output.inputs["Surface"])
+    elif kind in {"matte", "metallic"}:
+        shader = nodes.new("ShaderNodeBsdfPrincipled")
+        shader.name = "BandScope Text Principled"
+        shader.inputs["Base Color"].default_value = color
+        shader.inputs["Metallic"].default_value = float(settings["metallic"])
+        shader.inputs["Roughness"].default_value = float(settings["roughness"])
+        links.new(shader.outputs[0], output.inputs["Surface"])
+    elif kind == "glass":
+        glass = nodes.new("ShaderNodeBsdfGlass")
+        glass.name = "BandScope Text Glass"
+        glass.location = (-420, -80)
+        glass.inputs["Color"].default_value = color
+        glass.inputs["Roughness"].default_value = float(settings["roughness"])
+        glass.inputs["IOR"].default_value = float(settings["ior"])
+        transparent = nodes.new("ShaderNodeBsdfTransparent")
+        transparent.name = "BandScope Text Transparent"
+        transparent.location = (-420, 160)
+        transparent.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+        mix = nodes.new("ShaderNodeMixShader")
+        mix.name = "BandScope Text Glass Mix"
+        mix.location = (160, 80)
+        mix.inputs[0].default_value = float(settings["glass_weight"])
+        links.new(transparent.outputs[0], mix.inputs[1])
+        links.new(glass.outputs[0], mix.inputs[2])
+        links.new(mix.outputs[0], output.inputs["Surface"])
+    else:
+        raise RuntimeError(f"未知文本材质类型：{kind}")
+    material["bandscope_text_kind"] = kind
+    material["bandscope_text_style"] = settings["preset"]
+    return material
+
+
+def _load_text_font(relative, assets_root, assets_dir_name):
+    if relative in _TEXT_FONT_CACHE:
+        return _TEXT_FONT_CACHE[relative]
+    path = assets_root.joinpath(*Path(relative).parts).resolve()
+    if not path.is_file():
+        raise RuntimeError(f"文本预设字体缺失：{path}")
+    font = bpy.data.fonts.load(str(path), check_existing=True)
+    font.pack()
+    if font.packed_file is None:
+        raise RuntimeError(f"文本预设字体未能打包：{path}")
+    font.filepath = f"//{assets_dir_name}/{relative}"
+    _TEXT_FONT_CACHE[relative] = font
+    return font
+
+
+def create_text_presets(scene, target, parent, camera, assets_root, assets_dir_name):
+    layout = scene["text_layout"]
+    target_collection = collection(layout["collection"], target)
+    target_collection.hide_render = False
+    target_collection.hide_viewport = False
+    objects = []
+    for settings in scene.get("text_presets") or ():
+        curve = bpy.data.curves.new(settings["object"] + " data", "FONT")
+        curve.body = "A"
+        curve.align_x = "CENTER"
+        curve.align_y = "CENTER"
+        curve.dimensions = "2D"
+        curve.size = 1.0
+        curve.resolution_u = 12
+        curve.extrude = float(settings["extrude"])
+        curve.bevel_depth = float(settings["bevel_depth"])
+        curve.bevel_resolution = 3
+        curve.fill_mode = settings["fill_mode"]
+        curve.font = _load_text_font(settings["font"], assets_root, assets_dir_name)
+        material = create_text_material(settings)
+        curve.materials.append(material)
+        obj = bpy.data.objects.new(settings["object"], curve)
+        target_collection.objects.link(obj)
+        obj.parent = parent
+        obj.location = Vector(settings["center"])
+        bpy.context.view_layer.update()
+        height = float(obj.dimensions.y)
+        if not math.isfinite(height) or height <= 1.0e-8:
+            raise RuntimeError(f"文本 {settings['preset']} 无法测量大写 A 的实际高度。")
+        scale = float(layout["cap_height"]) / height
+        obj.scale = (scale, scale, scale)
+        obj.rotation_euler = camera.rotation_euler
+        obj["bandscope_text_preset"] = settings["preset"]
+        obj["bandscope_text_kind"] = settings["kind"]
+        obj["bandscope_entry_id"] = scene["entry_id"]
+        objects.append(obj)
+    bpy.context.view_layer.update()
+    return objects
+
+
+def create_text_lighting(scene, target, parent, objects):
+    settings = scene["text_lighting"]
+    receiver = collection(settings["receiver_collection"], target)
+    for obj in objects:
+        receiver.objects.link(obj)
+    lights = collection(settings["collection"], target)
+    layout = scene["text_layout"]
+    center = Vector(layout["center"])
+    right, up, backward = (Vector(layout[key]) for key in ("right", "up", "backward"))
+    created = []
+    for record in settings["lights"]:
+        distance = float(record["distance"])
+        position = center + backward * distance + up * (distance * 0.4) - right * (distance * 0.2)
+        data = bpy.data.lights.new(record["object"], type="AREA")
+        data.shape = "SQUARE"
+        data.size = float(record["size"])
+        data.energy = float(record["energy"])
+        data.color = (1.0, 1.0, 1.0)
+        obj = bpy.data.objects.new(record["object"], data)
+        lights.objects.link(obj)
+        obj.parent = parent
+        obj.location = position
+        obj.rotation_euler = (center - position).to_track_quat("-Z", "Y").to_euler()
+        obj.light_linking.receiver_collection = receiver
+        obj["bandscope_text_light"] = True
+        created.append(obj)
+    return created
 
 
 def create_references(metadata, target, parent, camera):
@@ -815,6 +1034,160 @@ def create_box_lights(scene, target, parent):
     return objects
 
 
+def create_volume_lighting(scene, target, parent, volume):
+    lighting = scene.get("volume_lighting") or {}
+    if not lighting.get("enabled"):
+        return []
+    receiver = collection(lighting["receiver_collection"], target)
+    move_to_collection(volume, receiver)
+    light_collection = collection(lighting["collection"], target)
+    objects = []
+    for record in lighting.get("lights") or ():
+        position = Vector(record["position"])
+        data = bpy.data.lights.new(record["object"], type="AREA")
+        data.shape = "SQUARE"
+        data.size = float(record["size"])
+        data.energy = float(record["energy"])
+        data.color = tuple(float(value) for value in record["color"])
+        obj = bpy.data.objects.new(record["object"], data)
+        light_collection.objects.link(obj)
+        obj.parent = parent
+        obj.location = position
+        obj.rotation_euler = (
+            Vector(record["target"]) - position
+        ).to_track_quat("-Z", "Y").to_euler()
+        obj.light_linking.receiver_collection = receiver
+        obj["bandscope_volume_light"] = record["role"]
+        obj["bandscope_receiver_collection"] = receiver.name
+        obj["bandscope_light_energy"] = float(record["energy"])
+        obj["bandscope_light_distance"] = float(record["distance"])
+        objects.append(obj)
+    return objects
+
+
+def validate_volume_material(volume, project):
+    shading = project.get("volume_shading") or {"mode": "emission", "parameters": {}}
+    mode = str(shading.get("mode") or "emission")
+    parameters = shading.get("parameters") or {}
+    hybrid = mode == "hybrid_lit"
+    expected = {
+        "Density multiplier": float(parameters.get("density_multiplier", 1.0)),
+        "Scattering amount": float(parameters.get("scattering_amount", 0.65 if hybrid else 0.0)),
+        "Emission compensation": float(parameters.get("emission_compensation", 0.15 if hybrid else 1.0)),
+        "Anisotropy": float(parameters.get("anisotropy", 0.0)),
+    }
+    material = volume.data.materials[0]
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    for name, value in expected.items():
+        node = nodes.get(name)
+        if node is None or node.bl_idname != "ShaderNodeValue" \
+                or abs(float(node.outputs[0].default_value) - value) > 1.0e-6:
+            raise RuntimeError(f"体材质参数节点 {name} 缺失或与工程配置不一致。")
+    adjust = nodes.get("Color adjustment")
+    color = tuple(float(value) for value in parameters.get("color_adjustment", (1.0, 1.0, 1.0)))
+    if adjust is None or any(
+            abs(float(adjust.inputs[2].default_value[index]) - color[index]) > 1.0e-6
+            for index in range(3)):
+        raise RuntimeError("体材质 Color adjustment 缺失或与工程配置不一致。")
+    coefficients = nodes.get("Volume Coefficients")
+    if coefficients is None or coefficients.bl_idname != "ShaderNodeVolumeCoefficients":
+        raise RuntimeError("体材质缺少 Volume Coefficients。")
+    expected_sources = {
+        "Absorption Coefficients": "Absorption = σ × (1 − ω)",
+        "Scatter Coefficients": "Scatter = σ × ω",
+        "Emission Coefficients": "Emission = compensation × σ × color",
+    }
+    connections = {}
+    for socket_name, source_name in expected_sources.items():
+        socket = coefficients.inputs[socket_name]
+        source = socket.links[0].from_node if socket.links else None
+        if source is None or source.name != source_name:
+            raise RuntimeError(f"体材质 {socket_name} 未连接到 {source_name}。")
+        extinction = nodes.get("Clipped total extinction")
+        upstream = [source]
+        for input_socket in source.inputs:
+            upstream.extend(_upstream_any(input_socket))
+        if extinction is None or extinction not in upstream:
+            raise RuntimeError(f"体材质 {socket_name} 没有使用裁剪后的总消光，可能产生底雾。")
+        connections[socket_name] = source.name
+    if not coefficients.inputs["Anisotropy"].is_linked:
+        raise RuntimeError("体材质 Anisotropy 未连接到独立参数节点。")
+    albedo = nodes.get("Scattering albedo = amount × clamp(color)")
+    remaining = nodes.get("Absorption fraction = 1 − ω")
+    if (albedo is None or remaining is None or remaining.operation != "SUBTRACT"
+            or not remaining.inputs[1].is_linked
+            or remaining.inputs[1].links[0].from_node != albedo):
+        raise RuntimeError("体材质没有按吸收＋散射＝总消光连接。")
+    return {
+        "material": material.name,
+        "mode": mode,
+        "parameters": {
+            "density_multiplier": float(nodes["Density multiplier"].outputs[0].default_value),
+            "scattering_amount": float(nodes["Scattering amount"].outputs[0].default_value),
+            "emission_compensation": float(nodes["Emission compensation"].outputs[0].default_value),
+            "anisotropy": float(nodes["Anisotropy"].outputs[0].default_value),
+        },
+        "color_adjustment": list(adjust.inputs[2].default_value[:3]),
+        "connections": connections,
+        "conserves_extinction": True,
+        "zero_density_safe": True,
+        "no_scattering": mode == "emission" and expected["Scattering amount"] == 0.0,
+        "material_validated": True,
+    }
+
+
+def validate_volume_lighting(scene, root, volume):
+    lighting = scene.get("volume_lighting") or {}
+    data_collection = bpy.data.collections.get(scene["composition"]["data_collection"])
+    flagged = [
+        obj for obj in data_collection.all_objects if obj.type == "LIGHT"
+        and obj.get("bandscope_volume_light")
+    ]
+    if not lighting.get("enabled"):
+        if flagged:
+            raise RuntimeError(f"条目 {scene['entry_id']} 的自发光模式不应创建数据体灯。")
+        return []
+    receiver = bpy.data.collections.get(lighting["receiver_collection"])
+    group = bpy.data.collections.get(lighting["collection"])
+    if (receiver is None or group is None
+            or receiver.name not in data_collection.children
+            or group.name not in data_collection.children
+            or set(receiver.objects) != {volume}):
+        raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯组或专用接收者不合规。")
+    records = []
+    for expected in lighting.get("lights") or ():
+        obj = bpy.data.objects.get(expected["object"])
+        if (obj is None or obj.type != "LIGHT" or obj.data.type != "AREA"
+                or obj.parent != root or obj.name not in group.objects
+                or obj.light_linking.receiver_collection != receiver):
+            raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯 {expected['object']} 或链接缺失。")
+        if obj.constraints:
+            raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯不应绑定相机运动。")
+        if ((obj.location - Vector(expected["position"])).length > 1.0e-5
+                or abs(float(obj.data.energy) - float(expected["energy"])) > 1.0e-4
+                or abs(float(obj.data.size) - float(expected["size"])) > 1.0e-6
+                or any(abs(float(obj.data.color[index]) - float(expected["color"][index])) > 1.0e-6
+                       for index in range(3))):
+            raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯位置、颜色、尺寸或功率不符。")
+        direction = obj.rotation_euler.to_quaternion() @ Vector((0.0, 0.0, -1.0))
+        target = (Vector(expected["target"]) - obj.location).normalized()
+        if direction.normalized().dot(target) < 1.0 - 1.0e-6:
+            raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯没有朝向数据中心。")
+        records.append({
+            "role": expected["role"], "object": obj.name, "type": obj.data.type,
+            "energy": float(obj.data.energy), "size": float(obj.data.size),
+            "color": list(obj.data.color), "position": list(obj.location),
+            "target": list(expected["target"]), "parent": root.name,
+            "collection": group.name, "receiver_collection": receiver.name,
+            "receiver_objects": [item.name for item in receiver.objects],
+            "camera_bound": False,
+        })
+    if len(records) != 3 or len(flagged) != 3:
+        raise RuntimeError(f"条目 {scene['entry_id']} 的数据体灯数量不是三盏。")
+    return records
+
+
 def _upstream_nodes(socket, seen=None):
     if seen is None:
         seen = set()
@@ -1138,7 +1511,10 @@ def validate_box_lights(scene, parent, presets, box_records):
         raise RuntimeError(f"条目 {scene.get('entry_id')} 的数据 Collection 缺失。")
     records = []
     if not enabled_lit:
-        leftover = [obj for obj in data_collection.all_objects if obj.type == "LIGHT"]
+        leftover = [
+            obj for obj in data_collection.all_objects
+            if obj.type == "LIGHT" and obj.get("bandscope_box_light")
+        ]
         if leftover:
             raise RuntimeError(f"条目 {scene.get('entry_id')} 不需要灯光却创建了 LIGHT 对象。")
         if bpy.data.collections.get(lighting.get("collection", "")) is not None:
@@ -1189,6 +1565,120 @@ def validate_box_lights(scene, parent, presets, box_records):
     return records
 
 
+def validate_text_material(settings, obj):
+    material = obj.data.materials[0]
+    nodes = material.node_tree.nodes
+    kind = settings["kind"]
+    if material.get("bandscope_text_kind") != kind:
+        raise RuntimeError(f"文本 {settings['preset']} 的材质类型记录不正确。")
+    if kind in {"flat", "outline", "emission"}:
+        shader = nodes.get("BandScope Text Emission")
+        if shader is None or shader.bl_idname != "ShaderNodeEmission":
+            raise RuntimeError(f"文本 {settings['preset']} 缺少发光材质节点。")
+        if abs(float(shader.inputs["Strength"].default_value) - float(settings["emission_strength"])) > 1e-6:
+            raise RuntimeError(f"文本 {settings['preset']} 的发光强度不正确。")
+    elif kind in {"matte", "metallic"}:
+        shader = nodes.get("BandScope Text Principled")
+        if shader is None or shader.bl_idname != "ShaderNodeBsdfPrincipled":
+            raise RuntimeError(f"文本 {settings['preset']} 缺少 Principled 材质节点。")
+        if (abs(float(shader.inputs["Metallic"].default_value) - float(settings["metallic"])) > 1e-6
+                or abs(float(shader.inputs["Roughness"].default_value) - float(settings["roughness"])) > 1e-6):
+            raise RuntimeError(f"文本 {settings['preset']} 的金属度或粗糙度不正确。")
+    elif kind == "glass":
+        glass = nodes.get("BandScope Text Glass")
+        transparent = nodes.get("BandScope Text Transparent")
+        mix = nodes.get("BandScope Text Glass Mix")
+        if (glass is None or glass.bl_idname != "ShaderNodeBsdfGlass"
+                or transparent is None or transparent.bl_idname != "ShaderNodeBsdfTransparent"
+                or mix is None or mix.bl_idname != "ShaderNodeMixShader"):
+            raise RuntimeError("玻璃文字缺少 Glass、Transparent 或混合节点。")
+        if (abs(float(glass.inputs["IOR"].default_value) - float(settings["ior"])) > 1e-6
+                or abs(float(glass.inputs["Roughness"].default_value) - float(settings["roughness"])) > 1e-6
+                or abs(float(mix.inputs[0].default_value) - float(settings["glass_weight"])) > 1e-6):
+            raise RuntimeError("玻璃文字的 IOR、粗糙度或混合比例不正确。")
+    else:
+        raise RuntimeError(f"未知文本材质类型：{kind}")
+    return True
+
+
+def validate_text_presets(scene, parent, presets, project):
+    layout = scene.get("text_layout") or {}
+    owner = bpy.data.collections.get(layout.get("collection", ""))
+    enabled = bool(presets.get("text_presets"))
+    if not enabled:
+        if owner is not None or any(bpy.data.objects.get(item["object"]) for item in scene.get("text_presets") or ()):
+            raise RuntimeError(f"条目 {scene['entry_id']} 未勾选文本预设却创建了文本对象。")
+        lighting = scene.get("text_lighting") or {}
+        if bpy.data.collections.get(lighting.get("collection", "")) is not None:
+            raise RuntimeError(f"条目 {scene['entry_id']} 未勾选文本预设却创建了文本灯组。")
+        return [], []
+    if owner is None or owner.hide_render or owner.hide_viewport:
+        raise RuntimeError(f"条目 {scene['entry_id']} 的文本 Collection 缺失或被隐藏。")
+    records = []
+    data_names, material_names = set(), set()
+    for settings in scene.get("text_presets") or ():
+        obj = bpy.data.objects.get(settings["object"])
+        if obj is None or obj.type != "FONT" or obj.parent != parent:
+            raise RuntimeError(f"文本预设 {settings['preset']} 缺失或父对象不正确。")
+        if obj.name not in {item.name for item in owner.objects} or obj.data.body != "A":
+            raise RuntimeError(f"文本预设 {settings['preset']} 不在独立 Collection 中或正文不是大写 A。")
+        if len(obj.data.materials) != 1 or obj.data.materials[0].name != settings["material"]:
+            raise RuntimeError(f"文本预设 {settings['preset']} 没有独立材质。")
+        if obj.data.name in data_names or obj.data.materials[0].name in material_names:
+            raise RuntimeError(f"条目 {scene['entry_id']} 的文本共享曲线或材质。")
+        data_names.add(obj.data.name)
+        material_names.add(obj.data.materials[0].name)
+        font = obj.data.font
+        expected_font = f"//{project['assets']['directory']}/{settings['font']}"
+        if font.packed_file is None or font.filepath.replace("\\", "/") != expected_font:
+            raise RuntimeError(f"文本预设 {settings['preset']} 的字体未打包或路径不正确。")
+        if (obj.data.fill_mode != settings["fill_mode"]
+                or abs(float(obj.data.extrude) - float(settings["extrude"])) > 1e-6
+                or abs(float(obj.data.bevel_depth) - float(settings["bevel_depth"])) > 1e-6):
+            raise RuntimeError(f"文本预设 {settings['preset']} 的轮廓、挤出或倒角配置不正确。")
+        if (obj.location - Vector(settings["center"])).length > 1e-6:
+            raise RuntimeError(f"文本预设 {settings['preset']} 的位置不正确。")
+        bpy.context.view_layer.update()
+        cap_height = float(obj.dimensions.y)
+        if abs(cap_height - float(layout["cap_height"])) > 1e-4:
+            raise RuntimeError(f"文本预设 {settings['preset']} 的大写 A 实际高度不正确：{cap_height}")
+        records.append({
+            "preset": settings["preset"], "object": obj.name, "data": obj.data.name,
+            "material": obj.data.materials[0].name, "kind": settings["kind"],
+            "body": obj.data.body, "parent": parent.name, "collection": owner.name,
+            "font": font.name, "font_filepath": font.filepath, "font_packed": True,
+            "cap_height": cap_height, "center": list(obj.location),
+            "row": settings["row"], "column": settings["column"],
+            "fill_mode": obj.data.fill_mode, "extrude": float(obj.data.extrude),
+            "bevel_depth": float(obj.data.bevel_depth),
+            "material_validated": validate_text_material(settings, obj),
+        })
+    lighting = scene["text_lighting"]
+    light_collection = bpy.data.collections.get(lighting["collection"])
+    receiver = bpy.data.collections.get(lighting["receiver_collection"])
+    if light_collection is None or receiver is None:
+        raise RuntimeError(f"条目 {scene['entry_id']} 的文本灯组或接收者 Collection 缺失。")
+    if {obj.name for obj in receiver.objects} != {record["object"] for record in records}:
+        raise RuntimeError(f"条目 {scene['entry_id']} 的文本灯光接收者集合不完整。")
+    light_records = []
+    expected_lights = {item["object"]: item for item in lighting["lights"]}
+    if {obj.name for obj in light_collection.objects} != set(expected_lights):
+        raise RuntimeError(f"条目 {scene['entry_id']} 的文本辅助灯对象集合不正确。")
+    for name, settings in expected_lights.items():
+        obj = bpy.data.objects.get(name)
+        if (obj is None or obj.type != "LIGHT" or obj.data.type != "AREA" or obj.parent != parent
+                or not obj.get("bandscope_text_light") or obj.light_linking.receiver_collection != receiver
+                or abs(float(obj.data.energy) - float(settings["energy"])) > 1e-6
+                or abs(float(obj.data.size) - float(settings["size"])) > 1e-6):
+            raise RuntimeError(f"条目 {scene['entry_id']} 的文本辅助灯 {name} 不合规。")
+        light_records.append({
+            "object": obj.name, "type": obj.data.type, "energy": float(obj.data.energy),
+            "size": float(obj.data.size), "parent": parent.name,
+            "receiver_collection": receiver.name, "receiver_count": len(receiver.objects),
+        })
+    return records, light_records
+
+
 def write_vdb(scene, arrays, vdb_path):
     density = openvdb.FloatGrid()
     density.name = "density"
@@ -1215,11 +1705,12 @@ def write_vdb(scene, arrays, vdb_path):
     return values.shape
 
 
-def configure_scene(samples=32):
+def configure_scene(samples=32, volume_bounces=0):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.device = "CPU"
     scene.cycles.samples = max(32, int(samples))
+    scene.cycles.volume_bounces = int(volume_bounces)
     scene.cycles.use_denoising = True
     scene.render.film_transparent = True
     scene.render.image_settings.file_format = "PNG"
@@ -1423,7 +1914,7 @@ def _selected_scene(scene, presets):
     return selected
 
 
-def _create_entry(scene, entry_job, project):
+def _create_entry(scene, entry_job, project, assets_root):
     composition = scene["composition"]
     translation = project["layout"]["entries"][scene["entry_id"]]["translation"]
     with np.load(entry_job["arrays_file"], allow_pickle=False) as arrays:
@@ -1444,8 +1935,15 @@ def _create_entry(scene, entry_job, project):
         scene, camera_collection, offset=translation,
         activate=not project["overview_camera"]["enabled"],
     )
-    material = build_material(scene["blender_grid"]["material_clip_bounds"])
-    material.name = "BandScope · absorption + emission" + composition.get("name_suffix", "")
+    material = build_material(
+        scene["blender_grid"]["material_clip_bounds"], project.get("volume_shading"),
+    )
+    material.name = (
+        ("BandScope · hybrid scattering + emission"
+         if (project.get("volume_shading") or {}).get("mode") == "hybrid_lit"
+         else "BandScope · absorption + emission")
+        + composition.get("name_suffix", "")
+    )
     volume_data = bpy.data.volumes.new("BandScope VDB" + composition.get("name_suffix", ""))
     volume_data.filepath = str(entry_job["vdb_path"])
     volume_data.render.space = "OBJECT"
@@ -1472,10 +1970,18 @@ def _create_entry(scene, entry_job, project):
     selected = _selected_scene(scene, presets)
     boxes = create_box_presets(selected, data_collection, root)
     lights = create_box_lights(selected, data_collection, root)
+    volume_lights = create_volume_lighting(scene, data_collection, root, volume)
+    texts, text_lights = [], []
+    if presets.get("text_presets"):
+        texts = create_text_presets(
+            scene, data_collection, root, camera, assets_root, project["assets"]["directory"],
+        )
+        text_lights = create_text_lighting(scene, data_collection, root, texts)
     return {
         "scene": scene, "root": root, "volume": volume, "camera": camera,
         "data_collection": data_collection, "camera_collection": camera_collection,
         "shape": shape, "boxes": boxes, "lights": lights,
+        "volume_lights": volume_lights, "texts": texts, "text_lights": text_lights,
     }
 
 
@@ -1576,6 +2082,9 @@ def _validate_entry(scene, entry_job, project):
         raise RuntimeError(f"条目 {entry_id} 未选择坐标参考却存在对象。")
     boxes = validate_box_presets(scene, root, presets)
     lights = validate_box_lights(scene, root, presets, boxes)
+    volume_material = validate_volume_material(volume, project)
+    volume_lights = validate_volume_lighting(scene, root, volume)
+    texts, text_lights = validate_text_presets(scene, root, presets, project)
     layout = project.get("box_layout") or {}
     if any(box.get("layout") != layout.get("id") for box in boxes):
         raise RuntimeError(f"条目 {entry_id} 的薄板布局与工程配置不一致。")
@@ -1602,14 +2111,36 @@ def _validate_entry(scene, entry_job, project):
         "coordinates_present": references is not None,
         "box_presets": boxes,
         "box_lights": lights,
+        "volume_material": volume_material,
+        "volume_lights": volume_lights,
+        "text_presets": texts,
+        "text_lights": text_lights,
         "box_layout": layout.get("id"),
         "density_space": volume.data.render.space,
         "weak_signal_clipping": volume.data.render.clipping,
     }
 
 
+def evaluated_geometry_points(objects, depsgraph):
+    points = []
+    for source in objects:
+        if source.type in {"EMPTY", "CAMERA", "LIGHT"}:
+            continue
+        obj = source.evaluated_get(depsgraph)
+        if obj.type == "FONT":
+            mesh = obj.to_mesh()
+            try:
+                if mesh.vertices:
+                    points.extend(tuple(obj.matrix_world @ vertex.co) for vertex in mesh.vertices)
+                    continue
+            finally:
+                obj.to_mesh_clear()
+        points.extend(tuple(obj.matrix_world @ Vector(corner)) for corner in obj.bound_box)
+    return points
+
+
 def _fit_actual_entry_layout(created, metadata, metadata_path):
-    """Use evaluated object bounds, including text, before placing adjacent groups."""
+    """Use evaluated object bounds, including exact text meshes, before placing groups."""
     project = metadata["project"]
     previous_max = None
     for record in created:
@@ -1619,11 +2150,7 @@ def _fit_actual_entry_layout(created, metadata, metadata_path):
         root.location = (0.0, 0.0, 0.0)
         bpy.context.view_layer.update()
         depsgraph = bpy.context.evaluated_depsgraph_get()
-        points = [
-            tuple(obj.matrix_world @ Vector(corner))
-            for source in collection.all_objects if source.type not in {"EMPTY", "CAMERA", "LIGHT"}
-            for obj in (source.evaluated_get(depsgraph),) for corner in obj.bound_box
-        ]
+        points = evaluated_geometry_points(collection.all_objects, depsgraph)
         if not points:
             raise RuntimeError(f"条目 {record['scene']['entry_id']} 没有可排布对象。")
         values = np.asarray(points, dtype=np.float64)
@@ -1645,7 +2172,7 @@ def _fit_actual_entry_layout(created, metadata, metadata_path):
         )
         previous_max = float(world_high[0])
         bpy.context.view_layer.update()
-    project["layout"]["bounds_source"] = "evaluated Blender object bounds including text"
+    project["layout"]["bounds_source"] = "evaluated Blender bounds with exact text mesh vertices"
     metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1655,12 +2182,15 @@ def build_scene(job):
     output_blend = Path(job["output_blend"])
     jobs = {entry["entry_id"]: entry for entry in job["entries"]}
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    configure_scene((project.get("render") or {}).get("samples", 32))
+    _TEXT_FONT_CACHE.clear()
+    render = project.get("render") or {}
+    configure_scene(render.get("samples", 32), render.get("volume_bounces", 0))
     created = []
     total = len(metadata["entries"])
+    assets_root = Path(job["metadata_file"]).parent
     for index, scene in enumerate(metadata["entries"]):
         progress(30 + int(35 * index / total), f"创建条目 {scene['entry_id']} 的体数据与预设")
-        created.append(_create_entry(scene, jobs[scene["entry_id"]], project))
+        created.append(_create_entry(scene, jobs[scene["entry_id"]], project, assets_root))
     _fit_actual_entry_layout(created, metadata, Path(job["metadata_file"]))
     if project["overview_camera"]["enabled"]:
         overview_collection = collection("BandScope Overview Camera", bpy.context.scene.collection)
@@ -1684,6 +2214,13 @@ def build_scene(job):
     mesh_names = [box["mesh"] for report in reports for box in report["box_presets"]]
     if len(set(material_names)) != len(material_names) or len(set(mesh_names)) != len(mesh_names):
         raise RuntimeError("不同条目或长方体意外共享网格或材质。")
+    volume_materials = [report["volume_material"]["material"] for report in reports]
+    if len(set(volume_materials)) != len(volume_materials):
+        raise RuntimeError("不同条目意外共享可变数据体材质。")
+    text_materials = [item["material"] for report in reports for item in report["text_presets"]]
+    text_curves = [item["data"] for report in reports for item in report["text_presets"]]
+    if len(set(text_materials)) != len(text_materials) or len(set(text_curves)) != len(text_curves):
+        raise RuntimeError("不同条目或文本预设意外共享文字曲线或材质。")
     camera = bpy.context.scene.camera
     report = {
         "schema_version": metadata["schema_version"],
@@ -1694,7 +2231,9 @@ def build_scene(job):
         "overview_camera": project["overview_camera"],
         "box_layout": project.get("box_layout") or {},
         "box_materials": project.get("box_materials") or {},
+        "text_fonts": project.get("text_fonts") or {},
         "render_samples": int(bpy.context.scene.cycles.samples),
+        "volume_bounces": int(bpy.context.scene.cycles.volume_bounces),
         "render_engine": bpy.context.scene.render.engine,
         "transparent_background": bpy.context.scene.render.film_transparent,
         "view_transform": bpy.context.scene.view_settings.view_transform,

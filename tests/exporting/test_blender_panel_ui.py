@@ -14,10 +14,10 @@ from PyQt5.QtWidgets import QApplication, QGroupBox, QWidget
 from bandscope.exporting.blender_batch import BlenderPageCandidate
 from bandscope.exporting.blender_export import BlenderExportResult
 from bandscope.exporting.blender_materials import MATERIAL_SPECS
-from bandscope.exporting.blender_project import BOX_GROUP_PRESET, PRESET_KEYS
+from bandscope.exporting.blender_project import BOX_GROUP_PRESET, PRESET_KEYS, TEXT_GROUP_PRESET
 from bandscope.exporting.blender_project_dialog import BlenderProjectDialog
 from bandscope.exporting.publication_dialog import PublicationExportDialog
-from tests.support.blender import make_blender_snapshot
+from tests.support.blender import make_blender_snapshot, write_fake_blender_project
 from tests.support.publication import MemoryPublicationSettings, _make_2d_snapshot
 
 
@@ -108,6 +108,15 @@ class BlenderPanelUiTests(unittest.TestCase):
         labels = [child.text() for child in self.panel.findChildren(type(self.panel.source_label))]
         self.assertTrue(any("不是 Blender 渲染预览" in text for text in labels))
 
+    def test_volume_mode_selector_defaults_to_emission_and_offers_hybrid(self):
+        combo = self.panel.volume_mode_combo
+        self.assertEqual(combo.count(), 2)
+        self.assertEqual(self.panel.selected_volume_mode(), "emission")
+        self.assertEqual(combo.itemText(0), "自发光")
+        self.assertEqual(combo.itemText(1), "柔和受光")
+        combo.setCurrentIndex(1)
+        self.assertEqual(self.panel.selected_volume_mode(), "hybrid_lit")
+
     def test_unified_box_preset_replaces_colors_and_removes_material_layout_group(self):
         self.assertEqual(set(self.panel.preset_checks), set(PRESET_KEYS))
         self.assertEqual(self.panel.preset_checks[BOX_GROUP_PRESET].text(), "薄层长方体")
@@ -121,6 +130,15 @@ class BlenderPanelUiTests(unittest.TestCase):
         group_titles = [group.title() for group in self.panel.findChildren(QGroupBox)]
         self.assertFalse(any("薄层长方体材质与布局" in title for title in group_titles))
 
+    def test_text_preset_is_one_default_checked_group(self):
+        check = self.panel.preset_checks[TEXT_GROUP_PRESET]
+        self.assertEqual(check.text(), "文本预设")
+        self.assertTrue(check.isChecked())
+        check.setChecked(False)
+        self.assertFalse(self.panel.selected_presets()[TEXT_GROUP_PRESET])
+        self.assertTrue(all(self.panel.preset_checks[key].isChecked() for key in PRESET_KEYS
+                            if key != TEXT_GROUP_PRESET))
+
     def test_export_panel_is_scrollable_without_material_group(self):
         self.assertIs(self.dialog.stack.widget(0), self.dialog.export_scroll)
         self.assertIs(self.dialog.export_scroll.widget(), self.panel)
@@ -130,12 +148,46 @@ class BlenderPanelUiTests(unittest.TestCase):
         self.panel._task = object()
         self.panel._set_busy_widgets(True)
         self.assertFalse(any(check.isEnabled() for check in self.panel.preset_checks.values()))
+        self.assertFalse(self.panel.volume_mode_combo.isEnabled())
+        self.assertFalse(self.panel.save_recipe_check.isEnabled())
         self.panel._task = None
         self.panel._set_busy_widgets(False)
         self.assertTrue(all(check.isEnabled() for check in self.panel.preset_checks.values()))
+        self.assertTrue(self.panel.volume_mode_combo.isEnabled())
+        self.assertTrue(self.panel.save_recipe_check.isEnabled())
+
+    def test_recipe_switch_defaults_on_and_is_remembered_only_by_window(self):
+        from PyQt5.QtWidgets import QMessageBox
+        self.assertTrue(self.panel.save_recipe_check.isChecked())
+        self.panel.save_recipe_check.setChecked(False)
+        self.assertFalse(self.window._blender_save_recipe)
+        self.dialog.reject()
+        self.dialog.show_export()
+        self.assertFalse(self.panel.save_recipe_check.isChecked())
+        second_window = _Window()
+        self.addCleanup(second_window.close)
+        second_dialog = BlenderProjectDialog(second_window)
+        self.addCleanup(second_dialog.deleteLater)
+        self.assertTrue(second_dialog.export_panel.save_recipe_check.isChecked())
+
+    def test_overwrite_prompt_warns_that_disabled_recipe_export_removes_old_file(self):
+        from PyQt5.QtWidgets import QMessageBox
+        self.panel.path_edit.setText(str(self.executable))
+        self.panel.save_recipe_check.setChecked(False)
+        final = Path(self.tempdir.name) / "existing.blend"
+        final.write_bytes(b"old")
+        Path(str(final) + ".bsview.json").write_text("old recipe", encoding="utf-8")
+        with patch("bandscope.exporting.blender_panel.detect_blender", return_value=self.executable), \
+                patch("bandscope.exporting.blender_panel.blender_version", return_value="5.2.3 LTS"), \
+                patch("bandscope.exporting.blender_panel.QMessageBox.question", return_value=QMessageBox.Cancel) as question, \
+                patch.object(self.panel, "_freeze_selected") as freeze:
+            self.assertFalse(self.panel.start_export(final))
+        self.assertIn("旧复现配置也会随覆盖移除", question.call_args.args[2])
+        freeze.assert_not_called()
 
     def test_started_task_keeps_original_request_and_cancel_is_cooperative(self):
         self.panel.path_edit.setText(str(self.executable))
+        self.panel.volume_mode_combo.setCurrentIndex(1)
         pool = _Pool()
         jobs = []
 
@@ -144,6 +196,7 @@ class BlenderPanelUiTests(unittest.TestCase):
                 self.request = request
                 self.output_path = output
                 self.cancel_event = kwargs["cancel_event"]
+                self.save_recipe = kwargs["save_recipe"]
                 jobs.append(self)
 
         with patch("bandscope.exporting.blender_panel.BlenderProjectExportJob", FakeJob), \
@@ -155,9 +208,12 @@ class BlenderPanelUiTests(unittest.TestCase):
         self.assertTrue(started)
         self.assertTrue(self.panel.busy)
         self.assertEqual(len(pool.tasks), 1)
+        self.assertTrue(jobs[0].save_recipe)
         self.assertIs(jobs[0].request.snapshots[0], self.snapshot)
+        self.assertEqual(jobs[0].request.volume_mode, "hybrid_lit")
         self.assertEqual(jobs[0].request.box_layout, "right_front_groups")
         self.assertEqual(len(jobs[0].request.enabled_boxes()), 8)
+        self.assertEqual(len(jobs[0].request.enabled_texts()), 10)
         for spec in MATERIAL_SPECS:
             box = jobs[0].request.boxes[spec.material_id]
             self.assertEqual(box.material_id, spec.material_id)
@@ -168,6 +224,8 @@ class BlenderPanelUiTests(unittest.TestCase):
         self.assertIs(jobs[0].request.snapshots[0], self.snapshot)
         self.assertEqual(jobs[0].request.snapshots[0].snapshot_id, "blender-synthetic")
         self.panel.preset_checks[BOX_GROUP_PRESET].setChecked(False)
+        self.panel.volume_mode_combo.setCurrentIndex(0)
+        self.assertEqual(jobs[0].request.volume_mode, "hybrid_lit")
         self.assertTrue(jobs[0].request.presets[BOX_GROUP_PRESET])
         self.assertEqual(len(jobs[0].request.enabled_boxes()), 8)
         self.assertEqual(jobs[0].request.box_layout, "right_front_groups")
@@ -176,6 +234,17 @@ class BlenderPanelUiTests(unittest.TestCase):
         pool.tasks[0].signals.failed.emit("cancelled", True)
         self.assertFalse(self.panel.busy)
         self.assertIn("已取消", self.panel.status_label.text())
+
+    def test_editor_displays_exported_volume_mode_as_read_only(self):
+        blend, _metadata = write_fake_blender_project(
+            Path(self.tempdir.name) / "reader", volume_mode="hybrid_lit",
+        )
+        self.dialog.editor.load_project(blend)
+        self.assertIn("柔和受光", self.dialog.editor.volume_mode_label.text())
+        self.assertIn("hybrid_lit", self.dialog.editor.volume_mode_label.text())
+        self.assertIn("重新导出", self.dialog.editor.volume_mode_label.text())
+        self.assertIn("不模拟 Blender 材质与灯光", self.dialog.editor.warning_label.text())
+        self.assertNotIn("volume_mode_combo", self.dialog.editor.__dict__)
 
     def test_export_slot_ignores_button_checked_flag(self):
         # QPushButton.clicked 会把 checked(bool) 作为第一个位置参数传入；
@@ -216,6 +285,15 @@ class BlenderPanelUiTests(unittest.TestCase):
             self.panel.open_folder()
             self.assertEqual(open_url.call_count, 2)
         self.assertIn("scene.assets", self.panel.status_label.text())
+
+    def test_reopening_export_dialog_resets_completed_progress(self):
+        final = Path(self.tempdir.name) / "scene.blend"
+        result = BlenderExportResult(final, Path(self.tempdir.name) / "scene.assets", {})
+        self.panel._on_succeeded(result)
+        self.assertEqual(self.panel.progress_bar.value(), 100)
+        self.dialog.reject()
+        self.dialog.show_export()
+        self.assertEqual(self.panel.progress_bar.value(), 0)
 
     def test_dialog_close_cancels_busy_task_first(self):
         self.panel._task = object()

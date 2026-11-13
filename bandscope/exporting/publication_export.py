@@ -139,7 +139,9 @@ def capture_snapshot(window) -> PublicationSnapshot:
     prepare_recipe = getattr(window, "_prepare_recipe_capture", None)
     if prepare_recipe is not None:
         prepare_recipe()
-    context = window._compute_render_context(spec)
+    context_getter = getattr(window, "_context_for_publication_capture", None)
+    context = (context_getter(spec) if context_getter is not None
+               else window._compute_render_context(spec))
     if context is None:
         raise ExportError("当前页没有可导出的完整结果。")
     if context.get("crop_empty"):
@@ -196,6 +198,34 @@ def capture_snapshot(window) -> PublicationSnapshot:
         except Exception:
             snapshot.home_frame_index = None
 
+    display_fields = None
+    if view in {"2d", "3d"}:
+        state_getter = getattr(window, "_enhancement_state", None)
+        state = state_getter(spec) if state_getter is not None else None
+        prepare = getattr(window, "_prepare_display_statistics", None)
+        if prepare is not None and prepare(context, spec, state):
+            raise ExportError("强度归一化仍在后台统计，请等待精确结果完成后导出。")
+        getter = getattr(window, "_enhancement_display", None)
+        display_fields = getter(context, spec) if getter is not None else None
+        background_style = (
+            display_fields["background_style"] if display_fields is not None
+            else window._enhancement_background_style()
+        )
+        snapshot.payload["display"] = {
+            "state": copy.deepcopy(state),
+            "background_style": copy.deepcopy(background_style),
+            "background_level_info": (
+                copy.deepcopy(display_fields["background_level_info"])
+                if display_fields is not None else None
+            ),
+            "resolved_range": (
+                tuple(display_fields["background_range"])
+                if display_fields is not None else None
+            ),
+            "resolved": display_fields is not None,
+        }
+    snapshot.payload["render_quality"] = copy.deepcopy(spec.params.get("render_quality"))
+
     if view == "3d":
         _freeze_3d(window, snapshot, render_context)
     elif view == "2d":
@@ -208,7 +238,9 @@ def capture_snapshot(window) -> PublicationSnapshot:
         _freeze_waterfall(window, snapshot, render_context)
     else:
         raise ExportError(f"暂不支持导出的视图类型：{view}")
-    _freeze_enhancement(window, snapshot, spec, context, render_context)
+    _freeze_enhancement(
+        window, snapshot, spec, context, render_context, display_fields=display_fields,
+    )
     capture_recipe = getattr(window, "_capture_view_recipe", None)
     if capture_recipe is not None:
         try:
@@ -218,9 +250,11 @@ def capture_snapshot(window) -> PublicationSnapshot:
     return snapshot
 
 
-def _freeze_enhancement(window, snapshot, spec, context, render_context):
+def _freeze_enhancement(window, snapshot, spec, context, render_context, *, display_fields=None):
     getter = getattr(window, "_enhancement_display", None)
-    fields = getter(context, spec) if getter is not None else None
+    fields = display_fields if display_fields is not None else (
+        getter(context, spec) if getter is not None else None
+    )
     if fields is None:
         return
     from bandscope.core.local_enhancement import physical_bounds
@@ -229,6 +263,10 @@ def _freeze_enhancement(window, snapshot, spec, context, render_context):
     frozen = {"color": np.array(fields["color"], copy=True),
               "alpha": np.array(fields["alpha"], copy=True),
               "background_level_info": dict(fields["background_level_info"]),
+              "background_style": copy.deepcopy(fields["background_style"]),
+              "background_range": tuple(fields["background_range"]),
+              "independent": bool(fields.get("independent")),
+              "opacity_unit_distance": float(fields["opacity_unit_distance"]),
               "common": fields["common"], "active": fields["active"],
               "revision": fields["revision"], "regions": []}
     frozen["color_rules"] = copy.deepcopy(fields.get("color_rules"))
@@ -297,9 +335,12 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         clip_render = [float(v) for v in clip_render]
 
     include_zero = bool(render_context.get("include_zero", False))
-    level_info = compute_level_info(
+    display = snapshot.payload.get("display") or {}
+    level_info = display.get("background_level_info") or compute_level_info(
         data, snapshot.levels_params, include_zero=include_zero,
         locked_range=snapshot.locked_range,
+        style=display.get("background_style"),
+        resolved_range=display.get("resolved_range"),
     )
 
     # 扩展效果：与主视图共用同一份对齐逻辑，把已解析到体素的一维倍率冻结进
@@ -328,7 +369,8 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
     )
 
     snapshot.camera = camera
-    snapshot.payload = {
+    background_style = display.get("background_style") or window._enhancement_background_style()
+    snapshot.payload.update({
         "volume": data,
         "data_bounds": data_bounds,
         "full_shape": full_shape,
@@ -338,9 +380,7 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         ),
         "clip_render_bounds": clip_render,
         "include_zero": include_zero,
-        "opacity_mode": (window._enhancement_background_style()["opacity_mode"]
-                         if hasattr(window, "_enhancement_background_style")
-                         else str(window.page_render.combo_map.currentText())),
+        "opacity_mode": background_style["opacity_mode"],
         "opacity_multiplier": opacity_multiplier,
         "show_axes": bool(window.timeline_bar.switch_axes.isChecked()),
         "viewport_aspect": float(viewport_aspect),
@@ -349,7 +389,7 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
         "axis_titles": [
             custom_3d.get(key, snapshot.axis_label(key)) for key in ("X", "Y", "E")
         ],
-    }
+    })
 
 
 def _capture_camera(window) -> Dict[str, Any]:
@@ -421,11 +461,13 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
     _check_uniform(snapshot.coords[x_key], x_key)
     _check_uniform(snapshot.coords[y_key], y_key)
 
-    level_info = compute_level_info(
-        img, snapshot.levels_params, locked_range=snapshot.locked_range
+    display = snapshot.payload.get("display") or {}
+    level_info = display.get("background_level_info") or compute_level_info(
+        img, snapshot.levels_params, locked_range=snapshot.locked_range,
+        style=display.get("background_style"), resolved_range=display.get("resolved_range"),
     )
     custom = _custom_axis_titles(window, snapshot.source_page_id, "2d", render_context)
-    snapshot.payload = {
+    snapshot.payload.update({
         "image": img,
         "extent": ext,
         "title": str(title),
@@ -445,7 +487,7 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
         ),
         "level_info": level_info,
         "intensity_label": intensity_label_for(snapshot.page_kind),
-    }
+    })
 
 
 def _ascending_xy(x_data, y_data):

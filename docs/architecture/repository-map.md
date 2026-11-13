@@ -4,12 +4,12 @@
 
 | 位置 | 职责与现有模块 |
 |---|---|
-| `bandscope/app/` | `startup` 启动；`refactored_app` 主窗口与总协调；`source_workspace` 多数据源会话的换入换出与新增 / 切换 / 关闭事务；`view_recipe_integration` 复现文件预检与恢复；`crop_integration` 裁剪接入；`qt_bootstrap` Qt 配置 |
-| `bandscope/core/` | `analyzer_core` 数据加载；`source_session` 数据源会话与页面归属；`axis_mapping` 坐标映射；`axis_units` 坐标单位约定（时间轴缺省 fs）；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型 |
-| `bandscope/processing/` | `compute_backends` 计算后端；`denoise_config` 参数；`denoise_engines` 去噪算法 |
+| `bandscope/app/` | `startup` 启动；`refactored_app` 主窗口与总协调；`source_workspace` 多数据源会话的换入换出与新增 / 切换 / 关闭事务；`view_recipe_integration` 复现文件预检与恢复；`blender_recipe_integration` Blender 多来源配方合并与整体恢复；`crop_integration` 裁剪接入；`qt_bootstrap` Qt 配置 |
+| `bandscope/core/` | `analyzer_core` 数据加载；`source_session` 数据源会话与页面归属；`axis_mapping` 坐标映射；`axis_units` 坐标单位约定（时间轴缺省 fs）；`data_trans` 格式转换；`data_scope` 数据域；`crop_model` 裁剪模型；`display_style` 独立／兼容显示样式、归一化、透明度预设与页面质量契约；`view_recipe` schema 2 复现文件与旧版迁移；`blender_recipe` Blender 配套配置、来源分组与显示覆写契约 |
+| `bandscope/processing/` | `compute_backends` 计算后端；`denoise_config` 参数；`denoise_engines` 去噪算法；`display_transfer`／`gpu_display` CPU 参考与 CUDA 颜色／透明度映射；`local_enhancement` 后台统计缓存与区域通道 |
 | `bandscope/rendering/` | `render_core` 显示及体渲染；`refresh_pipeline` 刷新、任务和缓存失效协调 |
 | `bandscope/ui/` | 控制页面、相机与裁剪控件、时间轴、数据源切换器、结果工作区、主题、弹层与提示 |
-| `bandscope/exporting/` | `publication_models` 数据契约；`publication_export` 快照；`publication_renderers` 出图；`publication_dialog` 图片导出交互；`blender_scene` 纯数据转换；`blender_materials` 八种薄板材质注册表与参数校验；`blender_project` schema 8 工程契约与回读（兼容 schema 7）；`blender_batch` 跨源精确冻结；`blender_export`／`blender_jobs` 外部进程及导出／更新事务；`blender_script` Blender 独立场景、八材质节点、灯光与检查；`blender_panel`／`blender_project_dialog` 独立导出与编辑界面 |
+| `bandscope/exporting/` | `publication_models` 数据契约；`publication_export` 快照；`publication_renderers` 出图；`publication_dialog` 图片导出交互；`blender_scene` 纯数据转换；`blender_materials` 八种薄板材质注册表与参数校验；`blender_volume` 两种数据体外观、体积系数与参数契约；`blender_texts` 十种文本样式、字体资源与统一字高契约；`blender_project` schema 11 工程契约与回读（兼容 schema 7–10）；`blender_batch` 跨源精确冻结；`blender_export`／`blender_jobs` 外部进程及导出／更新事务；`blender_script` Blender 独立场景、八材质节点、十种文本、数据体混合材质、三组灯光与检查；`blender_panel`／`blender_project_dialog` 独立导出与编辑界面 |
 | `bandscope/extensions/` | `api` 插件协议；`ui` 公共界面组件；`plugin_manager` 安装加载；`plugin_host` 宿主接入；`derived_host` 派生结果协调；`plugin_dialog` 管理界面 |
 | `bandscope/updates/` | `update_service` 网络及安装包校验；`update_controller` 更新交互；`update_settings_dialog` 更新源与账号设置草稿；`sources` 更新源抽象；`matelab_source` MatElab 更新源 |
 | `bandscope/app_metadata.py` | 应用名称、版本、构建类型与更新元信息 |

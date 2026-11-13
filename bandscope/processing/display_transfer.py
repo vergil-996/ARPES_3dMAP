@@ -1,6 +1,15 @@
 """Shared scalar-to-color and opacity rules for crops and local display regions."""
 import numpy as np
 
+from bandscope.core.display_style import (
+    INDEPENDENT_MODE,
+    NORMALIZATION_FULL,
+    NORMALIZATION_MANUAL,
+    NORMALIZATION_PERCENTILE,
+    is_independent,
+    resolved_display_style,
+)
+
 
 OPACITY_MAPS = {
     "linear": [0., .1, .2, .3, .4, .5, .6, .7, .8, .9, 1.],
@@ -33,10 +42,57 @@ def level_info(data_range, levels, *, include_zero=False):
             "gray_value": low + gray * span, "gamma_power": power}
 
 
+def finite_samples(values):
+    source = np.asarray(values)
+    return source[np.isfinite(source)]
+
+
+def finite_minmax(values):
+    finite = finite_samples(values)
+    if finite.size == 0:
+        return None
+    return float(np.min(finite)), float(np.max(finite))
+
+
+def normalization_range(values, style=None, *, locked_range=None, include_zero=False):
+    if locked_range is not None:
+        low, high = (float(value) for value in locked_range)
+        return low, high
+    if not is_independent(style):
+        measured = finite_minmax(values)
+        if measured is None:
+            measured = (0.0, 1.0)
+        low, high = measured
+        if include_zero:
+            low, high = min(low, 0.0), max(high, 0.0)
+        return low, high
+    normalization = resolved_display_style(style)["normalization"]
+    mode = normalization["mode"]
+    if mode == NORMALIZATION_MANUAL:
+        return tuple(float(value) for value in normalization["manual_range"])
+    measured = finite_minmax(values)
+    if measured is None:
+        return 0.0, 1.0
+    if mode == NORMALIZATION_FULL:
+        return measured
+    if mode == NORMALIZATION_PERCENTILE:
+        low, high = normalization["percentiles"]
+        finite = finite_samples(values)
+        return tuple(float(value) for value in np.percentile(finite, (low, high)))
+    return measured
+
+
+def display_level_info(values, style, *, locked_range=None, include_zero=False):
+    resolved = resolved_display_style(style)
+    data_range = normalization_range(
+        values, resolved, locked_range=locked_range,
+        include_zero=include_zero and not is_independent(resolved),
+    )
+    return level_info(data_range, resolved["levels"])
+
+
 def mapped_positions(info, samples):
     samples = np.asarray(samples, dtype=np.float64)
-    # Input black/white points select the intensity window, not a palette crop.
-    # Apply gamma before the palette can quantize any weak intensities.
     return np.power(np.clip(samples, 0., 1.), info["gamma_power"])
 
 
@@ -52,9 +108,6 @@ def opacity_ramp_points(mode, info):
     values = OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"])
     positions = np.linspace(0., 1., len(values))
     if info["gamma_power"] != 1.:
-        # Space samples in the mapped coordinate so the steep weak-signal
-        # section is represented as well. GPU volume rendering uses per-voxel
-        # channels instead of resampling this ramp on a uniform intensity grid.
         positions = np.unique(np.r_[positions, np.linspace(0., 1., 4097)])
     opacities = np.interp(positions, np.linspace(0., 1., len(values)), values)
     low, high = float(info["black_value"]), float(info["white_value"])
@@ -70,21 +123,51 @@ def opacity_values(values, info, mode):
     return np.interp(color, np.linspace(0., 1., len(ramp)), ramp)
 
 
-def channels(values, info, mode, *, view="3d"):
+def normalized_intensity_samples(values, info):
+    source = np.asarray(values, dtype=np.float64)
+    span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
+    if not np.isfinite(span) or span <= 0.0:
+        span = 1.0
+    return (source - float(info["data_min"])) / span
+
+
+def independent_opacity_values(values, info, style, unit_distance=1.0):
+    opacity = resolved_display_style(style)["opacity"]
+    q = normalized_intensity_samples(values, info)
+    threshold = float(opacity["threshold"]) / 100.0
+    transition = float(opacity["transition"]) / 100.0
+    signal = np.maximum(q - threshold, 0.0)
+    if transition > 0.0:
+        position = np.clip((q - threshold) / transition, 0.0, 1.0)
+        gate = position * position * (3.0 - 2.0 * position)
+    else:
+        gate = 1.0
+    distance = max(float(unit_distance), 0.0)
+    with np.errstate(invalid="ignore", over="ignore"):
+        sigma = (float(opacity["density"]) / 200.0) * np.power(signal, float(opacity["gamma"])) * gate
+        return -np.expm1(-sigma * distance)
+
+
+def channels(values, info, mode, *, view="3d", style=None, unit_distance=None):
     """Resolve final display coordinates without quantizing the science data."""
     source = np.asarray(values)
+    independent = is_independent(style)
     if view == "3d" and source.size >= 500_000:
-        # The CUDA path returns bit-identical values or declines; the arithmetic
-        # below stays the reference implementation (weak-signal handoff).
         from bandscope.processing import gpu_display
 
-        accelerated = gpu_display.try_channels(source, info, mode)
+        accelerated = gpu_display.try_channels(
+            source, info, mode, style=style, unit_distance=unit_distance,
+        )
         if accelerated is not None:
             return accelerated
     t = normalized_color_samples(source, info)
     color = mapped_positions(info, t)
     if view == "2d":
         alpha = np.ones(source.shape, dtype=np.float32)
+    elif independent:
+        alpha = independent_opacity_values(
+            source, info, style, 1.0 if unit_distance is None else unit_distance,
+        )
     else:
         ramp = OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"])
         alpha = np.interp(color, np.linspace(0., 1., len(ramp)), ramp)
@@ -103,3 +186,15 @@ def volume_unit_distance(shape, full_shape):
     spacing = np.divide(200., full_shape-1., out=np.ones(3), where=full_shape > 1.)
     denominator = np.mean(shape) - 1.
     return float(np.linalg.norm((shape-1.) * spacing) / denominator) if denominator > 0 else 0.
+
+
+def display_unit_distance(spacing):
+    values = np.asarray(spacing, dtype=np.float64).reshape(-1)
+    positive = values[np.isfinite(values) & (values > 0.0)]
+    return float(np.min(positive)) if positive.size else 1.0
+
+
+def volume_display_unit_distance(full_shape):
+    shape = np.asarray(full_shape, dtype=np.float64)
+    spacing = np.divide(200.0, shape - 1.0, out=np.ones(3), where=shape > 1.0)
+    return display_unit_distance(spacing)

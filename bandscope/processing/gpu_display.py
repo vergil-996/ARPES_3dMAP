@@ -112,7 +112,7 @@ def _device_array(cp, values):
     return device, False
 
 
-def try_channels(values, info, mode):
+def try_channels(values, info, mode, *, style=None, unit_distance=None):
     """Return ``(color, alpha)`` float32 arrays or ``None`` to use the CPU path."""
     with _lock:
         if not _enabled or _cp is None:
@@ -122,23 +122,40 @@ def try_channels(values, info, mode):
             return None
         cp = _cp
         try:
+            from bandscope.core.display_style import is_independent, resolved_display_style
             from bandscope.processing.display_transfer import OPACITY_MAPS
 
             device, _cached = _device_array(cp, source)
-            # Mirrors display_transfer.channels exactly; the parity test is the
-            # guard against these two drifting apart.
             low, high = float(info["black_value"]), float(info["white_value"])
             ratio = cp.clip((device.astype(cp.float64) - low) / (high - low), 0.0, 1.0)
             color = cp.power(ratio, float(info["gamma_power"]))
-            ramp = np.asarray(OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"]), dtype=np.float64)
-            alpha = cp.interp(color, cp.linspace(0.0, 1.0, ramp.size, dtype=cp.float64),
-                              cp.asarray(ramp))
+            if is_independent(style):
+                opacity = resolved_display_style(style)["opacity"]
+                span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
+                if not np.isfinite(span) or span <= 0.0:
+                    span = 1.0
+                q = (device.astype(cp.float64) - float(info["data_min"])) / span
+                threshold = float(opacity["threshold"]) / 100.0
+                transition = float(opacity["transition"]) / 100.0
+                signal = cp.maximum(q - threshold, 0.0)
+                if transition > 0.0:
+                    position = cp.clip((q - threshold) / transition, 0.0, 1.0)
+                    gate = position * position * (3.0 - 2.0 * position)
+                else:
+                    gate = 1.0
+                sigma = (float(opacity["density"]) / 200.0) * cp.power(
+                    signal, float(opacity["gamma"])
+                ) * gate
+                distance = 1.0 if unit_distance is None else max(float(unit_distance), 0.0)
+                alpha = -cp.expm1(-sigma * distance)
+            else:
+                ramp = np.asarray(OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"]), dtype=np.float64)
+                alpha = cp.interp(color, cp.linspace(0.0, 1.0, ramp.size, dtype=cp.float64),
+                                  cp.asarray(ramp))
             finite = cp.isfinite(device)
             packed = cp.empty((2, source.size), dtype=cp.float32)
             packed[0] = cp.where(finite, color, 0).astype(cp.float32).ravel()
             packed[1] = cp.where(finite, alpha, 0).astype(cp.float32).ravel()
-            # Pinned download is ~4x faster than pageable here; the array keeps
-            # the pinned owner alive through its buffer-protocol base.
             owner = cp.cuda.alloc_pinned_memory(int(packed.nbytes))
             host = np.frombuffer(owner, dtype=np.float32, count=int(packed.size)).reshape(packed.shape)
             cp.asnumpy(packed, out=host)

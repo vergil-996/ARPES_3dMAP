@@ -54,6 +54,7 @@ class BlenderExportResult:
     blend_path: Path
     assets_path: Path
     report: dict
+    recipe_path: Optional[Path] = None
 
 
 def blender_script_path() -> Path:
@@ -228,14 +229,14 @@ def probe_blender(path, timeout=60) -> dict:
                 except ValueError as exc:
                     raise BlenderCapabilityError("Blender 能力检查结果无法解析。") from exc
                 required = ("volume_coefficients", "object_space_density", "cycles",
-                            "box_materials", "light_linking")
+                            "box_materials", "light_linking", "text_presets")
                 missing = [key for key in required if not report.get(key)]
                 if not missing:
                     return report
     details = "\n".join(output.splitlines()[-12:])
     raise BlenderCapabilityError(
-        "Blender 缺少本功能所需的 OpenVDB、NumPy、体积系数节点、八种薄板材质节点或 "
-        "Cycles 灯光链接能力。"
+        "Blender 缺少本功能所需的 OpenVDB、NumPy、体积系数节点、八种薄板材质节点、"
+        "可编辑文本预设或 Cycles 灯光链接能力。"
         + (f"\n缺少能力：{', '.join(missing)}" if missing else "")
         + (f"\n{details}" if details else "")
     )
@@ -266,7 +267,7 @@ scene.json 保存版本化坐标、ROI、物理坐标数组、单位、相机和
 数据体旁边始终生成 “BandScope guide frame” 辅助盒框（“Guide frame · auxiliary” Collection）：
 其局部尺寸比坐标轴框大一圈；辅助元素按数据体中心的六方位布局分组分离：
 坐标轴及文字在左侧（−X），盒框在后侧（+Y），立体方向标在上方（+Z）。
-右、前、下三个方位留空；这些方向固定在世界空间中，不随相机转动。
+薄板在右侧／前侧，十种统一大写 A 的文本预设在下侧；方向固定在世界空间中，不随相机转动。
 相机保留数据体视角；可在视口使用 Home 查看全部组件，再自行组合。
 默认不参与渲染，需要时在 Outliner 中打开该 Collection 的渲染开关。
 该盒框与主视图的「坐标轴」开关无关，每次导出都会生成。

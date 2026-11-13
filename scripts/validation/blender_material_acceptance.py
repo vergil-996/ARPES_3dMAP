@@ -129,8 +129,8 @@ def main():
         report = json.loads(report_path.read_text(encoding="utf-8"))
         presets = request.presets
         expected_layout = expected_layout or request.box_layout
-        if report["schema_version"] != 8:
-            raise AcceptanceFailure(f"{name} 的工程 schema 不是 8")
+        if report["schema_version"] != 11:
+            raise AcceptanceFailure(f"{name} 的工程 schema 不是 11")
         if report["layout"]["id"] != expected_layout:
             raise AcceptanceFailure(f"{name} 的薄板布局不是 {expected_layout}")
         if len(report["entries"]) != len(request.entries):
@@ -424,10 +424,11 @@ def main():
             report = json.loads(Path(report_path).read_text(encoding="utf-8"))
             if not report["saved_and_reopened"] or not report["camera_unchanged"]:
                 raise AcceptanceFailure("Append 后保存重开或目标相机检查失败")
-            if report["volume_count_after"] != 2 or report["light_count_after"] != 6:
+            if (report["volume_count_after"] != 2 or report["box_light_count_after"] != 6
+                    or report["text_light_count_after"] != 1):
                 raise AcceptanceFailure(
-                    f"Append 后体积/灯光数量不符：{report['volume_count_after']}/"
-                    f"{report['light_count_after']}"
+                    f"Append 后体积/薄板灯/文本灯数量不符：{report['volume_count_after']}/"
+                    f"{report['box_light_count_after']}/{report['text_light_count_after']}"
                 )
             if not report["all_lights_linked"]:
                 raise AcceptanceFailure("Append 后有辅助灯失去灯光链接")

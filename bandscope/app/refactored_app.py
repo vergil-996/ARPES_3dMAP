@@ -60,6 +60,7 @@ from bandscope.ui.crop_controls import CropController
 from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.app.source_workspace import SourceWorkspaceMixin
+from bandscope.app.blender_recipe_integration import BlenderRecipeMixin
 from bandscope.app.view_recipe_integration import ViewRecipeMixin
 from bandscope.core.crop_model import apply_crop_regions, export_cropped_context, waterfall_offsets
 from bandscope.core.analyzer_core import AnalyzerCore
@@ -121,7 +122,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
+class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     refreshFinished = pyqtSignal(object)
     refreshFailed = pyqtSignal(object, str)
 
@@ -1314,6 +1315,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             return
         self._capture_3d_camera_position()
         page_id = self._active_refresh_page_id()
+        if cause not in {RefreshCause.DISPLAY_MAPPING, RefreshCause.TRANSFER_FUNCTION, RefreshCause.OVERLAY}:
+            self._render_context_page_id = None
         values = dict(snapshot or {})
         values.setdefault("rotation_angle", float(self.rotation_angle))
         if interactive:
@@ -1740,11 +1743,11 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
 
     def _finish_ui_refresh(self, request, backend):
         if request.quality == RenderQuality.EXACT:
-            if self.__dict__.get("_enhancement_roi_job") is None:
+            if (self.__dict__.get("_enhancement_roi_job") is None
+                    and self.__dict__.get("_display_stats_job") is None):
                 self._render_exact_ready = True
                 self._update_render_status("complete", backend)
             else:
-                # ROI 还在后台算：这一帧不是最终结果，不能开放导出/冻结。
                 self._render_exact_ready = False
                 self._update_render_status("computing", backend)
         else:
@@ -1760,9 +1763,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         enhancement = enhancement_getter() if enhancement_getter is not None else None
         if enhancement:
             effect_signature = (effect_signature, repr(enhancement))
+        style_getter = getattr(self, "_enhancement_ui_style", None)
+        display_signature = (style_getter() if style_getter is not None else (
+            tuple(self._get_display_levels()), str(self.page_render.combo_map.currentText()),
+        ))
+        quality_signature = repr(
+            self.page_render.get_render_quality()
+            if hasattr(self.page_render, "get_render_quality") else None
+        )
+        effect_signature = (effect_signature, quality_signature)
         return (
             tuple(self._get_display_levels()),
-            str(self.page_render.combo_map.currentText()),
+            (str(self.page_render.combo_map.currentText()), repr(display_signature)),
             str(self.page_render.get_selected_cmap()),
             VisualEngine.locked_data_range(),
             # 插件参数只改变不透明度，不改数据；不把它算进签名的话，改一条平带
@@ -2357,6 +2369,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if owner_spec is None:
             return
 
+        self._ensure_page_display_state(owner_spec)
         global_denoise_state = self._capture_global_denoise_control_state()
         control_state = self._copy_state(owner_spec.params.get("control_state"))
         if control_state is None:
@@ -2384,6 +2397,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
                 ),
                 block_signals=True,
             )
+            self._restore_enhancement_style()
             self.page_control_blank.restore_state(
                 self._detail_state_with_global_denoise(
                     control_state.get("denoise_detail"),
@@ -2458,6 +2472,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
     def flush_render_levels_refresh(self):
         if self._syncing_controls:
             return
+        self._commit_render_quality()
         local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(
             RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION,
@@ -2468,6 +2483,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
     def schedule_render_levels_refresh(self, _value):
         if self._syncing_controls:
             return
+        self._commit_render_quality()
         local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION, interactive=True)
 
@@ -5653,18 +5669,21 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         return x_values, y_values
 
     @staticmethod
-    def _mirror_plot_axis(axes, which):
-        """把一条已自动缩放的轴反向显示（数据与坐标不变，只换显示方向）。"""
+    def _set_plot_axis_inverted(axes, which, inverted):
+        """按目标方向设置已自动缩放的轴，重复调用不改变方向。"""
         if which == "x":
             low, high = axes.get_xlim()
         else:
             low, high = axes.get_ylim()
+        low, high = sorted((low, high))
         if low == high:
             return
+        if inverted:
+            low, high = high, low
         if which == "x":
-            axes.set_xlim(high, low)
+            axes.set_xlim(low, high)
         else:
-            axes.set_ylim(high, low)
+            axes.set_ylim(low, high)
 
     def _style_1d_axes(self, context, *, ylabel):
         # 复用同一个 ax_2d：2D 页拖过轴标题留下的显式位置在这里必须清掉。
@@ -5689,6 +5708,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             and not self.ax_2d.images
         )
         if can_update:
+            self._set_plot_axis_inverted(self.ax_2d, "x", False)
+            self.ax_2d.set_autoscalex_on(True)
             line.set_data(x_data, y_data)
             self.ax_2d.relim()
             self.ax_2d.autoscale_view()
@@ -5698,9 +5719,12 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.ax_2d._arpes_line = line
         display_title = self._style_1d_axes(context, ylabel=context.get("ylabel", "Intensity (a.u.)"))
         self.ax_2d.margins(x=0.02, y=0.08)
-        if context.get("display_e_flip") and "energy" in str(context.get("xlabel", "")).lower():
-            # E 轴翻转只换显示方向：曲线数据和坐标不动，刻度跟着一起镜像。
-            self._mirror_plot_axis(self.ax_2d, "x")
+        flip_x = bool(
+            context.get("display_e_flip")
+            and "energy" in str(context.get("xlabel", "")).lower()
+        )
+        # E 轴翻转只换显示方向：曲线数据和坐标不动，刻度跟着一起镜像。
+        self._set_plot_axis_inverted(self.ax_2d, "x", flip_x)
         self._apply_1d_plot_layout(
             compact_title=display_title != str(context["title"])
         )
@@ -5742,7 +5766,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if context.get("display_e_flip") and context.get("comparison_kind") in {
             "energy_dos", "edc_curve"
         }:
-            self._mirror_plot_axis(self.ax_2d, "x")
+            self._set_plot_axis_inverted(self.ax_2d, "x", True)
         self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
@@ -5790,7 +5814,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         self.ax_2d.set_xlim(-0.1, max(1.25, (len(curves) - 1) * offset_step + 1.1))
         if context.get("display_e_flip"):
             # 瀑布图的 E 在纵轴：只反向显示方向，能量轴与采样保持原始排列。
-            self._mirror_plot_axis(self.ax_2d, "y")
+            self._set_plot_axis_inverted(self.ax_2d, "y", True)
         self._apply_1d_plot_layout(compact_title=False)
         self.canvas_2d.draw()
 
@@ -5889,7 +5913,17 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             delta = target_angle - float(self._rendered_rotation_angle)
             session.volume.SetOrigin(100.0, 100.0, 100.0)
             session.volume.SetOrientation(0.0, 0.0, delta)
-            session._set_interactive_quality(RenderQuality.PREVIEW.value)
+            workspace = self.__dict__.get("left_workspace")
+            current_spec = getattr(workspace, "current_spec", None)
+            spec = current_spec() if callable(current_spec) else None
+            import inspect
+
+            setter = session._set_interactive_quality
+            quality_config = spec.params.get("render_quality") if spec is not None else None
+            if len(inspect.signature(setter).parameters) >= 2:
+                setter(RenderQuality.PREVIEW.value, quality_config)
+            else:
+                setter(RenderQuality.PREVIEW.value)
             self.plotter.render()
             session.render_count += 1
             self._actor_preview_rotation_angle = target_angle
@@ -6150,7 +6184,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         """加载入口：每次成功都新增独立数据源，不覆盖已打开的分析。"""
         if str(path).lower().endswith(".bsview.json"):
             try:
-                return self._load_view_recipe(path)
+                return self._load_recipe_by_format(path)
             except Exception as exc:
                 self._show_message("复现文件加载失败", str(exc), QMessageBox.Critical)
                 return False
@@ -7744,11 +7778,25 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             menu.deleteLater()
         return True
 
+    def _context_for_display_refresh(self, spec, cause, previous):
+        if (previous is not None and cause in {RefreshCause.DISPLAY_MAPPING, RefreshCause.TRANSFER_FUNCTION}
+                and self.__dict__.get("_render_context_page_id") == getattr(spec, "page_id", None)):
+            return previous
+        return self._compute_render_context(spec)
+
+    def _context_for_publication_capture(self, spec):
+        context = self.__dict__.get("current_render_context")
+        if (self.__dict__.get("_render_exact_ready") and context is not None
+                and self.__dict__.get("_render_context_page_id") == spec.page_id):
+            return context
+        return self._compute_render_context(spec)
+
     def _render_active_page(self, quality=RenderQuality.EXACT, cause=None):
         spec = self.left_workspace.current_spec() or self.left_workspace.home_spec()
         if spec is None:
             return
 
+        previous_context = self.current_render_context
         preserve_2d_interaction = bool(
             quality == RenderQuality.PREVIEW
             and isinstance(self.current_render_context, dict)
@@ -7787,7 +7835,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             return
 
         try:
-            context = self._compute_render_context(spec)
+            context = self._context_for_display_refresh(spec, cause, previous_context)
         except ValueError as exc:
             self._show_message("Render failed", str(exc), QMessageBox.Warning)
             return
@@ -7795,6 +7843,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
             return
 
         self.current_render_context = context
+        self._render_context_page_id = getattr(spec, "page_id", None)
         self._activate_crop_context(spec, context)
         if context.get("crop_empty"):
             self._clear_enhancement_interaction()
@@ -7807,12 +7856,17 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
         if enhancement_state and context.get("view") == "3d":
             # ROI 去噪在后台线程跑；等待期间照常渲染缓存数据，不阻塞界面。
             self._schedule_enhancement_roi(context, spec, enhancement_state)
+        if self._prepare_display_statistics(context, spec, enhancement_state):
+            self._sync_enhancement_controls(spec, context)
+            return
         display_fields = self._enhancement_display(
             context, spec,
             freeze_pending=quality == RenderQuality.EXACT,
             allow_compute=bool(self.__dict__.get("_enhancement_roi_disabled", False)),
         )
-        active_display_fields = display_fields if display_fields and display_fields["active"] else None
+        active_display_fields = display_fields if display_fields and (
+            display_fields["active"] or display_fields.get("independent")
+        ) else None
         self.ax_2d.set_axis_on()
         if preserve_2d_interaction and render_context.get("view") != "2d":
             preserve_2d_interaction = False
@@ -7874,6 +7928,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, ViewRecipeMixin, EnhancementInteraction
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
                 quality=quality.value,
+                quality_config=spec.params.get("render_quality"),
                 data_bounds=render_context.get("data_bounds"),
                 full_shape=render_context.get("full_shape"),
                 include_zero=bool(render_context.get("include_zero", False)),

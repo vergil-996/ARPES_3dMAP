@@ -5,10 +5,36 @@ import numpy as np
 
 from bandscope.core.axis_mapping import interpolate_axis
 from bandscope.core.crop_model import prepare_context, spatial_bounds
+from bandscope.core.display_style import (
+    create_display_state,
+    legacy_render_quality,
+    migrate_display_state,
+    new_render_quality,
+)
 
 
 STATE_KEY = "local_enhancement"
+RENDER_QUALITY_KEY = "render_quality"
 DEFAULT_STYLE = {"levels": (0.0, 50.0, 100.0), "opacity_mode": "线性"}
+DISPLAY_PAGE_KINDS = frozenset({
+    "home", "time_integral", "axis_integral", "axis_integral_crop",
+    "second_derivative", "plugin_derived",
+})
+
+
+def ensure_display_state(spec, *, legacy=False):
+    if spec is None or spec.page_kind not in DISPLAY_PAGE_KINDS:
+        return None
+    state = spec.params.get(STATE_KEY)
+    if state is None:
+        state = create_display_state(legacy=legacy)
+    else:
+        state = migrate_display_state(state, legacy=legacy)
+    spec.params[STATE_KEY] = state
+    spec.params.setdefault(
+        RENDER_QUALITY_KEY, legacy_render_quality() if legacy else new_render_quality(),
+    )
+    return state
 
 
 @dataclass(frozen=True)

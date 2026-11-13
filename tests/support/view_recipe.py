@@ -112,13 +112,28 @@ def control_window():
          patch.object(My3DAnalyzer, "request_refresh", request), \
          patch.object(My3DAnalyzer, "global_refresh", refresh):
         window = My3DAnalyzer()
+    from bandscope.processing.local_enhancement import finite_range
+
+    def prepare_sync(context, spec, state):
+        _signature, requests = window._display_statistics_requests(context, spec, state)
+        for values, style, include_zero, actual in requests:
+            finite_range(values, style, include_zero=include_zero)
+            if actual:
+                finite_range(values)
+        return False
+
+    window._prepare_display_statistics = prepare_sync
     # Persist replacement for subsequent data loads without holding patch state.
     window.global_refresh = lambda: refresh(window)
     window.request_refresh = lambda *a, **kw: request(window, *a, **kw)
     window._reset_3d_camera_to_default = lambda: None
     close = window.close
     def dispose():
-        # Drain queued layout callbacks while their real controls still exist.
+        for name in ("_display_stats_pool", "_enhancement_roi_pool"):
+            pool = window.__dict__.get(name)
+            if pool is not None:
+                pool.waitForDone(5000)
+        window._invalidate_display_statistics()
         QCoreApplication.processEvents()
         close()
         window.deleteLater()

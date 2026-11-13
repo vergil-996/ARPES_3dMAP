@@ -255,6 +255,7 @@ class SourceWorkspaceMixin:
     def _clear_interaction_objects(self):
         """换源前清掉只对旧场景有效的交互对象（不改页面参数）。"""
         self._clear_enhancement_interaction()
+        self._invalidate_display_statistics()
         controller = self.__dict__.get("crop_controller")
         if controller is not None:
             controller.popup.hide()
@@ -466,6 +467,8 @@ class SourceWorkspaceMixin:
         self._reset_workspace_after_load()
         home = self.left_workspace.home_spec()
         if home is not None:
+            self._ensure_page_display_state(home)
+            self._restore_enhancement_style()
             home.params["control_state"] = self._capture_control_state()
             self._persist_home_page_state(home)
         self._rebalance_scope_cache_budgets()
@@ -483,6 +486,7 @@ class SourceWorkspaceMixin:
         )
         if params:
             home.params.update(params)
+        self._ensure_page_display_state(home)
         return home
 
     def _prime_loaded_data_state(self, target_path):
@@ -887,6 +891,14 @@ class SourceWorkspaceMixin:
         if control_state:
             # 结果页沿用来源页当时的控件状态，而不是当前活动源的控件状态。
             spec.params.setdefault("control_state", control_state)
+        source_params = source.params if source is not None else {}
+        for key in ("local_enhancement", "render_quality"):
+            if key in source_params:
+                spec.params[key] = copy.deepcopy(source_params[key])
+        if "local_enhancement" in spec.params:
+            from bandscope.core.local_enhancement import defer_range_locks
+
+            defer_range_locks(spec.params["local_enhancement"])
         pages.append(spec)
         order = workspace.setdefault("order", [])
         if spec.page_id != workspace.get("home"):

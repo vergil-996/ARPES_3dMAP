@@ -1,5 +1,5 @@
 from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QDoubleSpinBox, QHBoxLayout, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.widgets import SiLabel
 
@@ -14,6 +14,20 @@ from bandscope.ui.control_layout_utils import (
 )
 from bandscope.ui.control_page_base import ControlPageBase
 from bandscope.processing.denoise_config import DENOISE_METHODS as CONFIG_DENOISE_METHODS
+from bandscope.core.display_style import (
+    INDEPENDENT_MODE,
+    LEGACY_MODE,
+    NORMALIZATION_FULL,
+    NORMALIZATION_MANUAL,
+    NORMALIZATION_PERCENTILE,
+    OPACITY_PRESET_CUSTOM,
+    legacy_display_style,
+    legacy_render_quality,
+    new_display_style,
+    new_render_quality,
+    resolved_display_style,
+    resolved_render_quality,
+)
 
 
 class RenderControlPage(ControlPageBase):
@@ -36,6 +50,8 @@ class RenderControlPage(ControlPageBase):
     #: 输入框提交新姿态（姿态, 本次改动的字段名）/ 请求重置相机：由主窗口连接渲染状态与相机实例。
     camera_pose_committed = pyqtSignal(object, str)
     camera_view_reset_requested = pyqtSignal()
+    display_mode_changed = pyqtSignal(str)
+    display_value_changed = pyqtSignal()
 
     def build_body(self):
         # 相机视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
@@ -95,23 +111,30 @@ class RenderControlPage(ControlPageBase):
         self._adaptive_row_controls.append(target_row)
         v_exp.addLayout(centered_widget_row(target_row, self.MIN_CONTROL_ROW_WIDTH))
 
+        self.combo_display_mode = self._create_denoise_combo("显示模式", [])
+        self.combo_display_mode.addItem("独立透明度", INDEPENDENT_MODE)
+        self.combo_display_mode.addItem("兼容映射", LEGACY_MODE)
+        self.combo_display_mode.setToolTip("兼容映射保留旧色阶与四条透明度曲线；独立透明度使用新的归一化和密度控制。")
+        self.combo_display_mode.currentIndexChanged.connect(self._on_display_mode_combo)
+        v_exp.addLayout(centered_widget_row(self.combo_display_mode, self.MIN_CONTROL_ROW_WIDTH))
+
         self.s_up = self._create_accent_slider()
         self.s_up.setRange(0, 100)
-        self.s_up.setValue(100)  # 默认不截断高光
-        self.s_up.setToolTip("白场：强度窗口上限，映射到色带终点；更强的信号使用终点颜色。")
+        self.s_up.setValue(100)
+        self.s_up.setToolTip("白场：颜色强度窗口上限，映射到色带终点；不改变独立透明度。")
 
         self.s_gamma = self._create_accent_slider()
         self.s_gamma.setRange(0, 100)
-        self.s_gamma.setValue(50)  # 默认线性映射 (Gamma 1.0)
-        self.s_gamma.setToolTip("灰场（Gamma）：50 为线性；调高可提升弱信号的色带位置，3D 中同时调整基础不透明度。")
+        self.s_gamma.setValue(50)
+        self.s_gamma.setToolTip("颜色 Gamma：50 为线性；独立模式下只改变颜色，不改变透明度。")
 
         self.s_low = self._create_accent_slider()
         self.s_low.setRange(0, 100)
-        self.s_low.setValue(0)    # 默认不截断低光
-        self.s_low.setToolTip("黑场：强度窗口下限，映射到色带起点；更弱的信号使用起点颜色。")
+        self.s_low.setValue(0)
+        self.s_low.setToolTip("黑场：颜色强度窗口下限，映射到色带起点；不改变独立透明度。")
 
         self._add_centered_slider_block(v_exp, "白场", self.s_up)
-        self._add_centered_slider_block(v_exp, "灰场", self.s_gamma)
+        self._add_centered_slider_block(v_exp, "灰场（颜色 Gamma）", self.s_gamma)
         self._add_centered_slider_block(v_exp, "黑场", self.s_low)
 
         self.combo_map = self._create_denoise_combo("强度映射方式", ["线性", "对数", "幂函数", "sigmoid"])
@@ -121,6 +144,66 @@ class RenderControlPage(ControlPageBase):
         v_exp.addLayout(centered_widget_row(self.btn_apply_map, self.BUTTON_WIDTH))
 
         self.vbox.addLayout(centered_widget_row(grp_exp, self.MIN_GROUP_WIDTH))
+
+        self.grp_normalize, v_normalize = self._create_group("强度归一化")
+        self.combo_normalization = self._create_denoise_combo("归一化策略", [])
+        self.combo_normalization.addItem("完整范围", NORMALIZATION_FULL)
+        self.combo_normalization.addItem("百分位范围（P0–P99.5）", NORMALIZATION_PERCENTILE)
+        self.combo_normalization.addItem("手动范围", NORMALIZATION_MANUAL)
+        self.combo_normalization.currentIndexChanged.connect(self._on_normalization_changed)
+        v_normalize.addLayout(centered_widget_row(self.combo_normalization, self.MIN_CONTROL_ROW_WIDTH))
+        self.manual_low = self._create_axis_value_box()
+        self.manual_high = self._create_axis_value_box()
+        for spin in (self.manual_low, self.manual_high):
+            spin.setRange(-1.0e12, 1.0e12)
+            spin.setDecimals(6)
+            spin.valueChanged.connect(self._queue_display_value_change)
+        manual_row = QWidget(self)
+        manual_layout = QHBoxLayout(manual_row)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.addWidget(self.manual_low)
+        manual_layout.addWidget(self.manual_high)
+        self._adaptive_row_controls.append(manual_row)
+        v_normalize.addLayout(centered_widget_row(manual_row, self.MIN_CONTROL_ROW_WIDTH))
+        self.range_label = SiLabel("实际强度范围：待统计")
+        self.range_label.setStyleSheet(theme.field_label_qss())
+        self.range_label.setWordWrap(True)
+        v_normalize.addWidget(self.range_label)
+        self.vbox.addLayout(centered_widget_row(self.grp_normalize, self.MIN_GROUP_WIDTH))
+
+        self.grp_opacity, v_opacity = self._create_group("独立透明度")
+        self.display_parameters = {}
+        self.display_parameter_labels = {}
+        for name, label, minimum, maximum, decimals, scale, value, tooltip in (
+            ("threshold", "阈值（%）", 0.0, 100.0, 3, 1000, 0.0, "阈值以下体素完全透明，用于去雾"),
+            ("transition", "起始过渡宽度（%）", 0.0, 100.0, 1, 10, 0.0, "阈值边界开始的平滑过渡宽度"),
+            ("gamma", "透明度 Gamma", 0.1, 4.0, 2, 100, 1.4, "控制不透明度随强度变化曲线形状"),
+            ("density", "整体密度", 0.0, 100.0, 1, 10, 12.0, ""),
+        ):
+            slider, spin, title_label = self._create_display_parameter(
+                v_opacity, label, minimum, maximum, decimals, scale, value, tooltip,
+            )
+            self.display_parameters[name] = (slider, spin, scale)
+            self.display_parameter_labels[label] = title_label
+        self.vbox.addLayout(centered_widget_row(self.grp_opacity, self.MIN_GROUP_WIDTH))
+
+        self.grp_quality, v_quality = self._create_group("渲染质量")
+        self.combo_quality_mode = self._create_denoise_combo("质量模式", [])
+        self.combo_quality_mode.addItem("明确采样", "explicit")
+        self.combo_quality_mode.addItem("兼容质量", LEGACY_MODE)
+        self.combo_interpolation = self._create_denoise_combo("体插值", [])
+        self.combo_interpolation.addItem("线性", "linear")
+        self.combo_interpolation.addItem("最近邻", "nearest")
+        self.combo_resting_quality = self._create_denoise_combo("静止质量", [])
+        self.combo_resting_quality.addItem("标准（0.5 × 最小间距）", "standard")
+        self.combo_resting_quality.addItem("精细（0.25 × 最小间距）", "fine")
+        for combo in (self.combo_quality_mode, self.combo_interpolation, self.combo_resting_quality):
+            combo.currentIndexChanged.connect(self._queue_display_value_change)
+            v_quality.addLayout(centered_widget_row(combo, self.MIN_CONTROL_ROW_WIDTH))
+        self.vbox.addLayout(centered_widget_row(self.grp_quality, self.MIN_GROUP_WIDTH))
+        self._resolved_range = None
+        self._display_view = "3d"
+        self.set_display_style(new_display_style(), new_render_quality(), view="3d")
 
         # 去噪处理
         grp_noise, v_noise = self._create_group("去噪处理")
@@ -160,6 +243,159 @@ class RenderControlPage(ControlPageBase):
 
         # 启动时还没有有效 3D 场景：先直接收起，避免首帧闪现再收起。
         self.set_camera_view_visible(False, animate=False)
+
+    def _create_display_parameter(self, layout, label, minimum, maximum, decimals, scale, value, tooltip=""):
+        slider = self._create_accent_slider(axis=True)
+        slider.setRange(int(round(minimum * scale)), int(round(maximum * scale)))
+        slider.setValue(int(round(value * scale)))
+        spin = self._create_axis_value_box()
+        spin.setRange(float(minimum), float(maximum))
+        spin.setDecimals(int(decimals))
+        spin.setSingleStep(1.0 / float(scale))
+        spin.setValue(float(value))
+        container = self._create_labeled_slider_block(label, slider, spin)
+        layout.addLayout(centered_widget_row(container))
+        title_label = next((child for child in container.findChildren(SiLabel) if child.text() == label), None)
+        if title_label is not None:
+            title_label.setHint(tooltip)
+
+        def from_slider(raw):
+            blocker = QSignalBlocker(spin)
+            spin.setValue(raw / float(scale))
+            del blocker
+            self.display_value_changed.emit()
+
+        def from_spin(raw):
+            blocker = QSignalBlocker(slider)
+            slider.setValue(int(round(raw * scale)))
+            del blocker
+            self.display_value_changed.emit()
+
+        slider.valueChanged.connect(from_slider)
+        spin.valueChanged.connect(from_spin)
+        return slider, spin, title_label
+
+    def _on_display_mode_combo(self, _index):
+        self.display_mode_changed.emit(str(self.combo_display_mode.currentData()))
+
+    def _on_normalization_changed(self, _index):
+        if self.combo_normalization.currentData() == NORMALIZATION_MANUAL and self._resolved_range is not None:
+            blockers = [QSignalBlocker(widget) for widget in (self.manual_low, self.manual_high)]
+            self.manual_low.setValue(float(self._resolved_range[0]))
+            self.manual_high.setValue(float(self._resolved_range[1]))
+            del blockers
+        self._queue_display_value_change()
+
+    def _queue_display_value_change(self, *_args):
+        self._sync_display_visibility()
+        self.display_value_changed.emit()
+
+    @staticmethod
+    def _set_combo_data(combo, value):
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _display_style_widgets(self):
+        widgets = [
+            self.combo_display_mode, self.s_low, self.s_gamma, self.s_up, self.combo_map,
+            self.combo_normalization, self.manual_low, self.manual_high,
+            self.combo_quality_mode, self.combo_interpolation, self.combo_resting_quality,
+        ]
+        for slider, spin, _scale in self.display_parameters.values():
+            widgets.extend((slider, spin))
+        return widgets
+
+    def set_display_style(self, style, quality=None, *, resolved_range=None, view="3d"):
+        independent = isinstance(style, dict) and style.get("display_mode") == INDEPENDENT_MODE
+        canonical = resolved_display_style(style)
+        extended = canonical if independent else new_display_style(
+            canonical["levels"], canonical["opacity_mode"],
+        )
+        normalization = extended["normalization"]
+        opacity = extended["opacity"]
+        quality = resolved_render_quality(quality)
+        blockers = [QSignalBlocker(widget) for widget in self._display_style_widgets()]
+        try:
+            self._set_combo_data(self.combo_display_mode, INDEPENDENT_MODE if independent else LEGACY_MODE)
+            for slider, value in zip((self.s_low, self.s_gamma, self.s_up), canonical["levels"]):
+                slider.setValue(int(round(float(value))))
+            index = combo_index_for_text(self.combo_map, canonical["opacity_mode"])
+            if index < 0:
+                self.combo_map.addItem(str(canonical["opacity_mode"]))
+                index = self.combo_map.count() - 1
+            self.combo_map.setCurrentIndex(index)
+            self._set_combo_data(self.combo_normalization, normalization["mode"])
+            self.manual_low.setValue(float(normalization["manual_range"][0]))
+            self.manual_high.setValue(float(normalization["manual_range"][1]))
+            for name, (slider, spin, scale) in self.display_parameters.items():
+                slider.setValue(int(round(float(opacity[name]) * scale)))
+                spin.setValue(float(opacity[name]))
+            self._set_combo_data(self.combo_quality_mode, quality["mode"])
+            self._set_combo_data(self.combo_interpolation, quality["interpolation"])
+            self._set_combo_data(self.combo_resting_quality, quality["resting"])
+        finally:
+            del blockers
+        self._display_view = str(view)
+        self._resolved_range = None if resolved_range is None else tuple(float(v) for v in resolved_range)
+        self._sync_display_visibility()
+        self._update_range_label()
+
+    def _sync_display_visibility(self):
+        independent = self.combo_display_mode.currentData() == INDEPENDENT_MODE
+        is_3d = self._display_view == "3d"
+        self.grp_normalize.setVisible(bool(independent))
+        self.grp_opacity.setVisible(bool(independent and is_3d))
+        self.grp_quality.setVisible(bool(is_3d))
+        self.combo_map.setVisible(not independent)
+        self.btn_apply_map.setVisible(not independent)
+        manual = independent and self.combo_normalization.currentData() == NORMALIZATION_MANUAL
+        self.manual_low.setEnabled(bool(manual))
+        self.manual_high.setEnabled(bool(manual))
+        explicit = self.combo_quality_mode.currentData() == "explicit"
+        self.combo_interpolation.setEnabled(bool(explicit))
+        self.combo_resting_quality.setEnabled(bool(explicit))
+        self.relayout_scroll_content()
+
+    def _update_range_label(self):
+        if self._resolved_range is None:
+            text = "实际强度范围：待统计"
+        else:
+            text = f"实际强度范围：{self._resolved_range[0]:.6g} ～ {self._resolved_range[1]:.6g}"
+        self.range_label.setText(text)
+
+    def set_resolved_range(self, data_range):
+        self._resolved_range = None if data_range is None else tuple(float(v) for v in data_range)
+        self._update_range_label()
+
+    def set_display_view(self, view):
+        self._display_view = str(view)
+        self._sync_display_visibility()
+
+    def get_display_style(self):
+        levels = tuple(float(slider.value()) for slider in (self.s_low, self.s_gamma, self.s_up))
+        opacity_mode = str(self.combo_map.currentText())
+        if self.combo_display_mode.currentData() != INDEPENDENT_MODE:
+            return legacy_display_style(levels, opacity_mode)
+        style = new_display_style(levels, opacity_mode)
+        style["normalization"] = {
+            "mode": str(self.combo_normalization.currentData()),
+            "percentiles": (0.0, 99.5),
+            "manual_range": (float(self.manual_low.value()), float(self.manual_high.value())),
+        }
+        opacity = {"preset": OPACITY_PRESET_CUSTOM}
+        for name, (slider, _spin, scale) in self.display_parameters.items():
+            opacity[name] = slider.value() / float(scale)
+        style["opacity"] = opacity
+        return resolved_display_style(style)
+
+    def get_render_quality(self):
+        if self.combo_quality_mode.currentData() != "explicit":
+            return legacy_render_quality()
+        quality = new_render_quality()
+        quality["interpolation"] = str(self.combo_interpolation.currentData())
+        quality["resting"] = str(self.combo_resting_quality.currentData())
+        return quality
 
     # ------------------------------------------------------------------
     # 扩展卡片（插件提供内容，宿主负责挂载、显隐与自适应宽度）
@@ -308,6 +544,9 @@ class RenderControlPage(ControlPageBase):
             "combo_n1": self.combo_n1.currentText(),
             "combo_n2": self.combo_n2.currentText(),
             "combo_n3": self.combo_n3.currentText(),
+            "display_style": self.get_display_style(),
+            "render_quality": self.get_render_quality(),
+            "display_range": self._resolved_range,
         }
 
     def restore_state(self, state, *, block_signals=True):
@@ -321,32 +560,35 @@ class RenderControlPage(ControlPageBase):
             self.combo_n1,
             self.combo_n2,
             self.combo_n3,
+            *self._display_style_widgets(),
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
-
         try:
+            defaults = {"s_low": 0, "s_gamma": 50, "s_up": 100}
             for slider_name, slider in (("s_low", self.s_low), ("s_gamma", self.s_gamma), ("s_up", self.s_up)):
                 slider_state = state.get(slider_name) or {}
-                minimum = slider_state.get("minimum")
-                maximum = slider_state.get("maximum")
-                if minimum is not None and maximum is not None:
-                    slider.setRange(int(minimum), int(maximum))
-                if "value" in slider_state:
-                    value = int(slider_state["value"])
-                    value = max(int(slider.minimum()), min(int(slider.maximum()), value))
-                    slider.setValue(value)
+                slider.setRange(int(slider_state.get("minimum", 0)), int(slider_state.get("maximum", 100)))
+                value = int(slider_state.get("value", defaults[slider_name]))
+                slider.setValue(max(int(slider.minimum()), min(int(slider.maximum()), value)))
 
-            for combo_name, combo in (
-                ("combo_cmap", self.combo_cmap),
-                ("combo_map", self.combo_map),
-                ("combo_n1", self.combo_n1),
-                ("combo_n2", self.combo_n2),
-                ("combo_n3", self.combo_n3),
+            for combo_name, combo, default in (
+                ("combo_cmap", self.combo_cmap, "magma"),
+                ("combo_map", self.combo_map, "线性"),
+                ("combo_n1", self.combo_n1, "None"),
+                ("combo_n2", self.combo_n2, "None"),
+                ("combo_n3", self.combo_n3, "None"),
             ):
-                if combo_name not in state:
-                    continue
-                index = combo_index_for_text(combo, state[combo_name])
+                index = combo_index_for_text(combo, state.get(combo_name, default))
                 if index >= 0:
                     combo.setCurrentIndex(index)
+            if "display_style" in state:
+                style = state["display_style"]
+                quality = state.get("render_quality", new_render_quality())
+            else:
+                style = legacy_display_style(self.get_display_style()["levels"], self.combo_map.currentText())
+                quality = legacy_render_quality()
+            self.set_display_style(
+                style, quality, resolved_range=state.get("display_range"), view=self._display_view,
+            )
         finally:
             del blockers

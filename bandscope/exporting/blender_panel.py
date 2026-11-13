@@ -11,12 +11,13 @@ import uuid
 from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QUrl, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 import bandscope.ui.theme as theme
+from bandscope.core.blender_recipe import blender_sidecar_path
 from bandscope.exporting.blender_batch import capture_blender_snapshots, list_blender_pages
 from bandscope.exporting.blender_export import (
     BlenderExportCancelled, assets_path_for, blender_version,
@@ -25,6 +26,9 @@ from bandscope.exporting.blender_export import (
 from bandscope.exporting.blender_jobs import BlenderProjectExportJob
 from bandscope.exporting.blender_project import (
     PRESET_KEYS, PRESET_LABELS, BlenderProjectRequest,
+)
+from bandscope.exporting.blender_volume import (
+    VOLUME_MODE_EMISSION, VOLUME_MODE_HYBRID_LIT, VOLUME_MODE_LABELS,
 )
 from bandscope.exporting.publication_export import safe_filename
 
@@ -106,6 +110,24 @@ class BlenderExportPanel(QWidget):
         self.reference_note.setWordWrap(True)
         self.reference_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
         right.addWidget(self.reference_note)
+        appearance = QGroupBox("数据体外观（应用于所有选中页面）")
+        appearance_layout = QVBoxLayout(appearance)
+        self.volume_mode_combo = QComboBox()
+        self.volume_mode_combo.addItem(
+            VOLUME_MODE_LABELS[VOLUME_MODE_EMISSION], VOLUME_MODE_EMISSION,
+        )
+        self.volume_mode_combo.addItem(
+            VOLUME_MODE_LABELS[VOLUME_MODE_HYBRID_LIT], VOLUME_MODE_HYBRID_LIT,
+        )
+        appearance_layout.addWidget(self.volume_mode_combo)
+        appearance_note = QLabel(
+            "自发光保持原有外观；柔和受光以散射为主并保留少量自发光，自动创建三盏灯。"
+            "材质参数和灯光请在 Blender 内调整；缩略图不模拟 Blender 灯光。"
+        )
+        appearance_note.setWordWrap(True)
+        appearance_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
+        appearance_layout.addWidget(appearance_note)
+        right.addWidget(appearance)
         presets = QGroupBox("应用于所有选中页面的预设")
         preset_grid = QGridLayout(presets)
         self.preset_checks = {}
@@ -143,10 +165,15 @@ class BlenderExportPanel(QWidget):
         install.setWordWrap(True)
         install.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
         layout.addWidget(install)
-        assets_note = QLabel("输出为 名称.blend + 名称.assets/。移动或分享时必须携带整个资产目录。")
+        assets_note = QLabel("输出为 名称.blend + 名称.assets/，可选名称.blend.bsview.json。移动或分享时请携带整套文件。")
         assets_note.setWordWrap(True)
         assets_note.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
         layout.addWidget(assets_note)
+        self.save_recipe_check = QCheckBox("同时保存复现文件")
+        self.save_recipe_check.setToolTip("保存逐页科学配方、显示状态和本次 Blender 导出设置；不包含原始数据或本机路径。")
+        self.save_recipe_check.setChecked(bool(getattr(self.main_window, "_blender_save_recipe", True)))
+        self.save_recipe_check.toggled.connect(self._on_save_recipe_changed)
+        layout.addWidget(self.save_recipe_check)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -198,6 +225,34 @@ class BlenderExportPanel(QWidget):
 
     def selected_presets(self):
         return {key: self.preset_checks[key].isChecked() for key in PRESET_KEYS}
+
+    def selected_volume_mode(self):
+        return str(self.volume_mode_combo.currentData())
+
+    def _on_save_recipe_changed(self, checked):
+        self.main_window._blender_save_recipe = bool(checked)
+
+    def apply_recipe_settings(self, settings, selections):
+        index = self.volume_mode_combo.findData((settings.get("volume_shading") or {}).get("mode"))
+        self.volume_mode_combo.setCurrentIndex(max(0, index))
+        for key, check in self.preset_checks.items():
+            check.setChecked(bool((settings.get("presets") or {}).get(key, True)))
+        self.save_recipe_check.setChecked(True)
+        self.refresh_pages()
+        wanted = {tuple(key) for key in selections}
+        self._tree_updating = True
+        try:
+            for source_index in range(self.page_tree.topLevelItemCount()):
+                source = self.page_tree.topLevelItem(source_index)
+                for page_index in range(source.childCount()):
+                    item = source.child(page_index)
+                    item.setCheckState(
+                        0, Qt.Checked if tuple(item.data(0, Qt.UserRole)) in wanted else Qt.Unchecked,
+                    )
+        finally:
+            self._tree_updating = False
+        self._sync_selection_label()
+        self.availabilityChanged.emit()
 
     def refresh_pages(self):
         if self.busy:
@@ -359,11 +414,12 @@ class BlenderExportPanel(QWidget):
                     return safe_filename(candidate.display_title)
         return "BandScope-Blender"
 
-    def _freeze_selected(self, cancel_event):
+    def _freeze_selected(self, cancel_event, selections=None):
         if self._legacy_snapshots:
             return list(self._legacy_snapshots)
         return capture_blender_snapshots(
-            self.main_window, self.selected_keys(), cancel_event=cancel_event,
+            self.main_window, self.selected_keys() if selections is None else selections,
+            cancel_event=cancel_event,
             progress=lambda index, total, text: self.status_label.setText(f"{text}（{index}/{total}）"),
         )
 
@@ -403,11 +459,20 @@ class BlenderExportPanel(QWidget):
         output_path = Path(output_path)
         if output_path.suffix.lower() != ".blend":
             output_path = output_path.with_suffix(output_path.suffix + ".blend" if output_path.suffix else ".blend")
-        exists = output_path.exists() or assets_path_for(output_path).exists()
+        save_recipe = self.save_recipe_check.isChecked()
+        selections = self.selected_keys()
+        presets = self.selected_presets()
+        volume_mode = self.selected_volume_mode()
+        recipe_path = Path(blender_sidecar_path(output_path))
+        exists = any(path.exists() for path in (output_path, assets_path_for(output_path), recipe_path))
         if exists and overwrite is None:
+            outputs = f"{output_path}\n{assets_path_for(output_path)}\n{recipe_path}"
+            removal = ""
+            if not save_recipe and recipe_path.exists():
+                removal = "\n\n本次未勾选保存复现文件，旧复现配置也会随覆盖移除。"
             answer = QMessageBox.question(
-                self, "替换 Blender 工程与资产",
-                f"目标工程或配套资产已存在。只有新工程完整生成并校验后才会替换：\n{output_path}\n{assets_path_for(output_path)}\n\n是否继续？",
+                self, "替换 Blender 工程、资产与复现配置",
+                f"目标产物已存在。只有整套新产物完整生成并校验后才会替换：\n{outputs}{removal}\n\n是否继续？",
                 QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
             )
             if answer != QMessageBox.Yes:
@@ -432,13 +497,13 @@ class BlenderExportPanel(QWidget):
         self.busyChanged.emit(True)
         self.availabilityChanged.emit()
         try:
-            snapshots = self._freeze_selected(self._cancel_event)
+            snapshots = self._freeze_selected(self._cancel_event, selections)
             self.status_label.setText("正在用首个冻结条目生成参考缩略图…")
             self._update_reference(snapshots)
-            request = BlenderProjectRequest(snapshots, self.selected_presets())
+            request = BlenderProjectRequest(snapshots, presets, volume_mode=volume_mode)
             job = BlenderProjectExportJob(
                 request, blender_path, output_path, overwrite=bool(overwrite or exists),
-                cancel_event=self._cancel_event, log_path=log_path,
+                cancel_event=self._cancel_event, log_path=log_path, save_recipe=save_recipe,
             )
         except Exception as exc:
             self._freezing = False
@@ -456,12 +521,15 @@ class BlenderExportPanel(QWidget):
         task.signals.failed.connect(self._on_failed)
         self._task = task
         self._freezing = False
-        self.status_label.setText("页面已冻结；后台转换不受后续页面、时间帧或数据源变化影响。")
+        self.status_label.setText("页面与导出设置已冻结；后台转换不受后续窗口变化影响。")
         QThreadPool.globalInstance().start(task)
         return True
 
     def _set_busy_widgets(self, busy):
-        for widget in (self.path_edit, self.browse_button, self.detect_button, self.page_tree):
+        for widget in (
+            self.path_edit, self.browse_button, self.detect_button, self.page_tree,
+            self.volume_mode_combo, self.save_recipe_check,
+        ):
             widget.setEnabled(not busy)
         for check in self.preset_checks.values():
             check.setEnabled(not busy)
@@ -478,7 +546,8 @@ class BlenderExportPanel(QWidget):
         self._cancel_event = None
         self.output_path = Path(result.blend_path)
         self.progress_bar.setValue(100)
-        self.status_label.setText(f"已导出：{result.blend_path}\n移动或分享时请同时携带 {result.assets_path.name}/。")
+        companion = f" 和 {result.recipe_path.name}" if result.recipe_path is not None else ""
+        self.status_label.setText(f"已导出：{result.blend_path}\n移动或分享时请同时携带 {result.assets_path.name}/{companion}。")
         self.open_project_button.show()
         self.open_folder_button.show()
         self._set_busy_widgets(False)

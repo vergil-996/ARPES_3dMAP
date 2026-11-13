@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Run inside Blender: inspect and render schema-8 thin-box materials.
+"""Run inside Blender: inspect and render schema-8–11 materials and lights.
 
 Usage (host runner passes these arguments after ``--``):
   blender --background --factory-startup --python blender_material_scene.py -- \
       inspect --blend project.blend --report report.json [--render out.png]
-      [--samples 64] [--long-edge 640] [--require-schema 8]
+      [--samples 64] [--long-edge 640] [--require-schema 11]
   blender ... -- append --base base.blend --append other.blend \
       --output combined.blend --report report.json --collection "BandScope Data · entry-002"
 """
@@ -25,17 +25,29 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from bandscope.exporting.blender_materials import material_spec  # noqa: E402
+from bandscope.exporting.blender_script import (  # noqa: E402
+    validate_volume_lighting, validate_volume_material,
+)
 
 
 def _bounds(collection, *, include_light=False):
     bpy.context.view_layer.update()
     depsgraph = bpy.context.evaluated_depsgraph_get()
     excluded = {"EMPTY", "CAMERA"} if include_light else {"EMPTY", "CAMERA", "LIGHT"}
-    points = [
-        tuple(obj.matrix_world @ Vector(corner))
-        for source in collection.all_objects if source.type not in excluded
-        for obj in (source.evaluated_get(depsgraph),) for corner in obj.bound_box
-    ]
+    points = []
+    for source in collection.all_objects:
+        if source.type in excluded:
+            continue
+        obj = source.evaluated_get(depsgraph)
+        if obj.type == "FONT":
+            mesh = obj.to_mesh()
+            try:
+                if mesh.vertices:
+                    points.extend(tuple(obj.matrix_world @ vertex.co) for vertex in mesh.vertices)
+                    continue
+            finally:
+                obj.to_mesh_clear()
+        points.extend(tuple(obj.matrix_world @ Vector(corner)) for corner in obj.bound_box)
     if not points:
         raise RuntimeError(f"Collection {collection.name} 没有可测量对象")
     values = np.asarray(points, dtype=np.float64)
@@ -109,7 +121,9 @@ def _check_material(box):
     }
 
 
-def _check_volume_material(volume):
+def _check_volume_material(volume, project):
+    if "volume_shading" in project:
+        return validate_volume_material(volume, project)
     material = volume.data.materials[0]
     nodes = material.node_tree.nodes
     if nodes.get("Density multiplier") is None or nodes.get("Color adjustment") is None:
@@ -117,12 +131,15 @@ def _check_volume_material(volume):
     coefficients = next(
         (node for node in nodes if node.bl_idname == "ShaderNodeVolumeCoefficients"), None
     )
-    if coefficients is None or any(
-        abs(float(value)) > 1e-9
-        for value in coefficients.inputs["Scatter Coefficients"].default_value
+    scatter = coefficients.inputs["Scatter Coefficients"] if coefficients else None
+    if coefficients is None or scatter.is_linked or any(
+        abs(float(value)) > 1e-9 for value in scatter.default_value
     ):
-        raise RuntimeError("体材质不再是无散射吸收＋发射")
-    return {"density_multiplier": True, "color_adjustment": True, "no_scattering": True}
+        raise RuntimeError("旧工程体材质不再是无散射吸收＋发射")
+    return {
+        "material": material.name, "mode": "emission", "density_multiplier": True,
+        "color_adjustment": True, "no_scattering": True, "scatter_connected": False,
+    }
 
 
 def _check_entry(scene, entry, project):
@@ -136,7 +153,8 @@ def _check_entry(scene, entry, project):
     volume = bpy.data.objects.get(composition["volume"])
     if volume is None or volume.type != "VOLUME" or volume.parent != root:
         raise RuntimeError(f"条目 {entry_id} 的体对象缺失或父对象错误")
-    volume_material = _check_volume_material(volume)
+    volume_material = _check_volume_material(volume, project)
+    volume_lights = validate_volume_lighting(entry, root, volume)
     layout = project["layout"]["entries"][entry_id]
     actual_bounds = _bounds(collection)
     expected_bounds = np.asarray(layout["world_bounds"], dtype=np.float64)
@@ -233,7 +251,10 @@ def _check_entry(scene, entry, project):
             "size": float(obj.data.size), "receiver_collection": linked.name,
             "receiver_objects": sorted(item.name for item in linked.objects),
         })
-    box_lights = [obj.name for obj in collection.all_objects if obj.type == "LIGHT"]
+    box_lights = [
+        obj.name for obj in collection.all_objects
+        if obj.type == "LIGHT" and obj.get("bandscope_box_light")
+    ]
     if sorted(box_lights) != sorted(record["object"] for record in expected_lights.values()):
         raise RuntimeError(f"条目 {entry_id} 的 LIGHT 对象集合与需要照明的薄板不一致：{box_lights}")
     including_lights = _bounds(collection, include_light=True)
@@ -252,6 +273,8 @@ def _check_entry(scene, entry, project):
         "light_object_count": len(box_lights),
         "data_collection_hide_render": bool(collection.hide_render),
         "volume_material": volume_material,
+        "volume_lights": volume_lights,
+        "volume_light_count": len(volume_lights),
     }
 
 
@@ -364,6 +387,9 @@ def append(args):
         "camera_unchanged": (scene.camera.name if scene.camera else None) == camera_before,
         "volume_count_after": len(volumes),
         "light_count_after": len(lights),
+        "box_light_count_after": sum(bool(obj.get("bandscope_box_light")) for obj in lights),
+        "volume_light_count_after": sum(bool(obj.get("bandscope_volume_light")) for obj in lights),
+        "text_light_count_after": sum(bool(obj.get("bandscope_text_light")) for obj in lights),
         "light_linking_after": linking,
         "all_lights_linked": all(item["receiver_collection"] for item in linking),
     }
@@ -382,7 +408,7 @@ def main(argv=None):
     inspect_parser.add_argument("--render")
     inspect_parser.add_argument("--samples", type=int, default=32)
     inspect_parser.add_argument("--long-edge", type=int, default=640)
-    inspect_parser.add_argument("--require-schema", type=int, default=8)
+    inspect_parser.add_argument("--require-schema", type=int, default=11)
     append_parser = subparsers.add_parser("append")
     append_parser.add_argument("--base", required=True)
     append_parser.add_argument("--append", required=True)

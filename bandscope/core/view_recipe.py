@@ -13,8 +13,20 @@ from pathlib import Path
 
 import numpy as np
 
+from bandscope.core.display_style import (
+    legacy_display_style,
+    legacy_render_quality,
+    migrate_display_state,
+)
+from bandscope.core.local_enhancement import (
+    DISPLAY_PAGE_KINDS,
+    RENDER_QUALITY_KEY,
+    STATE_KEY,
+    create_display_state,
+)
+
 FORMAT = "bandscope.view"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PAGE_KINDS = frozenset({"home", "time_integral", "axis_integral", "axis_integral_crop",
                         "slice_dos", "energy_dos", "edc_curve", "second_derivative",
                         "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived"})
@@ -57,6 +69,85 @@ def state_digest(document):
     state["sources"] = {sid: {k: v for k, v in source.items() if k != "path"}
                         for sid, source in document.get("sources", {}).items()}
     return digest(state)
+
+
+def _legacy_page_params(params, page_kind):
+    result = copy.deepcopy(params)
+    if page_kind not in DISPLAY_PAGE_KINDS:
+        return result
+    state = result.get(STATE_KEY)
+    if state is None:
+        state = create_display_state(legacy=True)
+        render = (result.get("control_state") or {}).get("render") or {}
+        levels = []
+        for key, default in (("s_low", 0.0), ("s_gamma", 50.0), ("s_up", 100.0)):
+            levels.append(float((render.get(key) or {}).get("value", default)))
+        state["background"] = legacy_display_style(levels, render.get("combo_map", "线性"))
+    state = migrate_display_state(state, legacy=True)
+    result[STATE_KEY] = state
+    result[RENDER_QUALITY_KEY] = legacy_render_quality()
+    return result
+
+
+def _remap_recipe_references(value, key_map):
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if key in {"recipe_id", "source_recipe_id"} and isinstance(item, str):
+                result[key] = key_map.get(item, item)
+            else:
+                result[key] = _remap_recipe_references(item, key_map)
+        return result
+    if isinstance(value, list):
+        return [_remap_recipe_references(item, key_map) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_remap_recipe_references(item, key_map) for item in value)
+    return value
+
+
+def _migrate_legacy_document(document):
+    result = copy.deepcopy(document)
+    pages = result["pages"]
+    params_by_node = {}
+    for page in pages:
+        old_key = page["recipe_id"]
+        params_by_node[old_key] = _legacy_page_params(page["params"], page["page_kind"])
+    key_map = {}
+    migrated_nodes = {}
+
+    def visit(old_key):
+        if old_key in key_map:
+            return key_map[old_key]
+        node = copy.deepcopy(result["recipes"][old_key])
+        node["inputs"] = [visit(parent) for parent in node["inputs"]]
+        if old_key in params_by_node:
+            node["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        else:
+            node["params"] = _remap_recipe_references(node["params"], key_map)
+        new_key = digest(node)
+        key_map[old_key] = new_key
+        migrated_nodes[new_key] = node
+        return new_key
+
+    for old_key in result["recipes"]:
+        visit(old_key)
+    for page in pages:
+        old_key = page["recipe_id"]
+        page["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        page["recipe_id"] = key_map[old_key]
+    result["recipes"] = migrated_nodes
+    view = result.get("view_state") or {}
+    levels = view.get("levels", (0.0, 50.0, 100.0))
+    view["display"] = {
+        "background_style": legacy_display_style(levels, view.get("opacity_mode", "线性")),
+        "resolved_range": view.get("locked_range"),
+        "state": None,
+    }
+    view["render_quality"] = legacy_render_quality()
+    result["view_state"] = view
+    result["schema_version"] = SCHEMA_VERSION
+    result["state_digest"] = state_digest(result)
+    return result
 
 
 def file_stamp(path):
@@ -147,7 +238,8 @@ class ViewRecipeDocument:
 
     def validate(self):
         d = _object(self.data, "复现文件")
-        if d.get("format") != FORMAT or type(d.get("schema_version")) is not int or d["schema_version"] != 1:
+        version = d.get("schema_version")
+        if d.get("format") != FORMAT or type(version) is not int or version not in {1, SCHEMA_VERSION}:
             raise RecipeError("不是受支持的 BandScope 视图复现文件版本。")
         sources = _object(d.get("sources"), "sources")
         if d.get("primary_source_id") not in sources:
@@ -214,6 +306,9 @@ class ViewRecipeDocument:
         if d.get("state_digest") != state_digest(d):
             raise RecipeError("科学参数或结果已被编辑；请在软件内修改后重新导出。")
         plain(d)
+        if version == 1:
+            self.data = _migrate_legacy_document(d)
+            return self.validate()
         return self
 
     def dumps(self):

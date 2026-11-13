@@ -22,7 +22,8 @@ from bandscope.exporting.blender_project import (
 )
 from bandscope.exporting.blender_scene import prepare_blender_scene
 from tests.support.blender import (
-    make_blender_snapshot, project_report_boxes, write_fake_blender_project,
+    make_blender_snapshot, project_report_boxes, project_report_texts, project_report_volume,
+    write_fake_blender_project,
 )
 
 
@@ -35,6 +36,8 @@ def _project_report(metadata, final):
     for scene in metadata["entries"]:
         entry_id = scene["entry_id"]
         boxes, lights = project_report_boxes(metadata, entry_id)
+        texts, text_lights = project_report_texts(metadata, entry_id)
+        volume_material, volume_lights = project_report_volume(metadata, entry_id)
         reports.append({
             "entry_id": entry_id,
             "volume_filepath": f"//{final.stem}.assets/{scene['assets']['vdb']}",
@@ -55,11 +58,16 @@ def _project_report(metadata, final):
             } if metadata["project"]["presets"]["orientation"] else {}),
             "box_presets": boxes,
             "box_lights": lights,
+            "volume_material": volume_material,
+            "volume_lights": volume_lights,
+            "text_presets": texts,
+            "text_lights": text_lights,
             "box_layout": metadata["project"]["box_layout"]["id"],
         })
     return {
         "blend_reopened": True,
         "render_samples": metadata["project"]["render"]["samples"],
+        "volume_bounces": metadata["project"]["render"]["volume_bounces"],
         "box_layout": metadata["project"]["box_layout"],
         "entries": reports,
     }
@@ -89,7 +97,7 @@ class BlenderProjectContractTests(unittest.TestCase):
             metadata["entry_id"] = entry.entry_id
             items.append((entry, metadata))
         metadata = make_project_metadata(items, request, "demo.assets")
-        self.assertEqual(metadata["schema_version"], 8)
+        self.assertEqual(metadata["schema_version"], 11)
         self.assertEqual(metadata["project"]["entry_order"], ["entry-001", "entry-002"])
         self.assertEqual(set(metadata["project"]["presets"]), set(PRESET_KEYS))
         self.assertTrue(all(metadata["project"]["presets"].values()))
@@ -219,6 +227,60 @@ class BlenderProjectContractTests(unittest.TestCase):
             result = commit_staged_project(stage, final, metadata, overwrite=True)
             self.assertTrue(result.blend_path.is_file())
 
+    def test_hybrid_all_presets_disabled_still_requires_three_volume_lights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            presets = {key: False for key in PRESET_KEYS}
+            blend, metadata = write_fake_blender_project(
+                directory, presets=presets, volume_mode="hybrid_lit",
+            )
+            final = blend
+            report = _project_report(metadata, final)
+            entry = report["entries"][0]
+            self.assertEqual(entry["box_lights"], [])
+            self.assertEqual(entry["text_lights"], [])
+            self.assertEqual(len(entry["volume_lights"]), 3)
+            stage = _stage_project(directory, blend, metadata, report)
+            result = commit_staged_project(stage, final, metadata, overwrite=True)
+            self.assertEqual(result.report["volume_bounces"], 2)
+
+    def test_hybrid_report_rejects_bad_connections_lights_sharing_and_bounces(self):
+        def case(mutate, expected, snapshots=None):
+            with tempfile.TemporaryDirectory() as directory:
+                blend, metadata = write_fake_blender_project(
+                    directory, snapshots, volume_mode="hybrid_lit",
+                )
+                report = _project_report(metadata, blend)
+                mutate(report)
+                stage = _stage_project(directory, blend, metadata, report)
+                with self.assertRaisesRegex(BlenderProcessError, expected):
+                    commit_staged_project(stage, blend, metadata, overwrite=True)
+
+        def wrong_connection(report):
+            report["entries"][0]["volume_material"]["connections"]["Scatter Coefficients"] = "wrong"
+
+        case(wrong_connection, "实际连接")
+
+        def missing_light(report):
+            report["entries"][0]["volume_lights"].pop()
+
+        case(missing_light, "灯数量")
+
+        def wrong_receiver(report):
+            report["entries"][0]["volume_lights"][0]["receiver_objects"] = []
+
+        case(wrong_receiver, "接收者")
+
+        def share_volume_material(report):
+            reports = report["entries"]
+            reports[1]["volume_material"]["material"] = reports[0]["volume_material"]["material"]
+
+        case(share_volume_material, "共享可变数据体材质", [make_blender_snapshot(), make_blender_snapshot()])
+
+        def wrong_bounces(report):
+            report["volume_bounces"] = 0
+
+        case(wrong_bounces, "反弹次数")
+
 
 class BlenderProjectReaderTests(unittest.TestCase):
     @staticmethod
@@ -226,10 +288,16 @@ class BlenderProjectReaderTests(unittest.TestCase):
         import copy
         legacy = copy.deepcopy(metadata)
         legacy["schema_version"] = 7
-        for key in ("box_materials", "box_layout", "box_lighting", "render"):
+        for key in ("box_materials", "box_layout", "box_lighting", "render",
+                    "text_styles", "text_fonts", "text_lighting", "volume_shading"):
             legacy["project"].pop(key, None)
+        legacy["project"]["presets"].pop("text_presets", None)
         for entry in legacy["entries"]:
+            entry["schema_version"] = 7
             entry.pop("box_lighting", None)
+            entry.pop("volume_lighting", None)
+            for key in ("text_layout", "text_presets", "text_lighting"):
+                entry.pop(key, None)
             entry["box_presets"] = [
                 {
                     "preset": box["preset"], "object": box["object"], "material": box["material"],
@@ -376,8 +444,8 @@ class BlenderProjectUpdateTests(unittest.TestCase):
             self.assertEqual(_sha(blend), blend_hash)
             self.assertEqual(result.project.entries[1].vdb_path.read_bytes(), untouched_vdb)
             self.assertEqual(result.project.entries[0].vdb_path.read_bytes(), b"VDB-updated")
-            self.assertEqual(result.project.schema_version, 8)
-            self.assertEqual(result.project.metadata["entries"][0]["schema_version"], 8)
+            self.assertEqual(result.project.schema_version, 11)
+            self.assertEqual(result.project.metadata["entries"][0]["schema_version"], 11)
             updated = result.project.entries[0].snapshot
             self.assertEqual(updated.cmap_name, "viridis")
             self.assertEqual(updated.levels_params, (5.0, 65.0, 90.0))

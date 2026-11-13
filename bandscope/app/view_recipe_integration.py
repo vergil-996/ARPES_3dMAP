@@ -125,10 +125,14 @@ class ViewRecipeMixin:
         if getattr(self.core, "source_identity", None) is not None:
             self._persist_active_page_state()
 
-    def _recipe_environment(self):
+    def _recipe_environment(self, spec=None):
+        rotation = self.rotation_angle
+        if spec is not None:
+            controls = spec.params.get("control_state") or {}
+            rotation = (controls.get("image") or {}).get("rotation_angle", rotation)
         return plain({"denoise_methods": self.global_denoise_methods,
                       "denoise_controls": self._capture_global_denoise_control_state(),
-                      "rotation_angle": self.rotation_angle})
+                      "rotation_angle": rotation})
 
     def _freeze_recipe_page(self, spec, *, params=None, inputs=None, environment=None, result=None,
                             verify_source=True):
@@ -145,7 +149,7 @@ class ViewRecipeMixin:
                 refs.append(key)
         source = identity.descriptor(self.core.source_layout, verify_current=verify_source)
         return store.add(source, spec.page_kind, params, refs,
-                         environment=environment or self._recipe_environment(),
+                         environment=environment or self._recipe_environment(spec),
                          result_digest=digest(result) if result is not None else None)
 
     def _on_recipe_page_added(self, page_id):
@@ -194,8 +198,9 @@ class ViewRecipeMixin:
                 if saved is None:
                     raise RecipeError(f"派生结果 {item.title} 缺少成功计算快照，请先打开该页面。")
                 params = copy.deepcopy(saved["params"])
-                # Control/display changes do not alter the successful scientific result.
-                params["control_state"] = record["params"].get("control_state", {})
+                for name in ("control_state", "local_enhancement", "render_quality"):
+                    if name in record["params"]:
+                        params[name] = copy.deepcopy(record["params"][name])
                 record["params"] = params
                 results[pid] = {**copy.deepcopy(saved), "params": params}
             saved = results.get(pid)
@@ -219,6 +224,8 @@ class ViewRecipeMixin:
                       "levels": snapshot.levels_params, "locked_range": snapshot.locked_range,
                       "levels_controls": dict(zip(("black", "gray", "white"), snapshot.levels_params)),
                       "cmap": snapshot.cmap_name, "level_info": snapshot.payload.get("level_info"),
+                      "display": snapshot.payload.get("display"),
+                      "render_quality": snapshot.payload.get("render_quality"),
                       "viewport_aspect": snapshot.payload.get("viewport_aspect"),
                       "opacity_multiplier": snapshot.payload.get("opacity_multiplier"),
                       "axis_titles": self._axis_titles().export_records(ancestors),
@@ -227,7 +234,7 @@ class ViewRecipeMixin:
                     "app_version": APP_VERSION, "created_at": datetime.now(timezone.utc).isoformat(),
                     "primary_source_id": primary, "sources": sources, "recipes": nodes,
                     "pages": pages, "scopes": scopes, "target_page_id": spec.page_id,
-                    "home_page_id": workspace.home_page_id, "environment": self._recipe_environment(),
+                    "home_page_id": workspace.home_page_id, "environment": self._recipe_environment(spec),
                     "view_state": view, "results": results, "publication": {}}
         document["plugins"] = self._recipe_plugins()
         document["provenance_notes"] = {pid: error for pid, error in
@@ -325,6 +332,7 @@ class ViewRecipeMixin:
     def _apply_recipe_workspace(self, core, document, evaluator):
         """把复现文件恢复进当前（新源）工作区；不发激活回调，由提交事务统一刷新。"""
         id_map, target_id = self._remap_recipe_pages(evaluator.pages, document)
+        self.__dict__["_last_recipe_id_map"] = id_map
         pages = list(evaluator.pages.values())
         home_id = id_map.get(str(document["home_page_id"]), pages[0].page_id if pages else None)
         results = {
