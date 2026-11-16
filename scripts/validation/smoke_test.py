@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""真实数据冒烟测试：加载 npz → 渲染 → 控件页切换 → Toast → 截图 → 干净退出。
+"""真实数据冒烟测试：加载 npz → 渲染 → 控件页 → 专注模式 → 出版导出 → Toast → 截图 → 干净退出。
 
 用法: .venv/Scripts/python.exe scripts/validation/smoke_test.py <npz路径> [--output-dir <目录>] [--dynamic]
 
@@ -60,7 +60,7 @@ def main():
             width, height = map(int, size_arg.split("x"))
             window.showNormal()
             window.resize(width, height)
-            window.main_splitter.setSizes([width - 420, 400])
+            window.main_splitter.setSizes([width - 380, 360])
         log(f"[smoke] loading {npz_path}")
         window.load_data(npz_path)
         assert window.core.raw_data is not None, "raw_data 为空，加载失败"
@@ -68,7 +68,7 @@ def main():
         QTimer.singleShot(12000, step_after_render)
 
     def step_after_render():
-        log(f"[smoke] render status: {window.render_status_label.text()}")
+        log(f"[smoke] render status: {window.status_state.text()} · {window.status_info.text()}")
         p3d = os.path.join(out_dir, "smoke_3d.png")
         window.plotter.screenshot(p3d)
         log(f"[smoke] 3d screenshot -> {p3d}")
@@ -94,6 +94,40 @@ def main():
             return
         window._select_control_page(0)
         log("[smoke] control pages switched")
+        assert window.canvas_tool_overlay.reset_button.isEnabled(), "3D 画布工具未启用"
+        assert "150 × 150 × 200 × 25" in window.left_workspace.page_tree.source_meta.text()
+        assert "原始数据" in window.left_workspace.source_breadcrumb.text()
+        assert not hasattr(window.timeline_bar, "play_button"), "时间轴不应提供自动播放按钮"
+        window.canvas_tool_overlay.focus_button.click()
+        QTimer.singleShot(350, step_focus_capture)
+
+    def step_focus_capture():
+        assert not window.right_panel.isVisible(), "专注模式未隐藏右侧栏"
+        assert not window.left_workspace.page_tree.isVisible(), "专注模式未隐藏页面树"
+        focus_path = os.path.join(out_dir, "smoke_focus.png")
+        window.grab().save(focus_path)
+        log(f"[smoke] focus grab -> {focus_path}")
+        window.canvas_tool_overlay.focus_button.click()
+        QTimer.singleShot(350, step_focus_restored)
+
+    def step_focus_restored():
+        assert window.right_panel.isVisible(), "退出专注模式后右侧栏未恢复"
+        assert window.left_workspace.page_tree.isVisible(), "退出专注模式后页面树未恢复"
+        clean_pixmap = window.screen().grabWindow(int(window.winId()))
+        if not clean_pixmap.isNull():
+            clean_path = os.path.join(out_dir, "smoke_workspace_clean.png")
+            clean_pixmap.save(clean_path)
+            log(f"[smoke] clean workspace grab -> {clean_path}")
+        window.open_publication_dialog()
+        QTimer.singleShot(9000, step_publication_capture)
+
+    def step_publication_capture():
+        dialog = window.__dict__.get("_publication_dialog")
+        assert dialog is not None and dialog.isVisible(), "出版导出窗口未打开"
+        publication_path = os.path.join(out_dir, "smoke_publication.png")
+        dialog.grab().save(publication_path)
+        log(f"[smoke] publication grab -> {publication_path}")
+        dialog.close()
         window._show_message("冒烟测试", "轻提示应显示为 Toast 而非弹窗", QMessageBox.Information)
         window.toast_manager.show("操作完成反馈", level="success", title="成功样式")
         QTimer.singleShot(600, step_grab)
@@ -102,6 +136,16 @@ def main():
         pwin = os.path.join(out_dir, "smoke_window.png")
         window.grab().save(pwin)
         log(f"[smoke] window grab -> {pwin}")
+        try:
+            desktop_path = os.path.join(out_dir, "smoke_desktop.png")
+            pixmap = window.screen().grabWindow(int(window.winId()))
+            if pixmap.isNull():
+                log("[smoke] desktop grab unavailable: empty native pixmap")
+            else:
+                pixmap.save(desktop_path)
+                log(f"[smoke] desktop grab -> {desktop_path}")
+        except Exception as exc:
+            log(f"[smoke] desktop grab unavailable: {type(exc).__name__}: {exc}")
         if args.hold:
             log("[smoke] review window ready; close it to finish")
         else:

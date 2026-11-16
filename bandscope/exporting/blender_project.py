@@ -628,16 +628,16 @@ def _shifted(bounds, offset):
     return (values + np.asarray(offset, dtype=float).reshape(3, 1)).ravel()
 
 
-def entry_local_bounds(scene, presets):
+def entry_local_bounds(scene, presets, *, include_presets=True):
     bounds = []
     bounds.append(np.asarray(scene["blender_grid"]["material_clip_bounds"], dtype=float))
-    if presets.get("coordinates"):
+    if include_presets and presets.get("coordinates"):
         bounds.append(_shifted(AXIS_FRAME_BOUNDS, np.asarray(scene["layout"]["coordinates"], dtype=float)))
-    if presets.get("guide_frame"):
+    if include_presets and presets.get("guide_frame"):
         guide = np.asarray(scene["guide_frame"]["bounds"], dtype=float).reshape(3, 2)
         guide += np.asarray(scene["layout"]["guide_frame"], dtype=float).reshape(3, 1)
         bounds.append(guide.ravel())
-    if presets.get("orientation"):
+    if include_presets and presets.get("orientation"):
         indicator = scene["axis_indicator"]
         points = [indicator["origin_world"]]
         for axis in indicator["axes"]:
@@ -646,12 +646,12 @@ def entry_local_bounds(scene, presets):
         values = np.asarray(points, dtype=float)
         bounds.append(np.column_stack((values.min(axis=0), values.max(axis=0))).ravel())
     for box in scene.get("box_presets") or ():
-        if not presets.get(box.get("preset_group", box["preset"])):
+        if not include_presets or not presets.get(box.get("preset_group", box["preset"])):
             continue
         center = np.asarray(box["center"], dtype=float)
         half = np.asarray(box["size"], dtype=float) * 0.5
         bounds.append(np.column_stack((center - half, center + half)).ravel())
-    if presets.get(TEXT_GROUP_PRESET):
+    if include_presets and presets.get(TEXT_GROUP_PRESET):
         points = _text_points(scene)
         if points:
             values = np.asarray(points, dtype=float)
@@ -703,10 +703,12 @@ def make_project_metadata(items, request: BlenderProjectRequest, assets_dir_name
         scene["text_lighting"] = text_lighting
         entries.append(scene)
 
-    layout = {"axis": "X", "gap": 1.0, "entries": {}}
+    layout = {
+        "axis": "X", "gap": 1.0, "preset_owner": entries[0]["entry_id"], "entries": {},
+    }
     previous_max = None
-    for scene in entries:
-        local = entry_local_bounds(scene, request.presets)
+    for index, scene in enumerate(entries):
+        local = entry_local_bounds(scene, request.presets, include_presets=index == 0)
         translation_x = 0.0 if previous_max is None else previous_max + layout["gap"] - local[0]
         world = list(local)
         world[0] += translation_x

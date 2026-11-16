@@ -1,10 +1,18 @@
 # BandScope → Blender 体渲染工程导出
 
 - 日期：2026-11-05。
-- 状态：独立顶部入口、多页面、工程回读和原位显示更新已实现；当前五项预设包含八薄板及十种文本。十种文本的全量回归、真实 Blender／窗口及 CPU／NVIDIA 最终冻结包验收均已通过；已随 v1.20.0 发布（2026-11-13，GitHub 与 MatElab）；仅保留维护者人工视觉复核。
+- 状态：独立顶部入口、多页面、工程回读和原位显示更新已实现；当前五项预设包含八薄板及十种文本，多视图工程改为只生成一组共享预设。十种文本的全量回归、真实 Blender／窗口及 CPU／NVIDIA 最终冻结包验收均已通过；已随 v1.20.0 发布（2026-11-13，GitHub 与 MatElab），多视图共享预设进入 v1.21.0（2026-11-16，发布中）；仅保留维护者人工视觉复核。
 - 负责范围：`bandscope/exporting/` 的场景转换、后台导出和面板接入；`tests/exporting/`、必要的集成测试及 `scripts/validation/` 的验收脚本。
 - 共享文件：`bandscope/exporting/publication_dialog.py`，必要时扩展快照数据契约；CPU／NVIDIA PyInstaller 配置需要收集 Blender 独立脚本资源，由集成任务统一修改。无需新增插件 API 或 OpenVDB 运行依赖。
 - 状态主记录：本文件；计划索引只维护入口。实施后在本文件记录验收结果，全部完成后归档。
+
+## 多视图共享预设（2026-11-16）
+
+- 目标：多页面工程不再为每个视图复制一套辅助预设。坐标轴及文字、辅助盒框、方向标、薄层长方体与十种文本只在首个视图生成一组；其余视图只创建数据体、备用相机和自身需要的数据体灯，减少重复对象与导出体积。
+- 契约：`project.layout.preset_owner` 记录持有共享预设的条目；组间距按首组实际边界与后续纯数据边界计算，后续视图从首组外沿向 +X 排列且不与预设重叠。工程 schema 仍为 11；缺少该字段的旧工程回退到首个条目，预设配置继续用于兼容回读与原位更新，不再生成额外对象。
+- 相关文件：`bandscope/exporting/blender_project.py`、`bandscope/exporting/blender_script.py`、`bandscope/exporting/blender_jobs.py`、`bandscope/exporting/blender_panel.py`、`docs/development/blender-export.md`；`tests/support/blender.py` 与 `scripts/validation/blender_*` 同步调整。
+- 验证：`tests/exporting/test_blender_project.py` 新增单组共享预设提交、`preset_owner` 与多条目布局断言；全量 1703 项通过（2026-11-16，555.205 秒），日志 `.local/logs/release-1.21.0-full.log`。真实 Blender 下的多视图重开、总览、Append 与人工观感**未执行**，仍需维护者复核。
+
 
 ## 十种文本预设扩展（2026-11-10）
 

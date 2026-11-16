@@ -2,12 +2,12 @@
 """插件管理入口的真实窗口验收：顶部按钮、管理窗口与布局（计划阶段 A）。
 
 验证点：
-1. 顶部计算信息控件已由「插件管理」按钮接替：92×32、secondary 样式、悬停提示
-   正确，位置在版本按钮左侧且不重叠；
+1. 顶部不显示计算硬件指示灯；「插件管理」按钮为 92×32、secondary 样式、
+   悬停提示正确，位置在版本按钮左侧且不重叠；
 2. 1550×950、1280×800 及可用最窄宽度下按钮不被挤压，版本入口完好；
 3. 点击打开（复用）非模态管理窗口；未加载数据、开启裁剪时也能进入；
 4. 管理窗口显示已安装插件、状态与操作按钮；重开复用同一窗口；
-5. 底部状态栏与画布右上角仍接收计算状态更新；
+5. 画布不显示计算状态浮层，底部状态栏仍接收计算状态更新；
 6. 真实应用启动时按 schema v2 加载已安装插件，并写入 last_good 健康记录。
 
 安装根目录隔离到临时目录，不触碰用户真实扩展与设置；验收用真实构建的
@@ -79,6 +79,7 @@ def main() -> int:
     app.processEvents()
 
     check("顶部不再有计算信息控件 backend_chip", not hasattr(window, "backend_chip"))
+    check("插件管理左侧不再有硬件指示灯", not hasattr(window, "backend_badge"))
     button = window.btn_tb_plugins
     version_button = window.btn_tb_version
     check("插件管理按钮存在且可用", button.isEnabled())
@@ -116,10 +117,10 @@ def main() -> int:
     window.resize(1550, 950)
     app.processEvents()
 
-    # 计算状态：画布右上角浮层与底部状态栏都要继续更新。
+    # 计算状态只保留底部状态栏，不再创建画布浮层。
     window._update_render_status("complete", "CPU")
     app.processEvents()
-    check("画布状态浮层显示完整", "完整" in window.render_status_label.text())
+    check("画布计算状态浮层已移除", not hasattr(window, "render_status_label"))
     check("底部状态栏显示就绪", "就绪" in window.status_state.text())
 
     # 未加载数据即可打开；开启裁剪后也能进入。

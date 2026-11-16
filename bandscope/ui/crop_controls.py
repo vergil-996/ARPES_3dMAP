@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
 
 import bandscope.ui.theme as theme
 from bandscope.core.crop_model import axis_labels, reorient_volume_selection, selection_for_context
+from bandscope.ui.numeric_wheel import enable_numeric_wheel
 
 
 def scissors_cursor():
@@ -71,6 +72,7 @@ class CropPopup(QFrame):
             edit.setFixedHeight(32)
             edit.setStyleSheet(theme.value_input_qss())
             edit.setCursor(Qt.IBeamCursor)
+            enable_numeric_wheel(edit, edit.editingFinished.emit)
             label.setBuddy(edit)
             edit.editingFinished.connect(self.edited)
             self.labels.append(label)

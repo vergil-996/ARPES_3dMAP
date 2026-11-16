@@ -64,7 +64,7 @@ QProgressDialog QPushButton:hover {
     border-color: %(BORD_S)s;
 }
 /* 进度框只有「取消」一颗按钮，且 Qt 把它设为默认按钮；这里刻意不给
-   :default 上主色，否则取消键会变成粉底主操作，主次反而颠倒。 */
+   :default 上主色，否则取消键会变成高亮主操作，主次反而颠倒。 */
 QProgressDialog QProgressBar {
     background-color: %(BG1)s;
     border: 1px solid %(BORD)s;
@@ -83,7 +83,7 @@ QToolTip {
 }
 """ % theme.QSS_TOKENS
 
-#: 原生 Qt 容器（表格 / 树 / 滚动区）的深色滚动条；SiUI 自绘滚动条不受影响。
+#: 原生 Qt 容器（表格 / 树 / 滚动区）的主题滚动条；SiUI 自绘滚动条不受影响。
 APP_FEEDBACK_STYLE += theme.scrollbar_qss()
 
 

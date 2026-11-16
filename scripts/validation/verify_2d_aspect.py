@@ -83,7 +83,7 @@ def describe(tag, m):
 def resize_window(window, width, height):
     window.showNormal()
     window.resize(width, height)
-    window.main_splitter.setSizes([width - 420, 400])
+    window.main_splitter.setSizes([width - 380, 360])
     window.canvas_2d.draw()
 
 

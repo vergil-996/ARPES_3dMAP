@@ -39,11 +39,12 @@ from bandscope.app.refactored_app import My3DAnalyzer
 
 window = My3DAnalyzer()
 
-# 顶部计算信息控件已被插件管理按钮替换。
+# 顶部不再显示计算硬件指示灯。
 assert not hasattr(window, "backend_chip"), "backend_chip 应该已移除"
+assert not hasattr(window, "backend_badge"), "backend_badge 应该已移除"
 assert window.btn_tb_plugins.isEnabled(), window.btn_tb_plugins.toolTip()
 assert window.btn_tb_plugins.toolTip() == "安装、卸载及启用/停用插件"
-assert window.btn_tb_plugins.text() == "插件管理"
+assert window.btn_tb_plugins.text() == "扩展"
 
 # 点击打开管理窗口；重复点击复用同一个窗口。
 dialog = window.open_plugin_manager()
@@ -68,8 +69,10 @@ texts = [action.text() for action in menu.actions()]
 assert not any("扩展管理" in text for text in texts), texts
 assert any("检查更新" in text for text in texts), texts
 
-# 底部状态栏仍接收计算状态更新。
+# 画布不再显示计算状态浮层，底部状态栏仍接收计算状态更新。
+assert not hasattr(window, "render_status_label"), "render_status_label 应该已移除"
 window._update_render_status("complete", "CPU")
+assert "就绪" in window.status_state.text()
 
 window.close()
 print("{_MARKER}")

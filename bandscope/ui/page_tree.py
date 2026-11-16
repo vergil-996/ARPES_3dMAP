@@ -40,7 +40,7 @@ import bandscope.ui.theme as theme
 
 #: 页面类型 -> SiUI 图标名；与旧图标栏保持同一套图形。
 PAGE_KIND_ICONS = {
-    "home": "ic_fluent_home_filled",
+    "home": "ic_fluent_cube_regular",
     "control_panel": "ic_fluent_wrench_screwdriver_filled",
     "time_integral": "ic_fluent_history_filled",
     "axis_integral": "ic_fluent_data_trending_filled",
@@ -62,13 +62,14 @@ _ICON_CACHE: Dict[str, QIcon] = {}
 def page_kind_icon(page_kind: str) -> QIcon:
     """按页面类型取图标；图标包不可用时退化为无图标，不影响导航。"""
     name = PAGE_KIND_ICONS.get(page_kind, DEFAULT_PAGE_ICON)
-    if name not in _ICON_CACHE:
+    cache_key = f"{name}:{theme.current_theme()}"
+    if cache_key not in _ICON_CACHE:
         try:
             icon = SiGlobal.siui.iconpack.toIcon(name, QSize(16, 16), theme.TEXT_2)
         except Exception:
             icon = QIcon()
-        _ICON_CACHE[name] = icon
-    return _ICON_CACHE[name]
+        _ICON_CACHE[cache_key] = icon
+    return _ICON_CACHE[cache_key]
 
 
 @dataclass(frozen=True)
@@ -575,7 +576,7 @@ class PageGroupView(QTreeWidget):
 
 
 class PageTreePanel(QWidget):
-    """常驻页面树面板：搜索框 + 来源树 + 独立分组区域。"""
+    """常驻页面树面板：搜索框 + 来源树 + 独立分组区域 + 数据源摘要。"""
 
     page_activated = pyqtSignal(str)
     rename_committed = pyqtSignal(str, str)
@@ -615,12 +616,23 @@ class PageTreePanel(QWidget):
         self._editing_page_id: Optional[str] = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 10, 8, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
+
+        panel_header = QHBoxLayout()
+        panel_header.setContentsMargins(2, 0, 2, 0)
+        panel_title = QLabel("工作区", self)
+        panel_title.setObjectName("page_panel_title")
+        panel_caption = QLabel("PAGES", self)
+        panel_caption.setObjectName("page_panel_caption")
+        panel_header.addWidget(panel_title, 1)
+        panel_header.addWidget(panel_caption)
+        root.addLayout(panel_header)
 
         self.search_edit = QLineEdit(self)
         self.search_edit.setObjectName("page_tree_search")
-        self.search_edit.setPlaceholderText("搜索页面名称")
+        self.search_edit.setPlaceholderText("搜索页面…")
+        self.search_edit.setFixedHeight(30)
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(self._on_search_changed)
         root.addWidget(self.search_edit)
@@ -683,10 +695,48 @@ class PageTreePanel(QWidget):
         )
         root.addWidget(self.group_tree, 1)
 
+        self.source_card = QFrame(self)
+        self.source_card.setObjectName("source_summary_card")
+        self.source_card.setFixedHeight(82)
+        card_layout = QVBoxLayout(self.source_card)
+        card_layout.setContentsMargins(10, 9, 10, 8)
+        card_layout.setSpacing(4)
+        source_header = QHBoxLayout()
+        source_header.setSpacing(7)
+        source_icon = QLabel(self.source_card)
+        source_icon.setPixmap(theme.fluent_icon("ic_fluent_database_regular", 15, theme.TEXT_2).pixmap(15, 15))
+        self.source_name = QLabel(self.source_card)
+        self.source_name.setObjectName("source_summary_name")
+        self.source_state = QLabel("● 已载入", self.source_card)
+        self.source_state.setObjectName("source_summary_state")
+        source_header.addWidget(source_icon)
+        source_header.addWidget(self.source_name, 1)
+        source_header.addWidget(self.source_state)
+        card_layout.addLayout(source_header)
+        self.source_file = QLabel(self.source_card)
+        self.source_file.setObjectName("source_summary_file")
+        card_layout.addWidget(self.source_file)
+        self.source_meta = QLabel(self.source_card)
+        self.source_meta.setObjectName("source_summary_meta")
+        card_layout.addWidget(self.source_meta)
+        self.source_card.hide()
+        root.insertWidget(2, self.source_card)
+        self.source_icon = source_icon
+
         self.setStyleSheet(
             """
             QWidget#page_tree_panel {
                 background-color: %(BG2)s;
+            }
+            QLabel#page_panel_title {
+                color: %(T1)s;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QLabel#page_panel_caption {
+                color: %(T3)s;
+                font-size: 9px;
+                letter-spacing: 1px;
             }
             QLineEdit#page_tree_search {
                 background-color: %(BG1)s;
@@ -707,9 +757,11 @@ class PageTreePanel(QWidget):
                 font-size: 12px;
             }
             QTreeWidget#page_tree::item, QTreeWidget#page_group_tree::item {
-                height: 26px;
-                padding: 1px 4px;
-                border-radius: 6px;
+                height: 30px;
+                padding: 1px 6px;
+                border: 1px solid transparent;
+                border-left: 2px solid transparent;
+                border-radius: 5px;
             }
             QTreeWidget#page_tree::item:hover, QTreeWidget#page_group_tree::item:hover {
                 background-color: %(BG3)s;
@@ -717,6 +769,7 @@ class PageTreePanel(QWidget):
             QTreeWidget#page_tree::item:selected, QTreeWidget#page_group_tree::item:selected {
                 background-color: %(ACC_SOFT)s;
                 color: %(T1)s;
+                border-left: 2px solid %(ACCENT)s;
             }
             QLabel#page_group_label {
                 color: %(T2)s;
@@ -739,6 +792,29 @@ class PageTreePanel(QWidget):
                 font-size: 11px;
                 padding: 8px 0;
             }
+            QFrame#source_summary_card {
+                background-color: %(BG1)s;
+                border: 1px solid %(BORD)s;
+                border-radius: 8px;
+            }
+            QLabel#source_summary_name {
+                color: %(T1)s;
+                font-size: 11px;
+                font-weight: 600;
+            }
+            QLabel#source_summary_state {
+                color: %(SUCCESS)s;
+                font-size: 9px;
+            }
+            QLabel#source_summary_file {
+                color: %(T2)s;
+                font-size: 10px;
+            }
+            QLabel#source_summary_meta {
+                color: %(T3)s;
+                font-family: %(MONO)s;
+                font-size: 9px;
+            }
             QLineEdit#page_tree_editor {
                 background-color: %(BG1)s;
                 color: %(T1)s;
@@ -752,7 +828,34 @@ class PageTreePanel(QWidget):
             """ % theme.QSS_TOKENS
         )
 
+    def apply_theme(self):
+        self.source_icon.setPixmap(
+            theme.fluent_icon("ic_fluent_database_regular", 15, theme.TEXT_2).pixmap(15, 15)
+        )
+        for page_id, item in self._items.items():
+            entry = self._entries.get(page_id)
+            if entry is not None:
+                item.setIcon(0, page_kind_icon(entry.page_kind))
+
     # ------------------------------------------------------------ 对外接口
+    def set_source_summary(self, title, filename, shape, backend):
+        title = str(title or "当前数据源")
+        filename = str(filename or "实验数据")
+        self.source_name.setText(
+            self.source_name.fontMetrics().elidedText(title, Qt.ElideMiddle, 112)
+        )
+        self.source_name.setToolTip(title)
+        self.source_file.setText(
+            self.source_file.fontMetrics().elidedText(filename, Qt.ElideMiddle, 178)
+        )
+        self.source_file.setToolTip(filename)
+        dimensions = " × ".join(str(int(value)) for value in (shape or ()))
+        self.source_meta.setText(" · ".join(value for value in (dimensions, str(backend or "")) if value))
+        self.source_card.show()
+
+    def clear_source_summary(self):
+        self.source_card.hide()
+
     def set_pages(
         self,
         entries: Dict[str, PageTreeEntry],

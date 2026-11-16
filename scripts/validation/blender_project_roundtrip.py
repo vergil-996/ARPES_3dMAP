@@ -109,16 +109,16 @@ def main():
             report = run_inspector("check", multi_blend, output / "multi-check.json", render=output / "multi-overview.png")
             if report["entry_count"] != 2 or not report["non_colliding"]:
                 raise RuntimeError("多页条目或布局报告不符")
-            if report.get("text_count") != 20:
-                raise RuntimeError("多页工程没有生成两组独立的十种文本预设")
+            if report.get("text_count") != 10:
+                raise RuntimeError("多页工程没有只生成一组十种文本预设")
             loaded = load_blender_project(multi_blend)
             edit = loaded.metadata["entries"][0]["bandscope_edit"]
             if (loaded.schema_version != 11 or edit.get("format_version") != 2
                     or edit["display_style"].get("display_mode") != "independent"
                     or edit["render_quality"].get("mode") != "explicit"):
                 raise RuntimeError("schema 11 独立显示或编辑格式 2 未完整写入／回读")
-            record("多页面、五项预设、独立 VDB/材质/文本与总览相机", "PASS",
-                   f"{report['overview_camera']}；schema 11 独立显示与编辑格式 2 完整")
+            record("多页面、一组共享五预设、独立 VDB 与总览相机", "PASS",
+                   f"{report['overview_camera']}；八块薄板、十种文本各一组；schema 11 独立显示与编辑格式 2 完整")
         except Exception as exc:
             record("多页面与五预设", "FAIL", f"{type(exc).__name__}: {exc}")
             print(traceback.format_exc(), flush=True)
@@ -158,8 +158,8 @@ def main():
                 "check", moved, output / "updated-check.json",
                 render=output / "updated-overview.png", decorations=True,
             )
-            if report.get("text_count") != 20:
-                raise RuntimeError("原位更新后十种文本预设没有完整保留")
+            if report.get("text_count") != 10:
+                raise RuntimeError("原位更新后共享的十种文本预设没有完整保留")
             record("目录搬移后回读、显示编辑与原位更新", "PASS", ".blend 摘要不变；VDB 与新 arrays 一致；创作对象和文本保留")
         except Exception as exc:
             record("回读与原位更新", "FAIL", f"{type(exc).__name__}: {exc}")

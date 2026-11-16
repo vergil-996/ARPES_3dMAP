@@ -73,8 +73,8 @@ PACKAGE_FILTER = f"BandScope 插件包 (*{PLUGIN_SUFFIX})"
 
 #: 列表里每列的含义与宽度。
 COLUMNS = (
-    ("名称", 150),
-    ("版本", 70),
+    ("名称", 200),
+    ("版本", 80),
     ("状态", 300),
 )
 
@@ -150,7 +150,7 @@ class PluginManagerDialog(QDialog):
         # QDialog 在 Windows 默认带标题栏「这是什么？」问号按钮；本面板没有
         # 任何 whats-this 文案，点它只会进入空帮助模式，直接去掉。
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        self.resize(760, 560)
+        self.resize(800, 600)
         self.setStyleSheet(
             f"QDialog {{ background-color: {theme.BG_0}; }}"
             f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
@@ -188,11 +188,28 @@ class PluginManagerDialog(QDialog):
         layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(10)
 
+        title_row = QHBoxLayout()
+        plugin_icon = QLabel(self)
+        plugin_icon.setPixmap(theme.fluent_icon("ic_fluent_puzzle_piece_regular", 18, theme.TEXT_2).pixmap(18, 18))
+        plugin_icon.setFixedSize(32, 32)
+        plugin_icon.setAlignment(Qt.AlignCenter)
+        plugin_icon.setStyleSheet(
+            f"background-color: {theme.BG_3}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px;"
+        )
+        title_row.addWidget(plugin_icon)
+        self.plugin_icon = plugin_icon
+        title_text = QVBoxLayout()
+        title_text.setSpacing(2)
         title = QLabel("插件管理")
         title.setStyleSheet(
-            f"font-size: 16px; font-weight: 700; color: {theme.TEXT_1};"
+            f"font-size: 14px; font-weight: 600; color: {theme.TEXT_1};"
         )
-        layout.addWidget(title)
+        title_text.addWidget(title)
+        subtitle = QLabel("用独立模块扩展你的分析工作流", self)
+        subtitle.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 10px;")
+        title_text.addWidget(subtitle)
+        title_row.addLayout(title_text, 1)
+        layout.addLayout(title_row)
 
         self.location_label = QLabel(f"安装位置：{self.manager.root}")
         self.location_label.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
@@ -201,14 +218,13 @@ class PluginManagerDialog(QDialog):
 
         self.tabs = QTabWidget(self)
         self.tabs.setStyleSheet(
-            f"QTabWidget::pane {{ border: 1px solid {theme.BORDER_HEX};"
-            f" border-radius: 6px; background-color: {theme.BG_1}; }}"
-            f"QTabBar::tab {{ color: {theme.TEXT_2}; background: transparent;"
-            f" padding: 6px 14px; margin: 2px; border-radius: 6px;"
-            f" border: 1px solid transparent; }}"
+            f"QTabWidget::pane {{ border: none; background: transparent; }}"
+            f"QTabBar::tab {{ color: {theme.TEXT_3}; background: transparent;"
+            " padding: 8px 12px; margin-right: 5px; border: none;"
+            " border-bottom: 2px solid transparent; font-size: 11px; }"
             f"QTabBar::tab:hover {{ color: {theme.TEXT_1}; }}"
-            f"QTabBar::tab:selected {{ color: {theme.ACCENT}; font-weight: 600;"
-            f" background-color: {theme.ACCENT_SOFT}; border-color: {theme.ACCENT_DIM}; }}"
+            f"QTabBar::tab:selected {{ color: {theme.TEXT_1};"
+            f" border-bottom-color: {theme.TEXT_1}; }}"
         )
         self.tabs.addTab(self._build_installed_tab(), "已安装")
         self._catalog_tab_index = self.tabs.addTab(self._build_catalog_tab(), "官方插件")
@@ -218,12 +234,12 @@ class PluginManagerDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-        self.btn_install = self._button("安装插件…", "primary", self.on_install)
+        self.btn_install = self._button("安装插件…", "secondary", self.on_install)
         self.btn_toggle = self._button("启用 / 停用", "secondary", self.on_toggle)
         self.btn_uninstall = self._button("卸载", "danger", self.on_uninstall)
         self.btn_retry = self._button("重试加载", "secondary", self.on_retry)
         self.btn_restore = self._button("恢复上一版本", "secondary", self.on_restore)
-        self.btn_relaunch = self._button("关闭", "secondary", self.close)
+        self.btn_relaunch = self._button("完成", "primary", self.close)
         buttons.addWidget(self.btn_install)
         buttons.addWidget(self.btn_toggle)
         buttons.addWidget(self.btn_uninstall)
@@ -232,6 +248,20 @@ class PluginManagerDialog(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(self.btn_relaunch)
         layout.addLayout(buttons)
+
+    def apply_theme(self):
+        self.plugin_icon.setPixmap(
+            theme.fluent_icon("ic_fluent_puzzle_piece_regular", 18, theme.TEXT_2).pixmap(18, 18)
+        )
+        icon = theme.fluent_icon("ic_fluent_puzzle_piece_regular", 16, theme.TEXT_2)
+        for table_name in ("table", "catalog_table"):
+            table = getattr(self, table_name, None)
+            if table is None:
+                continue
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                if item is not None:
+                    item.setIcon(icon)
 
     def _build_installed_tab(self):
         page = QWidget(self)
@@ -242,6 +272,9 @@ class PluginManagerDialog(QDialog):
         self.table = QTableWidget(0, len(COLUMNS), self)
         self.table.setHorizontalHeaderLabels([name for name, _ in COLUMNS])
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(58)
+        self.table.verticalHeader().setMinimumSectionSize(48)
+        self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -291,6 +324,9 @@ class PluginManagerDialog(QDialog):
         self.catalog_table = QTableWidget(0, len(CATALOG_COLUMNS), self)
         self.catalog_table.setHorizontalHeaderLabels([name for name, _ in CATALOG_COLUMNS])
         self.catalog_table.verticalHeader().setVisible(False)
+        self.catalog_table.verticalHeader().setDefaultSectionSize(58)
+        self.catalog_table.verticalHeader().setMinimumSectionSize(48)
+        self.catalog_table.setShowGrid(False)
         self.catalog_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.catalog_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.catalog_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -505,6 +541,7 @@ class PluginManagerDialog(QDialog):
             # 名称项保存插件 id：刷新重排后按 id 恢复选择，操作也按 id 定位，
             # 不依赖易变的行号。
             name_item.setData(Qt.UserRole, record.plugin_id)
+            name_item.setIcon(theme.fluent_icon("ic_fluent_puzzle_piece_regular", 16, theme.TEXT_2))
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, QTableWidgetItem(record.version or "—"))
             status = QTableWidgetItem(status_text(record))
@@ -947,6 +984,7 @@ class PluginManagerDialog(QDialog):
                 name = record.manifest.name
             name_item = QTableWidgetItem(name or plugin_id)
             name_item.setData(Qt.UserRole, plugin_id)
+            name_item.setIcon(theme.fluent_icon("ic_fluent_puzzle_piece_regular", 16, theme.TEXT_2))
             self.catalog_table.setItem(row, 0, name_item)
             self.catalog_table.setItem(row, 1, QTableWidgetItem(entry.version if entry else "—"))
             status = QTableWidgetItem(_catalog_status_text(match, record))

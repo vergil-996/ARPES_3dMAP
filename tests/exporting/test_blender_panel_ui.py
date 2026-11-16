@@ -79,7 +79,7 @@ class BlenderPanelUiTests(unittest.TestCase):
         with patch.object(dialog, "_regenerate_previews"):
             dialog._adopt_snapshot(_make_2d_snapshot())
         self.assertEqual(dialog.btn_export.text(), "导出此预览")
-        self.assertEqual(dialog.title_label.text(), "图片导出")
+        self.assertEqual(dialog.title_label.text(), "出版级导出")
         self.assertIn("截图样式", dialog.windowTitle())
         dialog.reject()
 

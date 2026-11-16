@@ -1,141 +1,218 @@
 # -*- coding: utf-8 -*-
-"""BandScope UI 设计令牌 —— 全项目颜色 / 间距 / 圆角 / 字体的唯一来源。
+"""BandScope 的深色 / 浅色界面令牌与 Qt 控件样式。
 
-所有界面代码必须从这里取色，禁止再出现硬编码的 ``#RRGGBB`` 字面量。
-调整配色只需改这一个文件。
-
-层级约定（深色实验室风格，由深到浅）：
-
-- ``BG_0`` 窗口底色（最深）
-- ``BG_1`` 绘图区 / 输入框底
-- ``BG_2`` 面板 / 侧边栏 / 工具栏
-- ``BG_3`` 卡片 / 抬升面
-- ``BG_4`` 悬停 / 滑条轨道（最浅）
-
-强调色只有一个：``ACCENT``（品牌粉）。语义色各司其职，``DANGER``
-仅用于删除等不可逆操作。
+界面只使用中性黑白灰；数据色带和出版输出不属于界面主题。已有模块继续
+通过 BG_*、TEXT_*、ACCENT* 读取颜色，切换时由这里同步更新 QSS、SiUI
+色板以及已创建的控件。
 """
+import re
+import sys
+import weakref
+from pathlib import Path
 
+from PyQt5.QtCore import QMargins, QObject
 from PyQt5.QtGui import QColor, QFont
 
-# ---------------------------------------------------------------------------
-# 背景层级
-# ---------------------------------------------------------------------------
-BG_0 = "#0D0D13"
-BG_1 = "#12121A"
-BG_2 = "#181822"
-BG_3 = "#20202C"
-BG_4 = "#2A2A38"
 
-# 边框（rgba 形式供 QSS 使用；BORDER_HEX 供 matplotlib 等只接受 hex 的场景）
-BORDER = "rgba(255, 255, 255, 0.08)"
-BORDER_STRONG = "rgba(255, 255, 255, 0.14)"
-BORDER_HEX = "#2E2E3C"
+PALETTES = {
+    "dark": {
+        "BG_0": "#101114",
+        "BG_1": "#121417",
+        "BG_2": "#16181B",
+        "BG_3": "#1B1D21",
+        "BG_4": "#292C31",
+        "CANVAS_BG": "#121417",
+        "BORDER": "rgba(255, 255, 255, 0.10)",
+        "BORDER_STRONG": "rgba(255, 255, 255, 0.18)",
+        "BORDER_HEX": "#2C2F35",
+        "TEXT_1": "#ECEEF1",
+        "TEXT_2": "#A1A5AD",
+        "TEXT_3": "#737881",
+        "ACCENT": "#E7E9EC",
+        "ACCENT_HOVER": "#FFFFFF",
+        "ACCENT_SOFT": "rgba(255, 255, 255, 0.075)",
+        "ACCENT_DIM": "rgba(255, 255, 255, 0.38)",
+        "ACCENT_ON": "#17191C",
+        "ACCENT_TRANSITION": "#E7E9EC",
+        "ACCENT_DEEP": "#8B9098",
+        "TITLE_HIGHLIGHT": "#14FFFFFF",
+        "INFO": "#A1A5AD",
+        "INFO_SOFT": "rgba(255, 255, 255, 0.08)",
+        "SUCCESS": "#A1A5AD",
+        "WARNING": "#D1B779",
+        "DANGER": "#E8A1A7",
+        "DANGER_HOVER": "#F0B7BC",
+        "DANGER_SOFT": "rgba(232, 161, 167, 0.10)",
+        "DANGER_BORDER": "rgba(232, 161, 167, 0.38)",
+        "SCROLLBAR": "#3E424A",
+    },
+    "light": {
+        "BG_0": "#EDEEF0",
+        "BG_1": "#F5F6F7",
+        "BG_2": "#F8F9FA",
+        "BG_3": "#FFFFFF",
+        "BG_4": "#E7E9EC",
+        "CANVAS_BG": "#FAFBFB",
+        "BORDER": "rgba(27, 31, 37, 0.10)",
+        "BORDER_STRONG": "rgba(27, 31, 37, 0.20)",
+        "BORDER_HEX": "#D9DCE0",
+        "TEXT_1": "#282B30",
+        "TEXT_2": "#656B74",
+        "TEXT_3": "#8C929B",
+        "ACCENT": "#292C31",
+        "ACCENT_HOVER": "#08090B",
+        "ACCENT_SOFT": "rgba(27, 31, 37, 0.055)",
+        "ACCENT_DIM": "rgba(27, 31, 37, 0.35)",
+        "ACCENT_ON": "#FFFFFF",
+        "ACCENT_TRANSITION": "#292C31",
+        "ACCENT_DEEP": "#15181C",
+        "TITLE_HIGHLIGHT": "#14292C31",
+        "INFO": "#656B74",
+        "INFO_SOFT": "rgba(27, 31, 37, 0.06)",
+        "SUCCESS": "#656B74",
+        "WARNING": "#9C702E",
+        "DANGER": "#B7555E",
+        "DANGER_HOVER": "#933E48",
+        "DANGER_SOFT": "rgba(183, 85, 94, 0.08)",
+        "DANGER_BORDER": "rgba(183, 85, 94, 0.35)",
+        "SCROLLBAR": "#C2C6CC",
+    },
+}
 
-# ---------------------------------------------------------------------------
-# 文本
-# ---------------------------------------------------------------------------
-TEXT_1 = "#F2F2F7"
-TEXT_2 = "#A3A3B5"
-TEXT_3 = "#858599"
-
-# ---------------------------------------------------------------------------
-# 强调色与语义色
-# ---------------------------------------------------------------------------
-ACCENT = "#FF7EB6"                       # 唯一主强调色（品牌粉，柔化自 #FF69B4）
-ACCENT_HOVER = "#FF9AC6"
-ACCENT_SOFT = "rgba(255, 126, 182, 0.16)"
-ACCENT_DIM = "rgba(255, 126, 182, 0.45)"
-ACCENT_ON = "#1A0B14"                    # 主色上的文字（深底字）
-ACCENT_TRANSITION = "#B85CFF"            # 过渡渐变的另一端（logo / 主题过渡动画）
-ACCENT_DEEP = "#7F3F5B"                  # 主色压暗版（阴影 / 按下态）
-
-INFO = "#5B8DEF"
-INFO_SOFT = "rgba(91, 141, 239, 0.12)"
-SUCCESS = "#34D399"
-WARNING = "#FBBF24"
-DANGER = "#F0506E"
-DANGER_HOVER = "#F5738D"
-DANGER_SOFT = "rgba(240, 80, 110, 0.12)"
-DANGER_BORDER = "rgba(240, 80, 110, 0.4)"
-
-# 白色透明叠层（SiUI 按钮的开关态染色，非调色板颜色）
-TINT_CLEAR = "#00FFFFFF"
-TINT_HOVER = "#12FFFFFF"
-
-# matplotlib 曲线配色环（第一条永远是主色）
-CURVE_PALETTE = [
-    ACCENT, "#4CC9F0", "#F9C74F", "#90BE6D", "#F3722C", "#B388FF", "#43AA8B",
-]
-
-# ---------------------------------------------------------------------------
-# 间距（4pt 网格）与圆角
-# ---------------------------------------------------------------------------
 SP_1 = 4
 SP_2 = 8
 SP_3 = 12
 SP_4 = 16
 SP_5 = 24
 SP_6 = 32
-
 R_S = 6
-R_M = 10
-R_L = 14
-
-# ---------------------------------------------------------------------------
-# 字体
-# ---------------------------------------------------------------------------
-FONT_FAMILY = '"Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif'
-FONT_MONO = '"Consolas", "Courier New", monospace'
-
-#: matplotlib 的字体族回退表（mpl ≥ 3.6 逐字形回退）：用户能把轴标题改成中文，
-#: 而 DejaVu Sans 没有 CJK 字形，必须把系统中文字体排在后面兜底。取值与截图
-#: 样式的 ``font_family`` 默认值（publication_models._DEFAULT_STYLE）一致，
-#: 主画布与导出图的中文观感才不会两样。
+R_M = 8
+R_L = 12
+FONT_FAMILY = '"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif'
+FONT_MONO = '"Cascadia Mono", "Consolas", "Courier New", monospace'
 MPL_FONT_FAMILIES = ["DejaVu Sans", "Microsoft YaHei", "SimHei", "sans-serif"]
-
-# 供 QSS 大块样式表做 ``%`` 格式化用的令牌字典（避免 f-string 与 QSS 花括号冲突）
-QSS_TOKENS = {
-    "BG0": BG_0,
-    "BG1": BG_1,
-    "BG2": BG_2,
-    "BG3": BG_3,
-    "BG4": BG_4,
-    "BORD": BORDER_HEX,
-    "BORD_S": BORDER_STRONG,
-    "T1": TEXT_1,
-    "T2": TEXT_2,
-    "T3": TEXT_3,
-    "ACCENT": ACCENT,
-    "ACCENT_H": ACCENT_HOVER,
-    "ACC_SOFT": ACCENT_SOFT,
-    "ACC_DIM": ACCENT_DIM,
-    "ACC_ON": ACCENT_ON,
-    "INFO": INFO,
-    "INFO_SOFT": INFO_SOFT,
-    "SUCCESS": SUCCESS,
-    "WARNING": WARNING,
-    "DANGER": DANGER,
-    "DANGER_H": DANGER_HOVER,
-    "DANGER_SOFT": DANGER_SOFT,
-    "DANGER_BORD": DANGER_BORDER,
-    "RS": R_S,
-    "RM": R_M,
-    "RL": R_L,
-    "FONT": FONT_FAMILY,
-    "MONO": FONT_MONO,
-}
+TINT_CLEAR = "#00FFFFFF"
+TINT_HOVER = "#12FFFFFF"
+CURVE_PALETTE = []
+QSS_TOKENS = {}
+_CURRENT_THEME = "light"
 
 
-# ---------------------------------------------------------------------------
-# Qt 辅助
-# ---------------------------------------------------------------------------
-def accent_qcolor() -> QColor:
+class _ThemeChange:
+    def __init__(self):
+        self._listeners = {}
+
+    @staticmethod
+    def _key(listener):
+        owner = getattr(listener, "__self__", None)
+        return id(owner if owner is not None else listener), getattr(listener, "__name__", "")
+
+    def connect(self, listener):
+        key = self._key(listener)
+        if getattr(listener, "__self__", None) is not None:
+            listener = weakref.WeakMethod(listener)
+        self._listeners[key] = listener
+
+    def disconnect(self, listener):
+        self._listeners.pop(self._key(listener), None)
+
+    def emit(self, name):
+        for listener in tuple(self._listeners.values()):
+            if isinstance(listener, weakref.WeakMethod):
+                listener = listener()
+            if listener is not None:
+                listener(name)
+
+
+changed = _ThemeChange()
+
+
+def current_theme():
+    return _CURRENT_THEME
+
+
+def asset_path(relative_path):
+    base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parents[2]))
+    return (Path(base) / relative_path).as_posix()
+
+
+def _install_palette(name):
+    global _CURRENT_THEME, ACCENT, ACCENT_HOVER, ACCENT_SOFT, ACCENT_DIM
+    global ACCENT_ON, ACCENT_TRANSITION, ACCENT_DEEP, INFO, INFO_SOFT
+    global SUCCESS, WARNING, DANGER, DANGER_HOVER, DANGER_SOFT, DANGER_BORDER
+    global BG_0, BG_1, BG_2, BG_3, BG_4, CANVAS_BG
+    global BORDER, BORDER_STRONG, BORDER_HEX, TEXT_1, TEXT_2, TEXT_3
+    global TITLE_HIGHLIGHT, SCROLLBAR
+    if name not in PALETTES:
+        raise ValueError(f"unknown theme: {name!r}")
+    _CURRENT_THEME = name
+    palette = PALETTES[name]
+    globals().update(palette)
+    QSS_TOKENS.update({
+        "BG0": BG_0,
+        "BG1": BG_1,
+        "BG2": BG_2,
+        "BG3": BG_3,
+        "BG4": BG_4,
+        "CANVAS": CANVAS_BG,
+        "BORD": BORDER_HEX,
+        "BORD_S": BORDER_STRONG,
+        "BORD_RGBA": BORDER,
+        "T1": TEXT_1,
+        "T2": TEXT_2,
+        "T3": TEXT_3,
+        "ACCENT": ACCENT,
+        "ACCENT_H": ACCENT_HOVER,
+        "ACC_SOFT": ACCENT_SOFT,
+        "ACC_DIM": ACCENT_DIM,
+        "ACC_ON": ACCENT_ON,
+        "ACC_ARGB": TITLE_HIGHLIGHT,
+        "INFO": INFO,
+        "INFO_SOFT": INFO_SOFT,
+        "SUCCESS": SUCCESS,
+        "WARNING": WARNING,
+        "DANGER": DANGER,
+        "DANGER_H": DANGER_HOVER,
+        "DANGER_SOFT": DANGER_SOFT,
+        "DANGER_BORD": DANGER_BORDER,
+        "SCROLLBAR": SCROLLBAR,
+        "RS": R_S,
+        "RM": R_M,
+        "RL": R_L,
+        "FONT": FONT_FAMILY,
+        "MONO": FONT_MONO,
+    })
+    CURVE_PALETTE[:] = [
+        TEXT_1, "#7B818B", "#4CC9F0", "#F9C74F", "#F3722C", "#B388FF", "#43AA8B",
+    ]
+
+
+_install_palette(_CURRENT_THEME)
+
+
+def accent_qcolor():
     return QColor(ACCENT)
 
 
-def apply_app_font() -> None:
-    """Set the application font before SiUI snapshots it in its custom controls."""
+def fluent_icon(name, size=16, color=None):
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QIcon
+    from siui.core import SiGlobal
+
+    try:
+        return SiGlobal.siui.iconpack.toIcon(name, QSize(size, size), color or TEXT_2)
+    except Exception:
+        return QIcon()
+
+
+def set_button_icon(button, name, size=16, *, on_accent=False):
+    button.setProperty("fluentIconName", name)
+    button.setProperty("fluentIconSize", int(size))
+    button.setProperty("fluentIconOnAccent", bool(on_accent))
+    button.setIcon(fluent_icon(name, size, ACCENT_ON if on_accent else TEXT_2))
+
+
+def apply_app_font():
     from PyQt5.QtWidgets import QApplication
 
     app = QApplication.instance()
@@ -146,42 +223,49 @@ def apply_app_font() -> None:
         app.setFont(font)
 
 
-def action_button_qss(kind="primary") -> str:
+def action_button_qss(kind="primary"):
     palette = {
-        "primary": (ACCENT, ACCENT_ON, ACCENT_HOVER, "transparent"),
-        "secondary": (BG_4, TEXT_1, BORDER_HEX, BORDER),
-        "danger": (DANGER_SOFT, DANGER, DANGER_BORDER, DANGER_BORDER),
+        "primary": (ACCENT, ACCENT_ON, ACCENT_HOVER, ACCENT),
+        "secondary": (BG_3, TEXT_1, BG_4, BORDER_HEX),
+        "quiet": ("transparent", TEXT_2, BG_4, "transparent"),
+        "danger": (DANGER_SOFT, DANGER, BG_4, DANGER_BORDER),
     }
     bg, fg, hover, border = palette[kind]
     return (
         f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border};"
-        f" border-radius: {R_S}px; padding: 0 10px; font-size: 13px; font-weight: 500; }}"
-        f"QPushButton:hover {{ background: {hover}; }}"
-        f"QPushButton:pressed {{ background: {BG_3}; color: {TEXT_1}; }}"
-        f"QPushButton:focus {{ border: 1px solid {ACCENT}; }}"
+        f" border-radius: {R_S}px; padding: 0 11px; font-size: 12px; font-weight: 500;"
+        " min-height: 26px; min-width: 28px; }"
+        f"QPushButton:hover {{ background: {hover}; color: {TEXT_1 if kind != 'primary' else ACCENT_ON};"
+        f" border-color: {BORDER_HEX if kind != 'primary' else ACCENT_HOVER}; }}"
+        f"QPushButton:pressed {{ background: {BG_4}; color: {TEXT_1}; }}"
+        f"QPushButton:checked {{ background: {ACCENT}; color: {ACCENT_ON}; border-color: {ACCENT}; }}"
+        f"QPushButton:focus {{ border: 1px solid {TEXT_2}; }}"
         f"QPushButton:disabled {{ background: {BG_3}; color: {TEXT_3}; border: 1px solid {BORDER}; }}"
     )
 
 
-def style_push_button(btn, kind: str = "primary") -> None:
-    """按语义层级给 SiPushButton 上色。
-
-    kind:
-        ``"primary"``   —— 每组最多一个的主操作（应用 / 确定），主色底深字
-        ``"secondary"`` —— 常规操作（保存 / 重置 / 返回），灰底
-        ``"danger"``    —— 仅删除 / 清空等不可逆操作，红色
-    """
+def style_push_button(btn, kind="primary"):
     from siui.core import SiColor
     from PyQt5.QtWidgets import QPushButton
 
+    btn.setProperty("buttonKind", kind)
     if isinstance(btn, QPushButton):
+        fixed_width = btn.minimumWidth() if btn.minimumWidth() == btn.maximumWidth() and btn.minimumWidth() > 0 else None
+        fixed_height = btn.minimumHeight() if btn.minimumHeight() == btn.maximumHeight() and btn.minimumHeight() > 0 else None
         btn.setStyleSheet(action_button_qss(kind))
+        if btn.property("compactIconButton"):
+            btn.setStyleSheet(btn.styleSheet() + "QPushButton { min-height: 24px; min-width: 26px; padding: 0; }")
+            btn.setFixedSize(28, 26)
+        if fixed_width is not None:
+            btn.setFixedWidth(fixed_width)
+        if fixed_height is not None:
+            btn.setFixedHeight(fixed_height)
         return
-
     palette = {
         "primary": (ACCENT, ACCENT_ON),
-        "secondary": (BG_4, TEXT_1),
-        "danger": (DANGER, TEXT_1),
+        "secondary": (BG_3, TEXT_1),
+        "quiet": ("transparent", TEXT_2),
+        "danger": (DANGER_SOFT, DANGER),
     }
     if kind not in palette:
         raise ValueError(f"unknown button kind: {kind!r}")
@@ -191,69 +275,57 @@ def style_push_button(btn, kind: str = "primary") -> None:
     btn.reloadStyleSheet()
 
 
-def style_accent_slider(slider) -> None:
-    """统一滑条外观：细轨道 + 白色小圆钮 + 主色填充（替代默认的 36×24 胖紫钮）。
-
-    注意 ``SliderStyleData`` 的字段名是 ``track_color / thumb_idle_color``，
-    ``_thumb_color`` 在构造时被快照并有动画驱动，所以除 style_data 外还要
-    把动画的当前值/终值一并钉住，否则首次悬停前仍是旧色。
-    """
+def style_accent_slider(slider):
+    slider.setProperty("neutralSlider", True)
     sd = slider.style_data
-    sd.track_color = accent_qcolor()
-    sd.background_color = QColor(BG_4)
-    sd.thumb_idle_color = QColor(TEXT_1)
+    sd.track_color = QColor(TEXT_2)
+    sd.background_color = QColor(BORDER_HEX)
+    sd.thumb_idle_color = QColor(ACCENT)
     sd.thumb_hover_color = QColor(ACCENT_HOVER)
-    sd.thumb_width = 18
-    sd.thumb_height = 18
-    sd.track_height = 6
-
+    sd.thumb_width = 10
+    sd.thumb_height = 16
+    sd.track_height = 3
     try:
-        slider._thumb_color = QColor(TEXT_1)
+        slider._thumb_color = QColor(ACCENT)
         thumb_ani = getattr(slider, "thumb_color_ani", None)
         if thumb_ani is not None:
-            thumb_ani.setCurrentValue(QColor(TEXT_1))
-            thumb_ani.setEndValue(QColor(TEXT_1))
+            thumb_ani.setCurrentValue(QColor(ACCENT))
+            thumb_ani.setEndValue(QColor(ACCENT))
     except Exception:
         pass
     slider.update()
 
 
-def card_qss() -> str:
-    """分组卡片的统一 QSS（抬升面 + 细边框 + 圆角）。"""
+def card_qss():
     return (
         "QFrame#CardGroup {"
-        f"background-color: {BG_3};"
-        f"border: 1px solid {BORDER};"
-        f"border-radius: {R_M}px;"
+        "background: transparent;"
+        f"border: none; border-bottom: 1px solid {BORDER}; border-radius: 0;"
         "}"
     )
 
 
-def card_title_qss() -> str:
-    """卡片标题文字（配合左侧主色竖条使用）。"""
+def card_title_qss():
     return f"color: {TEXT_1}; background: transparent; font-size: 13px; font-weight: 600;"
 
 
-def field_label_qss() -> str:
-    """卡片内字段小标签（滑条名、输入框名）：弱化一级，避免满屏粗白字。"""
+def field_label_qss():
     return f"color: {TEXT_2}; background: transparent; font-size: 12px;"
 
 
-def slider_value_qss() -> str:
-    """滑条行尾的当前数值：等宽字体，与标签同行右对齐。"""
-    return f"color: {TEXT_1}; font-size: 12px; font-family: {FONT_MONO};"
+def slider_value_qss():
+    return f"color: {TEXT_1}; font-size: 11px; font-family: {FONT_MONO};"
 
 
-def raise_well_on_card(widget) -> None:
-    """把 siui 输入类控件（输入框 / 下拉框 / 数字框）的井底色提亮到 BG_4。
-
-    这些控件默认从 ``INTERFACE_BG_B``（BG_1）取井底色，放在 BG_3 卡片上
-    会形成"黑洞"。对齐到比卡片亮一级的 BG_4 后，控件读起来是抬起的
-    可操作面而不是凹陷。对 SiCapsuleComboBox 自动落到内部的 _line_edit。
-    """
+def raise_well_on_card(widget):
     from siui.core import SiColor
 
     target = getattr(widget, "_line_edit", widget)
+    widget.setProperty("neutralCombo", True)
+    if hasattr(target, "_title_text_margins"):
+        target._title_text_margins = QMargins(10, 0, 10, 0)
+        target._updateTextMargins()
+        target._updateContainerGeometry()
     menu = getattr(widget, "_menu", None)
     if menu is not None:
         menu.setMaximumHeight(360)
@@ -262,12 +334,12 @@ def raise_well_on_card(widget) -> None:
         menu._initStyle()
     sd = getattr(target, "style_data", None)
     if sd is not None and hasattr(sd, "text_background_color"):
-        sd.title_background_color = QColor(BG_4)
-        sd.text_background_color = QColor(BG_4)
+        sd.title_background_color = QColor(BG_1)
+        sd.text_background_color = QColor(BG_1)
         sd.title_color_idle = QColor(TEXT_2)
         sd.title_color_focused = QColor(TEXT_1)
         sd.text_color = QColor(TEXT_1)
-        sd.text_indicator_color_editing = QColor(ACCENT)
+        sd.text_indicator_color_editing = QColor(TEXT_1)
         sd.text_indicator_color_error = QColor(DANGER)
         target.title_color_ani.setCurrentValue(QColor(TEXT_2))
         target.title_color_ani.setEndValue(QColor(TEXT_2))
@@ -275,173 +347,187 @@ def raise_well_on_card(widget) -> None:
         target.update()
         return
     try:
-        target.colorGroup().assign(SiColor.INTERFACE_BG_B, BG_4)
+        target.colorGroup().assign(SiColor.INTERFACE_BG_B, BG_1)
         target.colorGroup().assign(SiColor.INTERFACE_BG_D, BORDER_HEX)
         target.reloadStyleSheet()
     except Exception:
         pass
 
 
-def value_input_qss() -> str:
-    """数值输入框（QSpinBox / QDoubleSpinBox）的统一 QSS。"""
+def value_input_qss():
     return (
         "QLineEdit, QSpinBox, QDoubleSpinBox {"
-        f"background-color: {BG_1};"
-        f"color: {TEXT_1};"
-        f"border: 1px solid {BORDER};"
-        f"border-radius: {R_S}px;"
-        "padding-left: 10px;"
-        "padding-right: 10px;"
-        f"font-family: {FONT_MONO}; font-size: 12px;"
-        "}"
+        f"background-color: {BG_1}; color: {TEXT_1};"
+        f"border: 1px solid {BORDER_HEX}; border-radius: 5px;"
+        "padding-left: 8px; padding-right: 8px;"
+        f"font-family: {FONT_MONO}; font-size: 11px; }}"
         "QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {"
-        f"border: 1px solid {ACCENT};"
-        "}"
-        f"QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {TEXT_3}; background: {BG_3}; }}"
+        f"border: 1px solid {TEXT_2}; }}"
+        f"QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{"
+        f"color: {TEXT_3}; background: {BG_3}; }}"
         "QSpinBox::up-button, QSpinBox::down-button,"
         "QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {"
-        "width: 0px;"
-        "border: none;"
-        "}"
+        "width: 0px; border: none; }"
     )
 
 
-def section_label_qss() -> str:
-    """卡片/分组内小标签的统一 QSS（替代散落的 color: white; font-weight: bold）。"""
-    return f"color: {TEXT_1}; font-weight: bold;"
+def section_label_qss():
+    return f"color: {TEXT_1}; font-size: 11px; font-weight: 600;"
 
 
-def nav_tab_qss() -> str:
-    """右栏页签（渲染控制 / 处理分析）的胶囊式 QSS。
-
-    替代 SiCapsuleButton：设计稿要求 inactive=抬升面灰、active=主色
-    柔光底 + 主色字，无任何徽章动画。
-    """
+def nav_tab_qss():
     return (
-        "QPushButton {"
-        f"background-color: {BG_3};"
-        f"color: {TEXT_2};"
-        "border: 1px solid transparent;"
-        "border-radius: 6px;"
-        "padding: 0 10px;"
-        "font-size: 13px;"
-        "}"
-        "QPushButton:hover {"
-        f"color: {TEXT_1};"
-        "}"
+        "QPushButton { background-color: transparent;"
+        f"color: {TEXT_2}; border: 1px solid transparent; border-radius: 5px;"
+        "padding: 0 10px; font-size: 12px; }"
+        f"QPushButton:hover {{ color: {TEXT_1}; background-color: {BG_4}; }}"
         "QPushButton:checked {"
-        f"background-color: {ACCENT_SOFT};"
-        f"color: {ACCENT};"
-        f"border: 1px solid {ACCENT_DIM};"
-        "font-weight: 600;"
-        "}"
+        f"background-color: {BG_3}; color: {TEXT_1};"
+        f"border: 1px solid {BORDER_HEX}; font-weight: 500; }}"
     )
 
 
-def context_menu_qss() -> str:
-    """原生 QMenu 右键菜单的统一 QSS（页面树 / 工作区 / 主窗口共用）。
-
-    深色抬升面 + 细边框 + 圆角，条目带足量内边距与禁用态；分隔线弱化到
-    边框色。替代之前散落的「只有底色和选中色」两行样式。
-    """
+def context_menu_qss():
     return (
         "QMenu {"
-        f"color: {TEXT_1};"
-        f"background-color: {BG_3};"
-        f"border: 1px solid {BORDER_STRONG};"
-        f"border-radius: {R_S}px;"
-        "padding: 6px;"
-        "}"
+        f"color: {TEXT_1}; background-color: {BG_3};"
+        f"border: 1px solid {BORDER_HEX}; border-radius: {R_S}px; padding: 6px; }}"
         "QMenu::item {"
-        "padding: 6px 24px 6px 12px;"
-        f"border-radius: {R_S - 2}px;"
-        "background: transparent;"
-        "}"
-        "QMenu::item:selected {"
-        f"background-color: {BG_4};"
-        "}"
-        "QMenu::item:disabled {"
-        f"color: {TEXT_3};"
-        "}"
-        "QMenu::separator {"
-        "height: 1px;"
-        f"background: {BORDER};"
-        "margin: 4px 8px;"
-        "}"
+        "padding: 7px 24px 7px 12px; border-radius: 4px; background: transparent; }"
+        f"QMenu::item:selected {{ background-color: {BG_4}; }}"
+        f"QMenu::item:disabled {{ color: {TEXT_3}; }}"
+        f"QMenu::separator {{ height: 1px; background: {BORDER_HEX}; margin: 4px 8px; }}"
     )
 
 
-def scrollbar_qss() -> str:
-    """原生滚动条（QTableWidget / QTreeWidget / QScrollArea 等）的深色细条 QSS。
-
-    SiUI 容器用自己的自绘滚动条，不走 QSS；这里只兜住原生 Qt 容器，
-    避免内容一多就冒出 Windows 亮色滚动条。
-    """
+def scrollbar_qss():
     return (
-        "QScrollBar:vertical {"
-        "background: transparent; width: 10px; margin: 2px;"
-        "}"
-        "QScrollBar:horizontal {"
-        "background: transparent; height: 10px; margin: 2px;"
-        "}"
+        "QScrollBar:vertical { background: transparent; width: 6px; margin: 1px; }"
+        "QScrollBar:horizontal { background: transparent; height: 6px; margin: 1px; }"
         "QScrollBar::handle {"
-        f"background: {BG_4}; border-radius: 4px; min-height: 24px; min-width: 24px;"
-        "}"
-        "QScrollBar::handle:hover {"
-        f"background: {TEXT_3};"
-        "}"
+        f"background: {SCROLLBAR}; border-radius: 3px; min-height: 24px; min-width: 24px; }}"
+        f"QScrollBar::handle:hover {{ background: {TEXT_3}; }}"
         "QScrollBar::add-line, QScrollBar::sub-line {"
-        "height: 0px; width: 0px; border: none; background: none;"
-        "}"
-        "QScrollBar::add-page, QScrollBar::sub-page {"
-        "background: none;"
-        "}"
+        "height: 0px; width: 0px; border: none; background: none; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: none; }"
     )
 
 
-# ---------------------------------------------------------------------------
-# SiUI 全局色板对齐
-# ---------------------------------------------------------------------------
-def apply_siui_palette() -> None:
-    """把 SiUI 全局色板整体对齐到本文件的设计令牌。
-
-    SiUI 的自绘控件（分组标题指示条、下拉菜单、开关、滚动条等）绘制时从
-    ``SiGlobal.siui.colors`` 取色，QSS 压不到。必须在**创建任何 SiUI 控件
-    之前**调用一次（多数控件在初始化或 reloadStyleSheet 时快照色值）。
+def application_qss():
+    return f"""
+        QWidget {{ color: {TEXT_1}; font-family: {FONT_FAMILY}; font-size: 13px; }}
+        QDialog, QMessageBox, QProgressDialog {{ background-color: {BG_0}; }}
+        QLabel {{ background: transparent; }}
+        QToolTip {{ color: {TEXT_1}; background-color: {BG_3};
+            border: 1px solid {BORDER_HEX}; padding: 6px 8px; }}
+        QPushButton, QToolButton {{
+            color: {TEXT_1}; background-color: {BG_3};
+            border: 1px solid {BORDER_HEX}; border-radius: {R_S}px;
+            min-height: 30px; padding: 0 10px; font-size: 12px;
+        }}
+        QPushButton:hover, QToolButton:hover {{ background-color: {BG_4}; }}
+        QPushButton:disabled, QToolButton:disabled {{ color: {TEXT_3}; }}
+        QPushButton[buttonKind="primary"] {{ background-color: {ACCENT}; color: {ACCENT_ON};
+            border-color: {ACCENT}; }}
+        QPushButton[buttonKind="primary"]:hover {{ background-color: {ACCENT_HOVER}; }}
+        QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+            color: {TEXT_1}; background-color: {BG_1};
+            border: 1px solid {BORDER_HEX}; border-radius: 5px;
+            min-height: 28px; padding: 0 8px; selection-background-color: {BG_4};
+        }}
+        QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
+        QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {TEXT_2}; }}
+        QComboBox::drop-down {{ width: 24px; border: none; }}
+        QComboBox QAbstractItemView {{
+            color: {TEXT_1}; background-color: {BG_3}; border: 1px solid {BORDER_HEX};
+            selection-background-color: {BG_4}; selection-color: {TEXT_1};
+        }}
+        QGroupBox {{
+            color: {TEXT_1}; background: transparent; border: 1px solid {BORDER_HEX};
+            border-radius: 7px; margin-top: 13px; padding: 14px 11px 11px;
+            font-size: 11px; font-weight: 600;
+        }}
+        QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px;
+            background-color: {BG_0}; }}
+        QTabWidget::pane {{ border: none; background: transparent; }}
+        QTabBar::tab {{
+            color: {TEXT_3}; background: transparent; padding: 8px 13px;
+            margin-right: 5px; border: none; border-bottom: 2px solid transparent;
+            font-size: 11px;
+        }}
+        QTabBar::tab:hover {{ color: {TEXT_1}; }}
+        QTabBar::tab:selected {{ color: {TEXT_1}; border-bottom-color: {TEXT_1}; }}
+        QTreeWidget, QTableWidget, QTreeView, QTableView, QListWidget {{
+            color: {TEXT_1}; background-color: {BG_2}; alternate-background-color: {BG_2};
+            border: 1px solid {BORDER_HEX}; border-radius: 7px;
+            gridline-color: {BORDER_HEX}; selection-background-color: {ACCENT_SOFT};
+            selection-color: {TEXT_1};
+        }}
+        QTreeWidget::item, QTableWidget::item {{ padding: 5px; border: none; }}
+        QTreeWidget::item:hover, QTableWidget::item:hover {{ background-color: {BG_3}; }}
+        QTreeWidget::item:selected, QTableWidget::item:selected {{
+            color: {TEXT_1}; background-color: {ACCENT_SOFT};
+        }}
+        QHeaderView::section {{
+            color: {TEXT_2}; background-color: {BG_3}; border: none;
+            border-bottom: 1px solid {BORDER_HEX}; padding: 8px; font-size: 11px;
+        }}
+        QScrollArea {{ background: transparent; border: none; }}
+        QCheckBox, QRadioButton {{ color: {TEXT_2}; spacing: 7px; font-size: 12px; }}
+        QCheckBox::indicator, QRadioButton::indicator {{ width: 13px; height: 13px; }}
+        QCheckBox::indicator:unchecked {{ background: {BG_1}; border: 1px solid {BORDER_HEX};
+            border-radius: 3px; }}
+        QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT};
+            border-radius: 3px; image: url({asset_path('assets/ui/check-' + _CURRENT_THEME + '.svg')}); }}
+        QSlider::groove:horizontal {{ height: 3px; background: {BORDER_HEX}; border-radius: 1px; }}
+        QSlider::sub-page:horizontal {{ background: {TEXT_2}; border-radius: 1px; }}
+        QSlider::handle:horizontal {{ width: 9px; margin: -6px 0; background: {ACCENT};
+            border: 1px solid {ACCENT}; border-radius: 3px; }}
+        QSlider::groove:vertical {{ width: 3px; background: {BORDER_HEX}; }}
+        QSlider::handle:vertical {{ height: 9px; margin: 0 -3px; background: {ACCENT}; }}
+        QProgressBar {{ color: {TEXT_2}; background: {BG_1}; border: none;
+            border-radius: 2px; max-height: 4px; font-size: 9px; }}
+        QProgressBar::chunk {{ background: {TEXT_2}; border-radius: 2px; }}
+        QMenu {{ color: {TEXT_1}; background-color: {BG_3};
+            border: 1px solid {BORDER_HEX}; border-radius: {R_S}px; padding: 6px; }}
+        QMenu::item {{ padding: 7px 24px 7px 12px; border-radius: 4px; }}
+        QMenu::item:selected {{ background-color: {BG_4}; }}
+        QMenu::item:disabled {{ color: {TEXT_3}; }}
+        QMenu::separator {{ height: 1px; background: {BORDER_HEX}; margin: 4px 8px; }}
+        QSplitter::handle {{ background: {BG_0}; }}
+        QSplitter::handle:hover {{ background: {BORDER_HEX}; }}
+        {scrollbar_qss()}
     """
+
+
+def apply_siui_palette():
     from siui.core import SiColor, SiGlobal
 
     mapping = {
-        # 背景 5 级
         SiColor.INTERFACE_BG_A: BG_0,
         SiColor.INTERFACE_BG_B: BG_1,
         SiColor.INTERFACE_BG_C: BG_2,
         SiColor.INTERFACE_BG_D: BG_3,
         SiColor.INTERFACE_BG_E: BG_4,
-        # 文本
         SiColor.TEXT_A: TEXT_1,
         SiColor.TEXT_B: TEXT_1,
         SiColor.TEXT_C: TEXT_2,
         SiColor.TEXT_D: TEXT_2,
         SiColor.TEXT_E: TEXT_3,
-        SiColor.TEXT_THEME: ACCENT,
-        # 主题色与过渡渐变
+        SiColor.TEXT_THEME: TEXT_1,
         SiColor.THEME: ACCENT,
         SiColor.THEME_TRANSITION_A: ACCENT,
         SiColor.THEME_TRANSITION_B: ACCENT_TRANSITION,
-        SiColor.TITLE_INDICATOR: ACCENT,
-        SiColor.TITLE_HIGHLIGHT: "#29FF7EB6",  # ACCENT 16% alpha（ARGB hex）
-        # 侧边消息语义色
+        SiColor.TITLE_INDICATOR: TEXT_2,
+        SiColor.TITLE_HIGHLIGHT: TITLE_HIGHLIGHT,
         SiColor.SIDE_MSG_THEME_NORMAL: BG_4,
         SiColor.SIDE_MSG_THEME_SUCCESS: SUCCESS,
         SiColor.SIDE_MSG_THEME_INFO: INFO,
         SiColor.SIDE_MSG_THEME_WARNING: WARNING,
         SiColor.SIDE_MSG_THEME_ERROR: DANGER,
-        # 菜单 / 提示
         SiColor.MENU_BG: BG_3,
         SiColor.TOOLTIP_BG: BG_3,
-        # 按钮体系（默认粉紫渐变消为单色主色）
-        SiColor.BUTTON_PANEL: BG_4,
+        SiColor.BUTTON_PANEL: BG_3,
         SiColor.BUTTON_SHADOW: BG_0,
         SiColor.BUTTON_ON: ACCENT_DEEP,
         SiColor.BUTTON_OFF: BG_4,
@@ -449,29 +535,140 @@ def apply_siui_palette() -> None:
         SiColor.BUTTON_THEMED_BG_B: ACCENT,
         SiColor.BUTTON_THEMED_SHADOW_A: ACCENT_DEEP,
         SiColor.BUTTON_THEMED_SHADOW_B: ACCENT_DEEP,
-        SiColor.BUTTON_TEXT_BUTTON_IDLE: ACCENT,
+        SiColor.BUTTON_TEXT_BUTTON_IDLE: TEXT_1,
         SiColor.BUTTON_TEXT_BUTTON_FLASH: ACCENT_HOVER,
         SiColor.BUTTON_TEXT_BUTTON_HOVER: ACCENT_HOVER,
         SiColor.BUTTON_LONG_PRESS_PANEL: DANGER,
-        SiColor.BUTTON_LONG_PRESS_SHADOW: "#5C2430",
+        SiColor.BUTTON_LONG_PRESS_SHADOW: BG_0,
         SiColor.BUTTON_LONG_PRESS_PROGRESS: DANGER_HOVER,
-        # 选择类控件
         SiColor.RADIO_BUTTON_UNCHECKED: BG_1,
         SiColor.RADIO_BUTTON_CHECKED: ACCENT,
         SiColor.CHECKBOX_UNCHECKED: TEXT_3,
         SiColor.CHECKBOX_CHECKED: ACCENT,
         SiColor.CHECKBOX_SVG: ACCENT_ON,
-        SiColor.SWITCH_DEACTIVATE: TEXT_1,
+        SiColor.SWITCH_DEACTIVATE: BG_2,
         SiColor.SWITCH_ACTIVATE: ACCENT_ON,
-        # SVG 图标
         SiColor.SVG_NORMAL: TEXT_2,
-        SiColor.SVG_THEME: ACCENT,
-        # 进度条
+        SiColor.SVG_THEME: TEXT_1,
         SiColor.PROGRESS_BAR_TRACK: BG_4,
-        SiColor.PROGRESS_BAR_PROCESSING: ACCENT,
-        SiColor.PROGRESS_BAR_COMPLETING: SUCCESS,
+        SiColor.PROGRESS_BAR_PROCESSING: TEXT_2,
+        SiColor.PROGRESS_BAR_COMPLETING: TEXT_1,
         SiColor.PROGRESS_BAR_PAUSED: TEXT_3,
     }
-    colors = SiGlobal.siui.colors
     for token, code in mapping.items():
-        colors.assign(token, code)
+        SiGlobal.siui.colors.assign(token, code)
+    apply_application_style()
+
+
+def apply_application_style():
+    from PyQt5.QtGui import QPalette
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    palette = app.palette()
+    roles = {
+        QPalette.Window: BG_0,
+        QPalette.Base: BG_1,
+        QPalette.AlternateBase: BG_2,
+        QPalette.WindowText: TEXT_1,
+        QPalette.Text: TEXT_1,
+        QPalette.Button: BG_3,
+        QPalette.ButtonText: TEXT_1,
+        QPalette.BrightText: TEXT_1,
+        QPalette.Light: BG_4,
+        QPalette.Midlight: BG_3,
+        QPalette.Mid: BORDER_HEX,
+        QPalette.Dark: BORDER_HEX,
+        QPalette.Shadow: BG_0,
+        QPalette.Highlight: BG_4,
+        QPalette.HighlightedText: TEXT_1,
+        QPalette.Link: TEXT_2,
+        QPalette.PlaceholderText: TEXT_3,
+        QPalette.ToolTipBase: BG_3,
+        QPalette.ToolTipText: TEXT_1,
+    }
+    for role, color in roles.items():
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.HighlightedText):
+        palette.setColor(QPalette.Disabled, role, QColor(TEXT_3))
+    app.setPalette(palette)
+    app.setStyleSheet(application_qss())
+
+
+def _retranslate_style(style):
+    if not style:
+        return style
+    replacements = {}
+    for palette in PALETTES.values():
+        for key, value in palette.items():
+            if isinstance(value, str) and (value.startswith("#") or value.startswith("rgba")):
+                normalized = value.lower().replace(" ", "")
+                if normalized not in replacements or key.startswith("BG_"):
+                    replacements[normalized] = key
+    pattern = re.compile(r"#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|rgba?\([^)]*\)")
+
+    def replace(match):
+        key = replacements.get(match.group(0).lower().replace(" ", ""))
+        return str(PALETTES[_CURRENT_THEME][key]) if key else match.group(0)
+
+    return pattern.sub(replace, style)
+
+
+def apply_widget_theme(root):
+    from PyQt5.QtWidgets import QPushButton
+
+    widgets = [root, *root.findChildren(QObject)]
+    for widget in widgets:
+        if not hasattr(widget, "setStyleSheet"):
+            continue
+        style = widget.styleSheet()
+        translated = _retranslate_style(style)
+        if translated != style:
+            widget.setStyleSheet(translated)
+        if isinstance(widget, QPushButton) and widget.property("buttonKind"):
+            style_push_button(widget, widget.property("buttonKind"))
+        if widget.property("neutralSlider"):
+            style_accent_slider(widget)
+        if widget.property("neutralCombo"):
+            raise_well_on_card(widget)
+        apply_theme = getattr(widget, "apply_theme", None)
+        if callable(apply_theme):
+            apply_theme()
+        icon_name = widget.property("fluentIconName") if hasattr(widget, "property") else None
+        if icon_name and hasattr(widget, "setIcon"):
+            widget.setIcon(fluent_icon(
+                icon_name,
+                int(widget.property("fluentIconSize") or 16),
+                ACCENT_ON if widget.property("fluentIconOnAccent") else TEXT_2,
+            ))
+
+
+def set_theme(name, *, notify=True):
+    if name not in PALETTES:
+        raise ValueError(f"unknown theme: {name!r}")
+    changed_theme = name != _CURRENT_THEME
+    _install_palette(name)
+    apply_siui_palette()
+    if changed_theme and notify:
+        from PyQt5.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is not None:
+            top_level = set(app.topLevelWidgets())
+            for widget in top_level:
+                ancestor = widget.parentWidget()
+                nested = False
+                while ancestor is not None:
+                    if ancestor in top_level:
+                        nested = True
+                        break
+                    ancestor = ancestor.parentWidget()
+                if not nested:
+                    apply_widget_theme(widget)
+        changed.emit(name)
+
+
+def initialize_theme(name):
+    _install_palette(name)

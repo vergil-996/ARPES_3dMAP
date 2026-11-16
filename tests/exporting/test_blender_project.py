@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import os
@@ -33,8 +34,12 @@ def _sha(path):
 
 def _project_report(metadata, final):
     reports = []
+    preset_owner = metadata["project"]["layout"]["preset_owner"]
     for scene in metadata["entries"]:
         entry_id = scene["entry_id"]
+        entry_presets = dict(metadata["project"]["presets"])
+        if entry_id != preset_owner:
+            entry_presets = {key: False for key in entry_presets}
         boxes, lights = project_report_boxes(metadata, entry_id)
         texts, text_lights = project_report_texts(metadata, entry_id)
         volume_material, volume_lights = project_report_volume(metadata, entry_id)
@@ -43,11 +48,11 @@ def _project_report(metadata, final):
             "volume_filepath": f"//{final.stem}.assets/{scene['assets']['vdb']}",
             "density_space": "OBJECT", "weak_signal_clipping": 0.0,
             "grid_names": ["density", "color"],
-            "coordinates_present": metadata["project"]["presets"]["coordinates"],
+            "coordinates_present": entry_presets["coordinates"],
             "guide_frame": ({
                 "object": scene["guide_frame"]["object"],
                 "larger_than_axis_frame": True, "encloses_data_bounds": True,
-            } if metadata["project"]["presets"]["guide_frame"] else {}),
+            } if entry_presets["guide_frame"] else {}),
             "axis_indicator": ({
                 "all_present": True, "visible_by_default": True, "style": "solid_world_axes",
                 "geometry_validated": True,
@@ -55,7 +60,7 @@ def _project_report(metadata, final):
                     {"key": key, "role": role, "visible": True}
                     for key, role in zip(("X", "E", "Y"), ("horizontal", "vertical", "depth"))
                 ],
-            } if metadata["project"]["presets"]["orientation"] else {}),
+            } if entry_presets["orientation"] else {}),
             "box_presets": boxes,
             "box_lights": lights,
             "volume_material": volume_material,
@@ -109,8 +114,17 @@ class BlenderProjectContractTests(unittest.TestCase):
         self.assertNotEqual(
             metadata["entries"][0]["assets"]["arrays"], metadata["entries"][1]["assets"]["arrays"],
         )
-        first_layout = metadata["project"]["layout"]["entries"]["entry-001"]
-        second_layout = metadata["project"]["layout"]["entries"]["entry-002"]
+        layout = metadata["project"]["layout"]
+        self.assertEqual(layout["preset_owner"], "entry-001")
+        first_layout = layout["entries"]["entry-001"]
+        second_layout = layout["entries"]["entry-002"]
+        self.assertEqual(first_layout["translation"], [0.0, 0.0, 0.0])
+        self.assertGreater(second_layout["translation"][0], 0.0)
+        self.assertEqual(second_layout["translation"][1:], [0.0, 0.0])
+        self.assertEqual(
+            second_layout["local_bounds"],
+            metadata["entries"][1]["blender_grid"]["material_clip_bounds"],
+        )
         self.assertLess(first_layout["world_bounds"][1], second_layout["world_bounds"][0])
         for scene in metadata["entries"]:
             self.assertEqual(len(scene["box_presets"]), 8)
@@ -125,6 +139,31 @@ class BlenderProjectContractTests(unittest.TestCase):
         self.assertEqual(edit["locked_range"], [0.0, 1.0])
         self.assertEqual(edit["levels_params"], [0.0, 50.0, 100.0])
         self.assertEqual(metadata["entries"][1]["source"]["session_id"], "source-b")
+
+    def test_multi_entry_commits_one_shared_preset_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blend, metadata = write_fake_blender_project(
+                directory, [make_blender_snapshot(), make_blender_snapshot()],
+            )
+            report = _project_report(metadata, blend)
+            first, second = report["entries"]
+            self.assertEqual(len(first["box_presets"]), 8)
+            self.assertEqual(len(first["text_presets"]), 10)
+            self.assertTrue(first["coordinates_present"])
+            self.assertEqual(second["box_presets"], [])
+            self.assertEqual(second["text_presets"], [])
+            self.assertFalse(second["coordinates_present"])
+            self.assertEqual(second["guide_frame"], {})
+            self.assertEqual(second["axis_indicator"], {})
+            stage = _stage_project(directory, blend, metadata, report)
+            result = commit_staged_project(stage, blend, metadata, overwrite=True)
+            self.assertTrue(result.blend_path.is_file())
+
+            duplicated = copy.deepcopy(report)
+            duplicated["entries"][1]["coordinates_present"] = True
+            stage = _stage_project(directory, blend, metadata, duplicated)
+            with self.assertRaisesRegex(BlenderProcessError, "坐标轴及文字"):
+                commit_staged_project(stage, blend, metadata, overwrite=True)
 
     def test_partial_presets_change_report_validation_and_box_geometry(self):
         presets = {key: False for key in PRESET_KEYS}

@@ -75,11 +75,19 @@ def make_blender_snapshot(*, volume=None, full_shape=(6, 7, 8), data_bounds=None
     )
 
 
+def _owns_shared_presets(metadata, entry_id):
+    project = metadata["project"]
+    owner = (project.get("layout") or {}).get("preset_owner") or project["entry_order"][0]
+    return entry_id == owner
+
+
 def project_report_boxes(metadata, entry_id):
     """Build the schema-8 box/light section of a fake Blender reopen report."""
     from bandscope.exporting.blender_materials import material_spec
 
     scene = next(entry for entry in metadata["entries"] if entry["entry_id"] == entry_id)
+    if not _owns_shared_presets(metadata, entry_id):
+        return [], []
     presets = metadata["project"]["presets"]
     layout_id = metadata["project"]["box_layout"]["id"]
     boxes, lights = [], []
@@ -121,7 +129,7 @@ def project_report_texts(metadata, entry_id):
     """Build the schema-9 text/font/light section of a fake Blender reopen report."""
     scene = next(entry for entry in metadata["entries"] if entry["entry_id"] == entry_id)
     project = metadata["project"]
-    if not project["presets"].get("text_presets"):
+    if not project["presets"].get("text_presets") or not _owns_shared_presets(metadata, entry_id):
         return [], []
     records = [{
         "preset": item["preset"], "object": item["object"],

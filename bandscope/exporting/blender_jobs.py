@@ -111,10 +111,10 @@ def project_usage_text(metadata, assets_dir_name):
         "薄层长方体材质",
         "--------------",
         *(material_lines or ["未创建长方体。"]),
-        "统一预设会为八种材质各创建一块橙色薄板，全部使用注册表默认参数。",
-        "每块薄板拥有独立网格、独立材质和独立节点树；同一数据组与不同数据组都不共享材质。",
+        "统一预设只在首个视图生成一组，为八种材质各创建一块橙色薄板，全部使用注册表默认参数。",
+        "每块薄板拥有独立网格、独立材质和独立节点树；其余视图不重复创建薄板或其辅助灯。",
         (
-            "平面发光与全息边缘自带发光；哑光、缎面、无折射玻璃和真实玻璃使用逐条目中性 Area 灯，"
+            "平面发光与全息边缘自带发光；哑光、缎面、无折射玻璃和真实玻璃使用共享中性 Area 灯，"
             "并通过 Cycles 灯光链接只照亮需要外部照明的薄板。"
         ),
         "数据漫透射不使用薄板自发光；效果依赖数据体亮度和较高采样。",
@@ -124,8 +124,8 @@ def project_usage_text(metadata, assets_dir_name):
         "文本预设",
         "--------",
         *(text_lines or ["未创建文本预设。"]),
-        "统一预设一次生成十种可编辑 Text 对象，正文全部为大写 A，实际字高统一为 0.12 Blender 单位。",
-        "十个 A 在数据体下方按两行五列排列，朝向各自条目的原始相机；对象、文字曲线和材质互不共享。",
+        "统一预设只在首个视图生成一组十种可编辑 Text 对象，正文全部为大写 A，实际字高统一为 0.12 Blender 单位。",
+        "十个 A 在首个数据体下方按两行五列排列，朝向首个视图的原始相机；其余视图不重复创建文本或其辅助灯。",
         "空心描边保持可编辑轮廓；立体粗体、发光、金属和玻璃样式可直接修改文字、挤出、倒角和材质。",
         "文本专用 Area 灯通过 Cycles 灯光链接只照亮文本，不直接照射科学体或薄板，也不参与布局边界。",
         "",
@@ -140,9 +140,10 @@ def project_usage_text(metadata, assets_dir_name):
         "工程组织与预设",
         "--------------",
         "每个条目有独立 Collection、BandScope Root、体材质和 VDB，按页面树顺序沿世界 X 排列。",
+        "五类辅助预设只由首个条目生成一组；后续条目从首组实际边界之外向 +X 依次排列，不与共享预设重叠。",
         "科学网格保持原坐标，组间排布只平移父对象。多页活动相机为总览相机，各页原相机保留为备用。",
         "坐标轴及文字在左、辅助盒框在后、方向标在上；四种自发光／透射薄板在右，四种受光薄板在前并上移半层，移到数据体后八层交替。",
-        "十种文本预设作为一个开关生成，位于数据体下方；未勾选时不创建文本、字体资产或文本辅助灯。",
+        "十种文本预设作为一个开关生成，位于首个数据体下方；未勾选时不创建文本、字体资产或文本辅助灯。",
         "长方体是完整薄长方体，厚度固定 0.04；实际层间距与是否和数据体相交记录在 scene.json。",
         "辅助盒框 Collection 默认不参与渲染；未勾选的预设不会创建。",
         "薄板和文本辅助灯位于数据 Collection 内、父对象为 BandScope Root，不参与科学布局边界、取景和总览相机。",
@@ -445,8 +446,12 @@ def commit_staged_project(stage_root, blend_path, metadata, overwrite=False, rec
     material_names, mesh_names = [], []
     volume_materials = []
     text_materials, text_curves = [], []
+    project_layout = metadata["project"].get("layout") or {}
+    preset_owner = project_layout.get("preset_owner") or metadata["project"]["entry_order"][0]
     for scene in metadata["entries"]:
         selected = dict(metadata["project"]["presets"])
+        if scene["entry_id"] != preset_owner:
+            selected = {key: False for key in selected}
         scene = dict(scene)
         scene["_selected_presets"] = selected
         _validate_entry_report(
@@ -458,11 +463,11 @@ def commit_staged_project(stage_root, blend_path, metadata, overwrite=False, rec
         text_materials.extend(item["material"] for item in reports[scene["entry_id"]].get("text_presets") or ())
         text_curves.extend(item["data"] for item in reports[scene["entry_id"]].get("text_presets") or ())
     if len(set(material_names)) != len(material_names) or len(set(mesh_names)) != len(mesh_names):
-        raise BlenderProcessError("不同条目或长方体意外共享网格或材质。")
+        raise BlenderProcessError("不同长方体意外共享网格或材质。")
     if len(set(volume_materials)) != len(volume_materials):
         raise BlenderProcessError("不同条目意外共享可变数据体材质。")
     if len(set(text_materials)) != len(text_materials) or len(set(text_curves)) != len(text_curves):
-        raise BlenderProcessError("不同条目或文本预设意外共享文字曲线或材质。")
+        raise BlenderProcessError("不同文本预设意外共享文字曲线或材质。")
     targets = (blend_path, assets_path, recipe_path)
     if not overwrite and any(_lexists(target) for target in targets):
         raise BlenderOutputExistsError("目标工程、配套资产或复现配置已存在；未覆盖任何文件。")

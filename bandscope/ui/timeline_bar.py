@@ -6,8 +6,8 @@
 - 左起第一组：当前积分轴向的位置滑条 + 物理值输入框（``slider_axis`` /
   ``input_axis``）。只有需要位置控制的页面才出现；数据没有时间轴坐标时它
   直接占用原时间轴的位置，左侧不留空位。
-- 左起第二组：时间轴（滑条 + 帧号输入框 + 提示 + 总帧数），按数据显隐；
-  与位置滑条同排时两者共享富余宽度。
+- 左起第二组：时间轴（滑条 + 帧号输入框 + 提示 + 总帧数），按数据显隐；只提供
+  手动滑帧与帧号定位，不提供自动播放；与位置滑条同排时两者共享富余宽度。
 - 右侧：显示坐标 / 图像翻转 开关与 Z 轴旋转输入框，常驻右对齐。宽度不够时
   整组下移到第二行，底条高度同步增加。
 
@@ -83,8 +83,8 @@ class TimelineBar(QFrame):
     """画布正下方的常驻底条：积分位置组 + 时间轴组 + 右对齐的画布视图控件。"""
 
     #: 底条单行高度；出现第二行（视图控件下移）时再加 ``SECOND_ROW_HEIGHT``。
-    HEIGHT = 56
-    SECOND_ROW_HEIGHT = 44
+    HEIGHT = 64
+    SECOND_ROW_HEIGHT = 40
     # 滑条长度下限：窄窗口下仍能拖动。滑条没有长度上限——分组吸满富余宽度，
     # 滑条一直顶到相邻分组前，只留一处与行内一致的间隙（layout spacing）。
     SLIDER_MIN_WIDTH = 160
@@ -95,17 +95,17 @@ class TimelineBar(QFrame):
     #: 位置轨道最低可拖宽度（px）。
     AXIS_SLIDER_MIN_WIDTH = 120
     # 时间轴控件尺寸
-    TIME_VALUE_BOX_WIDTH = 72
+    TIME_VALUE_BOX_WIDTH = 64
     TIME_VALUE_BOX_HEIGHT = 30
     AXIS_VALUE_BOX_WIDTH = 92
     AXIS_VALUE_BOX_HEIGHT = 30
     ROTATION_BOX_WIDTH = 108
     ROTATION_BOX_HEIGHT = 32
-    SWITCH_WIDTH = 40
-    SWITCH_HEIGHT = 20
+    SWITCH_WIDTH = 30
+    SWITCH_HEIGHT = 18
     LABEL_CONTROL_SPACING = 6
     VIEW_CONTROL_SPACING = 16
-    ROW_MARGINS = (14, 4, 14, 4)
+    ROW_MARGINS = (14, 6, 14, 6)
 
     #: 底条每次重新排版（呼出/收起/换行/恢复）后发出，供宿主合并画布尺寸刷新。
     layoutChanged = pyqtSignal()
@@ -167,7 +167,7 @@ class TimelineBar(QFrame):
         self._title_block = QVBoxLayout()
         self._title_block.setContentsMargins(0, 0, 0, 0)
         self._title_block.setSpacing(2)
-        self.title_label = QLabel("时间轴", self.timeline_group)
+        self.title_label = QLabel("时间延迟", self.timeline_group)
         self.title_label.setStyleSheet(theme.card_title_qss())
         # 文字标签固定宽度：分组里的富余宽度只留给滑条，标签不被拉长。
         self.title_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -239,7 +239,7 @@ class TimelineBar(QFrame):
         self._axis_layout.addWidget(self.input_axis, 0, Qt.AlignVCenter)
 
     def _create_timeline_controls(self):
-        self.time_hint = QLabel("当前帧 · ← → 逐帧切换", self.timeline_group)
+        self.time_hint = QLabel("当前帧 · 拖动滑条或输入帧号", self.timeline_group)
         self.time_hint.setStyleSheet(theme.field_label_qss())
         self.time_hint.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self._title_block.addWidget(self.time_hint)

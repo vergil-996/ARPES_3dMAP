@@ -11,7 +11,7 @@ configure_qt_plugin_path()
 
 import numpy as np
 import vtk
-from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QSize, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -48,6 +48,7 @@ from bandscope.ui.axis_title_controller import (
     axis_title_key,
 )
 from bandscope.ui.ui_controls import ActionButton
+from bandscope.ui.canvas_overlay import CanvasToolOverlay
 from bandscope.ui.camera_view_controls import (
     DEFAULT_AZIMUTH,
     DEFAULT_ELEVATION,
@@ -70,6 +71,7 @@ from bandscope.ui.axis_interval_controller import AxisIntervalController, Interv
 from bandscope.ui.blank_control_page import BlankControlPage
 from bandscope.core.data_trans import convert as convert_mat_to_npz
 from bandscope.exporting.publication_models import axis_label
+from bandscope.ui.numeric_wheel import install_numeric_wheel_filter
 from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.ui.plot_coordinate_tooltip import PlotCoordinateTooltip
@@ -137,7 +139,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
     FULL_SCOPE_ID = "full"
     ROTATION_CACHE_LIMIT = 4
-    RENDER_STATUS_WIDTH = 330
     #: 持有焦点时方向键留给文本编辑，不用于逐帧。
     EDITABLE_CLASS_MARKERS = ("LineEdit", "EditBox", "SpinBox", "TextEdit", "PlainTextEdit")
     #: 持有焦点时方向键归这些控件自己用（滑条 / 下拉框 / 页面树）。
@@ -147,6 +148,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def __init__(self):
         super().__init__()
+        self.settings = QSettings("ARPES", "ARPES_3dMAP")
+        theme.initialize_theme(self.settings.value("ui/theme", "light", type=str))
         theme.apply_app_font()
         theme.apply_siui_palette()  # 必须先于任何 SiUI 控件创建
         self.setWindowOpacity(0)
@@ -205,7 +208,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self._camera_interaction_observer_id = None
         self._camera_view_sync_timer = None
 
-        self.settings = QSettings("ARPES", "ARPES_3dMAP")
         saved_backend = self.settings.value("compute_backend", "Auto", type=str)
         self.backend_manager = BackendManager(saved_backend)
         self._sync_gpu_display_backend()
@@ -240,6 +242,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         )
 
         self.init_ui()
+        theme.changed.connect(self._on_theme_changed)
         self.crop_controller = CropController(self)
         self.toast_manager = ToastManager(self)
         self.volume_session = VolumeRenderSession(self.plotter)
@@ -334,6 +337,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+            install_numeric_wheel_filter(app)
         self._install_global_shortcuts()
 
     def _install_global_shortcuts(self):
@@ -391,7 +395,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if self._crop_event_filter(watched, event):
             return True
         if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
-            self._position_render_status()
+            self._position_canvas_tool_overlay()
         if event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
             # 失焦时结束标题拖动，避免松手事件永远收不到。
             if self._axis_title_dragging():
@@ -542,21 +546,36 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def init_ui(self):
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(12, 12, 12, 8)
-        outer_layout.setSpacing(10)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
         self._build_toolbar()
         outer_layout.addWidget(self.toolbar)
 
         self.left_display_stack = QStackedWidget()
         self.left_display_stack.setObjectName("display_stack")
-        self.left_display_stack.setStyleSheet(f"QStackedWidget#display_stack {{ background-color: {theme.BG_1}; border-radius: 12px; }}")
+        self.left_display_stack.setStyleSheet(f"QStackedWidget#display_stack {{ background-color: {theme.CANVAS_BG}; border-radius: 10px; }}")
 
         self.plotter = QtInteractor(self.left_display_stack)
-        self.plotter.set_background(theme.BG_1)
+        self.plotter.set_background(theme.CANVAS_BG)
+        try:
+            self.orientation_marker = self.plotter.add_axes(
+                interactive=False,
+                color=theme.TEXT_2,
+                x_color=theme.CURVE_PALETTE[4],
+                y_color=theme.CURVE_PALETTE[1],
+                z_color=theme.ACCENT,
+                xlabel="kx",
+                ylabel="ky",
+                zlabel="E",
+                viewport=(0.0, 0.0, 0.15, 0.17),
+            )
+            self.orientation_marker.SetVisibility(False)
+        except Exception:
+            self.orientation_marker = None
         self.left_display_stack.addWidget(self.plotter)
 
-        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor=theme.BG_1)
+        self.fig = Figure(figsize=(5, 4), dpi=100, facecolor=theme.CANVAS_BG)
         self.canvas_2d = FigureCanvas(self.fig)
         self.canvas_2d.setMinimumSize(0, 0)
         self.canvas_2d.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -589,46 +608,66 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.page_control_blank = BlankControlPage(self.left_display_stack)
         self.left_display_stack.addWidget(self.page_control_blank)
 
-        self.render_status_label = QLabel(self.left_display_stack)
-        self.render_status_label.setFixedHeight(26)
-        self.render_status_label.setFixedWidth(self.RENDER_STATUS_WIDTH)
-        self.render_status_label.setAlignment(Qt.AlignCenter)
-        self.render_status_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.render_status_label.setAttribute(Qt.WA_StyledBackground)
-        self.render_status_label.setStyleSheet(
-            f"QLabel {{ color: {theme.TEXT_1}; background-color: {theme.BG_0}; "
-            f"border: 1px solid {theme.BORDER_STRONG}; border-radius: 8px; padding: 2px 8px; }}"
-        )
         self.left_display_stack.installEventFilter(self)
-        self._position_render_status()
+        self.canvas_tool_overlay = CanvasToolOverlay(
+            self.left_display_stack,
+            self.btn_tb_crop,
+            self.btn_tb_erase,
+            self.btn_tb_export,
+        )
+        self.canvas_tool_overlay.reset_requested.connect(self.on_camera_view_reset)
+        self.canvas_tool_overlay.view_preset_requested.connect(self._set_camera_view_preset)
+        self.canvas_tool_overlay.focus_requested.connect(self._set_canvas_focus_mode)
+        self.canvas_tool_overlay.set_3d_active(False)
+        self._position_canvas_tool_overlay()
 
         self.left_workspace = ResultWorkspace(self.left_display_stack, self)
 
         self.right_panel = QFrame()
         self.right_panel.setObjectName("control_panel")
-        self.right_panel.setMinimumWidth(388)
-        self.right_panel.setStyleSheet(f"QFrame#control_panel {{ background-color: {theme.BG_2}; border: 1px solid {theme.BORDER}; border-radius: 10px; }}")
+        self.right_panel.setMinimumWidth(328)
+        self.right_panel.setStyleSheet(f"QFrame#control_panel {{ background-color: {theme.BG_2}; border: none; border-left: 1px solid {theme.BORDER_HEX}; }}")
         right_vbox = QVBoxLayout(self.right_panel)
-        right_vbox.setContentsMargins(4, 12, 4, 8)
-        right_vbox.setSpacing(4)
+        right_vbox.setContentsMargins(16, 8, 16, 8)
+        right_vbox.setSpacing(0)
+
+        inspector_header = QHBoxLayout()
+        inspector_header.setContentsMargins(0, 0, 0, 0)
+        self.control_panel_title = QLabel("视图设置", self.right_panel)
+        self.control_panel_title.setStyleSheet(theme.card_title_qss())
+        inspector_header.addWidget(self.control_panel_title, 1)
+        self.btn_reset_view = ActionButton(self.right_panel)
+        self.btn_reset_view.setFixedSize(28, 28)
+        self.btn_reset_view.setToolTip("重置当前 3D 视角")
+        theme.style_push_button(self.btn_reset_view, "quiet")
+        theme.set_button_icon(self.btn_reset_view, "ic_fluent_arrow_reset_regular", 15)
+        self.btn_reset_view.clicked.connect(self.on_camera_view_reset)
+        inspector_header.addWidget(self.btn_reset_view)
+        right_vbox.addLayout(inspector_header)
 
         nav_group = QFrame()
-        nav_group.setFixedHeight(40)
+        nav_group.setObjectName("inspector_tabs")
+        nav_group.setFixedHeight(38)
+        nav_group.setStyleSheet(f"QFrame#inspector_tabs {{ background: {theme.BG_1}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px; }}")
         nav_layout = QHBoxLayout(nav_group)
-        nav_layout.setContentsMargins(12, 0, 12, 4)
-        nav_layout.setSpacing(6)
+        nav_layout.setContentsMargins(3, 3, 3, 3)
+        nav_layout.setSpacing(3)
 
-        self.btn_page2 = QPushButton("渲染控制", self)
+        self.btn_page2 = QPushButton("外观", self)
         self.btn_page2.setCheckable(True)
         self.btn_page2.setChecked(True)
 
         self.btn_page3 = QPushButton("处理分析", self)
         self.btn_page3.setCheckable(True)
+        theme.set_button_icon(self.btn_page2, "ic_fluent_slide_settings_regular", 15)
+        theme.set_button_icon(self.btn_page3, "ic_fluent_data_trending_regular", 15)
+        for button in (self.btn_page2, self.btn_page3):
+            button.setIconSize(QSize(15, 15))
 
         self.button_group = QButtonGroup(self)
         for btn in [self.btn_page2, self.btn_page3]:
             self.button_group.addButton(btn)
-            btn.setFixedHeight(32)
+            btn.setFixedHeight(30)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(theme.nav_tab_qss())
             nav_layout.addWidget(btn, 1)
@@ -664,20 +703,20 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.addWidget(self.left_workspace)
         self.main_splitter.addWidget(self.right_panel)
-        self.main_splitter.setHandleWidth(8)
+        self.main_splitter.setHandleWidth(1)
         self.main_splitter.setStyleSheet(
             f"QSplitter::handle {{ background: {theme.BG_0}; }}"
             f"QSplitter::handle:hover {{ background: {theme.BORDER_HEX}; }}"
         )
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 0)
-        self.main_splitter.setSizes([1100, 420])
+        self.main_splitter.setSizes([1100, 328])
         saved_sizes = self.settings.value("main_splitter_sizes")
         if saved_sizes:
             try:
                 sizes = [max(200, int(x)) for x in saved_sizes]
                 if len(sizes) == 2:
-                    panel_width = min(480, max(388, sizes[1]))
+                    panel_width = min(420, max(328, sizes[1]))
                     self.main_splitter.setSizes([sum(sizes) - panel_width, panel_width])
             except (TypeError, ValueError):
                 pass
@@ -709,25 +748,41 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             self.settings.setValue("main_splitter_sizes", self.main_splitter.sizes())
 
     def _build_toolbar(self):
-        """顶部工具栏：全局动作（加载/截图/导出）+ 后端状态 + 版本更新。"""
         self.toolbar = QFrame(self)
         self.toolbar.setObjectName("top_toolbar")
-        self.toolbar.setFixedHeight(52)
+        self.toolbar.setFixedHeight(60)
         self.toolbar.setStyleSheet(
-            f"QFrame#top_toolbar {{ background-color: {theme.BG_2}; border-radius: {theme.R_M}px; }}"
+            f"QFrame#top_toolbar {{ background-color: {theme.BG_2};"
+            f"border: none; border-bottom: 1px solid {theme.BORDER_HEX}; }}"
         )
         row = QHBoxLayout(self.toolbar)
-        row.setContentsMargins(16, 8, 16, 8)
-        row.setSpacing(8)
+        row.setContentsMargins(18, 8, 18, 8)
+        row.setSpacing(10)
 
         badge = QLabel("B", self.toolbar)
         badge.setAlignment(Qt.AlignCenter)
-        badge.setFixedSize(28, 28)
-        badge.setStyleSheet(f"background: {theme.ACCENT}; color: {theme.ACCENT_ON}; border-radius: 8px; font-size: 17px; font-weight: 700;")
+        badge.setFixedSize(32, 32)
+        badge.setStyleSheet(
+            f"background: {theme.ACCENT}; color: {theme.ACCENT_ON};"
+            "border-radius: 8px; font-size: 18px; font-weight: 700;"
+        )
         row.addWidget(badge)
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
         title = QLabel(APP_NAME, self.toolbar)
-        title.setStyleSheet(f"color: {theme.TEXT_1}; background: transparent; font-size: 15px; font-weight: 600; padding-right: 16px;")
-        row.addWidget(title)
+        title.setStyleSheet(f"color: {theme.TEXT_1}; background: transparent; font-size: 16px; font-weight: 600;")
+        caption = QLabel("ANALYSIS WORKSPACE", self.toolbar)
+        caption.setStyleSheet(f"color: {theme.TEXT_3}; background: transparent; font-size: 8px;")
+        brand.addWidget(title)
+        brand.addWidget(caption)
+        row.addLayout(brand)
+        row.addSpacing(8)
+
+        def separator():
+            line = QFrame(self.toolbar)
+            line.setFixedSize(1, 22)
+            line.setStyleSheet(f"background: {theme.BORDER_HEX};")
+            return line
 
         def _make_tb_btn(text, kind, width=92):
             btn = ActionButton(self.toolbar)
@@ -735,86 +790,152 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             btn.setFixedWidth(width)
             btn.attachment().setText(text)
             theme.style_push_button(btn, kind)
+            icon_names = {
+                "打开数据": "ic_fluent_folder_open_regular",
+                "截图样式": "ic_fluent_camera_regular",
+                "Blender": "ic_fluent_cube_regular",
+                "导出": "ic_fluent_arrow_export_regular",
+                "导出结果": "ic_fluent_arrow_export_regular",
+                "扩展": "ic_fluent_puzzle_piece_regular",
+                "裁剪": "ic_fluent_crop_regular",
+                "裁空": "ic_fluent_eraser_regular",
+            }
+            if text in icon_names:
+                theme.set_button_icon(btn, icon_names[text], 16, on_accent=kind == "primary")
+                btn.setIconSize(QSize(16, 16))
             return btn
 
-        self.btn_tb_load = _make_tb_btn("加载数据", "primary")
-        self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
-        self.btn_tb_shot.setToolTip("选择截图样式并预览导出（仅影响截图，不改变左侧视图）")
-        self.btn_tb_blender = _make_tb_btn("导出 Blender 工程", "secondary", 150)
-        self.btn_tb_blender.setToolTip("多页面导出 Blender 工程，或打开已有工程调整显示并原位更新资产")
-        self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
-        self.btn_tb_crop = _make_tb_btn("裁剪", "secondary", 80)
-        self.btn_tb_crop.setCheckable(True)
-        self.btn_tb_crop.setStyleSheet(self.btn_tb_crop.styleSheet() +
-            f"QPushButton:checked {{ background: {theme.ACCENT}; color: {theme.ACCENT_ON}; border-color: {theme.ACCENT}; }}")
-        self.btn_tb_crop.setToolTip(
-            "开启裁剪：打开可拖动的裁剪范围窗口，在画布上拖动选区；\n"
-            "关闭按钮收起窗口；Esc 退出裁剪模式。"
-        )
-        self.btn_tb_erase = _make_tb_btn("裁空", "secondary", 80)
-        self.btn_tb_erase.setCheckable(True)
-        self.btn_tb_erase.setStyleSheet(self.btn_tb_crop.styleSheet())
-        self.btn_tb_erase.setToolTip(
-            "开启裁空：打开可拖动的裁空范围窗口，在画布上拖动选区；\n"
-            "关闭按钮收起窗口；Esc 退出裁空模式。"
-        )
-        self.btn_tb_load.setToolTip("加载数据 (Ctrl+O)")
-        self._update_screenshot_tooltip()
+        row.addWidget(separator())
+        self.btn_tb_load = _make_tb_btn("打开数据", "quiet", 96)
+        self.btn_tb_load.setToolTip("打开数据 (Ctrl+O)")
         row.addWidget(self.btn_tb_load)
-        # 数据源切换器：仅在 2 份及以上数据时展开，默认收起、不占布局空间。
+        row.addWidget(separator())
+        self.single_source_badge = QLabel("数据源", self.toolbar)
+        self.single_source_badge.setFixedSize(180, 36)
+        self.single_source_badge.setAlignment(Qt.AlignCenter)
+        self.single_source_badge.setStyleSheet(
+            f"color: {theme.TEXT_2}; background: transparent; border: none; font-size: 11px;"
+        )
+        self.single_source_badge.hide()
+        row.addWidget(self.single_source_badge)
         self.source_switcher_bar = SourceSwitcherBar(self.toolbar)
         self.source_switcher_bar.source_selected.connect(self.activate_source)
         self.source_switcher_bar.alias_committed.connect(self._commit_source_alias)
         self._sync_source_switcher()
         row.addWidget(self.source_switcher_bar)
-        row.addWidget(self.btn_tb_shot)
-        row.addWidget(self.btn_tb_blender)
-        row.addWidget(self.btn_tb_export)
-        row.addWidget(self.btn_tb_crop)
-        row.addWidget(self.btn_tb_erase)
-
         row.addStretch(1)
 
-        self.btn_tb_plugins = _make_tb_btn("插件管理", "secondary", 92)
+        self.btn_tb_plugins = _make_tb_btn("扩展", "quiet", 76)
         self.btn_tb_plugins.setToolTip("安装、卸载及启用/停用插件")
         self.btn_tb_plugins.clicked.connect(self.open_plugin_manager)
         self._update_plugin_button_state()
         row.addWidget(self.btn_tb_plugins)
-        row.addSpacing(8)
+
+        self.theme_switch = QFrame(self.toolbar)
+        self.theme_switch.setObjectName("theme_switch")
+        self.theme_switch.setStyleSheet(
+            f"QFrame#theme_switch {{ background: {theme.BG_1};"
+            f"border: 1px solid {theme.BORDER_HEX}; border-radius: 7px; }}"
+        )
+        theme_row = QHBoxLayout(self.theme_switch)
+        theme_row.setContentsMargins(3, 3, 3, 3)
+        theme_row.setSpacing(2)
+        self.btn_theme_dark = ActionButton(self.theme_switch)
+        self.btn_theme_dark.setText("深色")
+        self.btn_theme_dark.setCheckable(True)
+        self.btn_theme_light = ActionButton(self.theme_switch)
+        self.btn_theme_light.setText("浅色")
+        self.btn_theme_light.setCheckable(True)
+        self.theme_group = QButtonGroup(self)
+        self.theme_group.setExclusive(True)
+        for button, name, icon in (
+            (self.btn_theme_dark, "dark", "ic_fluent_weather_moon_regular"),
+            (self.btn_theme_light, "light", "ic_fluent_weather_sunny_regular"),
+        ):
+            button.setFixedSize(68, 26)
+            button.setStyleSheet(theme.nav_tab_qss())
+            button.setChecked(theme.current_theme() == name)
+            button.clicked.connect(lambda _checked=False, value=name: self._set_theme(value))
+            self.theme_group.addButton(button)
+            theme.set_button_icon(button, icon, 14)
+            theme_row.addWidget(button)
+        row.addWidget(self.theme_switch)
+
+        self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
+        self.btn_tb_shot.setToolTip("选择截图样式并预览导出（仅影响截图，不改变左侧视图）")
+        self.btn_tb_shot.hide()
+        self._update_screenshot_tooltip()
+        self.btn_tb_blender = _make_tb_btn("Blender", "quiet", 82)
+        self.btn_tb_blender.setToolTip("多页面导出 Blender 工程，或打开已有工程调整显示并原位更新资产")
+        row.addWidget(self.btn_tb_blender)
+        self.btn_main_export = _make_tb_btn("导出", "primary", 74)
+        self.btn_main_export.setToolTip("冻结当前视图，设置并导出版图")
+        row.addWidget(self.btn_main_export)
+
+        self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
+        self.btn_tb_crop = _make_tb_btn("裁剪", "quiet", 62)
+        self.btn_tb_crop.setCheckable(True)
+        self.btn_tb_crop.setToolTip("开启裁剪：在画布上拖动选区；Esc 退出裁剪模式")
+        self.btn_tb_erase = _make_tb_btn("裁空", "quiet", 62)
+        self.btn_tb_erase.setCheckable(True)
+        self.btn_tb_erase.setToolTip("开启裁空：在画布上拖动选区；Esc 退出裁空模式")
 
         self.btn_tb_version = ActionButton(self.toolbar)
-        self.btn_tb_version.setFixedHeight(32)
-        self.btn_tb_version.setFixedWidth(96)
+        self.btn_tb_version.setFixedHeight(30)
+        self.btn_tb_version.setFixedWidth(76)
         self.btn_tb_version.attachment().setText(f"v{APP_VERSION}")
-        theme.style_push_button(self.btn_tb_version, "secondary")
+        theme.style_push_button(self.btn_tb_version, "quiet")
         self.btn_tb_version.setToolTip("点击检查更新；右键打开更新设置")
         row.addWidget(self.btn_tb_version)
 
         self.btn_tb_load.clicked.connect(self.on_load)
         self.btn_tb_shot.clicked.connect(self.open_publication_dialog)
         self.btn_tb_blender.clicked.connect(lambda: self.open_blender_project_dialog())
+        self.btn_main_export.clicked.connect(self.open_publication_dialog)
         self.btn_tb_export.clicked.connect(self.export_current_result)
+
+    def _set_theme(self, name):
+        self.settings.setValue("ui/theme", name)
+        theme.set_theme(name)
+
+    def _on_theme_changed(self, name):
+        self.btn_theme_dark.setChecked(name == "dark")
+        self.btn_theme_light.setChecked(name == "light")
+        self.CONTEXT_MENU_STYLE = theme.context_menu_qss()
+        self._apply_feedback_styles()
+        self.left_display_stack.setStyleSheet(
+            f"QStackedWidget#display_stack {{ background-color: {theme.CANVAS_BG}; border-radius: 10px; }}"
+        )
+        self.plotter.set_background(theme.CANVAS_BG)
+        self.fig.set_facecolor(theme.CANVAS_BG)
+        self.ax_2d.set_facecolor(theme.CANVAS_BG)
+        self.canvas_2d.draw_idle()
+        if self.core.raw_data is not None and self.left_workspace.current_spec() is not None:
+            self.request_refresh(RefreshCause.DISPLAY_MAPPING)
+        else:
+            self.plotter.render()
 
     def _build_statusbar(self):
         """底部状态栏：运行状态 / 当前页 / 光标坐标 / 数据与后端信息。"""
         self.statusbar = QFrame(self)
         self.statusbar.setObjectName("status_bar")
-        self.statusbar.setFixedHeight(30)
+        self.statusbar.setFixedHeight(28)
         self.statusbar.setStyleSheet(
-            f"QFrame#status_bar {{ background-color: {theme.BG_2}; border-radius: {theme.R_S}px; }}"
+            f"QFrame#status_bar {{ background-color: {theme.BG_2};"
+            f"border: none; border-top: 1px solid {theme.BORDER_HEX}; }}"
         )
         row = QHBoxLayout(self.statusbar)
         row.setContentsMargins(14, 0, 14, 0)
         row.setSpacing(20)
 
-        base_qss = f"color: {theme.TEXT_2}; font-size: 11px; background: transparent;"
+        base_qss = f"color: {theme.TEXT_2}; font-size: 10px; background: transparent;"
 
         self.status_state = QLabel("● 就绪", self.statusbar)
-        self.status_state.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 11px; background: transparent;")
+        self.status_state.setStyleSheet(f"color: {theme.SUCCESS}; font-size: 10px; background: transparent;")
         # 区间锁定指示：跟在运行状态灯旁边，绿=已锁定、灰=未锁定。
         self.status_lock = QLabel("● 区间未锁定", self.statusbar)
         self.status_lock.setStyleSheet(
-            f"color: {theme.TEXT_3}; font-size: 11px; background: transparent;"
+            f"color: {theme.TEXT_3}; font-size: 10px; background: transparent;"
         )
         self.status_page = QLabel("未加载数据", self.statusbar)
         self.status_page.setStyleSheet(base_qss)
@@ -822,6 +943,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.status_cursor.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
         self.status_info = QLabel("", self.statusbar)
         self.status_info.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
+        self.status_version = self.btn_tb_version
+        self.status_version.setParent(self.statusbar)
+        self.status_version.setFixedHeight(20)
+        self.status_version.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO}; border: none;")
 
         row.addWidget(self.status_state)
         row.addWidget(self.status_lock)
@@ -829,6 +954,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         row.addWidget(self.status_cursor)
         row.addStretch(1)
         row.addWidget(self.status_info)
+        row.addSpacing(8)
+        row.addWidget(self.status_version)
 
         self._last_cursor_status_ts = 0.0
         self.canvas_2d.mpl_connect("motion_notify_event", self._on_status_cursor_motion)
@@ -871,6 +998,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if backend:
             parts.append(f"{backend}计算")
         self.status_info.setText(" · ".join(parts))
+        page_tree = getattr(getattr(self, "left_workspace", None), "page_tree", None)
+        if page_tree is not None:
+            if self.core.raw_data is None:
+                page_tree.clear_source_summary()
+            else:
+                filename = os.path.basename(str(getattr(active_source, "primary_path", "") or ""))
+                page_tree.set_source_summary(
+                    getattr(active_source, "alias", "当前数据源"),
+                    filename or "实验数据",
+                    self.core.raw_data.shape,
+                    backend,
+                )
 
     def _on_canvas_layout_changed(self):
         """底条呼出/收起/换行后合并刷新画布几何，不在动画每一帧反复重建。"""
@@ -881,7 +1020,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def _flush_canvas_layout_refresh(self):
         self._canvas_layout_pending = False
-        self._position_render_status()
+        self._position_canvas_tool_overlay()
         stack = self.__dict__.get("left_display_stack")
         plotter = self.__dict__.get("plotter")
         if (
@@ -897,38 +1036,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             # 动画只改布局与绘制，渲染失败不应打断交互。
             pass
 
-    def _position_render_status(self):
-        label = getattr(self, "render_status_label", None)
-        stack = getattr(self, "left_display_stack", None)
-        if label is None or stack is None:
-            return
-        # Keep the overlay geometry stable across status changes.  Moving or
-        # shrinking a translucent child over a native OpenGL surface can leave
-        # the previous text in the vacated pixels until the next VTK frame.
-        width = min(self.RENDER_STATUS_WIDTH, max(1, stack.width() - 28))
-        label.setFixedWidth(width)
-        label.move(max(10, stack.width() - width - 14), 12)
-        label.raise_()
-
-    def _render_device_label(self):
-        cached = getattr(self, "_render_device_name", None)
-        if cached:
-            return cached
-        name = "OpenGL渲染"
-        try:
-            report = str(self.plotter.ren_win.ReportCapabilities()).lower()
-            if "nvidia" in report:
-                name = "NVIDIA GPU渲染"
-            elif "amd" in report or "radeon" in report:
-                name = "AMD GPU渲染"
-            elif "intel" in report:
-                name = "Intel GPU渲染"
-            elif "llvmpipe" in report or "software" in report:
-                name = "软件渲染"
-        except Exception:
-            pass
-        self._render_device_name = name
-        return name
+    def _position_canvas_tool_overlay(self):
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        if overlay is not None:
+            overlay.reposition()
 
     @staticmethod
     def _copy_camera_position(camera_position):
@@ -1101,6 +1212,37 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         page = self.__dict__.get("page_render")
         if page is not None:
             page.set_camera_view_visible(visible, animate=animate)
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        if overlay is not None:
+            overlay.set_3d_active(visible)
+        marker = self.__dict__.get("orientation_marker")
+        if marker is not None:
+            marker.SetVisibility(bool(visible))
+
+    def _set_camera_view_preset(self, preset):
+        if not self._camera_view_active():
+            return
+        pose = self._current_camera_view_pose()
+        if pose is None:
+            return
+        angles = {
+            "3d": (DEFAULT_AZIMUTH, DEFAULT_ELEVATION, DEFAULT_ROLL),
+            "xy": (0.0, 89.999, 0.0),
+            "xz": (0.0, 0.0, 0.0),
+            "yz": (90.0, 0.0, 0.0),
+        }.get(str(preset))
+        if angles is None:
+            return
+        for key, button in self.canvas_tool_overlay.preset_buttons.items():
+            button.setChecked(key == preset)
+        self.on_camera_view_pose_committed(CameraPose(*angles, pose.distance))
+
+    def _set_canvas_focus_mode(self, checked):
+        checked = bool(checked)
+        self.right_panel.setVisible(not checked)
+        self.left_workspace.page_tree.setVisible(not checked)
+        self.canvas_tool_overlay.set_focus_mode(checked)
+        self._on_canvas_layout_changed()
 
     def _current_camera_view_pose(self):
         """当前相机的真实姿态读数；相机不可用时返回 None。"""
@@ -1212,26 +1354,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if not self._camera_view_active():
             return
         self._reset_3d_camera_to_default()
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        if overlay is not None:
+            for key, button in overlay.preset_buttons.items():
+                button.setChecked(key == "3d")
 
     def _update_render_status(self, phase, backend=""):
-        label = getattr(self, "render_status_label", None)
-        if label is None:
-            return
         phase_text = {
             "preview": "预览",
             "computing": "计算中",
             "complete": "完整",
             "failed": "计算失败",
         }.get(str(phase), str(phase))
-        compute_name = backend or getattr(self, "_last_compute_backend", "CPU")
-        scope_label = self._active_scope_label()
-        label.setText(
-            f"{phase_text} · {compute_name}计算 / {self._render_device_label()} · {scope_label}"
-        )
-        label.show()
-        self._position_render_status()
-        label.repaint()
-
         state_label = self.__dict__.get("status_state")
         if state_label is not None:
             state_map = {
@@ -1242,7 +1376,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             }
             text, color = state_map.get(str(phase), (f"● {phase_text}", theme.TEXT_3))
             state_label.setText(text)
-            state_label.setStyleSheet(f"color: {color}; font-size: 11px; background: transparent;")
+            state_label.setStyleSheet(f"color: {color}; font-size: 10px; background: transparent;")
 
         self._update_statusbar()
 
@@ -2120,12 +2254,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def _scope_for_spec(self, spec=None):
         return self._scope_for_id(getattr(spec, "data_scope_id", self.FULL_SCOPE_ID))
-
-    def _active_scope_label(self):
-        workspace = getattr(self, "left_workspace", None)
-        spec = workspace.current_spec() if workspace is not None else None
-        descriptor = self._scope_for_spec(spec)
-        return descriptor.label if descriptor is not None else "完整数据"
 
     def _scope_cache_key(self, scope_id, signature=None):
         # 跨源注册与缓存归属用 (数据源, 数据域, 处理签名) 组合键；scope_id 本身
@@ -5689,11 +5817,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         # 复用同一个 ax_2d：2D 页拖过轴标题留下的显式位置在这里必须清掉。
         VisualEngine.reset_2d_axis_labels(self.ax_2d)
         display_title = self._display_title_for_1d_plot(context["title"])
-        self.ax_2d.set_title(display_title, color="white", fontsize=11, pad=12,
+        self.ax_2d.set_facecolor(theme.CANVAS_BG)
+        for spine in self.ax_2d.spines.values():
+            spine.set_color(theme.BORDER_HEX)
+        self.ax_2d.set_axisbelow(True)
+        self.ax_2d.grid(True, color=theme.BORDER_HEX, linewidth=0.6, alpha=0.35)
+        self.ax_2d.set_title(display_title, color=theme.TEXT_1, fontsize=11, pad=12,
                              fontfamily=["DejaVu Sans", "Microsoft YaHei"])
-        self.ax_2d.set_xlabel(context["xlabel"], color="white")
-        self.ax_2d.set_ylabel(ylabel, color="white")
-        self.ax_2d.tick_params(colors="white", labelsize=9)
+        self.ax_2d.set_xlabel(context["xlabel"], color=theme.TEXT_1)
+        self.ax_2d.set_ylabel(ylabel, color=theme.TEXT_1)
+        self.ax_2d.tick_params(colors=theme.TEXT_2, labelsize=9)
         return display_title
 
     def _render_1d_plot(self, context):
@@ -5761,7 +5894,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         legend = self.ax_2d.legend(facecolor=theme.BG_3, edgecolor=theme.BORDER_HEX, fontsize=8)
         if legend is not None:
             for text in legend.get_texts():
-                text.set_color("white")
+                text.set_color(theme.TEXT_1)
         self.ax_2d.margins(x=0.02, y=0.08)
         if context.get("display_e_flip") and context.get("comparison_kind") in {
             "energy_dos", "edc_curve"
@@ -5774,6 +5907,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         VisualEngine.clear_2d_colorbar(self.ax_2d)
         self.ax_2d.clear()
         self.ax_2d._arpes_line = None
+        self.ax_2d.set_facecolor(theme.CANVAS_BG)
+        for spine in self.ax_2d.spines.values():
+            spine.set_color(theme.BORDER_HEX)
 
         energy_axis = np.asarray(context["energy_axis"], dtype=np.float64)
         curves = np.asarray(context["curves"], dtype=np.float64)
@@ -5789,7 +5925,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             offset = float(offsets[idx])
             if not np.any(np.isfinite(curve)):
                 continue
-            self.ax_2d.plot(curve + offset, energy_axis, color="black", linewidth=1.5)
+            self.ax_2d.plot(curve + offset, energy_axis, color=theme.ACCENT, linewidth=1.5)
             self.ax_2d.text(
                 offset + 0.5,
                 1.03,
@@ -5806,11 +5942,11 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if context.get("stale_error"):
             # 参数无效时保留上次成功结果，并在标题上明确标注，不静默换成空图。
             title = f"{title}  ⚠ 当前参数无法计算，显示上次成功结果"
-        self.ax_2d.set_title(title, color="white", pad=28)
+        self.ax_2d.set_title(title, color=theme.TEXT_1, pad=28)
         VisualEngine.reset_2d_axis_labels(self.ax_2d)
-        self.ax_2d.set_xlabel(context["xlabel"], color="white")
-        self.ax_2d.set_ylabel(context["ylabel"], color="white")
-        self.ax_2d.tick_params(colors="white")
+        self.ax_2d.set_xlabel(context["xlabel"], color=theme.TEXT_1)
+        self.ax_2d.set_ylabel(context["ylabel"], color=theme.TEXT_1)
+        self.ax_2d.tick_params(colors=theme.TEXT_2)
         self.ax_2d.set_xlim(-0.1, max(1.25, (len(curves) - 1) * offset_step + 1.1))
         if context.get("display_e_flip"):
             # 瀑布图的 E 在纵轴：只反向显示方向，能量轴与采样保持原始排列。
@@ -6174,7 +6310,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.axis_space = None
         self.left_workspace.reset_to_home()
         self._bind_axis_interval(self.left_workspace.home_spec(), animate=False)
-        self.plotter.set_background("white")
+        self.plotter.set_background(theme.CANVAS_BG)
         self.global_refresh()
         # 新数据的默认视角同样按 E 轴方向摆正：降序数据的较小能量在画面下方。
         # 此刻场景里还没有体积，真正的取景推迟到第一次 3D 渲染之后。
@@ -8041,6 +8177,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             manager.unregister_page(page_id)
 
     def closeEvent(self, event):
+        theme.changed.disconnect(self._on_theme_changed)
         self._clear_enhancement_interaction()
         self._save_splitter_sizes()
         workspace = self.__dict__.get("left_workspace")

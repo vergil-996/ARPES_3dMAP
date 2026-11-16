@@ -912,6 +912,23 @@ class PageTreeHelperTests(unittest.TestCase):
         self.assertEqual(PageTreeEntry("p", "名称").tooltip(), "名称")
         self.assertIn("ROI #1", PageTreeEntry("p", "名称", scope_label="ROI #1").tooltip())
 
+    def test_source_summary_uses_real_metadata_and_can_be_cleared(self):
+        panel = PageTreePanel()
+        self.addCleanup(panel.deleteLater)
+        panel.set_source_summary(
+            "WSe₂",
+            "WSe2_step.npz",
+            (150, 150, 200, 25),
+            "NVIDIA GPU",
+        )
+        self.assertFalse(panel.source_card.isHidden())
+        self.assertIn("WSe₂", panel.source_name.text())
+        self.assertTrue(panel.source_file.text())
+        self.assertEqual(panel.source_file.toolTip(), "WSe2_step.npz")
+        self.assertEqual(panel.source_meta.text(), "150 × 150 × 200 × 25 · NVIDIA GPU")
+        panel.clear_source_summary()
+        self.assertTrue(panel.source_card.isHidden())
+
     def test_empty_panel_shows_nothing_and_locates_nothing(self):
         panel = PageTreePanel()
         self.addCleanup(panel.deleteLater)
@@ -926,7 +943,7 @@ class PageTreeHelperTests(unittest.TestCase):
 
 class NavWidthTests(_WorkspaceFixture):
     def test_initial_width_and_minimums(self):
-        self.assertEqual(NAV_INITIAL_WIDTH, 240)
+        self.assertEqual(NAV_INITIAL_WIDTH, 226)
         self.assertEqual(NAV_MIN_WIDTH, 180)
         self.assertEqual(self.workspace.page_tree.minimumWidth(), NAV_MIN_WIDTH)
         self.assertEqual(

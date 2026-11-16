@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -279,9 +280,9 @@ class _StyleCard(QToolButton):
         self.style = style
         self.setCheckable(True)
         self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        self.setFixedSize(216, 224)
+        self.setFixedSize(108, 128)
         if style.view_family == "1d":
-            self.setFixedSize(168, 144)
+            self.setFixedSize(108, 116)
         self.setCursor(Qt.PointingHandCursor)
         self._base_text = style.name
         self.setText(self._base_text)
@@ -289,13 +290,14 @@ class _StyleCard(QToolButton):
         self.toggled.connect(self._apply_qss)
 
     def _apply_qss(self, checked):
-        border = theme.ACCENT if checked else theme.BORDER_HEX
+        border = theme.TEXT_2 if checked else theme.BORDER_HEX
+        background = theme.ACCENT_SOFT if checked else theme.BG_1
         self.setStyleSheet(
             "QToolButton {"
-            f" background-color: {theme.BG_1}; color: {theme.TEXT_1};"
-            f" border: 1.5px solid {border}; border-radius: 8px;"
-            " padding: 8px; font-size: 12px; font-weight: 600; }"
-            f"QToolButton:hover {{ border: 1.5px solid {theme.ACCENT_DIM}; }}"
+            f" background-color: {background}; color: {theme.TEXT_1};"
+            f" border: 1px solid {border}; border-radius: 6px;"
+            " padding: 6px; font-size: 10px; font-weight: 500; }"
+            f"QToolButton:hover {{ border: 1px solid {theme.TEXT_2}; }}"
         )
 
     def set_tuned(self, tuned: bool):
@@ -305,7 +307,7 @@ class _StyleCard(QToolButton):
     def set_preview(self, pixmap: Optional[QPixmap]):
         if pixmap is None or pixmap.isNull():
             return
-        size = (148, 100) if self.style.view_family == "1d" else (196, 168)
+        size = (88, 68) if self.style.view_family == "1d" else (88, 78)
         scaled = pixmap.scaled(*size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.setIconSize(scaled.size())
         self.setIcon(QIcon(scaled))
@@ -324,7 +326,7 @@ class PublicationExportDialog(QDialog):
         self.main_window = window
         self.setWindowTitle("数据导出 · 截图样式")
         self.setModal(False)
-        self.resize(880, 780)
+        self.resize(1080, 820)
         self.setStyleSheet(
             f"QDialog {{ background-color: {theme.BG_0}; }}"
             f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
@@ -378,18 +380,26 @@ class PublicationExportDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(9)
 
         header = QHBoxLayout()
-        self.title_label = QLabel("数据导出")
-        self.title_label.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {theme.TEXT_1};")
+        export_icon = QLabel(self)
+        export_icon.setFixedSize(34, 34)
+        export_icon.setAlignment(Qt.AlignCenter)
+        export_icon.setPixmap(theme.fluent_icon("ic_fluent_arrow_export_regular", 18, theme.TEXT_2).pixmap(18, 18))
+        export_icon.setStyleSheet(
+            f"background-color: {theme.BG_3}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px;"
+        )
+        header.addWidget(export_icon)
+        self.title_label = QLabel("出版级导出")
+        self.title_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {theme.TEXT_1};")
         header.addWidget(self.title_label)
         header.addStretch(1)
         self.family_badge = QLabel("")
         self.family_badge.setStyleSheet(
-            f"color: {theme.ACCENT}; background-color: {theme.ACCENT_SOFT};"
-            f" border: 1px solid {theme.ACCENT_DIM}; border-radius: 6px; padding: 2px 10px; font-size: 11px;"
+            f"color: {theme.TEXT_2}; background-color: {theme.ACCENT_SOFT};"
+            f" border: 1px solid {theme.BORDER_HEX}; border-radius: 5px; padding: 3px 8px; font-size: 10px;"
         )
         header.addWidget(self.family_badge)
         layout.addLayout(header)
@@ -397,17 +407,37 @@ class PublicationExportDialog(QDialog):
         self.source_label = QLabel("")
         self.source_label.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
         layout.addWidget(self.source_label)
-        self.mode_note = QLabel("仅影响导出，不改变左侧视图、数据、相机与色阶锁定。")
+        self.mode_note = QLabel("冻结当前视图快照；不会改变原始分析、数据、相机与色阶锁定。")
         self.mode_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
         layout.addWidget(self.mode_note)
 
+        self.body_splitter = QSplitter(Qt.Horizontal, self)
+        self.preview_host = QFrame(self.body_splitter)
+        self.preview_host_layout = QVBoxLayout(self.preview_host)
+        self.preview_host_layout.setContentsMargins(0, 0, 14, 0)
+        self.preview_host_layout.setSpacing(8)
+        self.body_splitter.addWidget(self.preview_host)
+        self.options_scroll = QScrollArea(self.body_splitter)
+        self.options_scroll.setWidgetResizable(True)
+        self.options_scroll.setFrameShape(QFrame.NoFrame)
+        self.options_scroll.setMinimumWidth(330)
+        self.options_scroll.setMaximumWidth(390)
+        self.options_container = QWidget(self.options_scroll)
+        self.options_layout = QVBoxLayout(self.options_container)
+        self.options_layout.setContentsMargins(4, 0, 4, 0)
+        self.options_layout.setSpacing(13)
+        self.options_scroll.setWidget(self.options_container)
+        self.body_splitter.addWidget(self.options_scroll)
+        self.body_splitter.setSizes([700, 360])
+        layout.addWidget(self.body_splitter, 1)
+
         # 样式卡片
         self.cards_row = QHBoxLayout()
-        self.cards_row.setSpacing(10)
+        self.cards_row.setSpacing(7)
         self.card_group = QButtonGroup(self)
         self.card_group.setExclusive(True)
         self.cards: Dict[str, _StyleCard] = {}
-        layout.addLayout(self.cards_row)
+        self.options_layout.addLayout(self.cards_row)
 
         # 大图预览
         self.preview_header = QHBoxLayout()
@@ -422,7 +452,7 @@ class PublicationExportDialog(QDialog):
         self.fit_toggle.setCursor(Qt.PointingHandCursor)
         self.fit_toggle.clicked.connect(self._toggle_fit)
         preview_header.addWidget(self.fit_toggle)
-        layout.addLayout(preview_header)
+        self.preview_host_layout.addLayout(preview_header)
 
         self.preview_scroll = QScrollArea(self)
         self.preview_scroll.setWidgetResizable(True)
@@ -459,11 +489,11 @@ class PublicationExportDialog(QDialog):
         self.preview_splitter.setCollapsible(0, False)
         self.preview_splitter.setCollapsible(1, False)
         self.curve_editor.hide()
-        layout.addWidget(self.preview_splitter, 1)
+        self.preview_host_layout.addWidget(self.preview_splitter, 1)
 
         self.status_label = QLabel("")
         self.status_label.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
-        layout.addWidget(self.status_label)
+        self.preview_host_layout.addWidget(self.status_label)
 
         # 微调
         self.tune_toggle = QPushButton("微调（选中样式） ▾")
@@ -759,55 +789,68 @@ class PublicationExportDialog(QDialog):
         layout.addWidget(self.tune_panel)
 
         # 输出
-        self.output_frame = QFrame(self)
+        output_title = QLabel("输出设置", self.options_container)
+        output_title.setStyleSheet(f"color: {theme.TEXT_1}; font-size: 11px; font-weight: 600;")
+        self.options_layout.addWidget(output_title)
+        self.output_frame = QFrame(self.options_container)
         output_frame = self.output_frame
-        output_frame.setStyleSheet(
-            f"QFrame {{ background-color: {theme.BG_2}; border: 1px solid {theme.BORDER_HEX}; border-radius: 8px; }}"
-        )
-        output_row = QHBoxLayout(output_frame)
-        output_row.setContentsMargins(10, 8, 10, 8)
-        output_row.setSpacing(6)
-        output_row.addWidget(QLabel("宽"))
+        output_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
+        output_grid = QGridLayout(output_frame)
+        output_grid.setContentsMargins(0, 0, 0, 0)
+        output_grid.setHorizontalSpacing(12)
+        output_grid.setVerticalSpacing(10)
+
+        def paired(first, second):
+            host = QWidget(output_frame)
+            row = QHBoxLayout(host)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(7)
+            row.addWidget(first, 1)
+            row.addWidget(second, 1)
+            return host
+
         self.combo_width = QComboBox()
         self.combo_width.addItems(["89 mm（单栏）", "183 mm（双栏）", "自定义"])
-        output_row.addWidget(self.combo_width)
         self.spin_width = QDoubleSpinBox()
         self.spin_width.setRange(20.0, 300.0)
         self.spin_width.setSuffix(" mm")
         self.spin_width.setValue(89.0)
         self.spin_width.setVisible(False)
-        output_row.addWidget(self.spin_width)
-        output_row.addWidget(QLabel("高"))
+        output_grid.addWidget(QLabel("宽度"), 0, 0)
+        output_grid.addWidget(paired(self.combo_width, self.spin_width), 0, 1)
         self.spin_height = QDoubleSpinBox()
         self.spin_height.setRange(20.0, 300.0)
         self.spin_height.setSuffix(" mm")
-        output_row.addWidget(self.spin_height)
-        output_row.addWidget(QLabel("DPI"))
+        output_grid.addWidget(QLabel("高度"), 1, 0)
+        output_grid.addWidget(self.spin_height, 1, 1)
         self.combo_dpi = QComboBox()
         self.combo_dpi.addItems(["300", "600", "自定义"])
-        output_row.addWidget(self.combo_dpi)
         self.spin_dpi = QSpinBox()
         self.spin_dpi.setRange(72, 2400)
         self.spin_dpi.setValue(600)
         self.spin_dpi.setVisible(False)
-        output_row.addWidget(self.spin_dpi)
-        output_row.addWidget(QLabel("格式"))
+        output_grid.addWidget(QLabel("分辨率"), 2, 0)
+        output_grid.addWidget(paired(self.combo_dpi, self.spin_dpi), 2, 1)
         self.combo_format = QComboBox()
-        output_row.addWidget(self.combo_format)
+        output_grid.addWidget(QLabel("格式"), 3, 0)
+        output_grid.addWidget(self.combo_format, 3, 1)
         self.chk_transparent = QCheckBox("透明背景")
         self.chk_transparent.setToolTip(
             "导出时不填充白底：PNG 带 alpha 通道，PDF/SVG 页面底色留空。\n"
             "预览以棋盘格标示透明区域，导出的文件本身不含棋盘格。"
         )
-        output_row.addWidget(self.chk_transparent)
-        output_row.addStretch(1)
-        layout.addWidget(output_frame)
+        output_grid.addWidget(QLabel("背景"), 4, 0)
+        output_grid.addWidget(self.chk_transparent, 4, 1)
+        self.options_layout.addWidget(output_frame)
+        self.options_layout.addStretch(1)
 
         # 底部按钮
         footer = QHBoxLayout()
         self.btn_update = QPushButton("更新预览")
         self.btn_export = QPushButton("导出此预览")
         self.btn_cancel = QPushButton("取消")
+        self.btn_update.setIcon(theme.fluent_icon("ic_fluent_arrow_reset_regular", 15))
+        self.btn_export.setIcon(theme.fluent_icon("ic_fluent_arrow_export_regular", 15, theme.ACCENT_ON))
         for btn, kind in (
             (self.btn_update, "secondary"),
             (self.btn_export, "primary"),
@@ -888,7 +931,7 @@ class PublicationExportDialog(QDialog):
             ("面板编号", self.edit_panel_label, self.frame_row),
             ("坐标边框", self.combo_frame, self.frame_row),
         ])
-        self.title_label.setText("图片导出")
+        self.title_label.setText("出版级导出")
         for widget, padding in ((self.title_label, 4), (self.btn_update, 24), (self.btn_export, 24)):
             widget.setMinimumWidth(widget.fontMetrics().horizontalAdvance(widget.text()) + padding)
             widget.updateGeometry()

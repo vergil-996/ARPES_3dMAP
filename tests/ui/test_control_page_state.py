@@ -112,6 +112,30 @@ class ControlPageStateTests(unittest.TestCase):
         self.assertFalse(hasattr(blank, "waterfall_step_box"))
         self.assertNotIn("waterfall", blank.export_state())
 
+    def test_compact_combo_boxes_leave_room_for_current_text(self):
+        pages = [RenderControlPage(), DataProcessPage()]
+        for page in pages:
+            self.addCleanup(page.deleteLater)
+            page.resize(336, 900)
+            page.show()
+            combos = (page.combo_cmap,) if isinstance(page, RenderControlPage) else (
+                page.combo_ax,
+                page.combo_other,
+            )
+            for combo in combos:
+                editor = combo._line_edit
+                available = (
+                    editor._calcTextRect().width()
+                    - editor._calcContainerMargins().right()
+                    - 16
+                )
+                required = editor.fontMetrics().horizontalAdvance(combo.currentText()) + 8
+                self.assertGreaterEqual(
+                    available,
+                    required,
+                    f"{combo._title} 的当前值空间不足：{combo.currentText()}",
+                )
+
     def test_denoise_pages_share_defaults_and_options(self):
         blank = BlankControlPage()
         popup = DenoiseSettingsPopup(blank)

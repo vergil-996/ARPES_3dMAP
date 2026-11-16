@@ -168,6 +168,15 @@ class DefaultAxisTitleTests(unittest.TestCase):
         canvas.draw()
         self.assertEqual(analyzer.ax_2d.get_xlabel(), "E (eV)")
 
+        from matplotlib.colors import to_rgba
+        from bandscope.ui import theme
+        self.assertEqual(analyzer.ax_2d.get_facecolor(), to_rgba(theme.CANVAS_BG))
+        self.assertEqual(analyzer.ax_2d.xaxis.label.get_color(), theme.TEXT_1)
+        self.assertTrue(analyzer.ax_2d.get_xticklabels())
+        self.assertEqual(analyzer.ax_2d.get_xticklabels()[0].get_color(), theme.TEXT_2)
+        for spine in analyzer.ax_2d.spines.values():
+            self.assertEqual(spine.get_edgecolor(), to_rgba(theme.BORDER_HEX))
+
     def test_closing_a_page_forgets_its_axis_titles(self):
         analyzer = _analyzer()
         analyzer.crop_controller = SimpleNamespace(remove_page=Mock())

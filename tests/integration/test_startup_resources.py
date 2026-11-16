@@ -44,3 +44,16 @@ class StartupResourceTests(unittest.TestCase):
             content = (root / "packaging/pyinstaller" / name).read_text(encoding="utf-8")
             self.assertIn("blender_script.py", content, name)
             self.assertIn("bandscope/exporting", content, name)
+
+    def test_theme_assets_resolve_and_are_collected(self):
+        from bandscope.ui import theme
+
+        root = Path(__file__).resolve().parents[2]
+        for name in ("dark", "light"):
+            path = Path(theme.asset_path(f"assets/ui/check-{name}.svg"))
+            self.assertTrue(path.is_file())
+            self.assertEqual(path, root / f"assets/ui/check-{name}.svg")
+        for name in ("ARPES_3dMAP.spec", "ARPES_3dMAP_gpu.spec"):
+            content = (root / "packaging/pyinstaller" / name).read_text(encoding="utf-8")
+            self.assertIn("'ui'", content)
+            self.assertIn("'assets/ui'", content)

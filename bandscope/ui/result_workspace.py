@@ -32,12 +32,25 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
-from bandscope.ui.page_tree import PageGroupEntry, PageTreeEntry, PageTreePanel
+from bandscope.ui.page_tree import PageGroupEntry, PageTreeEntry, PageTreePanel, page_kind_icon
 
 #: 页面树初始宽度、最小宽度，以及画布至少保留的宽度。
-NAV_INITIAL_WIDTH = 240
+NAV_INITIAL_WIDTH = 226
 NAV_MIN_WIDTH = 180
 CANVAS_MIN_WIDTH = 320
+
+VIEW_KIND_LABELS = {
+    "home": "3D VOLUME",
+    "time_integral": "3D VOLUME",
+    "axis_integral": "2D MAP",
+    "axis_integral_crop": "2D MAP",
+    "slice_dos": "1D CURVE",
+    "energy_dos": "1D CURVE",
+    "edc_curve": "1D CURVE",
+    "curve_comparison_1d": "1D CURVES",
+    "log_curve": "1D CURVE",
+    "plugin_curve": "1D CURVE",
+}
 
 
 def unique_title_among(existing_titles, base_title) -> str:
@@ -216,7 +229,7 @@ class ResultWorkspace(QWidget):
         self.content_frame = QFrame(self)
         self.content_frame.setObjectName("result_content_frame")
         self.content_layout = QVBoxLayout(self.content_frame)
-        self.content_layout.setContentsMargins(14, 14, 14, 14)
+        self.content_layout.setContentsMargins(18, 6, 18, 10)
         self.content_layout.setSpacing(12)
 
         self.header = QFrame(self.content_frame)
@@ -224,17 +237,46 @@ class ResultWorkspace(QWidget):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(10)
-        self.header.setFixedHeight(30)
+        self.header.setFixedHeight(60)
+
+        self.view_icon = QLabel(self.header)
+        self.view_icon.setFixedSize(30, 30)
+        self.view_icon.setAlignment(Qt.AlignCenter)
+        self.view_icon.hide()
 
         self.page_title = PageTitleLabel("分析工作区", self.header)
         self.page_title.setMinimumWidth(0)
-        self.page_title.setStyleSheet(theme.card_title_qss())
+        self.page_title.setStyleSheet(
+            f"color: {theme.TEXT_1}; background: transparent; font-size: 19px; font-weight: 600;"
+        )
         self.page_title.setToolTip("双击重命名页面")
         self.page_title.rename_requested.connect(self._on_rename_requested)
         self.page_title.restore_requested.connect(self._on_restore_requested)
-        header_layout.addWidget(self.page_title, 1)
+
+        title_container = QWidget(self.header)
+        title_column = QVBoxLayout(title_container)
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(1)
+        self.source_breadcrumb = QLabel("BandScope 工作区", title_container)
+        self.source_breadcrumb.setStyleSheet(
+            f"color: {theme.TEXT_3}; background: transparent; font-size: 9px;"
+        )
+        title_column.addWidget(self.source_breadcrumb)
+        title_column.addWidget(self.page_title)
+        header_layout.addWidget(self.view_icon)
+        header_layout.addWidget(title_container, 1)
+
+        self.view_kind_label = QLabel(self.header)
+        self.view_kind_label.setFixedHeight(24)
+        self.view_kind_label.setStyleSheet(
+            f"color: {theme.TEXT_2}; background: {theme.ACCENT_SOFT};"
+            f"border: 1px solid {theme.BORDER_HEX}; border-radius: 5px; padding: 3px 7px;"
+            f"font-size: 10px; font-family: {theme.FONT_MONO};"
+        )
+        header_layout.addWidget(self.view_kind_label)
 
         self.scope_label = QLabel(self.header)
+        self.scope_label.setFixedHeight(24)
         self.scope_label.setStyleSheet(
             f"color: {theme.TEXT_2}; background: {theme.BG_3};"
             f"border-radius: 5px; padding: 3px 8px; font-size: 11px;"
@@ -268,7 +310,7 @@ class ResultWorkspace(QWidget):
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.setObjectName("result_splitter")
         self.splitter.setChildrenCollapsible(False)
-        self.splitter.setHandleWidth(6)
+        self.splitter.setHandleWidth(1)
         self.page_tree.setMinimumWidth(NAV_MIN_WIDTH)
         self.splitter.addWidget(self.page_tree)
         self.content_frame.setMinimumWidth(CANVAS_MIN_WIDTH)
@@ -288,24 +330,22 @@ class ResultWorkspace(QWidget):
         self.setStyleSheet(
             """
             QWidget#result_workspace {
-                background-color: %(BG1)s;
-                border-radius: 12px;
+                background-color: %(BG0)s;
             }
             QFrame#result_content_frame {
-                background-color: %(BG1)s;
-                border-top-right-radius: 12px;
-                border-bottom-right-radius: 12px;
+                background-color: %(BG0)s;
+                border: none;
             }
             QFrame#result_header {
                 background-color: transparent;
                 border: none;
             }
             QToolButton {
-                background-color: %(BG3)s;
+                background-color: transparent;
                 color: %(T2)s;
                 border: none;
                 border-radius: 6px;
-                font-weight: 700;
+                font-weight: 500;
             }
             QToolButton:hover {
                 background-color: %(DANGER_SOFT)s;
@@ -833,17 +873,33 @@ class ResultWorkspace(QWidget):
         spec = self.current_spec()
         if spec is None:
             self.page_title.setText("分析工作区")
+            self.source_breadcrumb.setText("BandScope 工作区")
+            self.view_icon.clear()
             self.page_title.setToolTip("双击重命名页面")
             self.page_title.set_rename_state(False, False)
+            self.view_kind_label.hide()
             self.scope_label.hide()
             self.close_button.hide()
             return
         title = str(spec.title)
+        home = self.home_spec()
+        source_name = str(home.title) if home is not None else "当前数据源"
+        source_detail = str(spec.source_title or ("原始数据" if spec.page_id == self.home_page_id else "派生分析"))
+        self.source_breadcrumb.setText(f"{source_name}  /  {source_detail}")
+        self.source_breadcrumb.setToolTip(self.source_breadcrumb.text())
+        self.view_icon.setPixmap(page_kind_icon(spec.page_kind).pixmap(16, 16))
         # 工具页（控制面板等）没有页面语义，不提供改名。
         renameable = spec.page_kind != "control_panel"
         self.page_title.setText(title)
         self.page_title.setToolTip(f"{title}（双击重命名）" if renameable else title)
         self.page_title.set_rename_state(renameable, bool(spec.title_overridden))
+        view_kind = VIEW_KIND_LABELS.get(spec.page_kind, "")
+        if spec.page_kind == "home" and spec.params.get("home_slice_info"):
+            view_kind = "2D SLICE"
+        elif spec.page_kind == "second_derivative":
+            view_kind = "2D MAP" if spec.params.get("source_view") == "2d" else "3D VOLUME"
+        self.view_kind_label.setText(view_kind)
+        self.view_kind_label.setVisible(bool(view_kind))
         scope = str(spec.params.get("data_scope_label") or "")
         if spec.params.get("_restored_result") or spec.params.get("_restored_snapshot"):
             scope += " · 已保存结果（无法重新计算）"

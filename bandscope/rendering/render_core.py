@@ -750,11 +750,11 @@ class VisualEngine:
 
             # 根据背景色自动调整标尺颜色
             bg = plotter.background_color
-            # 优化颜色：如果是深色背景，使用淡紫色/灰色避免纯白太刺眼
+            # 坐标轴文字跟随界面主题，与数据色带保持独立。
             if (bg[0] > 0.9 and bg[1] > 0.9 and bg[2] > 0.9):
                 ax_color = 'black'
             else:
-                ax_color = theme.TEXT_2  # 深底上的坐标轴文字
+                ax_color = theme.TEXT_2
 
             actor = plotter.show_bounds(bounds=[0, 200, 0, 200, 0, 200], grid='back', location='outer', ticks='both',
                 axes_ranges=[float(np.min(xp)), float(np.max(xp)), float(np.min(yp)), float(np.max(yp)),
@@ -860,6 +860,9 @@ class VisualEngine:
         """
         try:
             VisualEngine._ensure_2d_preview_cache(ax, canvas)
+            ax.set_facecolor(theme.CANVAS_BG)
+            for spine in ax.spines.values():
+                spine.set_color(theme.BORDER_HEX)
             existing_layers = list(getattr(ax, "_arpes_enhancement_images", ()))
             if display_fields is None:
                 for overlay in existing_layers:
@@ -1009,10 +1012,10 @@ class VisualEngine:
             else:
                 ax.set_aspect("auto")
 
-            ax.set_title(title, color='white')
+            ax.set_title(title, color=theme.TEXT_1)
 
             # 额外加固：强制坐标轴刻度显示
-            ax.tick_params(colors='white')
+            ax.tick_params(colors=theme.TEXT_2)
             if axis_titles is not None:
                 VisualEngine._apply_2d_axis_titles(
                     ax, axis_titles, axis_title_positions

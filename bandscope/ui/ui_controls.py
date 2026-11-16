@@ -94,12 +94,15 @@ class SyncedSwitch(SiSwitchRefactor):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # SwitchStyleData 颜色是硬编码类属性（亮紫轨道），这里按实例覆盖为设计令牌
+        self.apply_theme()
+
+    def apply_theme(self):
         self.style_data.background_color_starting = QColor(theme.ACCENT)
         self.style_data.background_color_ending = QColor(theme.ACCENT)
-        self.style_data.frame_color = QColor(theme.BG_4)
+        self.style_data.frame_color = QColor(theme.BORDER_HEX)
         self.style_data.thumb_color_checked = QColor(theme.ACCENT_ON)
-        self.style_data.thumb_color_unchecked = QColor(theme.TEXT_1)
+        self.style_data.thumb_color_unchecked = QColor(theme.BG_2)
+        self.update()
 
     def setChecked(self, checked):
         super().setChecked(checked)

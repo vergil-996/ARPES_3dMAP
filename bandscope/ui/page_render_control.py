@@ -69,7 +69,7 @@ class RenderControlPage(ControlPageBase):
         grp_cmap, v_cmap = self._create_group("色带选择")
         h_cmap = QHBoxLayout()
         self.combo_cmap = SiCapsuleComboBox(self)
-        self.combo_cmap.setTitle("渲染色带")
+        self.combo_cmap.setTitle("色带")
         self.combo_cmap.setFixedHeight(30)
         self.combo_cmap.setFixedWidth(self.MIN_COMBO_WIDTH)
         self._adaptive_combo_controls.append(self.combo_cmap)
@@ -96,6 +96,13 @@ class RenderControlPage(ControlPageBase):
         self.region_combo.sync([], None)
         self.btn_lock = self._create_btn("锁定色带", "secondary", height=30)
         self.btn_lock.setCheckable(True)
+        self.btn_lock.setAccessibleName("锁定色带")
+        self.btn_lock.setText("")
+        self.btn_lock.setProperty("compactIconButton", True)
+        self.btn_lock.setFixedWidth(28)
+        self._adaptive_buttons.remove(self.btn_lock)
+        theme.style_push_button(self.btn_lock, "secondary")
+        theme.set_button_icon(self.btn_lock, "ic_fluent_lock_closed_regular", 15)
         self.btn_lock.setToolTip(
             "锁定全部色带：开启后，背景与所有增强区域各自按\n"
             "当前强度范围锁定归一化，拖动时间轴或生成新结果页时\n"

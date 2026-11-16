@@ -128,7 +128,7 @@ class BlenderExportPanel(QWidget):
         appearance_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
         appearance_layout.addWidget(appearance_note)
         right.addWidget(appearance)
-        presets = QGroupBox("应用于所有选中页面的预设")
+        presets = QGroupBox("工程级共享预设（多视图仅生成一组）")
         preset_grid = QGridLayout(presets)
         self.preset_checks = {}
         for index, key in enumerate(PRESET_KEYS):

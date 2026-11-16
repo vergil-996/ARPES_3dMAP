@@ -9,9 +9,12 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtGui import QWheelEvent
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.extensions.api import SOURCE_FILE, SOURCE_INDEX, EnergyAxisSpec
+from bandscope.ui.numeric_wheel import install_numeric_wheel_filter
 from plugins.flat_band_opacity.controls import FlatBandPanel
 from plugins.flat_band_opacity.effect import (
     DEFAULT_BACKGROUND,
@@ -40,6 +43,7 @@ class PanelTestCase(unittest.TestCase):
 
         configure_qt_plugin_path()
         cls.app = QApplication.instance() or QApplication([])
+        install_numeric_wheel_filter(cls.app)
 
     def make_panel(self, state=None, spec=None):
         state = state if state is not None else EffectState()
@@ -104,6 +108,36 @@ class EditingTests(PanelTestCase):
         row.field_center.edited.emit()
         self.assertFalse(panel.state.bands[0].enabled)
         self.assertAlmostEqual(panel.state.bands[0].center, 0.4)
+
+    def test_number_field_wheel_uses_caret_and_emits_change(self):
+        panel = self.make_panel()
+        panel.add_band()
+        row = panel._rows[panel.state.bands[0].band_id]
+        field = row.field_center
+        field.setValue(0.25)
+        panel.show()
+        field.setFocus(Qt.OtherFocusReason)
+        self.app.processEvents()
+        field.setCursorPosition(3)
+        panel._changes.clear()
+        position = QPoint(10, 10)
+        event = QWheelEvent(
+            position,
+            position,
+            QPoint(0, 0),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.NoScrollPhase,
+            False,
+        )
+
+        QApplication.sendEvent(field, event)
+
+        self.assertAlmostEqual(field.value(), 0.35)
+        self.assertAlmostEqual(panel.state.bands[0].center, 0.35)
+        self.assertTrue(panel._changes)
+        self.assertEqual(field.cursorPosition(), 3)
 
     def test_invalid_text_keeps_the_last_valid_value(self):
         panel = self.make_panel()

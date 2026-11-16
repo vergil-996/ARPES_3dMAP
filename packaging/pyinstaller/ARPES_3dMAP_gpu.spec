@@ -21,6 +21,7 @@ for package in ('siui', 'pyvista', 'pyvistaqt', 'vtk', 'matplotlib', 'cupy', 'cu
 datas += collect_data_files('nvidia', include_py_files=True)
 datas += [
     (str(REPO_ROOT / 'assets' / 'app.ico'), 'assets'),
+    (str(REPO_ROOT / 'assets' / 'ui'), 'assets/ui'),
     (str(REPO_ROOT / 'bandscope' / 'exporting' / 'blender_script.py'), 'bandscope/exporting'),
 ]
 

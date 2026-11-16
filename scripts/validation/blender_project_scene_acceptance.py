@@ -74,8 +74,10 @@ def check(blend, report_path, render=None, samples=8, require_decorations=False)
     text_materials = []
     text_curves = []
     text_presets = []
+    preset_owner = (project.get("layout") or {}).get("preset_owner") or project["entry_order"][0]
     for entry in metadata["entries"]:
         entry_id = entry["entry_id"]
+        entry_presets = presets if entry_id == preset_owner else {key: False for key in presets}
         composition = entry["composition"]
         volume = bpy.data.objects.get(composition["volume"])
         root = bpy.data.objects.get(composition["parent"])
@@ -92,17 +94,17 @@ def check(blend, report_path, render=None, samples=8, require_decorations=False)
         collection = bpy.data.collections[composition["data_collection"]]
         suffix = composition.get("name_suffix", "")
         reference = bpy.data.collections.get("Coordinate reference · editable" + suffix)
-        if bool(reference is not None) != bool(presets["coordinates"]):
+        if bool(reference is not None) != bool(entry_presets["coordinates"]):
             raise RuntimeError(f"条目 {entry_id} 的坐标预设不符")
         guide = bpy.data.objects.get(entry["guide_frame"]["object"])
-        if bool(guide is not None) != bool(presets["guide_frame"]):
+        if bool(guide is not None) != bool(entry_presets["guide_frame"]):
             raise RuntimeError(f"条目 {entry_id} 的盒框预设不符")
         indicator = bpy.data.collections.get(entry["axis_indicator"]["collection"])
-        if bool(indicator is not None) != bool(presets["orientation"]):
+        if bool(indicator is not None) != bool(entry_presets["orientation"]):
             raise RuntimeError(f"条目 {entry_id} 的方向标预设不符")
         for box in entry.get("box_presets") or ():
             obj = bpy.data.objects.get(box["object"])
-            if not presets.get(box.get("preset_group", box["preset"])):
+            if not entry_presets.get(box.get("preset_group", box["preset"])):
                 if obj is not None:
                     raise RuntimeError(f"未勾选预设被创建：{box['preset']}")
                 continue
@@ -115,13 +117,17 @@ def check(blend, report_path, render=None, samples=8, require_decorations=False)
             box_meshes.append(obj.data.name)
         for light in (entry.get("box_lighting") or {}).get("lights") or ():
             obj = bpy.data.objects.get(light["object"])
+            if not entry_presets.get(light.get("preset_group", light["preset"])):
+                if obj is not None:
+                    raise RuntimeError(f"条目 {entry_id} 不应创建薄板辅助灯")
+                continue
             if obj is None or obj.type != "LIGHT" or obj.parent != root:
                 raise RuntimeError(f"条目 {entry_id} 的辅助灯缺失或父对象错误")
             if obj.light_linking.receiver_collection is None:
                 raise RuntimeError(f"条目 {entry_id} 的辅助灯没有灯光链接接收者")
         text_layout = entry.get("text_layout") or {}
         text_collection = bpy.data.collections.get(text_layout.get("collection", ""))
-        text_enabled = bool(presets.get("text_presets"))
+        text_enabled = bool(entry_presets.get("text_presets"))
         if bool(text_collection is not None) != text_enabled:
             raise RuntimeError(f"条目 {entry_id} 的文本预设 Collection 与开关不符")
         for item in entry.get("text_presets") or ():
@@ -145,20 +151,27 @@ def check(blend, report_path, render=None, samples=8, require_decorations=False)
         text_lighting = entry.get("text_lighting") or {}
         for light in text_lighting.get("lights") or ():
             obj = bpy.data.objects.get(light["object"])
-            if text_enabled and (obj is None or obj.type != "LIGHT" or obj.parent != root):
+            if not text_enabled:
+                if obj is not None:
+                    raise RuntimeError(f"条目 {entry_id} 不应创建文本辅助灯")
+                continue
+            if obj is None or obj.type != "LIGHT" or obj.parent != root:
                 raise RuntimeError(f"条目 {entry_id} 的文本辅助灯缺失或父对象错误")
-            if text_enabled:
-                receiver = obj.light_linking.receiver_collection
-                if receiver is None or len(receiver.objects) != 10:
-                    raise RuntimeError(f"条目 {entry_id} 的文本灯光链接接收者不正确")
+            receiver = obj.light_linking.receiver_collection
+            if receiver is None or len(receiver.objects) != 10:
+                raise RuntimeError(f"条目 {entry_id} 的文本灯光链接接收者不正确")
         camera = bpy.data.objects.get(composition["camera"])
         if camera is None or camera.type != "CAMERA":
             raise RuntimeError(f"条目 {entry_id} 的备用相机缺失")
         bounds.append((entry_id, *_actual_bounds(collection)))
     if len(set(box_materials)) != len(box_materials) or len(set(box_meshes)) != len(box_meshes):
-        raise RuntimeError("不同条目或长方体共享网格/材质")
+        raise RuntimeError("不同长方体共享网格/材质")
     if len(set(text_materials)) != len(text_materials) or len(set(text_curves)) != len(text_curves):
-        raise RuntimeError("不同条目或文本预设共享文字曲线/材质")
+        raise RuntimeError("不同文本预设共享文字曲线/材质")
+    expected_boxes = 8 if presets.get("thin_boxes") else 0
+    expected_texts = 10 if presets.get("text_presets") else 0
+    if len(box_meshes) != expected_boxes or len(text_presets) != expected_texts:
+        raise RuntimeError("多视图共享预设数量不符：薄板或文本被重复创建")
     for (_first_id, _first_low, first_high), (_second_id, second_low, _second_high) in zip(bounds, bounds[1:]):
         if first_high[0] >= second_low[0]:
             raise RuntimeError("多页面实际对象边界沿世界 X 相撞")
@@ -190,7 +203,8 @@ def check(blend, report_path, render=None, samples=8, require_decorations=False)
     report = {
         "blend": str(blend), "entries": grids, "entry_count": len(grids),
         "overview_camera": scene.camera.name if scene.camera else None,
-        "non_colliding": True, "independent_box_materials": sorted(box_materials),
+        "non_colliding": True, "shared_preset_owner": preset_owner,
+        "box_count": len(box_meshes), "independent_box_materials": sorted(box_materials),
         "text_count": len(text_presets), "text_presets": text_presets,
         "independent_text_materials": sorted(text_materials),
         "decorations_preserved": bool(require_decorations),

@@ -10,8 +10,8 @@
 - 特殊控件（如切片输入框）通过重写 ``_apply_extra_widths`` 钩子处理
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLayout, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.widgets import SiLabel, SiScrollArea
 
@@ -27,11 +27,7 @@ from bandscope.ui.ui_controls import ActionButton, SyncedSlider
 
 
 class CardGroup(QFrame):
-    """卡片式分组容器：抬升面 + 细边框 + 圆角，标题行带主色竖条。
-
-    替代 SiTitledWidgetGroup 的飘浮标题——内容全部收进卡片内部，
-    分组之间的视觉边界来自卡片本身而不是标题文字。
-    """
+    """可折叠的扁平参数分组，以留白与细分隔线代替厚卡片。"""
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
@@ -39,45 +35,63 @@ class CardGroup(QFrame):
         self.setStyleSheet(theme.card_qss())
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 12, 14, 14)
-        outer.setSpacing(10)
+        outer.setContentsMargins(0, 0, 0, 15)
+        outer.setSpacing(3)
 
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
-        tick = QFrame(self)
-        tick.setFixedSize(3, 14)
-        tick.setStyleSheet(f"background-color: {theme.ACCENT}; border-radius: 1px;")
-        title_label = QLabel(title, self)
-        title_label.setStyleSheet(theme.card_title_qss())
-        head.addWidget(tick)
-        head.addWidget(title_label)
-        head.addStretch()
-        outer.addLayout(head)
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setText(title)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(True)
+        self.toggle_button.setArrowType(Qt.DownArrow)
+        self.toggle_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle_button.setFixedHeight(39)
+        self.toggle_button.setStyleSheet(
+            f"QToolButton {{ background: transparent; color: {theme.TEXT_1};"
+            "border: none; padding: 0; font-size: 11px; font-weight: 600; text-align: left; }"
+        )
+        self.toggle_button.toggled.connect(self._set_expanded)
+        outer.addWidget(self.toggle_button)
 
-        self.body = QVBoxLayout()
-        self.body.setContentsMargins(0, 2, 0, 0)
-        self.body.setSpacing(10)
-        outer.addLayout(self.body)
+        self.body_host = QWidget(self)
+        self.body = QVBoxLayout(self.body_host)
+        self.body.setContentsMargins(0, 0, 0, 0)
+        self.body.setSpacing(9)
+        outer.addWidget(self.body_host)
+
+    def _set_expanded(self, expanded):
+        self.toggle_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.body_host.setVisible(bool(expanded))
+        self.layout().invalidate()
+        self.updateGeometry()
+        QTimer.singleShot(0, self._relayout_after_toggle)
+
+    def _relayout_after_toggle(self):
+        parent = self.parent()
+        while parent is not None:
+            relayout = getattr(parent, "relayout_scroll_content", None)
+            if callable(relayout):
+                relayout()
+                break
+            parent = parent.parent()
 
 
 class ControlPageBase(QWidget):
     PAGE_MARGIN = 0
     SECTION_MARGIN = 12
-    SECTION_SPACING = 12
+    SECTION_SPACING = 0
     GROUP_MARGINS = (12, 45, 12, 16)
-    GROUP_SPACING = 10
-    MIN_GROUP_WIDTH = 340
+    GROUP_SPACING = 9
+    MIN_GROUP_WIDTH = 252
     MAX_GROUP_WIDTH = 470
-    MIN_SLIDER_BLOCK_WIDTH = 290
+    MIN_SLIDER_BLOCK_WIDTH = 220
     MAX_SLIDER_BLOCK_WIDTH = 420
-    MIN_CONTROL_ROW_WIDTH = 260
+    MIN_CONTROL_ROW_WIDTH = 206
     MAX_CONTROL_ROW_WIDTH = 360
-    MIN_COMBO_WIDTH = 180
+    MIN_COMBO_WIDTH = 184
     MAX_COMBO_WIDTH = 230
-    BUTTON_WIDTH = 92
-    MIN_BUTTON_WIDTH = 92
-    MAX_BUTTON_WIDTH = 112
+    BUTTON_WIDTH = 72
+    MIN_BUTTON_WIDTH = 64
+    MAX_BUTTON_WIDTH = 80
     AXIS_VALUE_BOX_WIDTH = 86
     AXIS_VALUE_BOX_SPACING = 8
 
@@ -104,6 +118,7 @@ class ControlPageBase(QWidget):
         self.scroll = SiScrollArea(self)
         self.container = QWidget()
         self.vbox = QVBoxLayout(self.container)
+        self.vbox.setSizeConstraint(QLayout.SetNoConstraint)
         self.vbox.setContentsMargins(
             self.SECTION_MARGIN,
             self.SECTION_MARGIN,
@@ -235,7 +250,7 @@ class ControlPageBase(QWidget):
         row = bounded_width(group_width - 30, self.MIN_CONTROL_ROW_WIDTH, self.MAX_CONTROL_ROW_WIDTH)
         return {
             "slider": slider,
-            "axis_slider": max(180, slider - self.AXIS_VALUE_BOX_WIDTH - self.AXIS_VALUE_BOX_SPACING),
+            "axis_slider": max(140, slider - self.AXIS_VALUE_BOX_WIDTH - self.AXIS_VALUE_BOX_SPACING),
             "row": row,
             "combo": bounded_width(row - self.MAX_BUTTON_WIDTH - 8, self.MIN_COMBO_WIDTH, self.MAX_COMBO_WIDTH),
             "button": bounded_width(group_width * 0.25, self.MIN_BUTTON_WIDTH, self.MAX_BUTTON_WIDTH),
@@ -248,6 +263,7 @@ class ControlPageBase(QWidget):
         """卡片显隐动画期间/落定后同步滚动容器高度，避免挤压相邻卡片。"""
         if not hasattr(self, "scroll"):
             return
+        self.vbox.invalidate()
         self.container.adjustSize()
         refresh_scroll_bars(self.scroll)
         align_scroll_content(self.scroll, self.container)

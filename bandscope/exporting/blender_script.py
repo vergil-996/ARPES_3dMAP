@@ -1914,6 +1914,13 @@ def _selected_scene(scene, presets):
     return selected
 
 
+def _owns_shared_presets(scene, project):
+    layout = project.get("layout") or {}
+    order = project.get("entry_order") or ()
+    owner = layout.get("preset_owner") or (order[0] if order else None)
+    return scene["entry_id"] == owner
+
+
 def _create_entry(scene, entry_job, project, assets_root):
     composition = scene["composition"]
     translation = project["layout"]["entries"][scene["entry_id"]]["translation"]
@@ -1961,18 +1968,21 @@ def _create_entry(scene, entry_job, project, assets_root):
     if not {"density", "color"}.issubset({grid.name for grid in volume_data.grids}):
         raise RuntimeError(f"条目 {scene['entry_id']} 的 OpenVDB 网格不完整。")
     presets = project["presets"]
-    if presets.get("coordinates"):
+    owns_shared_presets = _owns_shared_presets(scene, project)
+    if owns_shared_presets and presets.get("coordinates"):
         create_references(scene, data_collection, root, camera)
-    if presets.get("orientation"):
+    if owns_shared_presets and presets.get("orientation"):
         create_axis_indicator(scene, data_collection, root, camera)
-    if presets.get("guide_frame"):
+    if owns_shared_presets and presets.get("guide_frame"):
         create_guide_frame(scene, data_collection, root)
-    selected = _selected_scene(scene, presets)
-    boxes = create_box_presets(selected, data_collection, root)
-    lights = create_box_lights(selected, data_collection, root)
+    boxes, lights = [], []
+    if owns_shared_presets:
+        selected = _selected_scene(scene, presets)
+        boxes = create_box_presets(selected, data_collection, root)
+        lights = create_box_lights(selected, data_collection, root)
     volume_lights = create_volume_lighting(scene, data_collection, root, volume)
     texts, text_lights = [], []
-    if presets.get("text_presets"):
+    if owns_shared_presets and presets.get("text_presets"):
         texts = create_text_presets(
             scene, data_collection, root, camera, assets_root, project["assets"]["directory"],
         )
@@ -2068,23 +2078,32 @@ def _validate_entry(scene, entry_job, project):
     if (root.location - translation).length > 1e-6:
         raise RuntimeError(f"条目 {entry_id} 的父对象排布位移被改变。")
     presets = project["presets"]
-    guide = _validate_guide(scene, root) if presets.get("guide_frame") else {}
+    owns_shared_presets = _owns_shared_presets(scene, project)
+    validation_presets = presets if owns_shared_presets else {key: False for key in presets}
+    guide = _validate_guide(scene, root) if validation_presets.get("guide_frame") else {}
+    if not validation_presets.get("guide_frame") and (
+            bpy.data.objects.get(scene["guide_frame"]["object"]) is not None
+            or bpy.data.collections.get(scene["guide_frame"]["collection"]) is not None):
+        raise RuntimeError(f"条目 {entry_id} 不应拥有辅助盒框。")
     indicator = (validate_axis_indicator(scene["axis_indicator"], root.name)
-                 if presets.get("orientation") else {})
+                 if validation_presets.get("orientation") else {})
+    if not validation_presets.get("orientation") and bpy.data.collections.get(
+            scene["axis_indicator"]["collection"]) is not None:
+        raise RuntimeError(f"条目 {entry_id} 不应拥有方向标。")
     reference_name = "Coordinate reference · editable" + composition.get("name_suffix", "")
     references = bpy.data.collections.get(reference_name)
-    if presets.get("coordinates"):
+    if validation_presets.get("coordinates"):
         if references is None or any(
                 (obj.location - Vector(scene["layout"]["coordinates"])).length > 1e-6
                 for obj in references.objects if obj.type == "CURVE"):
             raise RuntimeError(f"条目 {entry_id} 的坐标参考缺失或位移错误。")
     elif references is not None:
-        raise RuntimeError(f"条目 {entry_id} 未选择坐标参考却存在对象。")
-    boxes = validate_box_presets(scene, root, presets)
-    lights = validate_box_lights(scene, root, presets, boxes)
+        raise RuntimeError(f"条目 {entry_id} 不应拥有坐标参考。")
+    boxes = validate_box_presets(scene, root, validation_presets)
+    lights = validate_box_lights(scene, root, validation_presets, boxes)
     volume_material = validate_volume_material(volume, project)
     volume_lights = validate_volume_lighting(scene, root, volume)
-    texts, text_lights = validate_text_presets(scene, root, presets, project)
+    texts, text_lights = validate_text_presets(scene, root, validation_presets, project)
     layout = project.get("box_layout") or {}
     if any(box.get("layout") != layout.get("id") for box in boxes):
         raise RuntimeError(f"条目 {entry_id} 的薄板布局与工程配置不一致。")
@@ -2189,7 +2208,7 @@ def build_scene(job):
     total = len(metadata["entries"])
     assets_root = Path(job["metadata_file"]).parent
     for index, scene in enumerate(metadata["entries"]):
-        progress(30 + int(35 * index / total), f"创建条目 {scene['entry_id']} 的体数据与预设")
+        progress(30 + int(35 * index / total), f"创建条目 {scene['entry_id']} 的体数据")
         created.append(_create_entry(scene, jobs[scene["entry_id"]], project, assets_root))
     _fit_actual_entry_layout(created, metadata, Path(job["metadata_file"]))
     if project["overview_camera"]["enabled"]:
@@ -2213,14 +2232,14 @@ def build_scene(job):
     material_names = [box["material"] for report in reports for box in report["box_presets"]]
     mesh_names = [box["mesh"] for report in reports for box in report["box_presets"]]
     if len(set(material_names)) != len(material_names) or len(set(mesh_names)) != len(mesh_names):
-        raise RuntimeError("不同条目或长方体意外共享网格或材质。")
+        raise RuntimeError("不同长方体意外共享网格或材质。")
     volume_materials = [report["volume_material"]["material"] for report in reports]
     if len(set(volume_materials)) != len(volume_materials):
         raise RuntimeError("不同条目意外共享可变数据体材质。")
     text_materials = [item["material"] for report in reports for item in report["text_presets"]]
     text_curves = [item["data"] for report in reports for item in report["text_presets"]]
     if len(set(text_materials)) != len(text_materials) or len(set(text_curves)) != len(text_curves):
-        raise RuntimeError("不同条目或文本预设意外共享文字曲线或材质。")
+        raise RuntimeError("不同文本预设意外共享文字曲线或材质。")
     camera = bpy.context.scene.camera
     report = {
         "schema_version": metadata["schema_version"],

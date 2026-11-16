@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 from typing import Optional
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
 from bandscope.core.analyzer_core import AnalyzerCore
@@ -731,9 +732,22 @@ class SourceWorkspaceMixin:
         manager = self.__dict__.get("source_manager")
         if manager is None:
             bar.apply_sources([], None)
+            badge = self.__dict__.get("single_source_badge")
+            if badge is not None:
+                badge.hide()
             return
         bar.apply_sources(manager.source_items(), manager.active_id)
         session = manager.active()
+        badge = self.__dict__.get("single_source_badge")
+        if badge is not None:
+            show_badge = session is not None and len(manager) == 1
+            badge.setVisible(show_badge)
+            if show_badge:
+                alias = str(session.alias)
+                badge.setText(
+                    badge.fontMetrics().elidedText(alias, Qt.ElideMiddle, 164)
+                )
+                badge.setToolTip(alias)
         if session is not None:
             # 提示区分入口文件（用户点开的那个）和实际主 NPZ。
             lines = [session.alias, f"入口文件：{session.entry_path}"]

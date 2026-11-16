@@ -145,7 +145,10 @@ def _check_volume_material(volume, project):
 def _check_entry(scene, entry, project):
     entry_id = entry["entry_id"]
     composition = entry["composition"]
-    presets = project["presets"]
+    preset_owner = (project.get("layout") or {}).get("preset_owner") or project["entry_order"][0]
+    presets = project["presets"] if entry_id == preset_owner else {
+        key: False for key in project["presets"]
+    }
     collection = bpy.data.collections.get(composition["data_collection"])
     root = bpy.data.objects.get(composition["parent"])
     if collection is None or root is None:
@@ -222,7 +225,7 @@ def _check_entry(scene, entry, project):
             "requires_light": bool(spec.requires_light),
             "material_report": material,
         })
-    if project["box_layout"]["id"] == "right_front_groups":
+    if project["box_layout"]["id"] == "right_front_groups" and presets.get("thin_boxes"):
         right_z = sorted(box["center"][2] for box in box_records if box["layout_slot"] == "right")
         front_z = sorted(box["center"][2] for box in box_records if box["layout_slot"] == "front")
         if (len(right_z) != 4 or len(front_z) != 4

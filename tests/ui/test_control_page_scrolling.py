@@ -127,6 +127,21 @@ class ControlPageScrollingTests(unittest.TestCase):
         self.page.container.setMinimumHeight(0)
         self.page.container.setMaximumHeight(16777215)
 
+    def test_collapsing_a_group_updates_scroll_content(self):
+        self.page.resize(420, 4000)
+        self.page.relayout_scroll_content()
+        expanded_height = self.page.container.height()
+
+        self.page.grp_normalize.toggle_button.click()
+        QApplication.processEvents()
+
+        self.assertTrue(self.page.grp_normalize.body_host.isHidden())
+        self.assertLess(self.page.container.height(), expanded_height)
+        self.page.grp_normalize.toggle_button.click()
+        QApplication.processEvents()
+        self.assertFalse(self.page.grp_normalize.body_host.isHidden())
+        self.assertEqual(self.page.container.height(), expanded_height)
+
     def test_wheel_scrolls_the_page(self):
         self.page.resize(420, 500)
         self.page.relayout_scroll_content()
@@ -172,6 +187,7 @@ class ControlPageScrollingTests(unittest.TestCase):
         box = panel._boxes["azimuth"]
         # 离屏环境拿不到真实键盘焦点，这里直接替换判定条件。
         box._wheel_adjusts_value = lambda: True
+        box.lineEdit().setCursorPosition(2)
 
         QApplication.sendEvent(box, wheel_event(-120))
 

@@ -1,0 +1,82 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from PyQt5.QtWidgets import QApplication
+
+from tests.support.view_recipe import control_window, synthetic_npz
+from bandscope.ui import theme
+
+
+class View3dBackgroundTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_initial_3d_background_follows_theme(self):
+        window = control_window()
+        self.addCleanup(window.close)
+
+        self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
+
+    def test_new_settings_default_to_light(self):
+        previous = control_window()
+        previous.settings.remove("ui/theme")
+        previous.close()
+        theme.initialize_theme("light")
+
+        window = control_window()
+        self.addCleanup(window.close)
+        self.addCleanup(window._set_theme, "light")
+
+        self.assertEqual(theme.current_theme(), "light")
+        self.assertTrue(window.btn_theme_light.isChecked())
+        self.assertFalse(window.btn_theme_dark.isChecked())
+        self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
+
+    def test_loading_data_restores_current_theme_background(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.npz"
+            synthetic_npz(path)
+            window = control_window()
+            self.addCleanup(window.close)
+            window.plotter.set_background("black")
+
+            self.assertTrue(window.load_data(str(path)))
+
+            self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
+
+    def test_theme_switch_preserves_parameters_and_is_saved(self):
+        window = control_window()
+        self.addCleanup(window.close)
+        self.addCleanup(window._set_theme, "dark")
+        window._set_theme("dark")
+        window.page_render.s_gamma.setValue(37)
+
+        window._set_theme("light")
+
+        self.assertEqual(window.settings.value("ui/theme"), "light")
+        self.assertEqual(window.page_render.s_gamma.value(), 37)
+        self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
+        self.assertTrue(window.btn_theme_light.isChecked())
+        self.assertIn(theme.ACCENT, window.btn_main_export.styleSheet())
+        self.assertIn(theme.BG_1, window.styleSheet() + QApplication.instance().styleSheet())
+
+    def test_camera_preset_updates_overlay_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.npz"
+            synthetic_npz(path)
+            window = control_window()
+            self.addCleanup(window.close)
+            self.assertTrue(window.load_data(str(path)))
+
+            window._set_camera_view_preset("xy")
+
+            self.assertTrue(window.canvas_tool_overlay.preset_buttons["xy"].isChecked())
+            self.assertFalse(window.canvas_tool_overlay.preset_buttons["3d"].isChecked())
+            window._set_camera_view_preset("3d")
+            self.assertTrue(window.canvas_tool_overlay.preset_buttons["3d"].isChecked())
+
+
+if __name__ == "__main__":
+    unittest.main()

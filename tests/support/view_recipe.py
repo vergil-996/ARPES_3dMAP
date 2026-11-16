@@ -74,6 +74,7 @@ class _Plotter(QWidget):
         self.renderer.GetVolumes.return_value.GetNumberOfItems.return_value = 0
         self.ren_win = SimpleNamespace(ReportCapabilities=lambda: "")
         self.box_widgets = []
+        self.background_setting = None
     def clear_box_widgets(self):
         self.box_widgets.clear()
     @property
@@ -84,8 +85,8 @@ class _Plotter(QWidget):
         self.camera.position, self.camera.focal_point, self.camera.up = position
     def render(self):
         pass
-    def set_background(self, *a, **kw):
-        pass
+    def set_background(self, color, *args, **kwargs):
+        self.background_setting = color
     def reset_camera(self, *a, **kw):
         pass
     def clear(self, *a, **kw):

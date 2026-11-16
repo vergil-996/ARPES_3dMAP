@@ -1,62 +1,37 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from bandscope.app.refactored_app import My3DAnalyzer
 
 
-class _LabelStub:
-    def __init__(self):
-        self.width = None
-        self.position = None
-        self.raised = False
-
-    def setFixedWidth(self, width):
-        self.width = width
-
-    def move(self, x, y):
-        self.position = (x, y)
-
-    def raise_(self):
-        self.raised = True
-
-
-class _StackStub:
-    def __init__(self, width):
-        self._width = width
-
-    def width(self):
-        return self._width
-
-
 class RenderStatusOverlayTests(unittest.TestCase):
-    def test_status_geometry_is_stable_for_normal_view_widths(self):
-        label = _LabelStub()
+    def test_render_status_overlay_is_removed(self):
+        self.assertFalse(hasattr(My3DAnalyzer, "RENDER_STATUS_WIDTH"))
+        self.assertFalse(hasattr(My3DAnalyzer, "_position_render_status"))
+        self.assertFalse(hasattr(My3DAnalyzer, "_render_device_label"))
+
+    def test_statusbar_still_updates_without_hardware_indicators(self):
+        state_label = Mock()
+        update_statusbar = Mock()
         analyzer = SimpleNamespace(
-            RENDER_STATUS_WIDTH=My3DAnalyzer.RENDER_STATUS_WIDTH,
-            render_status_label=label,
-            left_display_stack=_StackStub(800),
+            status_state=state_label,
+            _update_statusbar=update_statusbar,
         )
 
-        My3DAnalyzer._position_render_status(analyzer)
-        first_geometry = label.width, label.position
-        My3DAnalyzer._position_render_status(analyzer)
+        My3DAnalyzer._update_render_status(analyzer, "complete", "NVIDIA GPU")
 
-        self.assertEqual(first_geometry, (330, (456, 12)))
-        self.assertEqual((label.width, label.position), first_geometry)
-        self.assertTrue(label.raised)
+        state_label.setText.assert_called_once_with("● 就绪")
+        state_label.setStyleSheet.assert_called_once()
+        update_statusbar.assert_called_once_with()
 
-    def test_status_width_is_bounded_on_a_narrow_view(self):
-        label = _LabelStub()
-        analyzer = SimpleNamespace(
-            RENDER_STATUS_WIDTH=My3DAnalyzer.RENDER_STATUS_WIDTH,
-            render_status_label=label,
-            left_display_stack=_StackStub(240),
-        )
+    def test_tool_overlay_positioning_no_longer_needs_a_status_label(self):
+        overlay = Mock()
+        analyzer = SimpleNamespace(canvas_tool_overlay=overlay)
 
-        My3DAnalyzer._position_render_status(analyzer)
+        My3DAnalyzer._position_canvas_tool_overlay(analyzer)
 
-        self.assertEqual(label.width, 212)
-        self.assertEqual(label.position, (14, 12))
+        overlay.reposition.assert_called_once_with()
 
 
 if __name__ == "__main__":
