@@ -74,7 +74,11 @@ GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维�
 - **MatElab 凭证**：`publish_matelab.py` 依次取命令行 `--username/--password`、
   环境变量 `MATELAB_USER`/`MATELAB_PASSWORD`，最后才交互输入；也可以只读使用应用
   「更新设置」里已保存的账号（registry `updates/matelab_username` /
-  `updates/matelab_password_b64`）。任何情况下都不把密码写进仓库、日志或提交。
+  `updates/matelab_password_b64`，`publish_matelab_driver.py` 会自行读取）。
+  中文用户名不要经 cmd／PowerShell 环境变量或跨进程命令行传递：控制台代码页会把
+  它转成乱码，服务器返回「用户不存在」。需要复用已保存账号时，在同一 Python 进程
+  里读 QSettings 后直接调用 `publish_matelab.main(argv)`，或改用 driver。
+  任何情况下都不把密码写进仓库、日志或提交。
 
 ## CI 与正式发布
 
