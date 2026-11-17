@@ -3,7 +3,7 @@ import vtk
 import pyvista as pv
 from matplotlib import colormaps, transforms as mtransforms
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import PowerNorm
+from matplotlib.colors import PowerNorm, to_rgba
 from PIL import Image
 from pyvista.plotting.cube_axes_actor import make_axis_labels
 from vtkmodules.util.numpy_support import numpy_to_vtk
@@ -518,6 +518,83 @@ class VisualEngine:
             pass
 
     @staticmethod
+    def apply_2d_theme(ax, canvas, *, line_colors=None, colorbars=()):
+        ax._arpes_preview_background = None
+        ax._arpes_preview_background_signature = None
+        fig = ax.figure
+        fig.set_facecolor(theme.CANVAS_BG)
+        theme_colorbars = tuple(
+            colorbar
+            for colorbar in (getattr(ax, "_arpes_colorbar", None), *colorbars)
+            if colorbar is not None and getattr(colorbar, "ax", None) is not None
+        )
+        plot_axes = list(fig.axes)
+        for colorbar in theme_colorbars:
+            if colorbar.ax not in plot_axes:
+                plot_axes.append(colorbar.ax)
+        text_colors = {
+            to_rgba(palette[key]): key
+            for key in ("TEXT_1", "TEXT_2", "TEXT_3")
+            for palette in theme.PALETTES.values()
+        }
+        for current_ax in plot_axes:
+            current_ax.set_facecolor(theme.CANVAS_BG)
+            for spine in current_ax.spines.values():
+                spine.set_color(theme.BORDER_HEX)
+            current_ax.title.set_color(theme.TEXT_1)
+            current_ax.xaxis.label.set_color(theme.TEXT_1)
+            current_ax.yaxis.label.set_color(theme.TEXT_1)
+            current_ax.tick_params(colors=theme.TEXT_2)
+            for axis in (current_ax.xaxis, current_ax.yaxis):
+                for gridline in axis.get_gridlines():
+                    gridline.set_color(theme.BORDER_HEX)
+            for text in current_ax.texts:
+                try:
+                    key = text_colors.get(to_rgba(text.get_color()))
+                except (TypeError, ValueError):
+                    key = None
+                if key:
+                    text.set_color(getattr(theme, key))
+        for text in fig.texts:
+            try:
+                key = text_colors.get(to_rgba(text.get_color()))
+            except (TypeError, ValueError):
+                key = None
+            if key:
+                text.set_color(getattr(theme, key))
+        if line_colors is not None:
+            for line, color in zip(ax.lines, line_colors):
+                line.set_color(color)
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor(theme.BG_3)
+            legend.get_frame().set_edgecolor(theme.BORDER_HEX)
+            for text in legend.get_texts():
+                text.set_color(theme.TEXT_1)
+        for colorbar in theme_colorbars:
+            try:
+                colorbar.outline.set_edgecolor(theme.BORDER_HEX)
+            except (AttributeError, RuntimeError):
+                pass
+        canvas.draw_idle()
+
+    @staticmethod
+    def apply_3d_text_theme(plotter):
+        try:
+            color = to_rgba(VisualEngine._plotter_text_color(plotter))[:3]
+            for scalar_bar in plotter.scalar_bars.values():
+                for name in (
+                    "GetTitleTextProperty",
+                    "GetLabelTextProperty",
+                    "GetAnnotationTextProperty",
+                ):
+                    getter = getattr(scalar_bar, name, None)
+                    if getter is not None:
+                        getter().SetColor(*color)
+        except (AttributeError, RuntimeError, TypeError, KeyError):
+            pass
+
+    @staticmethod
     def _update_2d_colorbar(ax, image, level_info):
         colorbar = getattr(ax, "_arpes_colorbar", None)
         if colorbar is None or getattr(colorbar, "ax", None) is None:
@@ -806,7 +883,7 @@ class VisualEngine:
             axis = ax.xaxis if axis_key == "x" else ax.yaxis
             axis.set_label_text(
                 str(titles.get(axis_key) or ""),
-                color="white",
+                color=theme.TEXT_1,
                 fontfamily=theme.MPL_FONT_FAMILIES,
             )
             position = positions.get(axis_key)
@@ -1058,6 +1135,7 @@ class VolumeRenderSession:
         self._display_signature = None
         self._clip_signature = None
         self._axes_signature = None
+        self._axes_state = None
         self._domain_signature = None
         self.opacity_multiplier = None
         self.alpha_channel = None
@@ -1097,6 +1175,7 @@ class VolumeRenderSession:
         self._display_signature = None
         self._clip_signature = None
         self._axes_signature = None
+        self._axes_state = None
         self._domain_signature = None
         self.alpha_channel = None
         self.display_channel = None
@@ -1556,7 +1635,17 @@ class VolumeRenderSession:
             mapper.SetClippingPlanes(planes)
         self._clip_signature = signature
 
+    def update_theme(self):
+        VisualEngine.apply_3d_text_theme(self.plotter)
+        if not self.active:
+            return
+        state = getattr(self, "_axes_state", None)
+        if state is not None:
+            self._axes_signature = None
+            self._update_axes(*state)
+
     def _update_axes(self, show_axes, coords, axis_titles=None):
+        self._axes_state = bool(show_axes), coords, axis_titles
         coord_signature = None
         if show_axes and coords:
             pieces = []

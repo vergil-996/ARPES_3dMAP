@@ -276,13 +276,6 @@ class ContextMenuTests(unittest.TestCase):
         analyzer.canvas_2d = QWidget()
         analyzer._can_copy_current_curve = Mock(return_value=False)
         analyzer._can_paste_curve_to_current_page = Mock(return_value=False)
-        analyzer.denoise_popup = SimpleNamespace(show_at=Mock())
-        analyzer.waterfall_popup = SimpleNamespace(show_at=Mock())
-        analyzer.update_controller = SimpleNamespace(
-            check_for_updates=Mock(),
-            add_settings_action=Mock(side_effect=lambda menu: menu.addAction("更新设置…")),
-        )
-
         _FakeMenu.instances.clear()
         with patch("bandscope.app.refactored_app.QMenu", _FakeMenu):
             My3DAnalyzer._show_curve_context_menu(analyzer, QPoint(3, 4))

@@ -281,7 +281,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         except Exception as exc:
             print(f"Extension startup failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
-        # 工具栏先于本段构造：会话就绪（或失败）后刷新插件管理按钮状态。
+        # 设置菜单先于本段构造：会话就绪（或失败）后刷新插件管理入口状态。
         self._update_plugin_button_state()
         # 「其他积分」下拉并入插件注册的动作；插件未加载时保持内置项。
         self._sync_integration_actions()
@@ -294,16 +294,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self._install_page_keyboard_shortcuts()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
-        self.update_controller = UpdateController(
-            self,
-            self.settings,
-            version_button=self.btn_tb_version,
-        )
-        self.btn_tb_version.clicked.connect(
-            lambda: self.update_controller.check_for_updates(manual=True)
-        )
-        self.btn_tb_version.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.btn_tb_version.customContextMenuRequested.connect(self._show_update_settings_menu)
+        self.update_controller = UpdateController(self, self.settings)
         QTimer.singleShot(5000, self.update_controller.check_automatically)
 
     def _apply_feedback_styles(self):
@@ -390,27 +381,37 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return True
 
     def eventFilter(self, watched, event):
-        if self._enhancement_event_filter(watched, event):
-            return True
-        if self._crop_event_filter(watched, event):
-            return True
-        if watched is getattr(self, "left_display_stack", None) and event.type() == QEvent.Resize:
+        event_type = event.type()
+        if watched is getattr(self, "left_display_stack", None) and event_type == QEvent.Resize:
             self._position_canvas_tool_overlay()
-        if event.type() in (QEvent.WindowDeactivate, QEvent.FocusOut):
+            return False
+        if event_type not in (
+            QEvent.KeyPress, QEvent.WindowDeactivate, QEvent.FocusOut,
+            QEvent.Enter, QEvent.MouseMove, QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease, QEvent.ContextMenu,
+        ):
+            return False
+        if event_type == QEvent.KeyPress and self._enhancement_event_filter(watched, event):
+            return True
+        if event_type in (
+            QEvent.KeyPress, QEvent.Enter, QEvent.MouseMove, QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease, QEvent.ContextMenu,
+        ) and self._crop_event_filter(watched, event):
+            return True
+        if event_type in (QEvent.WindowDeactivate, QEvent.FocusOut):
             # 失焦时结束标题拖动，避免松手事件永远收不到。
             if self._axis_title_dragging():
                 self._reset_axis_title_interaction()
-        if event.type() == QEvent.KeyPress:
+        if event_type == QEvent.KeyPress:
             if not self._page_keyboard_shortcuts_enabled():
-                return super().eventFilter(watched, event)
+                return False
             if self._handle_curve_clipboard_shortcut(event):
                 return True
             if self._handle_number_page_shortcut(event):
                 return True
             if self._handle_frame_step_shortcut(event):
                 return True
-            return False
-        return super().eventFilter(watched, event)
+        return False
 
     def _page_keyboard_shortcuts_enabled(self):
         return (
@@ -796,7 +797,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 "Blender": "ic_fluent_cube_regular",
                 "导出": "ic_fluent_arrow_export_regular",
                 "导出结果": "ic_fluent_arrow_export_regular",
-                "扩展": "ic_fluent_puzzle_piece_regular",
                 "裁剪": "ic_fluent_crop_regular",
                 "裁空": "ic_fluent_eraser_regular",
             }
@@ -824,12 +824,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self._sync_source_switcher()
         row.addWidget(self.source_switcher_bar)
         row.addStretch(1)
-
-        self.btn_tb_plugins = _make_tb_btn("扩展", "quiet", 76)
-        self.btn_tb_plugins.setToolTip("安装、卸载及启用/停用插件")
-        self.btn_tb_plugins.clicked.connect(self.open_plugin_manager)
-        self._update_plugin_button_state()
-        row.addWidget(self.btn_tb_plugins)
 
         self.theme_switch = QFrame(self.toolbar)
         self.theme_switch.setObjectName("theme_switch")
@@ -872,6 +866,19 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.btn_main_export.setToolTip("冻结当前视图，设置并导出版图")
         row.addWidget(self.btn_main_export)
 
+        self.btn_tb_settings = ActionButton(self.toolbar)
+        self.btn_tb_settings.setProperty("compactIconButton", True)
+        self.btn_tb_settings.setFixedSize(28, 26)
+        self.btn_tb_settings.setAccessibleName("设置")
+        self.btn_tb_settings.setToolTip("设置")
+        theme.style_push_button(self.btn_tb_settings, "quiet")
+        theme.set_button_icon(self.btn_tb_settings, "ic_fluent_settings_regular", 18)
+        self.btn_tb_settings.setIconSize(QSize(18, 18))
+        self.settings_menu = self._create_settings_menu()
+        self.btn_tb_settings.clicked.connect(self._show_settings_menu)
+        self._update_plugin_button_state()
+        row.addWidget(self.btn_tb_settings)
+
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
         self.btn_tb_crop = _make_tb_btn("裁剪", "quiet", 62)
         self.btn_tb_crop.setCheckable(True)
@@ -879,14 +886,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.btn_tb_erase = _make_tb_btn("裁空", "quiet", 62)
         self.btn_tb_erase.setCheckable(True)
         self.btn_tb_erase.setToolTip("开启裁空：在画布上拖动选区；Esc 退出裁空模式")
-
-        self.btn_tb_version = ActionButton(self.toolbar)
-        self.btn_tb_version.setFixedHeight(30)
-        self.btn_tb_version.setFixedWidth(76)
-        self.btn_tb_version.attachment().setText(f"v{APP_VERSION}")
-        theme.style_push_button(self.btn_tb_version, "quiet")
-        self.btn_tb_version.setToolTip("点击检查更新；右键打开更新设置")
-        row.addWidget(self.btn_tb_version)
 
         self.btn_tb_load.clicked.connect(self.on_load)
         self.btn_tb_shot.clicked.connect(self.open_publication_dialog)
@@ -902,18 +901,37 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.btn_theme_dark.setChecked(name == "dark")
         self.btn_theme_light.setChecked(name == "light")
         self.CONTEXT_MENU_STYLE = theme.context_menu_qss()
+        self.settings_menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         self._apply_feedback_styles()
         self.left_display_stack.setStyleSheet(
             f"QStackedWidget#display_stack {{ background-color: {theme.CANVAS_BG}; border-radius: 10px; }}"
         )
         self.plotter.set_background(theme.CANVAS_BG)
-        self.fig.set_facecolor(theme.CANVAS_BG)
-        self.ax_2d.set_facecolor(theme.CANVAS_BG)
-        self.canvas_2d.draw_idle()
-        if self.core.raw_data is not None and self.left_workspace.current_spec() is not None:
-            self.request_refresh(RefreshCause.DISPLAY_MAPPING)
+        self.volume_session.update_theme()
+        context = self.current_render_context
+        view = context.get("view") if isinstance(context, dict) else None
+        if view == "1d_comparison":
+            line_colors = [
+                theme.CURVE_PALETTE[index % len(theme.CURVE_PALETTE)]
+                for index in range(len(self.ax_2d.lines))
+            ]
+        elif view in {"1d", "waterfall"}:
+            line_colors = [theme.ACCENT] * len(self.ax_2d.lines)
         else:
-            self.plotter.render()
+            line_colors = None
+        for selector in (
+            self.axis_crop_selector,
+            self.__dict__.get("_enhancement_selector"),
+        ):
+            if selector is not None:
+                selector.update_theme()
+        VisualEngine.apply_2d_theme(
+            self.ax_2d,
+            self.canvas_2d,
+            line_colors=line_colors,
+            colorbars=self.__dict__.get("_enhancement_colorbars", ()),
+        )
+        self.plotter.render()
 
     def _build_statusbar(self):
         """底部状态栏：运行状态 / 当前页 / 光标坐标 / 数据与后端信息。"""
@@ -943,8 +961,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.status_cursor.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
         self.status_info = QLabel("", self.statusbar)
         self.status_info.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO};")
-        self.status_version = self.btn_tb_version
-        self.status_version.setParent(self.statusbar)
+        self.status_version = QLabel(f"v{APP_VERSION}", self.statusbar)
         self.status_version.setFixedHeight(20)
         self.status_version.setStyleSheet(base_qss + f"font-family: {theme.FONT_MONO}; border: none;")
 
@@ -1940,20 +1957,20 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return tuple(parts)
 
     def _update_plugin_button_state(self):
-        """插件管理按钮：只有管理器自身无法构造时才禁用。
+        """插件管理入口：只有管理器自身无法构造时才禁用。
 
         登记表损坏、迁移失败或单个插件加载失败都不该挡住管理入口——这些正是
         需要进管理窗口看诊断、做恢复的情况。
         """
-        button = self.__dict__.get("btn_tb_plugins")
-        if button is None:
+        action = self.__dict__.get("plugin_manager_action")
+        if action is None:
             return
         available = self.__dict__.get("plugin_session") is not None
-        button.setEnabled(available)
+        action.setEnabled(available)
         if available:
-            button.setToolTip("安装、卸载及启用/停用插件")
+            action.setToolTip("安装、卸载及启用/停用插件")
         else:
-            button.setToolTip("插件管理不可用：扩展模块未能初始化。")
+            action.setToolTip("插件管理不可用：扩展模块未能初始化。")
 
     def open_plugin_manager(self):
         """打开插件管理面板（安装 / 启用停用 / 卸载 / 恢复）。"""
@@ -2650,17 +2667,12 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             )
 
     def _update_color_lock_button_style(self):
-        """按锁定状态切换「色阶调整」里锁定按钮的文案与配色。"""
+        """按锁定状态切换「色阶调整」里锁定按钮的配色。"""
         page = getattr(self, "page_render", None)
         btn = getattr(page, "btn_lock", None) if page is not None else None
         if btn is None:
             return
-        if btn.isChecked():
-            btn.attachment().setText("色带已锁定")
-            theme.style_push_button(btn, "primary")
-        else:
-            btn.attachment().setText("锁定色带")
-            theme.style_push_button(btn, "secondary")
+        theme.style_push_button(btn, "primary" if btn.isChecked() else "secondary")
 
     def flush_time_slider_refresh(self):
         if self._syncing_controls or self.core.raw_data is None:
@@ -3745,31 +3757,35 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.left_workspace.add_page(new_spec)
         return True
 
-    def _create_settings_context_menu(self, owner, pos):
+    def _create_settings_menu(self):
+        menu = QMenu(self.btn_tb_settings)
+        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
+        update_action = menu.addAction("更新设置…")
+        update_action.triggered.connect(lambda: self.update_controller.open_settings())
+        self.plugin_manager_action = menu.addAction("插件管理…")
+        self.plugin_manager_action.triggered.connect(
+            lambda _checked=False: self.open_plugin_manager()
+        )
+        denoise_action = menu.addAction("去噪参数设置…")
+        denoise_action.triggered.connect(
+            lambda _checked=False: self.open_denoise_settings()
+        )
+        return menu
+
+    def _show_settings_menu(self):
+        button = self.btn_tb_settings
+        self.settings_menu.exec_(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def open_denoise_settings(self):
+        popup = self.denoise_popup
+        popup.adjustSize()
+        popup.show_at(self.frameGeometry().center() - popup.rect().center())
+
+    def _create_canvas_context_menu(self, owner, pos):
         global_pos = owner.mapToGlobal(pos)
         menu = QMenu(owner)
         menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
-        for label, popup in (
-            ("去噪参数设置", self.denoise_popup),
-        ):
-            action = menu.addAction(label)
-            action.triggered.connect(
-                lambda _checked=False, target=popup: target.show_at(global_pos)
-            )
-        menu.addSeparator()
-        update_action = menu.addAction(f"检查更新（当前 v{APP_VERSION}）")
-        update_action.triggered.connect(
-            lambda: self.update_controller.check_for_updates(manual=True)
-        )
-        self.update_controller.add_settings_action(menu)
         return menu, global_pos
-
-    def _show_update_settings_menu(self, pos):
-        menu = QMenu(self.btn_tb_version)
-        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
-        self.update_controller.add_settings_action(menu)
-        menu.exec_(self.btn_tb_version.mapToGlobal(pos))
-        menu.deleteLater()
 
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
@@ -3788,7 +3804,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         can_copy = self._can_copy_current_curve() if show_curve_actions else False
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
-        menu, global_pos = self._create_settings_context_menu(self.canvas_2d, pos)
+        menu, global_pos = self._create_canvas_context_menu(self.canvas_2d, pos)
         band_target = (self.__dict__.get("_band_context_target")
                        if context and context.get("view") == "2d" else None)
         if band_target is None and context and context.get("view") == "2d":
@@ -3834,7 +3850,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if target is None and band_target is None and context and context.get("view") == "3d":
             # 右键观察者未先到时再按当前光标补一次拾取，避免菜单漏掉删除入口。
             target = self._enhancement_box_region_at_cursor()
-        menu, global_pos = self._create_settings_context_menu(self.plotter, pos)
+        menu, global_pos = self._create_canvas_context_menu(self.plotter, pos)
         self._append_band_actions(menu, band_target)
         self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
@@ -5393,16 +5409,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 background-color: transparent;
             }
             QInputDialog QComboBox {
-                color: %(T1)s;
+                color: palette(text);
                 background-color: %(BG2)s;
                 border: 1px solid %(BORD)s;
                 border-radius: 4px;
                 padding: 4px 8px;
             }
             QInputDialog QComboBox QAbstractItemView {
-                color: %(T1)s;
+                color: palette(text);
                 background-color: %(BG2)s;
-                selection-color: %(T1)s;
+                selection-color: palette(text);
                 selection-background-color: %(BG4)s;
             }
             QInputDialog QPushButton {
@@ -5930,7 +5946,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 offset + 0.5,
                 1.03,
                 f"{k_values[idx]:.2f}",
-                color="white",
+                color=theme.TEXT_1,
                 fontsize=8,
                 ha="center",
                 va="bottom",

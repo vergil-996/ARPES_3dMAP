@@ -30,6 +30,18 @@ class InteractiveCropBox(RectangleSelector):
         )
         self.sync_bounds(bounds)
 
+    def update_theme(self):
+        self._selection_artist.set(
+            facecolor=theme.ACCENT,
+            edgecolor=theme.ACCENT,
+            path_effects=[
+                patheffects.Stroke(linewidth=4, foreground=theme.BG_2),
+                patheffects.Normal(),
+            ],
+        )
+        for artist in getattr(self, "_handles_artists", ()):
+            artist.set(markerfacecolor=theme.ACCENT, markeredgecolor=theme.BG_2)
+
     def sync_bounds(self, bounds):
         """Update geometry in place without rewriting the numeric draft."""
         self._valid_bounds = tuple(bounds)

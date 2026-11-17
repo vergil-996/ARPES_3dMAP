@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
-from matplotlib.colors import to_rgb
+from matplotlib.colors import to_rgb, to_rgba
 from bandscope.ui import theme
 
 from matplotlib.backend_bases import MouseButton, MouseEvent
@@ -122,6 +122,21 @@ class AxisCropBlitTests(unittest.TestCase):
 
         selector.release(release)
         self.assertEqual(len(self.selected), 1)
+
+    def test_theme_update_restyles_existing_crop_artists(self):
+        selector = self.analyzer.axis_crop_selector
+        original_theme = theme.current_theme()
+        self.addCleanup(theme.set_theme, original_theme)
+        theme.set_theme("light" if original_theme == "dark" else "dark")
+
+        selector.update_theme()
+
+        self.assertEqual(
+            to_rgba(selector._selection_artist.get_edgecolor()), to_rgba(theme.ACCENT)
+        )
+        for artist in selector.artists[1:]:
+            self.assertEqual(to_rgba(artist.get_markerfacecolor()), to_rgba(theme.ACCENT))
+            self.assertEqual(to_rgba(artist.get_markeredgecolor()), to_rgba(theme.BG_2))
 
     def _assert_all_nine_handles_painted(self):
         selector = self.analyzer.axis_crop_selector

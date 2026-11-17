@@ -53,6 +53,17 @@ class ModifierPageShortcutRemovalTests(unittest.TestCase):
             analyzer._select_control_page.assert_not_called()
             watched.deleteLater()
 
+    def test_unrelated_events_do_not_enter_business_filters(self):
+        analyzer = self._analyzer()
+        analyzer._enhancement_event_filter = Mock(return_value=False)
+        analyzer._crop_event_filter = Mock(return_value=False)
+        analyzer._position_canvas_tool_overlay = Mock()
+
+        self.assertFalse(analyzer.eventFilter(None, QEvent(QEvent.StyleChange)))
+        analyzer._enhancement_event_filter.assert_not_called()
+        analyzer._crop_event_filter.assert_not_called()
+        analyzer._position_canvas_tool_overlay.assert_not_called()
+
     def test_page_switch_helpers_are_gone(self):
         for name in REMOVED_HELPERS:
             self.assertFalse(hasattr(My3DAnalyzer, name), name)

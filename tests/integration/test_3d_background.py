@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from PyQt5.QtWidgets import QApplication
 
@@ -59,8 +60,35 @@ class View3dBackgroundTests(unittest.TestCase):
         self.assertEqual(window.page_render.s_gamma.value(), 37)
         self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
         self.assertTrue(window.btn_theme_light.isChecked())
-        self.assertIn(theme.ACCENT, window.btn_main_export.styleSheet())
-        self.assertIn(theme.BG_1, window.styleSheet() + QApplication.instance().styleSheet())
+        self.assertIn("palette(highlight)", window.btn_main_export.styleSheet())
+        self.assertIn("palette(base)", window.styleSheet() + QApplication.instance().styleSheet())
+
+    def test_theme_switch_does_not_request_a_data_render(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "input.npz"
+            synthetic_npz(path)
+            window = control_window()
+            self.addCleanup(window.close)
+            original_theme = theme.current_theme()
+            self.addCleanup(window._set_theme, original_theme)
+            self.assertTrue(window.load_data(str(path)))
+            context = window.current_render_context
+            window.request_refresh = Mock()
+            window._render_active_page = Mock()
+            window.volume_session.update_theme = Mock()
+            window.axis_crop_selector = Mock()
+            window._enhancement_selector = Mock()
+
+            target = "light" if original_theme == "dark" else "dark"
+            window._set_theme(target)
+
+            window.request_refresh.assert_not_called()
+            window._render_active_page.assert_not_called()
+            window.volume_session.update_theme.assert_called_once_with()
+            window.axis_crop_selector.update_theme.assert_called_once_with()
+            window._enhancement_selector.update_theme.assert_called_once_with()
+            self.assertIs(window.current_render_context, context)
+            self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
 
     def test_camera_preset_updates_overlay_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:

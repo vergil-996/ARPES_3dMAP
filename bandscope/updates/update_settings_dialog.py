@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
+from bandscope.app_metadata import APP_VERSION
 from bandscope.ui import theme
 from bandscope.updates.matelab_source import MatelabCredentials
 from bandscope.updates.sources import (
@@ -38,9 +39,10 @@ def _style_dialog(dialog):
         f" border: 1px solid {theme.BORDER_HEX}; border-radius: {theme.R_S}px;"
         " min-height: 30px; padding: 0 10px; }"
         f"QLineEdit:focus, QComboBox:focus {{ border-color: {theme.ACCENT}; }}"
-        f"QComboBox QAbstractItemView {{ color: {theme.TEXT_1};"
+        "QComboBox { color: palette(text); }"
+        f"QComboBox QAbstractItemView {{ color: palette(text);"
         f" background: {theme.BG_2}; selection-background-color: {theme.ACCENT_SOFT};"
-        f" selection-color: {theme.TEXT_1}; }}"
+        " selection-color: palette(text); }"
     )
 
 
@@ -108,6 +110,8 @@ class MatelabLoginDialog(QDialog):
 class UpdateSettingsDialog(QDialog):
     """只维护更新设置草稿，由控制器在接受后统一持久化。"""
 
+    CheckRequested = QDialog.Accepted + 1
+
     def __init__(self, parent=None, *, source=DEFAULT_SOURCE, credentials=None, username=""):
         super().__init__(parent)
         self.setWindowTitle("更新设置")
@@ -153,7 +157,21 @@ class UpdateSettingsDialog(QDialog):
         account_layout.addLayout(account_buttons)
         layout.addWidget(self.account_group)
 
-        hint = QLabel("点击「保存」后生效；取消会保留原设置。")
+        update_row = QHBoxLayout()
+        self.version_label = QLabel(f"当前版本：v{APP_VERSION}")
+        self.version_label.setStyleSheet(f"color: {theme.TEXT_2};")
+        self.check_updates_button = QPushButton("检查更新")
+        self.check_updates_button.setToolTip("应用当前设置并检查更新")
+        theme.style_push_button(self.check_updates_button, "secondary")
+        self.check_updates_button.setMinimumHeight(32)
+        self.check_updates_button.setAutoDefault(False)
+        self.check_updates_button.clicked.connect(self.request_update_check)
+        update_row.addWidget(self.version_label)
+        update_row.addStretch()
+        update_row.addWidget(self.check_updates_button)
+        layout.addLayout(update_row)
+
+        hint = QLabel("「保存」或「检查更新」会应用当前修改；取消保留原设置。")
         hint.setStyleSheet(f"color: {theme.TEXT_3};")
         layout.addWidget(hint)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -172,6 +190,9 @@ class UpdateSettingsDialog(QDialog):
 
     def credentials(self):
         return self._credentials
+
+    def request_update_check(self):
+        self.done(self.CheckRequested)
 
     def _refresh_source(self):
         matelab = self.selected_source() == SOURCE_MATELAB

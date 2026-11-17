@@ -79,6 +79,7 @@ def create_combo_box(*, parent, width, title, items, current_text):
     current_index = combo_index_for_text(combo_box, current_text)
     if current_index >= 0:
         combo_box.setCurrentIndex(current_index)
+    theme.raise_well_on_card(combo_box, adjust_layout=False)
     return combo_box
 
 

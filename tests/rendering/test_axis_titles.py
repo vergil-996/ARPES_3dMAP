@@ -13,8 +13,10 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.transforms import IdentityTransform
+from matplotlib.colors import to_rgba
 
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
+from bandscope.ui import theme
 
 COORDS = {
     "X": np.linspace(-1.0, 1.0, 4),
@@ -147,6 +149,32 @@ class Render2DAxisTitleTests(unittest.TestCase):
                 err_msg=f"{key} 轴标签没有回到自动位置",
             )
 
+    def test_theme_restyle_preserves_image_titles_and_colorbar(self):
+        original_theme = theme.current_theme()
+        self.addCleanup(theme.set_theme, original_theme)
+        theme.set_theme("dark")
+        _, canvas, axes = _figure(width=7.0, height=4.0)
+        _render(axes, canvas, {"x": "kx", "y": "E"}, {"x": (0.2, 0.5)})
+        canvas.draw()
+        image = axes._arpes_image
+        colorbar = axes._arpes_colorbar
+        values = image.get_array().copy()
+        label_position = axes.xaxis.label.get_position()
+
+        theme.set_theme("light")
+        VisualEngine.apply_2d_theme(axes, canvas)
+        canvas.draw()
+
+        self.assertIs(axes._arpes_image, image)
+        self.assertIs(axes._arpes_colorbar, colorbar)
+        np.testing.assert_array_equal(image.get_array(), values)
+        self.assertEqual(axes.xaxis.label.get_position(), label_position)
+        self.assertEqual(axes.get_facecolor(), to_rgba(theme.CANVAS_BG))
+        self.assertEqual(axes.xaxis.label.get_color(), theme.TEXT_1)
+        self.assertEqual(axes.title.get_color(), theme.TEXT_1)
+        self.assertEqual(colorbar.ax.yaxis.label.get_color(), theme.TEXT_1)
+        self.assertEqual(colorbar.outline.get_edgecolor(), to_rgba(theme.BORDER_HEX))
+
     def test_titles_do_not_disturb_the_colorbar_or_the_aspect_policy(self):
         _, canvas, axes = _figure(width=9.0, height=5.0)
         kx_ky = {**SLICE_INFO, "axis": 2, "mode": "slice", "index": 0}
@@ -228,6 +256,20 @@ class ThreeDAxisTitleTests(unittest.TestCase):
         session._update_axes(True, COORDS, ("kx (Å⁻¹)", "Ky", "E (eV)"))
         self.assertEqual(len(plotter.show_bounds_calls), 2)
         self.assertEqual(plotter.show_bounds_calls[-1]["xtitle"], "kx (Å⁻¹)")
+
+    def test_theme_update_restyles_axes_without_touching_volume_data(self):
+        plotter = _FakeBoundsPlotter()
+        session = _axes_session(plotter)
+        session.volume = object()
+        volume = session.volume
+        session._update_axes(True, COORDS, ("Kx", "Ky", "E (eV)"))
+        self.assertEqual(len(plotter.show_bounds_calls), 1)
+
+        session.update_theme()
+
+        self.assertEqual(len(plotter.show_bounds_calls), 2)
+        self.assertIs(session.volume, volume)
+        self.assertEqual(session._axes_state[2], ("Kx", "Ky", "E (eV)"))
 
     def test_repeating_the_same_titles_does_not_redraw(self):
         plotter = _FakeBoundsPlotter()

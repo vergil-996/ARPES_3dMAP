@@ -3,7 +3,7 @@
 
 验证点（3D 主页 + 2D 切片结果页各验一遍）：
 1. 未锁定时拖动时间轴，色带范围随当前帧数据重新归一化；
-2. 点下「色阶调整」模块的「锁定色带」（下拉框选中「全局（背景）」）后，VisualEngine 捕获当前数据范围，按钮文案/样式切换；
+2. 点下「色阶调整」模块的锁形按钮（下拉框选中「全局（背景）」）后，VisualEngine 捕获当前数据范围，按钮锁形动画/样式切换；
 3. 锁定状态拖动时间轴，clim / level_info 保持不变；
 4. 解锁后再次拖动时间轴，恢复按每帧数据自动归一化。
 
@@ -97,6 +97,20 @@ def main():
     # ---------- 3D 主页验证 ----------
     def step_3d_frame0():
         log(f"[verify] time slider range: {slider.minimum()}..{slider.maximum()}")
+        # 默认百分位归一化下，该数据各帧的 P99.5 可能相同，换帧后色带端点不变，
+        # 无法验证锁定效果；先切到完整范围，让各帧的黑色/白色端点真正不同。
+        from bandscope.ui.page_render_control import NORMALIZATION_FULL
+
+        combo = window.page_render.combo_normalization
+        index = combo.findData(NORMALIZATION_FULL)
+        if index >= 0 and combo.currentIndex() != index:
+            combo.setCurrentIndex(index)
+            window.flush_time_slider_refresh()
+            QTimer.singleShot(1500, step_3d_frame0_ready)
+        else:
+            step_3d_frame0_ready()
+
+    def step_3d_frame0_ready():
         state["bw0"] = volume_bw(window)
         log(f"[verify] 3d frame0 black/white: {state['bw0']}")
         goto_frame(slider.maximum(), step_3d_frame_last_unlocked)
@@ -110,11 +124,12 @@ def main():
         window.page_render.btn_lock.click()
         assert window.page_render.btn_lock.isChecked(), "锁定按钮未进入选中态"
         assert VisualEngine.locked_data_range() is not None, "锁定后未记录范围"
-        assert window.page_render.btn_lock.attachment().text() == "色带已锁定", "按钮文案未切换"
+        assert window.page_render.btn_lock.attachment().text() == "", "锁定按钮不应显示文字"
         log(f"[verify] locked range: {VisualEngine.locked_data_range()}")
         QTimer.singleShot(6000, step_3d_locked_a)
 
     def step_3d_locked_a():
+        assert window.page_render.btn_lock.lockProgress == 1.0, "锁形未切换到闭锁状态"
         state["bw_locked"] = volume_bw(window)
         log(f"[verify] 3d black/white right after lock: {state['bw_locked']}")
         goto_frame(0, step_3d_locked_b)
@@ -130,10 +145,11 @@ def main():
         window.page_render.btn_lock.click()
         assert not window.page_render.btn_lock.isChecked()
         assert VisualEngine.locked_data_range() is None
-        assert window.page_render.btn_lock.attachment().text() == "锁定色带"
+        assert window.page_render.btn_lock.attachment().text() == "", "锁定按钮不应显示文字"
         QTimer.singleShot(6000, step_3d_unlocked)
 
     def step_3d_unlocked():
+        assert window.page_render.btn_lock.lockProgress == 0.0, "锁形未切换到开锁状态"
         bw = volume_bw(window)
         log(f"[verify] 3d frame0 black/white (unlocked again): {bw}")
         assert bw == state["bw0"], "解锁后色带范围未恢复按当前帧自动归一化"

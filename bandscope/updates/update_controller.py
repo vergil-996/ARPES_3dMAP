@@ -121,11 +121,10 @@ class InstallerDownloadThread(QThread):
 
 
 class UpdateController(QObject):
-    def __init__(self, window, settings, version_button=None, parent=None):
+    def __init__(self, window, settings, parent=None):
         super().__init__(parent or window)
         self.window = window
         self.settings = settings
-        self.version_button = version_button
         self.flavor = current_build_flavor()
         self._github_client = GitHubReleaseClient()
         # 插件目录固定从 GitHub Release 获取；MatElab 发布记录不含插件目录，
@@ -208,8 +207,10 @@ class UpdateController(QObject):
             username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
         )
         self._settings_dialog = dialog
+        result = QDialog.Rejected
         try:
-            if dialog.exec_() != QDialog.Accepted:
+            result = dialog.exec_()
+            if result not in (QDialog.Accepted, UpdateSettingsDialog.CheckRequested):
                 return False
             self.settings.setValue(SOURCE_SETTING, dialog.selected_source())
             credentials = dialog.credentials()
@@ -219,10 +220,12 @@ class UpdateController(QObject):
             else:
                 self._store_matelab_credentials(credentials)
             self._reset_source_state()
-            return True
         finally:
             self._settings_dialog = None
             dialog.deleteLater()
+        if result == UpdateSettingsDialog.CheckRequested:
+            self.check_for_updates(manual=True)
+        return True
 
     # -- MatElab 凭证 -----------------------------------------------------------
 
@@ -315,7 +318,6 @@ class UpdateController(QObject):
             self.client = self._github_client
 
         self._manual_check = bool(manual)
-        self._set_checking_state(True)
         thread = ReleaseCheckThread(
             self.client, APP_VERSION, self.flavor, self, self.catalog_client
         )
@@ -330,7 +332,6 @@ class UpdateController(QObject):
         self._check_thread = None
         if thread is not None:
             thread.deleteLater()
-        self._set_checking_state(False)
 
     def _record_check_time(self):
         timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -340,11 +341,11 @@ class UpdateController(QObject):
         if self.current_source() == SOURCE_MATELAB:
             return (
                 "请确认 MatElab 账号可以正常登录，且当前网络能够访问所内服务器 "
-                "eln.iphy.ac.cn；如需修改账号或切换更新源，请使用右键菜单中的「更新设置…」。"
+                "eln.iphy.ac.cn；如需修改账号或切换更新源，请使用顶部栏齿轮菜单中的「更新设置…」。"
             )
         return (
             "如果当前网络无法直接访问 GitHub，请先开启 VPN 或网络代理，"
-            f"再点击工具栏右侧的 v{APP_VERSION} 按钮手动检查更新。"
+            "再通过顶部栏齿轮菜单打开「更新设置…」，点击「检查更新」。"
         )
 
     def _on_check_failed(self, message):
@@ -434,12 +435,13 @@ class UpdateController(QObject):
         notes = (release.notes or "本次 Release 未填写更新说明。").strip()
         if len(notes) > 1600:
             notes = notes[:1600].rstrip() + "\n……"
-        box.setInformativeText(notes)
+        details = ["更新说明：\n" + notes]
 
         report = self._plugin_impact
         impact = self._impact_text(report)
         if impact:
-            box.setDetailedText("插件影响：\n" + impact)
+            details.append("插件影响：\n" + impact)
+        box.setDetailedText("\n\n".join(details))
 
         if is_frozen_build():
             primary = box.addButton("下载并安装", QMessageBox.AcceptRole)
@@ -588,13 +590,6 @@ class UpdateController(QObject):
         if dialog is not None:
             dialog.close()
             dialog.deleteLater()
-
-    def _set_checking_state(self, checking):
-        button = self.version_button
-        if button is None:
-            return
-        button.setEnabled(not checking)
-        button.setText("检查中…" if checking else f"v{APP_VERSION}")
 
     def _show_message(self, title, text, icon=QMessageBox.Information, extra_button=None):
         """Show a modal box and report whether `extra_button` was the one clicked."""

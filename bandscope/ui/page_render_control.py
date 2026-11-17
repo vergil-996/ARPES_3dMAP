@@ -13,6 +13,7 @@ from bandscope.ui.control_layout_utils import (
     set_widget_visibility_instant,
 )
 from bandscope.ui.control_page_base import ControlPageBase
+from bandscope.ui.ui_controls import AnimatedLockButton
 from bandscope.processing.denoise_config import DENOISE_METHODS as CONFIG_DENOISE_METHODS
 from bandscope.core.display_style import (
     INDEPENDENT_MODE,
@@ -94,15 +95,9 @@ class RenderControlPage(ControlPageBase):
         # 各对象仍按自己的强度范围归一化。下拉框内可直接编辑文字重命名区域。
         self.region_combo = RegionComboBox(self)
         self.region_combo.sync([], None)
-        self.btn_lock = self._create_btn("锁定色带", "secondary", height=30)
-        self.btn_lock.setCheckable(True)
+        self.btn_lock = AnimatedLockButton(self)
         self.btn_lock.setAccessibleName("锁定色带")
-        self.btn_lock.setText("")
-        self.btn_lock.setProperty("compactIconButton", True)
-        self.btn_lock.setFixedWidth(28)
-        self._adaptive_buttons.remove(self.btn_lock)
         theme.style_push_button(self.btn_lock, "secondary")
-        theme.set_button_icon(self.btn_lock, "ic_fluent_lock_closed_regular", 15)
         self.btn_lock.setToolTip(
             "锁定全部色带：开启后，背景与所有增强区域各自按\n"
             "当前强度范围锁定归一化，拖动时间轴或生成新结果页时\n"

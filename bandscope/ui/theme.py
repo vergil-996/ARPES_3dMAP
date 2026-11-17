@@ -11,7 +11,7 @@ import weakref
 from pathlib import Path
 
 from PyQt5.QtCore import QMargins, QObject
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QPalette
 
 
 PALETTES = {
@@ -78,6 +78,76 @@ PALETTES = {
         "SCROLLBAR": "#C2C6CC",
     },
 }
+
+_QSS_PALETTE_ROLES = {
+    "BG_0": "window",
+    "BG_1": "base",
+    "BG_2": "alternate-base",
+    "BG_3": "button",
+    "BG_4": "light",
+    "BORDER_HEX": "mid",
+    "TEXT_1": "window-text",
+    "TEXT_2": "link",
+    "TEXT_3": "placeholder-text",
+    "ACCENT": "highlight",
+    "ACCENT_HOVER": "bright-text",
+    "ACCENT_ON": "highlighted-text",
+    "ACCENT_SOFT": "link-visited",
+    "SCROLLBAR": "dark",
+}
+
+
+def _qss_color(key):
+    role = _QSS_PALETTE_ROLES.get(key)
+    return f"palette({role})" if role else PALETTES[_CURRENT_THEME][key]
+
+
+def _palette_qcolor(value):
+    if not value.startswith("rgba("):
+        return QColor(value)
+    red, green, blue, alpha = (
+        component.strip() for component in value[5:-1].split(",")
+    )
+    color = QColor(int(red), int(green), int(blue))
+    color.setAlphaF(float(alpha))
+    return color
+
+
+_QPALETTE_ROLE_TOKENS = (
+    (QPalette.Window, "BG_0"),
+    (QPalette.Base, "BG_1"),
+    (QPalette.AlternateBase, "BG_2"),
+    (QPalette.WindowText, "TEXT_1"),
+    (QPalette.Text, "TEXT_1"),
+    (QPalette.Button, "BG_3"),
+    (QPalette.ButtonText, "TEXT_1"),
+    (QPalette.BrightText, "ACCENT_HOVER"),
+    (QPalette.Light, "BG_4"),
+    (QPalette.Midlight, "BG_3"),
+    (QPalette.Mid, "BORDER_HEX"),
+    (QPalette.Dark, "SCROLLBAR"),
+    (QPalette.Shadow, "BG_0"),
+    (QPalette.Highlight, "ACCENT"),
+    (QPalette.HighlightedText, "ACCENT_ON"),
+    (QPalette.Link, "TEXT_2"),
+    (QPalette.LinkVisited, "ACCENT_SOFT"),
+    (QPalette.PlaceholderText, "TEXT_3"),
+    (QPalette.ToolTipBase, "BG_3"),
+    (QPalette.ToolTipText, "TEXT_1"),
+)
+_QPALETTE_DISABLED_ROLES = (
+    QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.HighlightedText,
+)
+
+
+def _apply_palette_colors(palette):
+    for role, key in _QPALETTE_ROLE_TOKENS:
+        palette.setColor(role, _palette_qcolor(PALETTES[_CURRENT_THEME][key]))
+    combo_text = "#000000" if _CURRENT_THEME == "light" else PALETTES[_CURRENT_THEME]["TEXT_1"]
+    palette.setColor(QPalette.Text, QColor(combo_text))
+    for role in _QPALETTE_DISABLED_ROLES:
+        palette.setColor(QPalette.Disabled, role, QColor(TEXT_3))
+
 
 SP_1 = 4
 SP_2 = 8
@@ -225,22 +295,29 @@ def apply_app_font():
 
 def action_button_qss(kind="primary"):
     palette = {
-        "primary": (ACCENT, ACCENT_ON, ACCENT_HOVER, ACCENT),
-        "secondary": (BG_3, TEXT_1, BG_4, BORDER_HEX),
-        "quiet": ("transparent", TEXT_2, BG_4, "transparent"),
-        "danger": (DANGER_SOFT, DANGER, BG_4, DANGER_BORDER),
+        "primary": ("ACCENT", "ACCENT_ON", "ACCENT_HOVER", "ACCENT"),
+        "secondary": ("BG_3", "TEXT_1", "BG_4", "BORDER_HEX"),
+        "quiet": ("transparent", "TEXT_2", "BG_4", "transparent"),
+        "danger": ("DANGER_SOFT", "DANGER", "BG_4", "DANGER_BORDER"),
     }
-    bg, fg, hover, border = palette[kind]
+    bg, fg, hover, border = (
+        value if value == "transparent" else _qss_color(value)
+        for value in palette[kind]
+    )
+    hover_text = _qss_color("TEXT_1" if kind != "primary" else "ACCENT_ON")
+    hover_border = _qss_color("BORDER_HEX" if kind != "primary" else "ACCENT_HOVER")
     return (
         f"QPushButton {{ background: {bg}; color: {fg}; border: 1px solid {border};"
         f" border-radius: {R_S}px; padding: 0 11px; font-size: 12px; font-weight: 500;"
         " min-height: 26px; min-width: 28px; }"
-        f"QPushButton:hover {{ background: {hover}; color: {TEXT_1 if kind != 'primary' else ACCENT_ON};"
-        f" border-color: {BORDER_HEX if kind != 'primary' else ACCENT_HOVER}; }}"
-        f"QPushButton:pressed {{ background: {BG_4}; color: {TEXT_1}; }}"
-        f"QPushButton:checked {{ background: {ACCENT}; color: {ACCENT_ON}; border-color: {ACCENT}; }}"
-        f"QPushButton:focus {{ border: 1px solid {TEXT_2}; }}"
-        f"QPushButton:disabled {{ background: {BG_3}; color: {TEXT_3}; border: 1px solid {BORDER}; }}"
+        f"QPushButton:hover {{ background: {hover}; color: {hover_text};"
+        f" border-color: {hover_border}; }}"
+        f"QPushButton:pressed {{ background: {_qss_color('BG_4')}; color: {_qss_color('TEXT_1')}; }}"
+        f"QPushButton:checked {{ background: {_qss_color('ACCENT')}; color: {_qss_color('ACCENT_ON')};"
+        f" border-color: {_qss_color('ACCENT')}; }}"
+        f"QPushButton:focus {{ border: 1px solid {_qss_color('TEXT_2')}; }}"
+        f"QPushButton:disabled {{ background: {_qss_color('BG_3')}; color: {_qss_color('TEXT_3')};"
+        f" border: 1px solid {BORDER}; }}"
     )
 
 
@@ -252,9 +329,12 @@ def style_push_button(btn, kind="primary"):
     if isinstance(btn, QPushButton):
         fixed_width = btn.minimumWidth() if btn.minimumWidth() == btn.maximumWidth() and btn.minimumWidth() > 0 else None
         fixed_height = btn.minimumHeight() if btn.minimumHeight() == btn.maximumHeight() and btn.minimumHeight() > 0 else None
-        btn.setStyleSheet(action_button_qss(kind))
+        style = action_button_qss(kind)
         if btn.property("compactIconButton"):
-            btn.setStyleSheet(btn.styleSheet() + "QPushButton { min-height: 24px; min-width: 26px; padding: 0; }")
+            style += "QPushButton { min-height: 24px; min-width: 26px; padding: 0; }"
+        if btn.styleSheet() != style:
+            btn.setStyleSheet(style)
+        if btn.property("compactIconButton"):
             btn.setFixedSize(28, 26)
         if fixed_width is not None:
             btn.setFixedWidth(fixed_width)
@@ -317,12 +397,37 @@ def slider_value_qss():
     return f"color: {TEXT_1}; font-size: 11px; font-family: {FONT_MONO};"
 
 
-def raise_well_on_card(widget):
+def _combo_text_color():
+    return "#000000" if _CURRENT_THEME == "light" else TEXT_1
+
+
+def _style_combo_menu_text(menu):
+    text_color = QColor(_combo_text_color())
+    disabled_color = QColor(TEXT_3)
+    for item in getattr(menu, "_widgets", {}).values():
+        style_data = getattr(item, "style_data", None)
+        if style_data is not None:
+            if hasattr(style_data, "label_text_color_enabled"):
+                style_data.label_text_color_enabled = text_color
+            if hasattr(style_data, "label_text_color_disabled"):
+                style_data.label_text_color_disabled = disabled_color
+        label = getattr(item, "_name_label", None)
+        if label is not None:
+            label.setStyleSheet(
+                "QLabel { margin: 0px 8px 1px 0px;"
+                f"color: {text_color.name()}; }}"
+                "QLabel:disabled { margin: 0px 8px 1px 0px;"
+                f"color: {disabled_color.name()}; }}"
+            )
+
+
+def raise_well_on_card(widget, *, adjust_layout=True):
     from siui.core import SiColor
 
     target = getattr(widget, "_line_edit", widget)
     widget.setProperty("neutralCombo", True)
-    if hasattr(target, "_title_text_margins"):
+    widget.setProperty("neutralComboAdjustLayout", bool(adjust_layout))
+    if adjust_layout and hasattr(target, "_title_text_margins"):
         target._title_text_margins = QMargins(10, 0, 10, 0)
         target._updateTextMargins()
         target._updateContainerGeometry()
@@ -332,14 +437,19 @@ def raise_well_on_card(widget):
         menu.style_data.background_color = QColor(BG_3)
         menu.style_data.border_color = QColor(BORDER_HEX)
         menu._initStyle()
+        _style_combo_menu_text(menu)
+        if not menu.property("neutralComboTextThemeBound"):
+            menu.aboutToShow.connect(lambda: _style_combo_menu_text(menu))
+            menu.setProperty("neutralComboTextThemeBound", True)
     sd = getattr(target, "style_data", None)
     if sd is not None and hasattr(sd, "text_background_color"):
+        text_color = QColor(_combo_text_color())
         sd.title_background_color = QColor(BG_1)
         sd.text_background_color = QColor(BG_1)
         sd.title_color_idle = QColor(TEXT_2)
         sd.title_color_focused = QColor(TEXT_1)
-        sd.text_color = QColor(TEXT_1)
-        sd.text_indicator_color_editing = QColor(TEXT_1)
+        sd.text_color = text_color
+        sd.text_indicator_color_editing = text_color
         sd.text_indicator_color_error = QColor(DANGER)
         target.title_color_ani.setCurrentValue(QColor(TEXT_2))
         target.title_color_ani.setEndValue(QColor(TEXT_2))
@@ -401,12 +511,14 @@ def context_menu_qss():
 
 
 def scrollbar_qss():
+    scrollbar = _qss_color("SCROLLBAR")
+    hover = _qss_color("TEXT_3")
     return (
         "QScrollBar:vertical { background: transparent; width: 6px; margin: 1px; }"
         "QScrollBar:horizontal { background: transparent; height: 6px; margin: 1px; }"
         "QScrollBar::handle {"
-        f"background: {SCROLLBAR}; border-radius: 3px; min-height: 24px; min-width: 24px; }}"
-        f"QScrollBar::handle:hover {{ background: {TEXT_3}; }}"
+        f"background: {scrollbar}; border-radius: 3px; min-height: 24px; min-width: 24px; }}"
+        f"QScrollBar::handle:hover {{ background: {hover}; }}"
         "QScrollBar::add-line, QScrollBar::sub-line {"
         "height: 0px; width: 0px; border: none; background: none; }"
         "QScrollBar::add-page, QScrollBar::sub-page { background: none; }"
@@ -414,6 +526,20 @@ def scrollbar_qss():
 
 
 def application_qss():
+    BG_0 = _qss_color("BG_0")
+    BG_1 = _qss_color("BG_1")
+    BG_2 = _qss_color("BG_2")
+    BG_3 = _qss_color("BG_3")
+    BG_4 = _qss_color("BG_4")
+    BORDER_HEX = _qss_color("BORDER_HEX")
+    TEXT_1 = _qss_color("TEXT_1")
+    TEXT_2 = _qss_color("TEXT_2")
+    TEXT_3 = _qss_color("TEXT_3")
+    ACCENT = _qss_color("ACCENT")
+    ACCENT_HOVER = _qss_color("ACCENT_HOVER")
+    ACCENT_ON = _qss_color("ACCENT_ON")
+    ACCENT_SOFT = _qss_color("ACCENT_SOFT")
+    COMBO_TEXT = "palette(text)"
     return f"""
         QWidget {{ color: {TEXT_1}; font-family: {FONT_FAMILY}; font-size: 13px; }}
         QDialog, QMessageBox, QProgressDialog {{ background-color: {BG_0}; }}
@@ -434,13 +560,15 @@ def application_qss():
             color: {TEXT_1}; background-color: {BG_1};
             border: 1px solid {BORDER_HEX}; border-radius: 5px;
             min-height: 28px; padding: 0 8px; selection-background-color: {BG_4};
+            selection-color: {TEXT_1};
         }}
         QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
         QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{ border-color: {TEXT_2}; }}
+        QComboBox {{ color: {COMBO_TEXT}; selection-color: {COMBO_TEXT}; }}
         QComboBox::drop-down {{ width: 24px; border: none; }}
         QComboBox QAbstractItemView {{
-            color: {TEXT_1}; background-color: {BG_3}; border: 1px solid {BORDER_HEX};
-            selection-background-color: {BG_4}; selection-color: {TEXT_1};
+            color: {COMBO_TEXT}; background-color: {BG_3}; border: 1px solid {BORDER_HEX};
+            selection-background-color: {BG_4}; selection-color: {COMBO_TEXT};
         }}
         QGroupBox {{
             color: {TEXT_1}; background: transparent; border: 1px solid {BORDER_HEX};
@@ -478,7 +606,7 @@ def application_qss():
         QCheckBox::indicator:unchecked {{ background: {BG_1}; border: 1px solid {BORDER_HEX};
             border-radius: 3px; }}
         QCheckBox::indicator:checked {{ background: {ACCENT}; border: 1px solid {ACCENT};
-            border-radius: 3px; image: url({asset_path('assets/ui/check-' + _CURRENT_THEME + '.svg')}); }}
+            border-radius: 3px; image: url({asset_path('assets/ui/check.svg')}); }}
         QSlider::groove:horizontal {{ height: 3px; background: {BORDER_HEX}; border-radius: 1px; }}
         QSlider::sub-page:horizontal {{ background: {TEXT_2}; border-radius: 1px; }}
         QSlider::handle:horizontal {{ width: 9px; margin: -6px 0; background: {ACCENT};
@@ -561,78 +689,86 @@ def apply_siui_palette():
 
 
 def apply_application_style():
-    from PyQt5.QtGui import QPalette
     from PyQt5.QtWidgets import QApplication
 
     app = QApplication.instance()
     if app is None:
         return
     palette = app.palette()
-    roles = {
-        QPalette.Window: BG_0,
-        QPalette.Base: BG_1,
-        QPalette.AlternateBase: BG_2,
-        QPalette.WindowText: TEXT_1,
-        QPalette.Text: TEXT_1,
-        QPalette.Button: BG_3,
-        QPalette.ButtonText: TEXT_1,
-        QPalette.BrightText: TEXT_1,
-        QPalette.Light: BG_4,
-        QPalette.Midlight: BG_3,
-        QPalette.Mid: BORDER_HEX,
-        QPalette.Dark: BORDER_HEX,
-        QPalette.Shadow: BG_0,
-        QPalette.Highlight: BG_4,
-        QPalette.HighlightedText: TEXT_1,
-        QPalette.Link: TEXT_2,
-        QPalette.PlaceholderText: TEXT_3,
-        QPalette.ToolTipBase: BG_3,
-        QPalette.ToolTipText: TEXT_1,
-    }
-    for role, color in roles.items():
-        palette.setColor(role, QColor(color))
-    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.HighlightedText):
-        palette.setColor(QPalette.Disabled, role, QColor(TEXT_3))
+    _apply_palette_colors(palette)
     app.setPalette(palette)
-    app.setStyleSheet(application_qss())
+    style = application_qss()
+    if app.styleSheet() != style:
+        app.setStyleSheet(style)
+
+
+def _build_style_color_maps():
+    replacements = {}
+    value_keys = {}
+    for palette in PALETTES.values():
+        for key, value in palette.items():
+            if not isinstance(value, str) or not (value.startswith("#") or value.startswith("rgba")):
+                continue
+            normalized = value.lower().replace(" ", "")
+            value_keys.setdefault(normalized, set()).add(key)
+            if normalized not in replacements or key.startswith("BG_"):
+                replacements[normalized] = key
+    roles = {}
+    for normalized, keys in value_keys.items():
+        selected = replacements[normalized]
+        equivalent = all(
+            all(palette[key] == palette[selected] for palette in PALETTES.values())
+            for key in keys
+        )
+        if equivalent and selected in _QSS_PALETTE_ROLES:
+            roles[normalized] = _QSS_PALETTE_ROLES[selected]
+    return replacements, roles
+
+
+_STYLE_REPLACEMENTS, _STYLE_ROLES = _build_style_color_maps()
+_STYLE_PATTERN = re.compile(r"#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|rgba?\([^)]*\)")
 
 
 def _retranslate_style(style):
     if not style:
         return style
-    replacements = {}
-    for palette in PALETTES.values():
-        for key, value in palette.items():
-            if isinstance(value, str) and (value.startswith("#") or value.startswith("rgba")):
-                normalized = value.lower().replace(" ", "")
-                if normalized not in replacements or key.startswith("BG_"):
-                    replacements[normalized] = key
-    pattern = re.compile(r"#[0-9a-fA-F]{8}\b|#[0-9a-fA-F]{6}\b|rgba?\([^)]*\)")
 
     def replace(match):
-        key = replacements.get(match.group(0).lower().replace(" ", ""))
+        normalized = match.group(0).lower().replace(" ", "")
+        role = _STYLE_ROLES.get(normalized)
+        if role:
+            return f"palette({role})"
+        key = _STYLE_REPLACEMENTS.get(normalized)
         return str(PALETTES[_CURRENT_THEME][key]) if key else match.group(0)
 
-    return pattern.sub(replace, style)
+    return _STYLE_PATTERN.sub(replace, style)
 
 
 def apply_widget_theme(root):
-    from PyQt5.QtWidgets import QPushButton
+    from PyQt5.QtWidgets import QPushButton, QWidget
 
     widgets = [root, *root.findChildren(QObject)]
     for widget in widgets:
         if not hasattr(widget, "setStyleSheet"):
             continue
+        original_palette = widget.palette()
+        palette = QPalette(original_palette)
+        _apply_palette_colors(palette)
+        if palette != original_palette:
+            widget.setPalette(palette)
         style = widget.styleSheet()
         translated = _retranslate_style(style)
         if translated != style:
             widget.setStyleSheet(translated)
         if isinstance(widget, QPushButton) and widget.property("buttonKind"):
             style_push_button(widget, widget.property("buttonKind"))
-        if widget.property("neutralSlider"):
+        if widget.property("neutralSlider") and hasattr(widget, "style_data"):
             style_accent_slider(widget)
         if widget.property("neutralCombo"):
-            raise_well_on_card(widget)
+            raise_well_on_card(
+                widget,
+                adjust_layout=widget.property("neutralComboAdjustLayout") is not False,
+            )
         apply_theme = getattr(widget, "apply_theme", None)
         if callable(apply_theme):
             apply_theme()
@@ -643,6 +779,10 @@ def apply_widget_theme(root):
                 int(widget.property("fluentIconSize") or 16),
                 ACCENT_ON if widget.property("fluentIconOnAccent") else TEXT_2,
             ))
+        qt_style = QWidget.style(widget)
+        qt_style.unpolish(widget)
+        qt_style.polish(widget)
+        widget.update()
 
 
 def set_theme(name, *, notify=True):

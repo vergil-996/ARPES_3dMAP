@@ -98,6 +98,18 @@ class UpdateSettingsDialogTests(unittest.TestCase):
 
         self.assertEqual(dialog.credentials(), credentials)
 
+    def test_check_updates_button_closes_with_a_check_request(self):
+        credentials = MatelabCredentials("user", "password")
+        dialog = self._dialog(source=SOURCE_MATELAB, credentials=credentials)
+        dialog.show()
+
+        dialog.check_updates_button.click()
+
+        self.assertEqual(dialog.result(), UpdateSettingsDialog.CheckRequested)
+        self.assertFalse(dialog.isVisible())
+        self.assertEqual(dialog.selected_source(), SOURCE_MATELAB)
+        self.assertEqual(dialog.credentials(), credentials)
+
     def test_outer_cancel_does_not_change_original_credentials(self):
         credentials = MatelabCredentials("user", "password")
         dialog = self._dialog(source=SOURCE_MATELAB, credentials=credentials)

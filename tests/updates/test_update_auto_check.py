@@ -1,11 +1,11 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtWidgets import QApplication, QMessageBox, QPushButton, QTextEdit, QWidget
 
 from bandscope.app_metadata import APP_VERSION
 from bandscope.updates.update_controller import (
@@ -36,12 +36,12 @@ def _settings(values=None):
     return settings
 
 
-def _new_release(version="9.9.9"):
+def _new_release(version="9.9.9", notes=""):
     release = ReleaseInfo(
         version=SemanticVersion.parse(version),
         tag_name=f"v{version}",
         title=f"BandScope {version}",
-        notes="",
+        notes=notes,
         page_url="",
         published_at="",
         assets=(),
@@ -169,6 +169,39 @@ class AutomaticUpdateCheckTests(unittest.TestCase):
         controller._on_check_completed(_new_release())
 
         controller._prompt_for_update.assert_called_once()
+
+    def test_update_details_are_collapsed_by_default_and_expand_on_demand(self):
+        controller, _ = self._controller()
+        controller._impact_text = Mock(return_value="插件影响内容")
+
+        inspected = []
+
+        def inspect_prompt(box):
+            inspected.append(box)
+            details = box.findChild(QTextEdit)
+            self.assertIsNotNone(details)
+            self.assertEqual(box.informativeText(), "")
+            self.assertIn("更新说明：\n第一行\n第二行", details.toPlainText())
+            self.assertIn("插件影响：\n插件影响内容", details.toPlainText())
+            self.assertFalse(details.isVisibleTo(box))
+
+            toggle = next(
+                button
+                for button in box.findChildren(QPushButton)
+                if button.text() == "Show Details..."
+            )
+            toggle.click()
+            self.assertTrue(details.isVisibleTo(box))
+            toggle.click()
+            self.assertFalse(details.isVisibleTo(box))
+
+        with patch.object(QMessageBox, "exec_", inspect_prompt):
+            UpdateController._prompt_for_update(
+                controller,
+                _new_release(notes="第一行\n第二行"),
+            )
+
+        self.assertEqual(len(inspected), 1)
 
 
 if __name__ == "__main__":

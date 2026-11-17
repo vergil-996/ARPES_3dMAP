@@ -12,8 +12,8 @@ ContinuousFrameSlider 拖动后也会自行覆盖精确进度，因此重写这�
 不会破坏用户交互动画。
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, pyqtProperty
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QDoubleSpinBox, QPushButton
 from siui.components.button import SiSwitchRefactor
 from siui.components.slider_ import SiSlider
@@ -30,6 +30,75 @@ class ActionButton(QPushButton):
 
     def attachment(self):
         return self
+
+
+class AnimatedLockButton(ActionButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lock_progress = 0.0
+        self._lock_animation = QPropertyAnimation(self, b"lockProgress", self)
+        self._lock_animation.setDuration(180)
+        self._lock_animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self.setCheckable(True)
+        self.setProperty("compactIconButton", True)
+        self.toggled.connect(self._animate_lock)
+
+    def _get_lock_progress(self):
+        return self._lock_progress
+
+    def _set_lock_progress(self, value):
+        self._lock_progress = float(value)
+        self.update()
+
+    lockProgress = pyqtProperty(float, fget=_get_lock_progress, fset=_set_lock_progress)
+
+    def setChecked(self, checked):
+        signals_blocked = self.signalsBlocked()
+        super().setChecked(checked)
+        if signals_blocked:
+            self._lock_animation.stop()
+            self._set_lock_progress(float(self.isChecked()))
+
+    def _animate_lock(self, checked):
+        self._lock_animation.stop()
+        self._lock_animation.setStartValue(self._lock_progress)
+        self._lock_animation.setEndValue(float(checked))
+        self._lock_animation.start()
+
+    def apply_theme(self):
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            color = QColor(theme.TEXT_3 if not self.isEnabled() else (
+                theme.ACCENT_ON if self.isChecked() else theme.TEXT_2
+            ))
+            scale = min(self.width() / 22.0, self.height() / 20.0)
+            painter.translate(QRectF(self.rect()).center())
+            painter.scale(scale, scale)
+
+            shackle = QPainterPath()
+            shackle.moveTo(-3.35, -0.5)
+            shackle.lineTo(-3.35, -4.5)
+            shackle.cubicTo(-3.35, -7.6, 3.35, -7.6, 3.35, -4.5)
+            shackle.lineTo(3.35, -0.5 - 3.8 * (1.0 - self._lock_progress))
+            painter.save()
+            painter.translate(-3.35, -0.5)
+            painter.rotate(-22.0 * (1.0 - self._lock_progress))
+            painter.translate(3.35, 0.5)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(color, 1.55, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(shackle)
+            painter.restore()
+
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(color)
+            painter.drawRoundedRect(QRectF(-5.5, -0.5, 11.0, 8.5), 1.8, 1.8)
+        finally:
+            painter.end()
 
 
 class RotationSpinBox(QDoubleSpinBox):

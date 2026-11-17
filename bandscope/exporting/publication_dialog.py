@@ -334,7 +334,9 @@ class PublicationExportDialog(QDialog):
             f"QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{"
             f" color: {theme.TEXT_1}; background-color: {theme.BG_3};"
             f" border: 1px solid {theme.BORDER_HEX}; border-radius: 5px; padding: 2px 6px; }}"
-            f"QComboBox QAbstractItemView {{ color: {theme.TEXT_1}; background-color: {theme.BG_2}; }}"
+            "QComboBox { color: palette(text); }"
+            f"QComboBox QAbstractItemView {{ color: palette(text); background-color: {theme.BG_2};"
+            " selection-color: palette(text); }"
         )
 
         self.snapshot = None

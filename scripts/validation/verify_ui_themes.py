@@ -11,8 +11,8 @@ from bandscope.app.qt_bootstrap import configure_qt_high_dpi, configure_qt_plugi
 configure_qt_high_dpi()
 configure_qt_plugin_path()
 
-from PyQt5.QtCore import QPoint, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
@@ -54,23 +54,12 @@ def main():
     results = []
 
     def capture(widget, path):
-        try:
-            from PIL import ImageGrab
-            widget.raise_()
-            widget.activateWindow()
-            QApplication.processEvents()
-            QTest.qWait(250)
-            top_left = widget.mapToGlobal(QPoint(0, 0))
-            ratio = widget.devicePixelRatioF()
-            bounds = (
-                round(top_left.x() * ratio),
-                round(top_left.y() * ratio),
-                round((top_left.x() + widget.width()) * ratio),
-                round((top_left.y() + widget.height()) * ratio),
-            )
-            ImageGrab.grab(bbox=bounds, all_screens=True).save(path)
-        except Exception:
-            widget.grab().save(path)
+        widget.raise_()
+        widget.activateWindow()
+        QApplication.processEvents()
+        QTest.qWait(250)
+        if not widget.grab().save(str(path)):
+            raise AssertionError(f"控件截图失败：{path}")
         if not Path(path).is_file() or Path(path).stat().st_size == 0:
             raise AssertionError(f"截图未生成：{path}")
         log(f"[capture] {path}")
@@ -115,7 +104,9 @@ def main():
         assert window.page_render.s_gamma.value() == 50
         assert window.btn_theme_dark.isChecked() == (name == "dark")
         assert window.btn_theme_light.isChecked() == (name == "light")
-        assert theme.ACCENT in window.btn_main_export.styleSheet()
+        assert "palette(highlight)" in window.btn_main_export.styleSheet()
+        actual_accent = QApplication.instance().palette().color(QPalette.Highlight).name().upper()
+        assert actual_accent == theme.ACCENT, (actual_accent, theme.ACCENT)
         capture(window, args.output_dir / f"main-{name}.png")
         window.plotter.screenshot(str(args.output_dir / f"volume-{name}.png"))
         if name == "dark":

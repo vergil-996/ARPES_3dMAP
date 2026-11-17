@@ -63,6 +63,18 @@ class DisplayControlStateTests(unittest.TestCase):
         self.assertEqual(other.display_parameters["threshold"][0].value(), 0)
         self.assertEqual(other.get_render_quality()["mode"], "legacy")
 
+    def test_color_lock_style_refresh_keeps_button_icon_only(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.page_render = self.page
+
+        for checked, kind in ((True, "primary"), (False, "secondary")):
+            with self.subTest(checked=checked):
+                self.page.btn_lock.setChecked(checked)
+                analyzer._update_color_lock_button_style()
+
+                self.assertEqual(self.page.btn_lock.attachment().text(), "")
+                self.assertEqual(self.page.btn_lock.property("buttonKind"), kind)
+
     def test_presets_are_removed_and_custom_parameters_have_tooltips(self):
         self.assertFalse(hasattr(self.page, "combo_opacity_preset"))
         self.assertFalse(hasattr(self.page, "btn_apply_opacity_preset"))

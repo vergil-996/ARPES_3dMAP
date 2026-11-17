@@ -19,6 +19,7 @@ from bandscope.updates.update_controller import (
     UpdateController,
 )
 from bandscope.updates.update_service import GitHubReleaseClient
+from bandscope.updates.update_settings_dialog import UpdateSettingsDialog
 
 
 def _settings(values=None):
@@ -190,6 +191,25 @@ class UpdateSourceSwitchTests(unittest.TestCase):
             controller.check_for_updates(manual=True)
             controller._prompt_matelab_login.assert_called_once()
             thread_cls.assert_not_called()
+
+    def test_check_updates_from_settings_saves_then_starts_after_dialog_closes(self):
+        controller, _settings = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
+        controller._store_matelab_credentials(MatelabCredentials("user", "password"))
+        controller.check_for_updates = Mock(
+            side_effect=lambda manual: self.assertIsNone(controller._settings_dialog)
+        )
+
+        def request_check(dialog):
+            dialog.clear_account_button.click()
+            dialog.check_updates_button.click()
+            return dialog.result()
+
+        with patch.object(UpdateSettingsDialog, "exec_", request_check):
+            accepted = controller.open_settings()
+
+        self.assertTrue(accepted)
+        self.assertIsNone(controller._stored_matelab_credentials())
+        controller.check_for_updates.assert_called_once_with(manual=True)
 
     def test_busy_update_blocks_settings_and_source_changes(self):
         for thread_attribute in ("_check_thread", "_download_thread"):
