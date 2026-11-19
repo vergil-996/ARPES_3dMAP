@@ -126,9 +126,9 @@ class AnalyzerCore(QObject):
             # 3. 重排与内存优化
             if self.has_time_axis:
                 raw_4d = canonicalize_array(raw, roles, role_order)
-                self.raw_data = np.ascontiguousarray(raw_4d, dtype=np.float32)
+                self.raw_data = np.asarray(raw_4d, dtype=np.float32)
             else:
-                raw_3d = np.ascontiguousarray(
+                raw_3d = np.asarray(
                     canonicalize_array(raw, roles, role_order),
                     dtype=np.float32,
                 )

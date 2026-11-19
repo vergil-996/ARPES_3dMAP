@@ -55,6 +55,33 @@ class VolumeQualityTests(unittest.TestCase):
         )
         self.assertEqual(mapper.GetInterpolationMode(), vtk.VTK_NEAREST_INTERPOLATION)
 
+    def test_masked_gpu_volume_configures_interpolation_on_volume_property(self):
+        self.data[2:6, 3:7, :] = np.nan
+        quality = new_render_quality()
+        self.session.render(
+            self.data, (0, 50, 100), "linear", show_axes=False,
+            quality_config=quality,
+        )
+        mapper = self.session.volume.mapper
+        prop = self.session.volume.GetProperty()
+        self.assertIsInstance(mapper, vtk.vtkGPUVolumeRayCastMapper)
+        self.assertIsNotNone(mapper.GetMaskInput())
+        self.assertEqual(prop.GetInterpolationType(), vtk.VTK_LINEAR_INTERPOLATION)
+        self.assertEqual(mapper.GetAutoAdjustSampleDistances(), 0)
+        self.assertAlmostEqual(
+            mapper.GetSampleDistance(),
+            0.5 * volume_display_unit_distance(self.data.shape),
+            places=5,
+        )
+
+        quality["interpolation"] = "nearest"
+        self.session.render(
+            self.data, (0, 50, 100), "linear", show_axes=False,
+            quality_config=quality,
+        )
+        self.assertEqual(prop.GetInterpolationType(), vtk.VTK_NEAREST_INTERPOLATION)
+        self.assertTrue(np.isnan(self.session.level_data[3, 4, 0]))
+
     def test_independent_channels_survive_color_opacity_and_plugin_changes(self):
         style = new_display_style()
         style["normalization"].update(mode="manual", manual_range=(0.0, 1.0))

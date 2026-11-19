@@ -230,12 +230,18 @@ def configure_volume_quality(volume, plotter, quality="exact", quality_config=No
     mapper = volume.mapper
     interactive = str(getattr(quality, "value", quality)).lower() == "preview"
     if config["mode"] == "explicit":
-        if config["interpolation"] == "linear":
-            mapper.SetInterpolationModeToLinear()
+        interpolation = (
+            vtk.VTK_LINEAR_INTERPOLATION
+            if config["interpolation"] == "linear"
+            else vtk.VTK_NEAREST_INTERPOLATION
+        )
+        if hasattr(mapper, "SetInterpolationMode"):
+            mapper.SetInterpolationMode(interpolation)
         else:
-            mapper.SetInterpolationModeToNearestNeighbor()
+            volume.GetProperty().SetInterpolationType(interpolation)
         mapper.SetAutoAdjustSampleDistances(False)
-        mapper.SetInteractiveAdjustSampleDistances(False)
+        if hasattr(mapper, "SetInteractiveAdjustSampleDistances"):
+            mapper.SetInteractiveAdjustSampleDistances(False)
         if publication:
             factor = 0.25
         elif interactive:

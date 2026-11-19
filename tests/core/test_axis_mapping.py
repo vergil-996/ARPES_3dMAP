@@ -115,6 +115,23 @@ class AxisMappingTests(unittest.TestCase):
         self.assertEqual(shape, (3, 4, 5, 1))
         np.testing.assert_array_equal(analyzer.coords["X"], lowercase_x)
 
+    def test_loader_preserves_fortran_layout_without_a_second_full_array(self):
+        source = np.asfortranarray(
+            np.arange(2 * 3 * 4 * 5, dtype=np.float32).reshape(2, 3, 4, 5)
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "fortran-order.npz")
+            np.savez(path, sample=source)
+
+            analyzer = AnalyzerCore()
+            success, shape = analyzer.load_npz(path)
+
+        self.assertTrue(success)
+        self.assertEqual(shape, source.shape)
+        self.assertTrue(analyzer.raw_data.flags.f_contiguous)
+        self.assertFalse(analyzer.raw_data.flags.c_contiguous)
+        np.testing.assert_array_equal(analyzer.raw_data, source)
+
 
 if __name__ == "__main__":
     unittest.main()

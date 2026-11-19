@@ -1,12 +1,27 @@
 # BandScope
 
-BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、多数据源工作区、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出、多页面 Blender 工程导出／回读与原位显示更新，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.21.1**。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、多数据源工作区、全局 ROI 数据域、3D 体渲染、2D 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出、多页面 Blender 工程导出／回读与原位显示更新，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.21.2**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
 ---
 
 ## 界面概览
+
+### v1.21.2 更新
+
+本版修正大数据加载与 GPU 体渲染：超大 MATLAB v5 数值矩阵改走只读内存映射，加载与转换不再为转连续内存额外复制整块数组；带 NaN 掩膜的体渲染在显式质量设置下改为在体属性上设置插值，不再调用 GPU 光线投射映射器没有的接口。
+
+- **超大 MAT v5 导入**：MATLAB v5 用 32 位长度字段记录数据字节数，单个数值矩阵超过 4 GiB 时长度回绕，`scipy.io.loadmat` 读取失败。现在识别这种文件后按列主序（`order="F"`）只读内存映射打开，仅支持单个、未压缩、非复数的数值矩阵且数据位于文件末尾；其他 MAT 文件仍走原读取路径，行为不变，转换失败时仍会清理未完成的输出文件。
+- **加载与转换的内存占用**：NPZ 加载去掉强制 `ascontiguousarray`，保留原数组布局，不再生成整块连续副本；MAT 转换中的 float32 样本不再复制。大数组的峰值内存相应降低，显示与导出结果不变。
+- **GPU 体渲染插值**：含 NaN 掩膜的体数据必须使用 `vtkGPUVolumeRayCastMapper`，该映射器没有 `SetInterpolationMode`；显式质量设置改为在体属性（`GetProperty().SetInterpolationType`）上设置线性／最近邻插值，并跳过不存在的交互采样接口，掩膜体不再因设置插值失败；自动调整、采样距离与静止／预览切换仍按所选质量生效。
+
+验证（Windows、仓库 `.venv`）：
+
+- 全量 `python -m unittest discover -s tests -t .`：**1733 项通过**（2026-11-19，218.939 秒），日志 `.local/logs/release-1.21.2-full.log`；`compileall` 通过。
+- `check_release_version.py v1.21.2`、`scripts/validation/verify_plugin_release_flow.py` 与 `git diff --check` 通过。
+
+未执行：维护者人工视觉复核（真实超大 MAT 文件的导入耗时与内存占用、GPU 掩膜体在不同显卡上的插值观感）；冻结安装包与安装器的人工安装验收（以 CI 产物为准）。
 
 ### v1.21.1 更新
 
