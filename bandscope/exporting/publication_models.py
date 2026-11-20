@@ -30,6 +30,7 @@ SETTINGS_PREFIX = "publication_export/v1"
 VIEW_TO_FAMILY = {
     "3d": "3d",
     "2d": "2d",
+    "path_slice": "2d",
     "1d": "1d",
     "1d_comparison": "1d",
     "waterfall": "1d",
@@ -589,6 +590,8 @@ class PublicationSnapshot:
           level_info, intensity_label, axis_titles
     - 2d: image（已应用 E 翻转与降序归一化）, extent, title, xlabel,
           ylabel, level_info, intensity_label
+    - path_slice: path_segments{k, rgba}、energy、node_k/node_names、
+      标注开关与可选共享色条；始终冻结完整路径而非当前滚动视口。
     - 2d/3d 可选 enhancement：冻结的独立 color/alpha 通道、背景色阶、区域范围与编号。
       区域范围与编号只作为快照元数据；出版图片不绘制区域裁剪框、编号/图例或区域色带。
     - 1d: curve{x,y,label}, title, xlabel, ylabel

@@ -45,6 +45,7 @@ PAGE_KIND_ICONS = {
     "time_integral": "ic_fluent_history_filled",
     "axis_integral": "ic_fluent_data_trending_filled",
     "axis_integral_crop": "ic_fluent_data_trending_filled",
+    "path_slice": "ic_fluent_bezier_curve_square_filled",
     "slice_dos": "ic_fluent_table_stack_right_filled",
     "energy_dos": "ic_fluent_document_data_filled",
     "curve_comparison_1d": "ic_fluent_data_trending_filled",

@@ -1,5 +1,6 @@
 import time
 import unittest
+from unittest.mock import patch
 
 from PyQt5.QtCore import QCoreApplication
 
@@ -56,6 +57,43 @@ class RefreshCoordinatorTests(unittest.TestCase):
         coordinator.schedule_preview(second)
         self.assertTrue(process_until(lambda: bool(dispatched)))
         self.assertEqual(dispatched, [second.generation])
+        coordinator.shutdown()
+
+    def test_next_preview_delay_is_measured_from_previous_frame_start(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=250, exact_idle_ms=1000)
+        coordinator._last_preview_started_at = 100.0
+        request = coordinator.make_request("home", RefreshCause.TRANSFER_FUNCTION, RenderQuality.PREVIEW)
+        with patch("bandscope.rendering.refresh_pipeline.time.monotonic", return_value=100.2):
+            coordinator.schedule_preview(request)
+        self.assertEqual(coordinator._preview_timer.interval(), 50)
+        coordinator._preview_timer.stop()
+        with patch("bandscope.rendering.refresh_pipeline.time.monotonic", return_value=100.4):
+            coordinator.schedule_preview(request)
+        self.assertEqual(coordinator._preview_timer.interval(), 0)
+        coordinator.shutdown()
+
+    def test_exact_frame_cancels_older_pending_preview(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=250, exact_idle_ms=30)
+        dispatched = []
+        coordinator.dispatch_requested.connect(lambda request: dispatched.append(request.quality))
+        preview, exact = coordinator.make_quality_pair("home", RefreshCause.TRANSFER_FUNCTION)
+        coordinator.schedule_interactive(preview, exact)
+        self.assertTrue(process_until(lambda: bool(dispatched)))
+        self.assertEqual(dispatched, [RenderQuality.EXACT])
+        self.assertFalse(coordinator._preview_timer.isActive())
+        self.assertIsNone(coordinator._pending_preview)
+        coordinator.shutdown()
+
+    def test_immediate_release_cancels_pending_interactive_preview(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=250, exact_idle_ms=1000)
+        dispatched = []
+        coordinator.dispatch_requested.connect(lambda request: dispatched.append(request.quality))
+        preview, exact = coordinator.make_quality_pair("home", RefreshCause.TRANSFER_FUNCTION)
+        coordinator.schedule_interactive(preview, exact)
+        coordinator.schedule_exact(exact, immediate=True)
+        self.assertEqual(dispatched, [RenderQuality.EXACT])
+        self.assertFalse(coordinator._preview_timer.isActive())
+        self.assertIsNone(coordinator._pending_preview)
         coordinator.shutdown()
 
     def test_running_task_keeps_only_latest_pending_result(self):

@@ -90,14 +90,8 @@ class _AxisHarness:
         self.bar = TimelineBar()
         self.controller = AxisIntervalController()
         self.controller.attach(
-            slider_up=self.page_data.s_ax_up,
-            box_up=self.page_data.input_ax_up,
-            slider_low=self.page_data.s_ax_low,
-            box_low=self.page_data.input_ax_low,
-            box_length=self.page_data.input_ax_length,
-            button_lock=self.page_data.btn_ax_lock,
-            slider_position=self.bar.slider_axis,
-            box_position=self.bar.input_axis,
+            interval_widget=self.bar.interval_control,
+            box_length=self.bar.interval_control.input_length,
         )
 
         self.analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
@@ -208,7 +202,7 @@ class PageIntervalBindingTests(unittest.TestCase):
         self.assertTrue(interval.locked)
         self.assertTrue(self.harness.controller.interval is interval)
         self.assertEqual(self.harness.controller.mode, IntervalEditMode.FULL)
-        self.assertTrue(self.harness.page_data.s_ax_up.isEnabled())
+        self.assertTrue(self.harness.bar.interval_control.isEnabled())
 
     def test_two_pages_keep_independent_state(self):
         first = _spec("first", low=1, up=3, mid=2)
@@ -232,12 +226,11 @@ class PageIntervalBindingTests(unittest.TestCase):
         self.harness.bind(first)
         self.assertAlmostEqual(self.harness.analyzer.axis_interval.length, 0.4, places=9)
         self.assertTrue(self.harness.controller.interval.locked)
-        self.assertTrue(self.harness.page_data.btn_ax_lock.isChecked())
+        self.assertTrue(self.harness.analyzer.axis_interval.locked)
 
     def test_e_flip_keeps_interval_values_and_samples(self):
         h = self.harness
         spec = _spec("energy", axis_index=2, low=0, up=2, mid=1)
-        h.page_data.combo_ax.setCurrentIndex(2)
         interval = h.bind(spec)
         interval.set_up(-0.7)
         interval.set_low(-2.8)
@@ -251,8 +244,8 @@ class PageIntervalBindingTests(unittest.TestCase):
         h.analyzer._persist_axis_interval_state(spec)
         # 翻转只镜像画面：区间数值与选中的采样都不变。
         self.assertEqual(h.analyzer._axis_input_logical_values()[:2], indices)
-        self.assertAlmostEqual(h.page_data.input_ax_low.value(), original[0])
-        self.assertAlmostEqual(h.page_data.input_ax_up.value(), original[1])
+        self.assertAlmostEqual(h.analyzer.axis_interval.low, original[0])
+        self.assertAlmostEqual(h.analyzer.axis_interval.up, original[1])
         self.assertTrue(h.analyzer.axis_interval.locked)
         coords = h.analyzer._coords_for_axis(2)
         self.assertLess(np.argmin(abs(coords - h.analyzer.axis_interval.low)),
@@ -268,13 +261,10 @@ class PageIntervalBindingTests(unittest.TestCase):
     def test_e_flip_edit_maps_to_canonical_samples(self):
         h = self.harness
         h.bar.switch_flip.setChecked(True)
-        h.page_data.combo_ax.setCurrentIndex(2)
         spec = _spec("energy", axis_index=2, low=0, up=5, mid=2)
         h.bind(spec)
-        h.page_data.input_ax_low.setValue(0.6)
-        h.page_data.input_ax_low.editingFinished.emit()
-        h.page_data.input_ax_up.setValue(1.8)
-        h.page_data.input_ax_up.editingFinished.emit()
+        h.bar.interval_control.endpointCommitted.emit("low", 0.6)
+        h.bar.interval_control.endpointCommitted.emit("up", 1.8)
         h.analyzer._persist_axis_interval_state(spec)
         self.assertEqual((spec.params["low"], spec.params["up"]), (3, 4))
         params = h.analyzer._build_axis_request_params()
@@ -306,16 +296,21 @@ class PageIntervalBindingTests(unittest.TestCase):
         # 旧的 locked_half_width 不解释成新锁定状态。
         self.assertFalse(interval.locked)
 
-    def test_position_mode_collapses_the_interval_to_a_point(self):
+    def test_single_slice_starts_locked_and_can_be_unlocked_for_thickening(self):
         spec = _spec("slice", kind="home", home_slice_info={"axis": 0, "index": 4})
 
         interval = self.harness.bind(spec)
 
-        self.assertEqual(self.harness.controller.mode, IntervalEditMode.POSITION)
+        self.assertEqual(self.harness.controller.mode, IntervalEditMode.FULL)
         self.assertAlmostEqual(interval.low, interval.up, places=9)
-        self.assertFalse(self.harness.page_data.s_ax_up.isEnabled())
-        self.assertFalse(self.harness.page_data.input_ax_length.isEnabled())
-        self.assertTrue(self.harness.bar.slider_axis.isEnabled())
+        self.assertTrue(interval.locked)
+        self.assertTrue(self.harness.bar.interval_control.isEnabled())
+        self.assertTrue(self.harness.bar.interval_control.input_length.isReadOnly())
+        self.harness.controller.set_locked(False)
+        self.harness.bar.interval_control.input_length.setValue(0.5)
+        self.harness.bar.interval_control.input_length.editingFinished.emit()
+        self.assertGreater(interval.length, 0.0)
+        self.assertFalse(interval.locked)
 
     def test_3d_derivative_page_disables_the_controls(self):
         spec = _spec(
@@ -358,70 +353,64 @@ class PageIntervalBindingTests(unittest.TestCase):
         # 锁定是编辑方式，新页面从头开始未锁定。
         self.assertFalse(interval.locked)
 
-    def test_switching_the_axis_direction_rebuilds_for_the_new_axis(self):
-        # 回归：下拉是轴向选择器时，必须先让页面参数跟上再重建区间，
-        # 否则旧轴的物理区间会被映射到新轴的下标上。
-        spec = _spec("integral", axis_index=0, low=2, up=8, mid=5)
-        self.harness.bind(spec)
+    def test_each_page_has_a_fixed_axis_and_restores_its_own_range(self):
+        first = _spec("integral-x", axis_index=0, low=2, up=8, mid=5)
+        self.harness.bind(first)
+        second = _spec("integral-e", axis_index=2, low=0, up=5, mid=2)
 
-        self.harness.page_data.combo_ax.setCurrentIndex(2)
-        self.harness.analyzer.on_axis_selection_changed(2)
+        self.harness.bind(second)
 
-        self.assertEqual(spec.params["axis_index"], 2)
-        self.assertEqual(spec.params["axis_name"], "Z轴")
+        self.assertEqual(first.params["axis_index"], 0)
+        self.assertEqual(second.params["axis_index"], 2)
         self.assertEqual(self.harness.analyzer.axis_space.key, "E")
-        self.assertEqual(self.harness.bar.axis_title_label.text(), "E")
-        # 新轴的完整范围：E 轴 6 个采样点 → 0..5。
+        self.assertEqual(self.harness.bar.interval_control.title_label.text(), "XY 切片")
         interval = self.harness.analyzer.axis_interval
         self.assertAlmostEqual(interval.low, float(self.harness.core.coords["E"][0]), places=9)
         self.assertAlmostEqual(interval.up, float(self.harness.core.coords["E"][-1]), places=9)
-        self.assertEqual((spec.params["low"], spec.params["up"]), (0, 5))
-        self.assertEqual(spec.params["axis_interval"]["axis_key"], "E")
+        self.harness.bind(first)
+        self.assertEqual(self.harness.analyzer.axis_space.key, "X")
+        self.assertEqual(self.harness.bar.interval_control.title_label.text(), "YZ 切片")
 
     def test_disabled_page_clears_the_controller_and_the_lock_light(self):
         spec = _spec("integral", low=2, up=8, mid=5)
         self.harness.bind(spec)
         self.harness.controller.set_locked(True)
-        self.assertTrue(self.harness.page_data.btn_ax_lock.isChecked())
+        self.assertTrue(self.harness.analyzer.axis_interval.locked)
 
         self.harness.bind(_spec("time", kind="time_integral"))
 
         self.assertEqual(self.harness.controller.mode, IntervalEditMode.DISABLED)
         self.assertIsNone(self.harness.controller.interval)
-        self.assertFalse(self.harness.page_data.s_ax_up.isEnabled())
-        self.assertFalse(self.harness.page_data.btn_ax_lock.isChecked())
+        self.assertFalse(self.harness.bar.interval_control.isEnabled())
+        self.assertIsNone(self.harness.analyzer.axis_interval)
 
-    def test_committing_a_box_on_a_3d_page_still_persists_the_interval(self):
-        # 回归：3D 主页上只有输入框提交、没有拖动滑条时，区间同样要写回页面
-        # 参数，否则切页回来会退回完整范围而输入框还停在用户输入的值上。
+    def test_3d_home_has_no_interval_or_hidden_legacy_editors(self):
         spec = _spec("home", kind="home")
         self.harness.bind(spec)
 
-        self.harness.page_data.input_ax_up.setValue(0.4)
-        self.harness.page_data.input_ax_up.editingFinished.emit()
+        self.harness.bar.interval_control.endpointCommitted.emit("up", 0.4)
         self.harness.analyzer.flush_axis_refresh()
 
-        self.assertIn("axis_interval", spec.params)
-        self.assertAlmostEqual(spec.params["axis_interval"]["up"], 0.4, places=9)
-        # 3D 页面不因区间变化请求重算。
+        self.assertNotIn("axis_interval", spec.params)
+        self.assertIsNone(self.harness.analyzer.axis_interval)
         self.assertEqual(self.harness.refreshes, [])
 
     def test_position_bar_label_uses_the_axis_and_its_unit(self):
         spec = _spec("integral", low=0, up=10, mid=5)
         self.harness.bind(spec)
-        self.assertEqual(self.harness.bar.axis_title_label.text(), "kx")
+        self.assertEqual(self.harness.bar.interval_control.subtitle_label.text(), "沿 kx 积分")
 
         source = _spec("integral2", low=0, up=10, mid=5)
         self.harness.core.coord_units["X"] = "Å⁻¹"
         self.harness.bind(source)
-        self.assertEqual(self.harness.bar.axis_title_label.text(), "kx / Å⁻¹")
+        self.assertEqual(self.harness.bar.interval_control.subtitle_label.text(), "沿 kx / Å⁻¹ 积分")
 
     def test_index_coordinates_are_labelled_index(self):
         harness = _AxisHarness()
         harness.core.coord_sources["X"] = "index"
         spec = _spec("integral", low=0, up=10, mid=5)
         harness.bind(spec)
-        self.assertEqual(harness.bar.axis_title_label.text(), "kx (index)")
+        self.assertEqual(harness.bar.interval_control.subtitle_label.text(), "沿 kx (index) 积分")
 
 
 class SliceSourceRangeTests(unittest.TestCase):
@@ -495,12 +484,12 @@ class SliceSourceRangeTests(unittest.TestCase):
         self.harness.controller.interval.set_center(float(coords[5]))
         spec.params["axis_interval"] = self.harness.analyzer.axis_interval.as_dict()
 
+        self.harness.analyzer._update_slice_source_range(spec)
         self.assertFalse(self.harness.analyzer._update_slice_source_range(spec))
 
-    def test_saved_interval_is_snapped_to_the_slice_sample(self):
+    def test_saved_interval_preserves_subsample_position(self):
         spec = self._slice_spec()
         self.harness.bind(spec)
-        # 位置落在采样点之间：模型保留精确值，保存的区间对齐到最近采样点。
         self.harness.controller.interval.set_center(0.62)
         spec.params["axis_interval"] = self.harness.analyzer.axis_interval.as_dict()
 
@@ -509,8 +498,10 @@ class SliceSourceRangeTests(unittest.TestCase):
         coords = self.harness.core.coords["X"]
         saved = spec.params["axis_interval"]
         self.assertEqual(saved["low"], saved["up"])
-        self.assertAlmostEqual(saved["low"], float(coords[8]), places=9)
+        self.assertAlmostEqual(saved["low"], 0.62, places=9)
         self.assertEqual(spec.params["home_slice_info"]["index"], 8)
+        self.assertEqual(spec.params["home_slice_info"]["range"], (8, 8))
+        self.assertAlmostEqual(coords[8], 0.6, places=9)
 
     def test_precise_logical_bounds_follow_the_new_slice(self):
         spec = self._slice_spec()
@@ -543,7 +534,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(bar.timeline_group.isVisible())
         self.assertLess(geometry.right(), bar.width() - bar.view_controls.width())
         # 滑条拿到整行富余宽度，明显宽于与其他分组同排时的份额。
-        self.assertGreater(bar.slider_axis.width(), bar.AXIS_SLIDER_MIN_WIDTH * 2)
+        self.assertGreater(bar.interval_control.range_slider.width(), bar.AXIS_SLIDER_MIN_WIDTH * 2)
 
     def test_position_group_shares_the_row_with_the_timeline(self):
         bar = TimelineBar()
@@ -568,6 +559,21 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertTrue(bar._wrapped)
         self.assertEqual(bar.height(), bar.HEIGHT + bar.SECOND_ROW_HEIGHT)
         self.assertTrue(bar.secondary_row.isVisible())
+        self.assertTrue(bar.secondary_row.isAncestorOf(bar.timeline_group))
+        self.assertTrue(bar.secondary_row.isAncestorOf(bar.view_controls))
+
+    def test_very_narrow_window_gives_view_controls_a_third_row(self):
+        bar = TimelineBar()
+        bar.resize(700, bar.HEIGHT)
+        bar.show()
+        bar.set_position_visible(True, animate=False)
+        bar._apply_wrap(bar._should_wrap())
+
+        self.assertTrue(bar._wrapped)
+        self.assertTrue(bar._view_stacked)
+        self.assertTrue(bar.secondary_row.isAncestorOf(bar.timeline_group))
+        self.assertTrue(bar.tertiary_row.isAncestorOf(bar.view_controls))
+        self.assertEqual(bar.height(), bar.HEIGHT + bar.SECOND_ROW_HEIGHT + bar.THIRD_ROW_HEIGHT)
 
     def test_unwrapping_restores_the_single_row_height(self):
         bar = TimelineBar()
@@ -582,6 +588,8 @@ class BottomBarLayoutTests(unittest.TestCase):
 
         self.assertFalse(bar._wrapped)
         self.assertEqual(bar.height(), bar.HEIGHT)
+        self.assertFalse(bar.secondary_row.isAncestorOf(bar.timeline_group))
+        self.assertFalse(bar.secondary_row.isAncestorOf(bar.view_controls))
 
     def test_revealing_twice_does_not_restart_the_animation(self):
         bar = TimelineBar()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
-from PyQt5.QtCore import QEventLoop, QTimer
+from PyQt5.QtCore import QEventLoop, Qt, QTimer
 
 from bandscope.exporting.publication_export import ExportError, capture_snapshot
 from bandscope.rendering.refresh_pipeline import RenderQuality
@@ -206,17 +206,22 @@ def _wait_for_exact(window, candidate, cancel_event, timeout):
 
 
 def _set_freeze_controls(window, frozen):
+    """保存控件自身的启用状态，不把父容器继承的禁用记到子控件上。"""
     stored = getattr(window, "_blender_freeze_widget_states", None)
     if frozen:
         if stored is not None:
             return
-        states = {}
+        widgets = {}
         for name in ("main_splitter", "page_container", "toolbar", "source_switcher_bar"):
             widget = getattr(window, name, None)
             if widget is not None:
-                states[name] = widget.isEnabled()
-                widget.setEnabled(False)
-        window._blender_freeze_widget_states = states
+                widgets[name] = widget
+        window._blender_freeze_widget_states = {
+            name: not widget.testAttribute(Qt.WA_ForceDisabled)
+            for name, widget in widgets.items()
+        }
+        for widget in widgets.values():
+            widget.setEnabled(False)
         return
     if stored is None:
         return

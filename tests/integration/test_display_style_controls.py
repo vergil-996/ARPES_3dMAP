@@ -14,9 +14,9 @@ from bandscope.core.display_style import (
     new_render_quality,
 )
 from bandscope.core.local_enhancement import RENDER_QUALITY_KEY, STATE_KEY
-from bandscope.processing.local_enhancement import cached_finite_range, clear_range_cache
+from bandscope.processing.local_enhancement import cached_finite_range, clear_range_cache, resolve_display
 from bandscope.rendering.render_core import VisualEngine
-from bandscope.rendering.refresh_pipeline import RefreshCause
+from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.ui.page_render_control import RenderControlPage
 
@@ -62,6 +62,21 @@ class DisplayControlStateTests(unittest.TestCase):
         self.assertFalse(other.grp_opacity.isVisible())
         self.assertEqual(other.display_parameters["threshold"][0].value(), 0)
         self.assertEqual(other.get_render_quality()["mode"], "legacy")
+
+    def test_independent_sliders_commit_on_release_but_value_boxes_keep_idle_commit(self):
+        committed = Mock()
+        changed = Mock()
+        self.page.display_value_committed.connect(committed)
+        self.page.display_value_changed.connect(changed)
+        for slider, spin, _scale in self.page.display_parameters.values():
+            with self.subTest(control=slider.toolTip(), kind="slider"):
+                slider.sliderReleased.emit()
+            with self.subTest(control=slider.toolTip(), kind="spin"):
+                spin.editingFinished.emit()
+        self.assertEqual(committed.call_count, 4)
+        spin.setValue(spin.value() + spin.singleStep())
+        self.assertEqual(committed.call_count, 4)
+        self.assertGreater(changed.call_count, 0)
 
     def test_color_lock_style_refresh_keeps_button_icon_only(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
@@ -156,6 +171,37 @@ class DisplayRefreshContextTests(unittest.TestCase):
         analyzer._render_context_page_id = "home"
         self.assertIs(analyzer._context_for_publication_capture(spec), analyzer.current_render_context)
 
+    def test_preview_signature_does_not_skip_the_release_exact_frame(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        spec = SimpleNamespace(page_id="home")
+        analyzer.left_workspace = SimpleNamespace(
+            current_spec=lambda: spec, home_spec=lambda: spec,
+        )
+        analyzer.rotation_angle = 0.0
+        analyzer._render_exact_ready = False
+        analyzer._last_completed_refresh = SimpleNamespace(
+            page_id="home", quality=RenderQuality.PREVIEW,
+        )
+        analyzer._last_compute_backend = "CPU"
+        analyzer._last_ui_transfer_signature = "same"
+        analyzer._current_transfer_signature = Mock(return_value="same")
+        analyzer._schedule_display_mapping_compute = Mock(return_value=False)
+        analyzer._render_active_page_timed = Mock()
+        analyzer._finish_ui_refresh = Mock()
+        request = SimpleNamespace(
+            page_id="home", cause=RefreshCause.TRANSFER_FUNCTION,
+            quality=RenderQuality.EXACT, snapshot={},
+        )
+        analyzer._dispatch_refresh_request(request)
+        analyzer._render_active_page_timed.assert_called_once_with(
+            RenderQuality.EXACT, RefreshCause.TRANSFER_FUNCTION,
+        )
+
+        analyzer._last_completed_refresh.quality = RenderQuality.EXACT
+        analyzer._render_active_page_timed.reset_mock()
+        analyzer._dispatch_refresh_request(request)
+        analyzer._render_active_page_timed.assert_not_called()
+
     def test_publication_capture_reuses_only_the_current_exact_page(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer._render_exact_ready = True
@@ -244,6 +290,70 @@ class DisplayStatisticsTests(unittest.TestCase):
         state["background"]["opacity"]["density"] = 35.0
         self.assertFalse(host._prepare_display_statistics(context, host.active_page_spec, state))
         host.request_refresh.assert_called_once()
+
+    def test_independent_cache_recomputes_only_the_changed_channel(self):
+        host = self.host
+        context = host.current_render_context
+        spec = host.active_page_spec
+        state = spec.params[STATE_KEY]
+        first = host._enhancement_display(context, spec)
+        first_color = first["color"]
+        first_alpha = first["alpha"]
+
+        state["background"]["levels"] = (10, 80, 90)
+        with patch("bandscope.processing.display_transfer.independent_opacity_values") as opacity:
+            second = host._enhancement_display(context, spec)
+        opacity.assert_not_called()
+        self.assertIs(second["alpha"], first_alpha)
+        self.assertIsNot(second["color"], first_color)
+        self.assertEqual(second["alpha_token"], first["alpha_token"])
+        self.assertGreater(second["color_token"], first["color_token"])
+
+        state["background"]["opacity"]["density"] = 35.0
+        with patch("bandscope.processing.display_transfer.normalized_color_samples") as normalized:
+            third = host._enhancement_display(context, spec)
+        normalized.assert_not_called()
+        self.assertIs(third["color"], second["color"])
+        self.assertIsNot(third["alpha"], second["alpha"])
+        expected = resolve_display(context, state)
+        np.testing.assert_array_equal(third["color"], expected["color"])
+        np.testing.assert_array_equal(third["alpha"], expected["alpha"])
+
+    def test_large_cpu_mapping_uses_latest_only_compute_transport(self):
+        host = self.host
+        data = np.random.default_rng(29).random((80, 80, 80), dtype=np.float32)
+        context = {
+            "view": "3d", "data": data,
+            "coords": {key: np.arange(size, dtype=float)
+                       for key, size in zip(("X", "Y", "E"), data.shape)},
+        }
+        host.current_render_context = context
+        host._context_for_display_refresh = Mock(return_value=context)
+        host._enhancement_cache = None
+        host.refresh_coordinator = Mock()
+        spec = host.active_page_spec
+        state = spec.params[STATE_KEY]
+        state["background"]["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
+        request = SimpleNamespace(cause=RefreshCause.DISPLAY_MAPPING)
+
+        with patch("bandscope.processing.gpu_display.enabled", return_value=False):
+            self.assertTrue(host._schedule_display_mapping_compute(request, spec))
+        request_arg, work = host.refresh_coordinator.submit_compute.call_args.args
+        self.assertIs(request_arg, request)
+        result = work()
+        key, context_key, fields, update = result.metadata["display_cache"]
+        self.assertEqual(update, frozenset(("color", "alpha")))
+        host._cache_display_fields(key, context_key, fields, update)
+
+        state["background"]["opacity"]["density"] = 42.0
+        host.refresh_coordinator.reset_mock()
+        with patch("bandscope.processing.gpu_display.enabled", return_value=False):
+            self.assertTrue(host._schedule_display_mapping_compute(request, spec))
+        _request_arg, work = host.refresh_coordinator.submit_compute.call_args.args
+        latest = work()
+        self.assertEqual(latest.metadata["display_cache"][3], frozenset(("alpha",)))
+        self.assertIs(latest.value["color"], fields["color"])
+        self.assertIsNot(latest.value["alpha"], fields["alpha"])
 
 
 if __name__ == "__main__":

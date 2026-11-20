@@ -112,54 +112,74 @@ def _device_array(cp, values):
     return device, False
 
 
-def try_channels(values, info, mode, *, style=None, unit_distance=None):
-    """Return ``(color, alpha)`` float32 arrays or ``None`` to use the CPU path."""
+def try_channels(values, info, mode, *, style=None, unit_distance=None, color=None, alpha=None):
+    """Return display channels, computing only the missing independent channels."""
     with _lock:
         if not _enabled or _cp is None:
             return None
         source = np.asarray(values)
-        if source.ndim != 3 or source.size < MIN_ELEMENTS:
+        if source.ndim != 3 or source.size < MIN_ELEMENTS or (color is not None and alpha is not None):
             return None
         cp = _cp
         try:
             from bandscope.core.display_style import is_independent, resolved_display_style
             from bandscope.processing.display_transfer import OPACITY_MAPS
 
+            independent = is_independent(style)
+            if not independent and (color is not None or alpha is not None):
+                return None
             device, _cached = _device_array(cp, source)
-            low, high = float(info["black_value"]), float(info["white_value"])
-            ratio = cp.clip((device.astype(cp.float64) - low) / (high - low), 0.0, 1.0)
-            color = cp.power(ratio, float(info["gamma_power"]))
-            if is_independent(style):
-                opacity = resolved_display_style(style)["opacity"]
-                span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
-                if not np.isfinite(span) or span <= 0.0:
-                    span = 1.0
-                q = (device.astype(cp.float64) - float(info["data_min"])) / span
-                threshold = float(opacity["threshold"]) / 100.0
-                transition = float(opacity["transition"]) / 100.0
-                signal = cp.maximum(q - threshold, 0.0)
-                if transition > 0.0:
-                    position = cp.clip((q - threshold) / transition, 0.0, 1.0)
-                    gate = position * position * (3.0 - 2.0 * position)
-                else:
-                    gate = 1.0
-                sigma = (float(opacity["density"]) / 200.0) * cp.power(
-                    signal, float(opacity["gamma"])
-                ) * gate
-                distance = 1.0 if unit_distance is None else max(float(unit_distance), 0.0)
-                alpha = -cp.expm1(-sigma * distance)
-            else:
+            need_color = color is None
+            need_alpha = alpha is None
+            computed_color = color
+            computed_alpha = alpha
+            if need_color or not independent:
+                low, high = float(info["black_value"]), float(info["white_value"])
+                ratio = cp.clip((device.astype(cp.float64) - low) / (high - low), 0.0, 1.0)
+                mapped = cp.power(ratio, float(info["gamma_power"]))
+                if need_color:
+                    computed_color = mapped
+            if independent:
+                if need_alpha:
+                    opacity = resolved_display_style(style)["opacity"]
+                    span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
+                    if not np.isfinite(span) or span <= 0.0:
+                        span = 1.0
+                    q = (device.astype(cp.float64) - float(info["data_min"])) / span
+                    threshold = float(opacity["threshold"]) / 100.0
+                    transition = float(opacity["transition"]) / 100.0
+                    signal = cp.maximum(q - threshold, 0.0)
+                    if transition > 0.0:
+                        position = cp.clip((q - threshold) / transition, 0.0, 1.0)
+                        gate = position * position * (3.0 - 2.0 * position)
+                    else:
+                        gate = 1.0
+                    sigma = (float(opacity["density"]) / 200.0) * cp.power(
+                        signal, float(opacity["gamma"])
+                    ) * gate
+                    distance = 1.0 if unit_distance is None else max(float(unit_distance), 0.0)
+                    computed_alpha = -cp.expm1(-sigma * distance)
+            elif need_alpha:
                 ramp = np.asarray(OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"]), dtype=np.float64)
-                alpha = cp.interp(color, cp.linspace(0.0, 1.0, ramp.size, dtype=cp.float64),
-                                  cp.asarray(ramp))
+                computed_alpha = cp.interp(mapped, cp.linspace(0.0, 1.0, ramp.size, dtype=cp.float64),
+                                           cp.asarray(ramp))
             finite = cp.isfinite(device)
-            packed = cp.empty((2, source.size), dtype=cp.float32)
-            packed[0] = cp.where(finite, color, 0).astype(cp.float32).ravel()
-            packed[1] = cp.where(finite, alpha, 0).astype(cp.float32).ravel()
+            if need_color and need_alpha:
+                packed = cp.empty((source.size, 2), dtype=cp.float32)
+                packed[:, 0] = cp.where(finite, computed_color, 0).astype(cp.float32).ravel(order="F")
+                packed[:, 1] = cp.where(finite, computed_alpha, 0).astype(cp.float32).ravel(order="F")
+                owner = cp.cuda.alloc_pinned_memory(int(packed.nbytes))
+                host = np.frombuffer(owner, dtype=np.float32, count=int(packed.size)).reshape(packed.shape)
+                cp.asnumpy(packed, out=host)
+                return (host[:, 0].reshape(source.shape, order="F"),
+                        host[:, 1].reshape(source.shape, order="F"))
+            device_channel = computed_color if need_color else computed_alpha
+            packed = cp.where(finite, device_channel, 0).astype(cp.float32).ravel(order="F")
             owner = cp.cuda.alloc_pinned_memory(int(packed.nbytes))
-            host = np.frombuffer(owner, dtype=np.float32, count=int(packed.size)).reshape(packed.shape)
+            host = np.frombuffer(owner, dtype=np.float32, count=int(packed.size))
             cp.asnumpy(packed, out=host)
-            return host[0].reshape(source.shape), host[1].reshape(source.shape)
+            result = host.reshape(source.shape, order="F")
+            return (result, alpha) if need_color else (color, result)
         except Exception as exc:  # pragma: no cover - depends on the host GPU
             _disable(exc)
             return None

@@ -1,5 +1,7 @@
 """Exercise transfer rules at actual Matplotlib and VTK mapper inputs."""
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pyvista as pv
@@ -10,6 +12,7 @@ from vtkmodules.util.numpy_support import vtk_to_numpy
 
 from bandscope.processing.local_enhancement import resolve_display
 from bandscope.processing.display_transfer import level_info
+from bandscope.rendering.local_enhancement import apply_volume_display
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
 from tests.support.enhancement import context_2d, region
 from tests.support.environment import requires_opengl
@@ -29,6 +32,37 @@ class DisplayLegendTransferTests(unittest.TestCase):
                     self.assertEqual(legend.GetAnnotation(index), VisualEngine._format_level_tick(value))
                 mappable = VisualEngine._colorbar_mappable("magma", info)
                 self.assertAlmostEqual(float(mappable.norm(info["gray_value"])), .5)
+
+
+class PackedDisplayUploadTests(unittest.TestCase):
+    def test_interleaved_channels_upload_with_one_contiguous_copy(self):
+        shape = (2, 3, 4)
+        packed = np.random.default_rng(41).random((np.prod(shape), 2), dtype=np.float32)
+        color = packed[:, 0].reshape(shape, order="F")
+        alpha = packed[:, 1].reshape(shape, order="F")
+        prop = SimpleNamespace(SetColor=Mock(), SetScalarOpacity=Mock())
+        mapper = SimpleNamespace(
+            Modified=Mock(),
+            lookup_table=SimpleNamespace(apply_cmap=Mock()),
+        )
+        channel = SimpleNamespace(
+            buffer=np.zeros_like(packed), attach=Mock(), vtk_array=SimpleNamespace(Modified=Mock()),
+            volume=SimpleNamespace(mapper=mapper, GetProperty=Mock(return_value=prop)),
+        )
+        with patch("bandscope.rendering.local_enhancement.np.copyto", wraps=np.copyto) as copy:
+            apply_volume_display(channel, color, alpha, "gray")
+        copy.assert_called_once()
+        self.assertIs(copy.call_args.args[0], channel.buffer)
+        np.testing.assert_array_equal(channel.buffer, packed)
+
+        updated_alpha = np.asarray(alpha * 0.5, dtype=np.float32)
+        with patch("bandscope.rendering.local_enhancement.np.copyto", wraps=np.copyto) as copy:
+            apply_volume_display(
+                channel, color, updated_alpha, "gray", update_color=False,
+            )
+        copy.assert_called_once()
+        np.testing.assert_array_equal(channel.buffer[:, 0], packed[:, 0])
+        np.testing.assert_array_equal(channel.buffer[:, 1], updated_alpha.ravel(order="F"))
 
 
 class Display2DTransferTests(unittest.TestCase):

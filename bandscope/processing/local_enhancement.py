@@ -1,4 +1,5 @@
 """Resolve independent color and opacity channels without modifying science data."""
+import copy
 import threading
 import weakref
 
@@ -85,10 +86,15 @@ def _rebased_alpha(alpha, source_distance, target_distance):
     return (1.0 - np.power(1.0 - bounded, target_distance / source_distance)).astype(np.float32)
 
 
-def resolve_display(context, state, *, background_locked_range=None, region_data=None):
+def resolve_display(context, state, *, background_locked_range=None, region_data=None,
+                    previous=None, update=("color", "alpha")):
     """Statistics use original samples; later enabled regions own overlaps."""
     regions = matching_regions(context, state.get("regions", []))
     background_style = state.get("background", DEFAULT_STYLE)
+    update = frozenset(update)
+    if regions or previous is None or not is_independent(background_style):
+        previous = None
+        update = frozenset(("color", "alpha"))
     if not regions and not is_independent(background_style):
         return None
     source = np.asarray(context["data"])
@@ -151,6 +157,8 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
     color, alpha = channels(
         source, bg_info, background_style["opacity_mode"], view=view,
         style=background_style, unit_distance=target_distance,
+        color=previous["color"] if previous is not None and "color" not in update else None,
+        alpha=previous["alpha"] if previous is not None and "alpha" not in update else None,
     )
     if view == "3d" and any_independent and not is_independent(background_style):
         alpha = _rebased_alpha(alpha, legacy_distance, target_distance)
@@ -174,7 +182,7 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
         "color": color,
         "alpha": alpha,
         "background_level_info": bg_info,
-        "background_style": dict(background_style),
+        "background_style": copy.deepcopy(background_style),
         "background_range": (bg_info["data_min"], bg_info["data_max"]),
         "regions": resolved,
         "common": bool(state.get("common")),

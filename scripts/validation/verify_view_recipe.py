@@ -110,8 +110,8 @@ def main():
         pixels = window.plotter.screenshot(str(args.output_dir / "restored_3d_scene.png"), return_img=True)
         check("3D 场景非空", float(np.std(pixels[..., :3])) > 1.0)
         window.grab().save(str(args.output_dir / "restored_3d_window.png"))
-        window.page_data.combo_ax.setCurrentIndex(1)
-        window.on_apply_axis_integral()
+        from scripts.validation._common import create_axis_slice
+        create_axis_slice(window, 1)
         wait(export_2d)
 
     def export_2d():

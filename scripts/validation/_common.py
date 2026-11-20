@@ -7,6 +7,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def create_axis_slice(window, axis_index, *, full_range=False):
+    spec = window._build_canvas_axis_slice_spec(window.left_workspace.current_spec(), axis_index)
+    if spec is None:
+        raise AssertionError("当前三维来源无法生成坐标轴切片")
+    window.left_workspace.add_page(spec)
+    if full_range:
+        interval = window.axis_space.as_interval()
+        window.axis_interval = interval
+        window.axis_interval_controller.bind(window.axis_space, interval)
+        window._persist_axis_interval_for_current_page()
+        window.global_refresh()
+    return spec
+
+
 def arguments(description, *, data=True, dynamic=False, two_datasets=False, default_data=None):
     parser = argparse.ArgumentParser(description=description)
     if data:

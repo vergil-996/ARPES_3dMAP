@@ -859,13 +859,41 @@ class AnalyzerProvenanceTests(unittest.TestCase):
 
 class NonUniformGridTests(unittest.TestCase):
     def test_non_uniform_axis_rejected(self):
-        from bandscope.exporting.publication_export import _check_uniform
+        from bandscope.exporting.publication_export import ExportError, _check_uniform
 
         uniform = np.linspace(0.0, 1.0, 50)
-        _check_uniform(uniform, "X")  # 不抛异常
-        non_uniform = np.asarray([0.0, 0.1, 0.15, 0.4, 0.9, 1.0])
-        with self.assertRaises(Exception):
-            _check_uniform(non_uniform, "X")
+        _check_uniform(uniform, "X")
+        for dtype in (np.float32, np.float64):
+            with self.subTest(dtype=dtype), self.assertRaisesRegex(ExportError, "X 轴坐标为非均匀网格"):
+                _check_uniform(np.asarray([0.0, 0.1, 0.15, 0.4, 0.9, 1.0], dtype=dtype), "X")
+
+    def test_rounded_uniform_axis_uses_storage_precision(self):
+        from bandscope.exporting.publication_export import ExportError, _check_uniform
+
+        energy = np.linspace(0.4, -6.6, 352, dtype=np.float32)
+        _check_uniform(energy, "E")
+        _check_uniform(energy[::-1], "E")
+        with self.assertRaisesRegex(ExportError, "E 轴坐标为非均匀网格"):
+            _check_uniform(energy.astype(np.float64), "E")
+
+    def test_small_step_errors_cannot_accumulate_into_a_different_grid(self):
+        from bandscope.exporting.publication_export import ExportError, _check_uniform
+
+        indices = np.arange(256)
+        spacing = np.spacing(np.float32(1.0))
+        drift = np.maximum(indices - 127, 0) * spacing / 4
+        energy = (1.0 + indices / 10000 + drift).astype(np.float32)
+        with self.assertRaisesRegex(ExportError, "E 轴坐标为非均匀网格"):
+            _check_uniform(energy, "E")
+
+    def test_axis_must_be_finite_and_strictly_monotonic(self):
+        from bandscope.exporting.publication_export import ExportError, _check_uniform
+
+        _check_uniform(np.array([1.0]), "E")
+        _check_uniform(np.array([2.0, 1.0]), "E")
+        for values in ([0.0, float("nan"), 1.0], [0.0, float("inf")], [0.0, 0.0], [0.0, 1.0, 0.0]):
+            with self.subTest(values=values), self.assertRaises(ExportError):
+                _check_uniform(np.array(values, dtype=np.float32), "E")
 
 
 if __name__ == "__main__":

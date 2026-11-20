@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import time
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal, pyqtSlot
@@ -91,6 +92,7 @@ class RefreshCoordinator(QObject):
         self._pending_exact: Optional[RefreshRequest] = None
         self._running: Optional[Tuple[RefreshRequest, _ComputeTask]] = None
         self._pending_compute: Optional[Tuple[RefreshRequest, Callable[[], ComputeResult]]] = None
+        self._last_preview_started_at = None
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -150,7 +152,7 @@ class RefreshCoordinator(QObject):
                 if preview_interval_ms is None
                 else int(preview_interval_ms)
             )
-            self._preview_timer.start(interval)
+            self._preview_timer.start(self._preview_delay(interval))
         self._exact_timer.start(self.exact_idle_ms)
         self.status_changed.emit("preview", "")
 
@@ -158,7 +160,7 @@ class RefreshCoordinator(QObject):
         self._latest_generation[request.page_id] = request.generation
         self._pending_preview = request
         if not self._preview_timer.isActive():
-            self._preview_timer.start(self.preview_interval_ms)
+            self._preview_timer.start(self._preview_delay(self.preview_interval_ms))
         self.status_changed.emit("preview", "")
 
     def schedule_exact(self, request: RefreshRequest, *, immediate=False):
@@ -166,6 +168,7 @@ class RefreshCoordinator(QObject):
         self._pending_exact = request
         self.status_changed.emit("computing", "")
         if immediate:
+            self._cancel_pending_preview(request.page_id)
             self._exact_timer.stop()
             self._dispatch_exact()
         else:
@@ -203,16 +206,30 @@ class RefreshCoordinator(QObject):
         self._pending_compute = None
         self._pool.waitForDone(int(wait_ms))
 
+    def _preview_delay(self, interval):
+        if self._last_preview_started_at is None:
+            return int(interval)
+        elapsed_ms = (time.monotonic() - self._last_preview_started_at) * 1000.0
+        return max(0, int(round(interval - elapsed_ms)))
+
+    def _cancel_pending_preview(self, page_id):
+        if self._pending_preview is not None and self._pending_preview.page_id == page_id:
+            self._pending_preview = None
+        if self._pending_preview is None:
+            self._preview_timer.stop()
+
     def _dispatch_preview(self):
         request = self._pending_preview
         self._pending_preview = None
         if request is not None and self.is_current(request):
+            self._last_preview_started_at = time.monotonic()
             self.dispatch_requested.emit(request)
 
     def _dispatch_exact(self):
         request = self._pending_exact
         self._pending_exact = None
         if request is not None and self.is_current(request):
+            self._cancel_pending_preview(request.page_id)
             self.dispatch_requested.emit(request)
 
     def _start_compute(self, request, work):

@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """积分区间统一控制器 —— 控件只提交意图，模型负责约束，一次同步所有显示。
 
-右侧积分卡片的上下限、可输入长度、锁定按钮，底栏的位置滑条/输入框，以及
-左下角状态栏的锁定指示灯，全部指向同一个 :class:`AxisInterval`。以前中心
-位置、上下限、锁定半宽各存一份，滑条的嵌套事件会用旧值回写输入框，计算又
-从输入框反算索引，同一份状态在三个地方不一致。这里收敛成一条链：
+画布底栏的双端区间条、可输入长度与状态栏锁定指示灯全部指向同一个
+:class:`AxisInterval`。状态只有一条更新链：
 
     控件意图 → 模型约束 → 阻断信号统一同步 → 一次性保存/刷新
 
@@ -51,6 +49,7 @@ class AxisIntervalController(QObject):
         self._syncing = False
         self._widgets = {}
         self._connected = []
+        self._preview_dirty = False
 
     # ------------------------------------------------------------------
     # 装配
@@ -67,8 +66,10 @@ class AxisIntervalController(QObject):
         slider_position=None,
         box_position=None,
         label_lock=None,
+        interval_widget=None,
     ):
         self._widgets = {
+            "interval_widget": interval_widget,
             "slider_up": slider_up,
             "box_up": box_up,
             "slider_low": slider_low,
@@ -101,6 +102,11 @@ class AxisIntervalController(QObject):
             (self._widgets.get("box_length"), "editingFinished", self._on_box_length),
             (self._widgets.get("box_position"), "editingFinished", self._on_box_position),
             (self._widgets.get("button_lock"), "toggled", self._on_lock_toggled),
+            (self._widgets.get("interval_widget"), "endpointPreview", self._on_range_endpoint),
+            (self._widgets.get("interval_widget"), "endpointCommitted", self._on_range_endpoint_committed),
+            (self._widgets.get("interval_widget"), "centerPreview", self._on_range_center),
+            (self._widgets.get("interval_widget"), "interactionFinished", self._finish_preview),
+            (self._widgets.get("interval_widget"), "lockRequested", self.set_locked),
         )
 
     def detach(self):
@@ -131,6 +137,7 @@ class AxisIntervalController(QObject):
         """换轴或换页：绑定新的轴描述和区间，然后整体同步一次。"""
         self._space = space
         self._interval = interval
+        self._preview_dirty = False
         self.sync_widgets()
 
     def set_mode(self, mode):
@@ -148,10 +155,16 @@ class AxisIntervalController(QObject):
         self._interval = None
         self._space = None
         self._mode = IntervalEditMode.DISABLED
+        self._preview_dirty = False
         self._reset_widgets()
 
     def _reset_widgets(self):
         widgets = self._widgets
+        interval_widget = widgets.get("interval_widget")
+        slider = getattr(interval_widget, "range_slider", None)
+        if slider is not None:
+            slider.coordinate_popup.hide()
+            slider.lock_badge.hide()
         targets = [widget for widget in widgets.values() if widget is not None]
         blockers = [QSignalBlocker(widget) for widget in targets]
         try:
@@ -203,6 +216,9 @@ class AxisIntervalController(QObject):
         previous = self._syncing
         self._syncing = True
         try:
+            interval_widget = widgets.get("interval_widget")
+            if interval_widget is not None:
+                interval_widget.sync(space, interval, self._mode != IntervalEditMode.DISABLED)
             self._sync_sliders(interval, space)
             self._sync_boxes(interval, space)
             self._sync_lock(interval)
@@ -293,6 +309,9 @@ class AxisIntervalController(QObject):
             button.setEnabled(full)
         for name in ("slider_position", "box_position"):
             self._set_enabled(name, position)
+        interval_widget = self._widgets.get("interval_widget")
+        if interval_widget is not None:
+            interval_widget.setEnabled(full or position)
 
     def _set_enabled(self, name, enabled):
         widget = self._widgets.get(name)
@@ -302,6 +321,27 @@ class AxisIntervalController(QObject):
     # ------------------------------------------------------------------
     # 控件意图
     # ------------------------------------------------------------------
+    def _on_range_endpoint(self, endpoint, value):
+        if endpoint == "low":
+            self._apply(lambda interval: interval.set_low(value))
+        else:
+            self._apply(lambda interval: interval.set_up(value))
+
+    def _on_range_endpoint_committed(self, endpoint, value):
+        operation = (lambda interval, number: interval.set_low(number)) if endpoint == "low" else (
+            lambda interval, number: interval.set_up(number)
+        )
+        self._commit_value(operation, value)
+
+    def _on_range_center(self, value):
+        self._apply(lambda interval: interval.set_center(value))
+
+    def _finish_preview(self):
+        if not self._preview_dirty:
+            return
+        self._preview_dirty = False
+        self.intervalCommitted.emit()
+
     def _on_slider_up(self, value):
         self._apply(lambda interval: interval.set_up(self._from_slider(value)))
 
@@ -340,19 +380,30 @@ class AxisIntervalController(QObject):
         widget = self._widgets.get(widget_name)
         if widget is None or self._interval is None or self._syncing:
             return
-        changed = operation(self._interval, float(widget.value()))
-        # 无论是否真的改变，都要把显示规范化回模型（输入可能被约束掉）。
+        self._commit_value(operation, float(widget.value()))
+
+    def _commit_value(self, operation, value):
+        if self._interval is None or self._syncing:
+            return
+        was_locked = self._interval.locked
+        changed = operation(self._interval, float(value))
         self.sync_widgets()
+        if was_locked != self._interval.locked:
+            self.lockChanged.emit(self._interval.locked)
         if changed:
             self.intervalCommitted.emit()
 
     def _apply(self, operation):
         if self._syncing or self._interval is None:
             return False
+        was_locked = self._interval.locked
         changed = operation(self._interval)
         # 被轴边界约束的输入也必须复位控件，即使模型没有变化。
         self.sync_widgets()
+        if was_locked != self._interval.locked:
+            self.lockChanged.emit(self._interval.locked)
         if changed:
+            self._preview_dirty = True
             self.intervalChanged.emit()
         return changed
 

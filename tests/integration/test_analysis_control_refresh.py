@@ -108,7 +108,8 @@ class AnalysisControlRefreshTests(unittest.TestCase):
     def test_moving_one_box_axis_resets_the_other_axes_to_full_volume(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         analyzer._can_show_interactive_box = lambda: True
-        analyzer.page_data = SimpleNamespace(combo_ax=SimpleNamespace(currentIndex=lambda: 1))
+        spec = SimpleNamespace(page_kind="axis_integral", params={"axis_index": 1})
+        analyzer.left_workspace = SimpleNamespace(current_spec=lambda: spec)
         analyzer._axis_input_logical_values = lambda: (2, 3, 2)
         analyzer._get_full_logical_bounds = lambda: [0, 3, 0, 4, 0, 5]
         analyzer.precise_logical_bounds = [1, 2, 0, 4, 1, 5]
@@ -124,17 +125,12 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         expected = [0, 3, 2, 3, 0, 5]
         self.assertEqual(seen, [("box", expected), ("edits", expected)])
 
-    def test_switching_axis_resets_the_space_then_refreshes_the_box(self):
-        spec = SimpleNamespace(page_kind="home", params={})
+    def test_axis_direction_comes_from_the_page_not_a_shared_selector(self):
+        spec = SimpleNamespace(page_kind="axis_integral", params={"axis_index": 2})
         analyzer = self._analyzer_with_page(spec)
-        calls = []
-        analyzer.update_ax_slider_range = lambda **kwargs: calls.append(("range", kwargs))
-        analyzer.schedule_axis_refresh = lambda: calls.append("box")
 
-        analyzer.on_axis_selection_changed(2)
-
-        # 主动切换方向要重置为新轴的完整范围并解锁。
-        self.assertEqual(calls, [("range", {"reset": True}), "box"])
+        self.assertEqual(analyzer._axis_index_for_interval(spec), 2)
+        self.assertEqual(analyzer._axis_interval_context(spec)[0], 2)
 
 
 if __name__ == "__main__":

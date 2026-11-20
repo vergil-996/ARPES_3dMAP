@@ -275,10 +275,8 @@ def main():
 
     def step_open_2d():
         window.left_workspace.activate_page(window.left_workspace.home_page_id)
-        window.page_data.combo_ax.setCurrentIndex(2)  # 沿 E 轴积分 → kx–ky 面
-
         def click():
-            window.page_data.btn_ax_apply.click()
+            window.canvas_tool_overlay.preset_buttons["xy"].click()
             QTimer.singleShot(10000, guarded(step_default_titles))
 
         QTimer.singleShot(600, click)

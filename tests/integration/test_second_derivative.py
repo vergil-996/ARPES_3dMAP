@@ -165,7 +165,7 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
 
 
 class SecondDerivativeSliderControlTests(unittest.TestCase):
-    """2D 二阶导页的区间模式：切片来源只移动位置，积分来源保留完整区间。"""
+    """2D 二阶导页与来源切片共用可解锁加厚的物理区间。"""
 
     @staticmethod
     def _analyzer_with_axis_interval(*, axis_index=0, low=None, up=None, locked=False):
@@ -181,14 +181,13 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
             coord_sources={"X": "file", "Y": "file", "E": "file", "delay": "index"},
             coord_units={},
         )
-        analyzer.page_data = SimpleNamespace(combo_ax=_StubControl(axis_index))
         analyzer.left_workspace = SimpleNamespace(current_spec=lambda: None)
         space = analyzer._axis_space_for_index(axis_index)
         analyzer.axis_space = space
         analyzer.axis_interval = space.as_interval(low=low, up=up, locked=locked)
         return analyzer
 
-    def test_slice_result_only_moves_position(self):
+    def test_slice_result_preserves_position_and_allows_thickening(self):
         analyzer = self._analyzer_with_axis_interval(axis_index=0, low=0.4, up=0.4)
         spec = SimpleNamespace(
             page_kind="second_derivative",
@@ -205,8 +204,10 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
 
         # 切片位置取最近采样点；区间仍是零长度。
         self.assertEqual(spec.params["slice_index"], 6)
+        self.assertEqual(spec.params["integral_low"], 6)
+        self.assertEqual(spec.params["integral_up"], 6)
         self.assertEqual(spec.params["axis_interval"]["low"], spec.params["axis_interval"]["up"])
-        self.assertEqual(mode, IntervalEditMode.POSITION)
+        self.assertEqual(mode, IntervalEditMode.FULL)
         self.assertTrue(show_position)
 
     def test_integral_result_keeps_the_full_interval(self):
@@ -245,8 +246,7 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
             analyzer._axis_interval_context(derivative_3d)[1], IntervalEditMode.DISABLED
         )
         _axis_index, mode, show_position = analyzer._axis_interval_context(regular_page)
-        self.assertEqual(mode, IntervalEditMode.FULL)
-        # 3D 主页仍可用区间控件驱动选择盒，但不显示底栏位置滑条。
+        self.assertEqual(mode, IntervalEditMode.DISABLED)
         self.assertFalse(show_position)
 
     def test_new_slice_result_seeds_a_zero_length_interval(self):
@@ -268,7 +268,8 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
         self.assertEqual(interval["axis_key"], "Y")
         self.assertEqual(interval["low"], interval["up"])
         self.assertEqual((spec.params["low"], spec.params["up"], spec.params["mid"]), (4, 4, 4))
-        self.assertEqual(spec.params["control_state"]["data_process"]["combo_ax"]["index"], 1)
+        self.assertEqual(spec.params["axis_interval"]["axis_key"], "Y")
+        self.assertNotIn("combo_ax", spec.params["control_state"]["data_process"])
 
     def test_new_integral_result_seeds_the_integral_window(self):
         analyzer = self._analyzer_with_axis_interval()

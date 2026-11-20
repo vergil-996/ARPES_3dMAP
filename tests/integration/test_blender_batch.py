@@ -3,6 +3,7 @@ import time
 import unittest
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
 from PyQt5.QtWidgets import QApplication
@@ -10,6 +11,7 @@ from PyQt5.QtWidgets import QApplication
 from bandscope.exporting.blender_batch import (
     BlenderFreezeError, capture_blender_snapshots, list_blender_pages,
 )
+from bandscope.exporting.publication_export import ExportError, capture_snapshot
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from tests.support.view_recipe import control_window, synthetic_npz
 
@@ -67,9 +69,16 @@ class BlenderBatchTests(unittest.TestCase):
     def test_batch_freezes_exact_independent_pages_and_restores_workspace(self):
         first_id, first_page, second_id, second_home = self._load_two_sources()
         before_camera = np.asarray(self.window._current_3d_camera_position(), dtype=float)
+
+        def check_controls_during_freeze(index, total, _message):
+            if index < total:
+                self.assertFalse(self.window.page_container.isEnabled())
+                self.assertFalse(self.window.source_switcher_bar.isEnabled())
+
         snapshots = capture_blender_snapshots(
             self.window,
             [(first_id, first_page), (second_id, second_home), (second_id, second_home)],
+            progress=check_controls_during_freeze,
         )
         self.assertEqual(len(snapshots), 2)
         self.assertEqual(snapshots[0].source_session_id, first_id)
@@ -84,6 +93,8 @@ class BlenderBatchTests(unittest.TestCase):
             np.asarray(self.window._current_3d_camera_position(), dtype=float), before_camera,
         )
         self.assertIsNone(self.window._blender_freeze_widget_states)
+        self.assertTrue(self.window.page_container.isEnabled())
+        self.assertTrue(self.window.source_switcher_bar.isEnabled())
 
     def test_failure_and_cancel_restore_controls_and_current_page(self):
         first_id, first_page, second_id, second_home = self._load_two_sources()
@@ -92,6 +103,14 @@ class BlenderBatchTests(unittest.TestCase):
         self.assertEqual(self.window.source_manager.active_id, second_id)
         self.assertEqual(self.window.left_workspace.current_page_id, second_home)
         self.assertIsNone(self.window._blender_freeze_widget_states)
+        with patch("bandscope.exporting.blender_batch.capture_snapshot", side_effect=ExportError("E 轴非均匀")):
+            with self.assertRaisesRegex(BlenderFreezeError, "冻结页面失败.*\\nE 轴非均匀"):
+                capture_blender_snapshots(self.window, [(first_id, first_page)])
+        self.assertEqual(self.window.source_manager.active_id, second_id)
+        self.assertEqual(self.window.left_workspace.current_page_id, second_home)
+        self.assertTrue(self.window.page_container.isEnabled())
+        self.assertTrue(self.window.source_switcher_bar.isEnabled())
+
         cancelled = threading.Event()
         cancelled.set()
         with self.assertRaisesRegex(BlenderFreezeError, "取消"):
@@ -100,6 +119,43 @@ class BlenderBatchTests(unittest.TestCase):
             )
         self.assertEqual(self.window.source_manager.active_id, second_id)
         self.assertEqual(self.window.left_workspace.current_page_id, second_home)
+        self.assertIsNone(self.window._blender_freeze_widget_states)
+        self.assertTrue(self.window.page_container.isEnabled())
+        self.assertTrue(self.window.source_switcher_bar.isEnabled())
+
+    def test_freeze_preserves_explicit_and_inherited_disabled_states(self):
+        _, _, second_id, second_home = self._load_two_sources()
+        self.window.page_container.setEnabled(False)
+        self.window.toolbar.setEnabled(False)
+        capture_blender_snapshots(self.window, [(second_id, second_home)])
+
+        self.assertFalse(self.window.page_container.isEnabled())
+        self.assertFalse(self.window.toolbar.isEnabled())
+        self.assertFalse(self.window.source_switcher_bar.isEnabled())
+        self.window.toolbar.setEnabled(True)
+        self.assertTrue(self.window.source_switcher_bar.isEnabled())
+
+    def test_rounded_energy_axis_allows_blender_and_slice_capture(self):
+        path = Path(self.temp.name) / "rounded-energy.npz"
+        shape = (4, 5, 8)
+        data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        energy = np.linspace(5.007, 5.0, shape[2], dtype=np.float32)
+        np.savez(path, sample=data, kx=np.arange(shape[0]), ky=np.arange(shape[1]), E=energy,
+                 axis_order=np.array(["X", "Y", "E"]), axis_mapping_version=1)
+        self.assertTrue(self.window.load_data(str(path)))
+        key = (self.window.source_manager.active_id, self.window.left_workspace.home_page_id)
+
+        volume, = capture_blender_snapshots(self.window, [key])
+        np.testing.assert_array_equal(volume.coords["E"], energy)
+        np.testing.assert_array_equal(volume.payload["volume"], data)
+        self.assertFalse(np.shares_memory(volume.coords["E"], self.window.core.coords["E"]))
+
+        self.window.home_slice_info = {"axis": 0, "index": 1}
+        image = capture_snapshot(self.window)
+        self.assertEqual(image.view, "2d")
+        np.testing.assert_array_equal(image.coords["E"], energy)
+        np.testing.assert_array_equal(image.payload["image"], data[1].T[::-1])
+        self.assertEqual(image.payload["extent"][2:], [float(energy[-1]), float(energy[0])])
 
     def test_top_blender_action_opens_independent_dialog(self):
         self.assertTrue(hasattr(self.window, "btn_tb_blender"))

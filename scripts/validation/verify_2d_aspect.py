@@ -114,12 +114,10 @@ def main():
         QTimer.singleShot(12000, step_small)
 
     def apply_axis_integral(axis_index, follow_up):
-        """回到主页再改轴向：轴向下拉会联动刷新当前 2D 页，先离开它。"""
         window.left_workspace.activate_page(window.left_workspace.home_page_id)
-        window.page_data.combo_ax.setCurrentIndex(axis_index)
 
         def click():
-            window.page_data.btn_ax_apply.click()
+            window.canvas_tool_overlay.preset_buttons[{0: "yz", 1: "xz", 2: "xy"}[axis_index]].click()
             QTimer.singleShot(7000, follow_up)
 
         QTimer.singleShot(700, click)

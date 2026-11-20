@@ -278,8 +278,8 @@ def main():
                     check("global gamma colors survive last region deletion", np.allclose(session.display_channel.buffer[:, 0], color.ravel(order="F")))
                     check("global gamma opacity survives last region deletion", np.allclose(session.display_channel.buffer[:, 1], alpha.ravel(order="F")))
                 screenshot("3d_restored")
-                window.page_data.combo_ax.setCurrentIndex(1)
-                window.on_apply_axis_integral()
+                from scripts.validation._common import create_axis_slice
+                create_axis_slice(window, 1)
             elif step == 7:
                 check("2D integral ready", window.current_render_context["view"] == "2d")
                 verify_global_gamma("2D")

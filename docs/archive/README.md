@@ -7,6 +7,8 @@
 - [UI 设计稿](ui/ui_redesign_mockup.html)
 - [图片导出研究计划（2026-09-21）](publication-export/publication_export_research_plan_2026-09-21.md)
 - [图片导出历史验收报告](publication-export/publication_export_acceptance/validation_report.md)
+- [等能面折线路径切片（2026-11-20）](path-slice/README.md)：选点、分段取样与显示、视口、导出及复现；含最终自动化与真实窗口验收记录。
+- [画布坐标轴切片与双端区间条（2026-11-20）](canvas-axis-slices/README.md)：XY／XZ／YZ 建页、来源冻结、单层解锁加厚、精细控件与三级底栏布局；含自动化及真实窗口验收。
 - [1D 截图与导出样式优化（2026-10-10）](1d-export-style/README.md)：三阶段实施、自动化回归与实测窗口验收，含计划及样例。
 - [截图样式中英文字体选择（2026-10-09）](screenshot-font-selection/README.md)：英文 / 中文各四种字体，随样式保存。
 - [2D 截图刻线样式（2026-10-09）](screenshot-tick-style/README.md)：刻线方向与颜色，仅 2D 可见。

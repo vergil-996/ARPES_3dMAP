@@ -351,7 +351,6 @@ class CropTimeFrameTests(unittest.TestCase):
         analyzer.shared_denoise_version = 0
         analyzer._get_spec_denoise_methods = lambda _spec: []
         analyzer.request_refresh = Mock()
-        analyzer.page_data.combo_ax = SimpleNamespace(currentIndex=lambda: 0)
         frame = np.arange(4 * 5 * 6, dtype=np.float32).reshape(4, 5, 6)
         raw_data = np.stack([frame, frame * 3, frame * 7], axis=-1)
         coords = {"X": np.arange(4.0), "Y": np.arange(5.0),

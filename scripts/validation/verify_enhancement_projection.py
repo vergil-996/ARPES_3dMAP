@@ -45,10 +45,8 @@ def main():
         print(f"[PASS] {name}", flush=True)
 
     def apply_axis(axis):
-        window.page_data.combo_ax.setCurrentIndex(axis)
-        window.page_data.s_ax_low.setValue(0)
-        window.page_data.s_ax_up.setValue(window.page_data.s_ax_up.maximum())
-        window.on_apply_axis_integral()
+        from scripts.validation._common import create_axis_slice
+        create_axis_slice(window, axis, full_range=True)
 
     def tick():
         try:

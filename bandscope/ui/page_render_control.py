@@ -53,6 +53,7 @@ class RenderControlPage(ControlPageBase):
     camera_view_reset_requested = pyqtSignal()
     display_mode_changed = pyqtSignal(str)
     display_value_changed = pyqtSignal()
+    display_value_committed = pyqtSignal()
 
     def build_body(self):
         # 相机视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
@@ -275,6 +276,7 @@ class RenderControlPage(ControlPageBase):
 
         slider.valueChanged.connect(from_slider)
         spin.valueChanged.connect(from_spin)
+        slider.sliderReleased.connect(self.display_value_committed)
         return slider, spin, title_label
 
     def _on_display_mode_combo(self, _index):

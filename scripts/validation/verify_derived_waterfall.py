@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import sys
@@ -52,6 +53,8 @@ from bandscope.extensions.plugin_manager import (  # noqa: E402
 )
 from bandscope.extensions.trust import SOURCE_LOCAL  # noqa: E402
 from scripts.release.build_plugin import build as build_package  # noqa: E402
+
+faulthandler.enable()
 
 RESULTS = []
 
@@ -158,14 +161,15 @@ def main() -> int:
         wait_for(
             "主页 3D 渲染",
             lambda: window.current_render_context is not None
-            and window.current_render_context.get("view") == "3d",
+            and window.current_render_context.get("view") == "3d"
+            and window._render_exact_ready
+            and window._camera_view_active(),
             step_integral,
             timeout_ms=90000,
         )
 
     def step_integral():
-        window.page_data.combo_ax.setCurrentIndex(0)
-        window.on_apply_axis_integral()
+        window.canvas_tool_overlay.preset_buttons["yz"].click()
         wait_for(
             "X 轴积分页渲染",
             lambda: window.left_workspace.current_spec() is not None
@@ -320,19 +324,21 @@ def main() -> int:
         # 画面用的是「视觉翻转」后的上下文（current_render_context 保持原始方向）。
         flipped = window._render_context_for_visual_flip(window._compute_render_context(spec))
         record(
-            "翻转后的显示上下文定向翻转",
-            np.allclose(flipped["energy_axis"], np.flip(base["energy_axis"]))
-            and np.allclose(flipped["curves"], np.flip(base["curves"], axis=1)),
-            "能量轴与曲线一起反序",
+            "翻转后的显示上下文保留原数组并标记镜像",
+            flipped.get("display_e_flip") is True
+            and np.allclose(flipped["energy_axis"], base["energy_axis"])
+            and np.allclose(flipped["curves"], base["curves"]),
+            "显示轴反转，数值顺序不变",
         )
-        # 屏幕重绘后仍与归一化曲线逐点对齐（瀑布按升序绘制，观感不变）。
+        # 屏幕曲线数据保持原向并逐点对齐，Y 显示轴按开关反转。
         lines = [line for line in window.ax_2d.lines]
         offsets = np.asarray(pe.waterfall_offsets(base))
         screen_ok = bool(lines) and len(lines) == len(base["curves"])
         if screen_ok:
             energy_on_screen = np.asarray(lines[0].get_ydata(), dtype=np.float64)
             screen_ok = (
-                energy_on_screen.size == base["energy_axis"].size
+                window.ax_2d.yaxis_inverted()
+                and energy_on_screen.size == base["energy_axis"].size
                 and energy_on_screen[0] <= energy_on_screen[-1]
                 and np.allclose(
                     np.asarray(lines[-1].get_xdata()) - offsets[-1],
@@ -499,6 +505,9 @@ def main() -> int:
             json.dumps(RESULTS, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"[accept] {ok_count}/{len(RESULTS)} 项通过；输出 {args.output_dir}", flush=True)
+        for widget in QApplication.topLevelWidgets():
+            if widget.isVisible():
+                widget.close()
         app.quit()
 
     def launch():
@@ -511,6 +520,8 @@ def main() -> int:
     QTimer.singleShot(0, launch)
     QTimer.singleShot(600000, app.quit)
     app.exec_()
+    window.close()
+    app.processEvents()
     failures = [item for item in RESULTS if not item["ok"]]
     return 1 if failures else 0
 

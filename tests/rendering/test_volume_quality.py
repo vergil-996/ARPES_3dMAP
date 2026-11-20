@@ -97,6 +97,8 @@ class VolumeQualityTests(unittest.TestCase):
                  "coords": {key: np.arange(size) for key, size in zip(("X", "Y", "E"), self.data.shape)}},
                 state,
             )
+            fields["color_token"] = 1 if revision == 1 else 2
+            fields["alpha_token"] = 1 if revision < 3 else 3
             self.session.render(
                 self.data, style["levels"], "linear", show_axes=False,
                 display_fields=fields, display_token=revision,

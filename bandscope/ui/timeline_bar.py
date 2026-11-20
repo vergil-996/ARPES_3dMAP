@@ -1,25 +1,24 @@
 # -*- coding: utf-8 -*-
-"""画布下方底条 —— 左侧积分位置 / 时间轴 + 右侧画布视图控件。
+"""画布下方底条 —— 左侧双端积分区间 / 时间轴 + 右侧画布视图控件。
 
 底条自己创建并持有这些控件（原「图像控制」页已删除）：
 
-- 左起第一组：当前积分轴向的位置滑条 + 物理值输入框（``slider_axis`` /
-  ``input_axis``）。只有需要位置控制的页面才出现；数据没有时间轴坐标时它
-  直接占用原时间轴的位置，左侧不留空位。
+- 左起第一组：切片方向、双端区间条与长度输入框。端点保留精确物理坐标，
+  重合时锁定为单层；解锁可扩成区间。只有二维切片页出现；数据没有时间轴
+  坐标时它直接占用原时间轴的位置，左侧不留空位。
 - 左起第二组：时间轴（滑条 + 帧号输入框 + 提示 + 总帧数），按数据显隐；只提供
   手动滑帧与帧号定位，不提供自动播放；与位置滑条同排时两者共享富余宽度。
 - 右侧：显示坐标 / 图像翻转 开关与 Z 轴旋转输入框，常驻右对齐。宽度不够时
   整组下移到第二行，底条高度同步增加。
 
-主窗口的所有信号、快捷键和按结果页保存的控件状态都指向这里的同名属性
-（``slider_time`` / ``input_time`` / ``time_hint`` / ``switch_axes`` /
-``switch_flip`` / ``edit_rotation``），:meth:`export_state` /
+主窗口的时间轴、快捷键和按结果页保存的控件状态都指向这里的同名属性
+（``interval_control`` / ``slider_time`` / ``input_time`` / ``time_hint`` /
+``switch_axes`` / ``switch_flip`` / ``edit_rotation``），:meth:`export_state` /
 :meth:`restore_state` 保持与迁移前完全相同的字典结构。
 """
 
 from PyQt5.QtCore import QSize, Qt, QSignalBlocker, pyqtSignal
 from PyQt5.QtWidgets import (
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -37,6 +36,7 @@ from bandscope.ui.control_layout_utils import (
     animate_widget_width,
     set_widget_visibility_instant,
 )
+from bandscope.ui.axis_interval_bar import AxisIntervalControl
 from bandscope.ui.ui_controls import RotationSpinBox, SyncedSlider, SyncedSwitch
 
 
@@ -85,6 +85,7 @@ class TimelineBar(QFrame):
     #: 底条单行高度；出现第二行（视图控件下移）时再加 ``SECOND_ROW_HEIGHT``。
     HEIGHT = 64
     SECOND_ROW_HEIGHT = 40
+    THIRD_ROW_HEIGHT = 36
     # 滑条长度下限：窄窗口下仍能拖动。滑条没有长度上限——分组吸满富余宽度，
     # 滑条一直顶到相邻分组前，只留一处与行内一致的间隙（layout spacing）。
     SLIDER_MIN_WIDTH = 160
@@ -144,6 +145,15 @@ class TimelineBar(QFrame):
         self.secondary_row.setVisible(False)
         outer.addWidget(self.secondary_row)
 
+        self.tertiary_row = QWidget(self)
+        self.tertiary_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._tertiary_layout = QHBoxLayout(self.tertiary_row)
+        self._tertiary_layout.setContentsMargins(0, 0, 0, 0)
+        self._tertiary_layout.setSpacing(12)
+        self._tertiary_layout.addStretch()
+        self.tertiary_row.setVisible(False)
+        outer.addWidget(self.tertiary_row)
+
         # —— 左：积分位置组（整体收放）——
         self.axis_group = QWidget(self)
         self._axis_layout = QHBoxLayout(self.axis_group)
@@ -194,6 +204,7 @@ class TimelineBar(QFrame):
         self._timeline_visible_target = True
         self._axis_visible_target = False
         self._wrapped = False
+        self._view_stacked = False
         self._create_axis_controls()
         self._create_timeline_controls()
         self._create_view_controls()
@@ -204,39 +215,9 @@ class TimelineBar(QFrame):
     # 控件创建
     # ------------------------------------------------------------------
     def _create_axis_controls(self):
-        self.axis_accent = QFrame(self.axis_group)
-        self.axis_accent.setFixedSize(4, 26)
-        self.axis_accent.setStyleSheet(
-            f"background-color: {theme.ACCENT}; border: none; border-radius: 2px;"
-        )
-        self._axis_layout.addWidget(self.axis_accent, 0, Qt.AlignVCenter)
-
-        self._axis_title_block = QVBoxLayout()
-        self._axis_title_block.setContentsMargins(0, 0, 0, 0)
-        self._axis_title_block.setSpacing(2)
-        self.axis_title_label = QLabel("积分位置", self.axis_group)
-        self.axis_title_label.setStyleSheet(theme.card_title_qss())
-        self.axis_title_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self._axis_title_block.addWidget(self.axis_title_label)
-        self._axis_layout.addLayout(self._axis_title_block)
-        self._axis_layout.addSpacing(self.LABEL_CONTROL_SPACING)
-
-        self.slider_axis = ContinuousFrameSlider(self.axis_group)
-        self.slider_axis.setFixedHeight(32)
-        self.slider_axis.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.slider_axis.setMinimumWidth(self.AXIS_SLIDER_MIN_WIDTH)
-        theme.style_accent_slider(self.slider_axis)
-        self._axis_layout.addWidget(self.slider_axis, self.SLIDER_STRETCH)
-
-        self.input_axis = QDoubleSpinBox(self.axis_group)
-        self.input_axis.setFixedSize(self.AXIS_VALUE_BOX_WIDTH, self.AXIS_VALUE_BOX_HEIGHT)
-        self.input_axis.setKeyboardTracking(False)
-        self.input_axis.setAlignment(Qt.AlignCenter)
-        self.input_axis.setFocusPolicy(Qt.StrongFocus)
-        self.input_axis.setToolTip("当前积分区间中心（物理坐标，可直接输入）")
-        self.input_axis.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.input_axis.setStyleSheet(theme.value_input_qss())
-        self._axis_layout.addWidget(self.input_axis, 0, Qt.AlignVCenter)
+        self.interval_control = AxisIntervalControl(self.axis_group)
+        self._axis_layout.addWidget(self.interval_control, self.SLIDER_STRETCH)
+        self.axis_title_label = self.interval_control.title_label
 
     def _create_timeline_controls(self):
         self.time_hint = QLabel("当前帧 · 拖动滑条或输入帧号", self.timeline_group)
@@ -360,20 +341,43 @@ class TimelineBar(QFrame):
         needed = self._groups_min_width() + self._view_controls_width()
         return available < needed
 
+    def _should_stack_view(self, wrapped):
+        if not (wrapped and self._axis_visible_target and self._timeline_visible_target):
+            return False
+        needed = self._timeline_group_min_width() + self._view_controls_width()
+        return self._available_row_width() < needed
+
     def _apply_wrap(self, wrapped):
-        if self._wrapped == wrapped:
+        stacked = self._should_stack_view(wrapped)
+        if self._wrapped == wrapped and self._view_stacked == stacked:
             return
         self._wrapped = wrapped
+        self._view_stacked = stacked
         self._primary_layout.removeWidget(self.view_controls)
+        self._secondary_layout.removeWidget(self.view_controls)
+        self._tertiary_layout.removeWidget(self.view_controls)
+        timeline_in_secondary = wrapped and self._axis_visible_target and self._timeline_visible_target
+        if timeline_in_secondary:
+            self._primary_layout.removeWidget(self.timeline_group)
+            self._secondary_layout.insertWidget(0, self.timeline_group, self.TIMELINE_STRETCH)
+        else:
+            self._secondary_layout.removeWidget(self.timeline_group)
+            self._primary_layout.insertWidget(1, self.timeline_group, self.TIMELINE_STRETCH)
 
-        if wrapped:
+        if stacked:
+            self._tertiary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
+        elif wrapped:
             self._secondary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
-            self.secondary_row.setVisible(True)
-            self.setFixedHeight(self.HEIGHT + self.SECOND_ROW_HEIGHT)
         else:
             self._primary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
-            self.secondary_row.setVisible(False)
-            self.setFixedHeight(self.HEIGHT)
+        self.secondary_row.setVisible(wrapped)
+        self.tertiary_row.setVisible(stacked)
+        height = self.HEIGHT
+        if wrapped:
+            height += self.SECOND_ROW_HEIGHT
+        if stacked:
+            height += self.THIRD_ROW_HEIGHT
+        self.setFixedHeight(height)
 
         self.updateGeometry()
         self.layoutChanged.emit()
@@ -508,7 +512,5 @@ class TimelineBar(QFrame):
         self.layoutChanged.emit()
 
     def set_position_label(self, text):
-        self.axis_title_label.setText(str(text))
-        self.input_axis.setToolTip(f"{text}：当前积分区间中心（物理坐标，可直接输入）")
-        # 标签宽度会改变第一行的最小宽度（例如 kx → kx / Å⁻¹），换行判定要跟着走。
+        self.interval_control.subtitle_label.setText(f"沿 {text} 积分")
         self._apply_wrap(self._should_wrap())

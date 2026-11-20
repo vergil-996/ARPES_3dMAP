@@ -8,13 +8,13 @@
 交互规则（``locked`` 为假时端点各自独立，为真时整体平移）::
 
     操作        未锁定                      已锁定
-    修改上限    越过下限时推动下限          按上限位移整体平移
-    修改下限    越过上限时推动上限          按下限位移整体平移
+    修改上限    到下限处停止                按上限位移整体平移
+    修改下限    到上限处停止                按下限位移整体平移
     平移位置    保持长度整体平移             保持长度整体平移
     修改长度    以当前中心向两侧调整         输入框只读（调用方禁用）
 
-未锁定时端点越过另一端会推动它一起走，允许零长度（单层采样）。
-平移触边时限制位移，两端一起停，长度不变。
+两个物理端点重合时自动锁定。锁浮标只解除编辑锁，不移动端点；解锁后首次
+分离仍从同一个坐标开始。平移触边时限制位移，两端一起停，长度不变。
 """
 
 from __future__ import annotations
@@ -211,8 +211,8 @@ class AxisInterval:
             return False
         if self._locked:
             return self._translate(value - self._up)
-        value = self._clamp_endpoint(value, self._minimum, self._maximum)
-        return self._assign(low=min(self._low, value), up=value)
+        value = self._clamp_endpoint(value, self._low, self._maximum)
+        return self._assign(up=value)
 
     def set_low(self, value):
         """修改下限；锁定时按下限位移整体平移。"""
@@ -221,8 +221,8 @@ class AxisInterval:
             return False
         if self._locked:
             return self._translate(value - self._low)
-        value = self._clamp_endpoint(value, self._minimum, self._maximum)
-        return self._assign(low=value, up=max(self._up, value))
+        value = self._clamp_endpoint(value, self._minimum, self._up)
+        return self._assign(low=value)
 
     def set_center(self, value):
         """保持长度整体平移。"""
@@ -238,6 +238,8 @@ class AxisInterval:
             return False
 
         target = min(max(value, 0.0), self.span)
+        if target == 0.0 and self.length == 0.0:
+            return self.set_locked(True)
         center = self.center
         low = center - target / 2.0
         up = center + target / 2.0
@@ -410,6 +412,8 @@ class AxisInterval:
             return False
         self._low = new_low
         self._up = new_up
+        if new_low == new_up:
+            self._locked = True
         return True
 
     @staticmethod

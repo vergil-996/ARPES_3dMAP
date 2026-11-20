@@ -60,6 +60,39 @@ class IndependentDisplayTests(unittest.TestCase):
         self.assertFalse(np.array_equal(alpha_a, alpha_c))
         np.testing.assert_array_equal(self.data, original)
 
+    def test_partial_channels_match_full_and_reuse_the_other_array(self):
+        full_color, full_alpha = channels(
+            self.data, self.info, "linear", style=self.style, unit_distance=2.0,
+        )
+        other = new_display_style(levels=(20, 100, 80))
+        other["normalization"] = self.style["normalization"].copy()
+        other_info = display_level_info(self.data, other)
+        with patch("bandscope.processing.display_transfer.independent_opacity_values") as opacity:
+            color, alpha = channels(
+                self.data, other_info, "linear", style=other, unit_distance=2.0,
+                alpha=full_alpha,
+            )
+        opacity.assert_not_called()
+        self.assertIs(alpha, full_alpha)
+        expected_color, expected_alpha = channels(
+            self.data, other_info, "linear", style=other, unit_distance=2.0,
+        )
+        np.testing.assert_array_equal(color, expected_color)
+        np.testing.assert_array_equal(alpha, expected_alpha)
+
+        other["opacity"]["density"] = 45.0
+        with patch("bandscope.processing.display_transfer.normalized_color_samples") as normalized:
+            color, alpha = channels(
+                self.data, other_info, "linear", style=other, unit_distance=2.0,
+                color=expected_color,
+            )
+        normalized.assert_not_called()
+        self.assertIs(color, expected_color)
+        _expected_color, expected_alpha = channels(
+            self.data, other_info, "linear", style=other, unit_distance=2.0,
+        )
+        np.testing.assert_array_equal(alpha, expected_alpha)
+
     def test_zero_density_and_zero_transition(self):
         self.style["opacity"].update(density=0.0)
         alpha = independent_opacity_values(self.data, self.info, self.style, 100.0)
@@ -114,6 +147,17 @@ class IndependentDisplayTests(unittest.TestCase):
         self.assertTrue(gpu_display.enabled())
         np.testing.assert_allclose(gpu_color, cpu_color, rtol=0.0, atol=1e-7)
         np.testing.assert_allclose(gpu_alpha, cpu_alpha, rtol=0.0, atol=1e-7)
+        self.assertIs(gpu_color.base, gpu_alpha.base)
+        self.assertEqual(gpu_color.base.size, values.size * 2)
+        self.assertEqual(
+            gpu_alpha.__array_interface__["data"][0],
+            gpu_color.__array_interface__["data"][0] + gpu_color.itemsize,
+        )
+        partial_color, partial_alpha = channels(
+            values, info, "linear", style=style, unit_distance=2.5, color=gpu_color,
+        )
+        self.assertIs(partial_color, gpu_color)
+        np.testing.assert_allclose(partial_alpha, cpu_alpha, rtol=0.0, atol=1e-7)
 
 
 if __name__ == "__main__":

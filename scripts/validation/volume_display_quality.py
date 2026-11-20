@@ -301,8 +301,8 @@ class VolumeQualityAcceptance:
         self._slice_case()
 
     def _slice_case(self):
-        self.window.page_data.combo_ax.setCurrentIndex(0)
-        self.window.on_apply_axis_integral()
+        from scripts.validation._common import create_axis_slice
+        create_axis_slice(self.window, 0)
         self._wait_ready(self._slice_ready)
 
     def _slice_ready(self):

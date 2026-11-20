@@ -155,8 +155,8 @@ def main():
         screenshot("roi_flipped")
         window.btn_tb_crop.setChecked(False)
         window._select_control_page(1)
-        window.page_data.combo_ax.setCurrentIndex(0)
-        window.page_data.btn_ax_apply.click()
+        from scripts.validation._common import create_axis_slice
+        create_axis_slice(window, 0)
         QTimer.singleShot(1000, lambda: ready("2d", analysis))
 
     def analysis():

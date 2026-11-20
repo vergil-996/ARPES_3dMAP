@@ -13,6 +13,8 @@ class CanvasToolOverlay(QFrame):
     reset_requested = pyqtSignal()
     focus_requested = pyqtSignal(bool)
     view_preset_requested = pyqtSignal(str)
+    slice_requested = pyqtSignal(str)
+    return_3d_requested = pyqtSignal()
 
     def __init__(self, parent, crop_button, erase_button, export_button):
         super().__init__(parent)
@@ -26,6 +28,7 @@ class CanvasToolOverlay(QFrame):
         layout.setContentsMargins(padding, padding, padding, padding)
         layout.setSpacing(4)
         self._3d_active = False
+        self._return_active = False
 
         self.preset_container = QFrame(self)
         preset_layout = QVBoxLayout(self.preset_container)
@@ -35,10 +38,15 @@ class CanvasToolOverlay(QFrame):
         for key, label in (("3d", "3D"), ("xy", "XY"), ("xz", "XZ"), ("yz", "YZ")):
             button = ActionButton(self.preset_container)
             button.setText(label)
-            button.setCheckable(True)
+            button.setCheckable(key == "3d")
             button.setChecked(key == "3d")
             button.setFixedSize(34, 26)
-            button.setToolTip({"3d": "等轴三维视图", "xy": "XY 俯视", "xz": "XZ 正视", "yz": "YZ 侧视"}[key])
+            button.setToolTip({
+                "3d": "等轴三维视图；在切片页返回三维来源",
+                "xy": "新建 XY 切片（沿 E 轴积分）",
+                "xz": "新建 XZ 切片（沿 Y 轴积分）",
+                "yz": "新建 YZ 切片（沿 X 轴积分）",
+            }[key])
             button.setStyleSheet(theme.nav_tab_qss())
             button.clicked.connect(lambda _checked=False, preset=key: self._select_preset(preset))
             self.preset_buttons[key] = button
@@ -71,6 +79,25 @@ class CanvasToolOverlay(QFrame):
         self.focus_button.toggled.connect(self.focus_requested)
         layout.addWidget(self.focus_button, 0, Qt.AlignHCenter)
         self.adjustSize()
+
+    def install_path_button(self, button):
+        self.path_button = button
+        button.setParent(self)
+        self._configure_button(button, "折线路径切片", "ic_fluent_bezier_curve_square_regular")
+        button.setCheckable(True)
+        button.setToolTip("折线路径切片：左键加点，双击节点改名，右键生成")
+        layout = self.layout()
+        layout.insertWidget(3, button, 0, Qt.AlignHCenter)
+        button.hide()
+        self.adjustSize()
+        self.reposition()
+
+    def set_path_available(self, available):
+        button = getattr(self, "path_button", None)
+        if button is not None:
+            button.setVisible(bool(available))
+            self.adjustSize()
+            self.reposition()
 
     def _rounded_rect_path(self, pen_inset=0):
         inset = self._MASK_INSET + pen_inset
@@ -129,8 +156,13 @@ class CanvasToolOverlay(QFrame):
         return line
 
     def _select_preset(self, preset):
-        for key, button in self.preset_buttons.items():
-            button.setChecked(key == preset)
+        if preset != "3d":
+            self.slice_requested.emit(preset)
+            return
+        if self._return_active and not self._3d_active:
+            self.return_3d_requested.emit()
+            return
+        self.preset_buttons["3d"].setChecked(True)
         self.view_preset_requested.emit(preset)
 
     def _on_focus_toggled(self, checked):
@@ -146,16 +178,26 @@ class CanvasToolOverlay(QFrame):
 
     def set_3d_active(self, active):
         self._3d_active = bool(active)
+        if active:
+            self._return_active = False
         self.reset_button.setEnabled(self._3d_active)
         for button in self.preset_buttons.values():
             button.setEnabled(self._3d_active)
+        self.reposition()
+
+    def set_return_active(self, active):
+        self._return_active = bool(active)
+        self.preset_buttons["3d"].setEnabled(self._3d_active or self._return_active)
         self.reposition()
 
     def reposition(self):
         parent = self.parentWidget()
         if parent is None:
             return
-        self.preset_container.setVisible(self._3d_active and parent.height() >= 320)
+        for key, button in self.preset_buttons.items():
+            button.setVisible(self._3d_active or (key == "3d" and self._return_active))
+        show_presets = (self._3d_active and parent.height() >= 320) or self._return_active
+        self.preset_container.setVisible(show_presets)
         self.adjustSize()
         self.move(max(0, parent.width() - self.width() - 12), 12)
         self.raise_()

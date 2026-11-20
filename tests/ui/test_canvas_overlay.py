@@ -109,15 +109,24 @@ class CanvasToolOverlayTests(unittest.TestCase):
         self.assertFalse(window.mask().contains(visible.bottomRight()))
         self.assertTrue(window.mask().contains(QPoint(visible.right(), visible.center().y())))
 
-    def test_view_presets_emit_the_selected_camera(self):
+    def test_plane_buttons_create_slices_and_3d_returns_to_source(self):
         _parent, overlay, _buttons = self.make_overlay()
         overlay.set_3d_active(True)
-        received = []
-        overlay.view_preset_requested.connect(received.append)
+        slices = []
+        cameras = []
+        returned = []
+        overlay.slice_requested.connect(slices.append)
+        overlay.view_preset_requested.connect(cameras.append)
+        overlay.return_3d_requested.connect(lambda: returned.append(True))
         overlay.preset_buttons["xy"].click()
-        self.assertEqual(received, ["xy"])
-        self.assertTrue(overlay.preset_buttons["xy"].isChecked())
-        self.assertFalse(overlay.preset_buttons["3d"].isChecked())
+        self.assertEqual(slices, ["xy"])
+        self.assertEqual(cameras, [])
+        self.assertTrue(overlay.preset_buttons["3d"].isChecked())
+
+        overlay.set_3d_active(False)
+        overlay.set_return_active(True)
+        overlay.preset_buttons["3d"].click()
+        self.assertEqual(returned, [True])
 
     def test_focus_mode_updates_the_existing_button_and_3d_state(self):
         _parent, overlay, _buttons = self.make_overlay()

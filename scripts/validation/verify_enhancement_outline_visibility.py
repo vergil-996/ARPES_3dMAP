@@ -102,10 +102,8 @@ def main():
                 check("3D enhanced volume survives outline changes", np.array_equal(buffer, window.volume_session.display_channel.buffer))
                 screenshot("3d_hidden")
                 combo.setCurrentIndex(3)
-                window.page_data.combo_ax.setCurrentIndex(1)
-                window.page_data.s_ax_low.setValue(0)
-                window.page_data.s_ax_up.setValue(window.page_data.s_ax_up.maximum())
-                window.on_apply_axis_integral()
+                from scripts.validation._common import create_axis_slice
+                create_axis_slice(window, 1, full_range=True)
             else:
                 combo = window.page_render.region_combo
                 check("2D inherits both enhancement effects", len(window._enhancement_display(window.current_render_context)["regions"]) == 2)

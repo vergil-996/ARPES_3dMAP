@@ -98,11 +98,7 @@ class View3dBackgroundTests(unittest.TestCase):
             self.addCleanup(window.close)
             self.assertTrue(window.load_data(str(path)))
 
-            window._set_camera_view_preset("xy")
-
-            self.assertTrue(window.canvas_tool_overlay.preset_buttons["xy"].isChecked())
-            self.assertFalse(window.canvas_tool_overlay.preset_buttons["3d"].isChecked())
-            window._set_camera_view_preset("3d")
+            window.canvas_tool_overlay.preset_buttons["3d"].click()
             self.assertTrue(window.canvas_tool_overlay.preset_buttons["3d"].isChecked())
 
 

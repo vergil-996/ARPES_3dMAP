@@ -119,7 +119,8 @@ class TimeIntegralDerivationTests(unittest.TestCase):
         control_state = params["control_state"]
         data_state = control_state["data_process"]
         self.assertEqual(control_state["axis_source_mode"], "time_integral")
-        self.assertEqual(data_state["combo_ax"], {"index": 1, "text": "Y轴"})
+        self.assertNotIn("combo_ax", data_state)
+        self.assertEqual(params["axis_index"], 1)
         self.assertEqual(data_state["s_t_low"]["value"], 1)
         self.assertEqual(data_state["s_t_up"]["value"], 3)
 

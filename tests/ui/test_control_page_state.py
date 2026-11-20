@@ -119,7 +119,6 @@ class ControlPageStateTests(unittest.TestCase):
             page.resize(336, 900)
             page.show()
             combos = (page.combo_cmap,) if isinstance(page, RenderControlPage) else (
-                page.combo_ax,
                 page.combo_other,
             )
             for combo in combos:

@@ -1385,8 +1385,12 @@ class VolumeRenderSession:
             )
             # 增强区域自带颜色通道：用调用方给的递增 token 判断是否需要重传，
             # 避免相机/坐标轴/标题等刷新把两份体素数组整块再写一遍。
+            color_token = (display_fields.get("color_token", display_token)
+                           if display_fields is not None else None)
+            alpha_token = (display_fields.get("alpha_token", display_token)
+                           if display_fields is not None else None)
             display_signature = (
-                "enhancement", display_token, str(cmap),
+                "enhancement", color_token, alpha_token, str(cmap),
                 None if self.opacity_multiplier is None else tuple(self.opacity_multiplier),
             )
             changed = (display_fields is None and signature != self._style_signature)
@@ -1401,7 +1405,15 @@ class VolumeRenderSession:
                     color, alpha = display_fields["color"], display_fields["alpha"]
                 if self.display_channel is None:
                     self.display_channel = VolumeAlphaChannel(self.volume, self.grid, color, self.finite_flat)
-                apply_volume_display(self.display_channel, color, alpha, cmap, self.opacity_multiplier)
+                previous_display = self._display_signature
+                apply_volume_display(
+                    self.display_channel, color, alpha, cmap, self.opacity_multiplier,
+                    update_color=(display_fields is None or display_token is None
+                                  or previous_display is None or previous_display[1] != color_token),
+                    update_alpha=(display_fields is None or display_token is None
+                                  or previous_display is None or previous_display[2] != alpha_token
+                                  or previous_display[4] != display_signature[4]),
+                )
                 self._style_signature = signature if display_fields is None else None
                 if display_fields is not None:
                     self._display_signature = display_signature

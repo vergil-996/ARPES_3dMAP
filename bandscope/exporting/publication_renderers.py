@@ -28,7 +28,8 @@ import matplotlib
 # 不调用 matplotlib.use()；按需使用 Figure/Agg，不经过 pyplot 全局状态。
 from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.colors import Colormap
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Colormap, Normalize
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, FancyArrowPatch, PathPatch
 from matplotlib.textpath import TextPath
@@ -37,6 +38,7 @@ from matplotlib.transforms import Affine2D
 import numpy as np
 
 from bandscope.rendering.render_core import VisualEngine, VolumeRenderSession
+from bandscope.rendering.path_slice import axis_edges, display_cmap
 from bandscope.exporting.publication_models import (
     DRAGGABLE_TEXT_IDS,
     PUB_CURVE_PALETTE,
@@ -695,6 +697,7 @@ def _draw_colorbar(
     outline: bool,
     title: str,
     style_params: Mapping[str, Any],
+    mappable=None,
 ):
     """在指定 cbar_ax 绘制色条；刻度与冻结的 LUT/norm 严格一致。"""
     ink = style_params.get("ink_color", "#000000")
@@ -704,7 +707,8 @@ def _draw_colorbar(
     high = float(level_info["white_value"])
     if high <= low:
         high = low + 1.0
-    mappable = VisualEngine._colorbar_mappable(cmap, level_info)
+    if mappable is None:
+        mappable = VisualEngine._colorbar_mappable(cmap, level_info)
 
     d_lo, d_hi = data_range
     eps = (high - low) * 1e-9
@@ -894,7 +898,80 @@ def _initial_margins(style_params) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def render_path_slice_publication(snapshot, style, overrides, options, dpi: int) -> Figure:
+    params = _font_style_params(style, overrides)
+    family = "2d"
+    width_mm = float(options.width_mm)
+    height_mm = options.resolved_height_mm(family)
+    fig = _new_figure(width_mm, height_mm, dpi, bool(options.transparent))
+    ax = fig.add_axes([0.15, 0.15, 0.7, 0.7])
+    energy = np.asarray(snapshot.payload["energy"], dtype=np.float64)
+    for segment in snapshot.payload["path_segments"]:
+        ax.pcolormesh(
+            axis_edges(segment["k"]), axis_edges(energy),
+            np.asarray(segment["rgba"], dtype=np.float64),
+            shading="auto", rasterized=True,
+        )
+    ext = [float(value) for value in snapshot.payload["extent"]]
+    ax.set_xlim(ext[0], ext[1])
+    ax.set_ylim(ext[2], ext[3])
+    max_ticks = int(overrides.get("axis_nticks", params.get("max_major_ticks", 5)))
+    _apply_formatter(ax.yaxis, nice_ticks(ext[2], ext[3], max_ticks), ext[2], ext[3])
+    _style_axes_frame(ax, params, overrides, family)
+    ax.set_xticks([])
+    ink = params.get("ink_color", "#000000")
+    if snapshot.payload.get("show_guides"):
+        for position in snapshot.payload["node_k"]:
+            ax.axvline(float(position), color=ink, linestyle=(0, (4, 4)), linewidth=0.55, alpha=0.65)
+    if snapshot.payload.get("show_labels"):
+        transform = ax.get_xaxis_transform()
+        for position, name in zip(snapshot.payload["node_k"], snapshot.payload["node_names"]):
+            ax.text(
+                float(position), -0.035, str(name), transform=transform,
+                ha="center", va="top", color=ink,
+                fontsize=float(params.get("tick_label_size", 6.0)),
+                fontfamily=params.get("font_family", "DejaVu Sans"), clip_on=False,
+            )
+    xlabel, ylabel = resolve_axis_labels(snapshot, overrides)
+    _style_axis_labels(ax, params, xlabel, ylabel)
+    ax.xaxis.labelpad = 18 if snapshot.payload.get("show_labels") else 6
+    _add_panel_label(ax, overrides, params)
+
+    colorbar_payload = snapshot.payload.get("path_colorbar")
+    cbar_layout = _colorbar_layout_for(params, overrides, family) if colorbar_payload else None
+    cbar_ax = None
+    if cbar_layout is not None:
+        info = colorbar_payload["level_info"]
+        cmap = display_cmap(snapshot.cmap_name, info, colorbar_payload["intensity_map"])
+        mappable = ScalarMappable(
+            norm=Normalize(vmin=info["black_value"], vmax=info["white_value"]), cmap=cmap
+        )
+        cbar_ax = fig.add_axes([0.85, 0.15, 0.05, 0.7])
+        _draw_colorbar(
+            fig, cbar_ax, cmap, info, (info["data_min"], info["data_max"]),
+            position=cbar_layout["position"],
+            tick_mode=overrides.get("colorbar_tick_mode", "values"),
+            target_ticks=int(overrides.get("colorbar_nticks", params.get("colorbar_ticks", 3))),
+            outline=bool(overrides.get("colorbar_outline", params.get("colorbar_outline", False))),
+            title=snapshot.payload.get("intensity_label", "Intensity (a.u.)"),
+            style_params=params, mappable=mappable,
+        )
+    margins = _initial_margins(params)
+    if snapshot.payload.get("show_labels"):
+        margins["bottom"] = max(margins["bottom"], 13.0)
+    title_plan = plan_title(snapshot, overrides, params, width_mm)
+    margins, overflow = _fit_layout(
+        fig, ax, cbar_ax, width_mm, height_mm, margins, cbar_layout, title_plan=title_plan
+    )
+    place_title(fig, title_plan, width_mm, height_mm, margins, cbar_layout, overflow)
+    _fit_manual_colorbar_to_canvas(fig, overrides)
+    apply_manual_annotation_positions(fig, overrides)
+    return fig
+
+
 def render_2d(snapshot, style, overrides, options, dpi: int) -> Figure:
+    if snapshot.view == "path_slice":
+        return render_path_slice_publication(snapshot, style, overrides, options, dpi)
     params = _font_style_params(style, overrides)
     family = "2d"
     width_mm = float(options.width_mm)

@@ -279,8 +279,8 @@ class RecipeRoundtripTests(unittest.TestCase):
         w.plugin_session.manager = manager
         record = manager.record("edc_waterfall")
         self.assertTrue(record.ready, record.load_error)
-        w.page_data.combo_ax.setCurrentIndex(0)
-        w.on_apply_axis_integral()
+        axis_spec = w._build_canvas_axis_slice_spec(w.left_workspace.current_spec(), 0)
+        w.left_workspace.add_page(axis_spec)
         pid = w.plugin_session.invoke_integration_action("edc_waterfall", "create")
         self.assertIsNotNone(pid)
         path, _ = self.save()

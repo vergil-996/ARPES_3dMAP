@@ -29,7 +29,7 @@ FORMAT = "bandscope.view"
 SCHEMA_VERSION = 2
 PAGE_KINDS = frozenset({"home", "time_integral", "axis_integral", "axis_integral_crop",
                         "slice_dos", "energy_dos", "edc_curve", "second_derivative",
-                        "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived"})
+                        "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived", "path_slice"})
 
 
 class RecipeError(ValueError):

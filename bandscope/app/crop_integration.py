@@ -140,6 +140,9 @@ class CropInteractionMixin:
 
     def _toggle_region_mode(self, operation, checked):
         if checked:
+            path_controller = self.__dict__.get("path_slice_controller")
+            if path_controller is not None:
+                path_controller.on_crop_toggled(True)
             clear_enhancement = getattr(self, "_clear_enhancement_interaction", None)
             if clear_enhancement is not None:
                 clear_enhancement()
@@ -219,12 +222,7 @@ class CropInteractionMixin:
         self._sync_slice_edits_from_logical_bounds(bounds)
 
     def _update_slice_source_range(self, spec, *, axis_index=None):
-        """单层切片页移动位置：更新产生该切面的源范围。
-
-        切面来自裁剪链的第一层（三维范围里恰好塌缩一根轴）。位置变化只改
-        这一层的该轴上下限，面内裁剪与裁空链原样保留——否则旧的裁剪参数会
-        在下一次渲染时把位置覆盖回去。
-        """
+        """Update only the normal range of a cropped slice, preserving its 2D tail."""
         interval = getattr(self, "axis_interval", None)
         if spec is None or interval is None:
             return False
@@ -233,65 +231,43 @@ class CropInteractionMixin:
         if axis_index is None:
             return False
         axis_index = int(axis_index)
-
         coords = self._coords_for_axis(axis_index)
-        maximum = max(int(coords.size) - 1, 0)
-        index = int(np.clip(nearest_index(coords, interval.center), 0, maximum))
-        value = float(coords[index]) if coords.size else float(interval.center)
-        # 裁剪链保存原始物理坐标；控件显示的 E 坐标可能已翻转。
-        source_value = float(self.core.logical_to_physical(axis_index, index))
-
+        low, up = interval.to_indices(coords)
+        mid = int(np.clip(nearest_index(coords, interval.center), low, up))
+        source_low = float(self.core.logical_to_physical(axis_index, low))
+        source_up = float(self.core.logical_to_physical(axis_index, up))
         params = spec.params
-        changed = False
-
-        info = params.get("home_slice_info")
-        if isinstance(info, dict) and int(info.get("axis", -1)) == axis_index:
-            if int(info.get("index", -1)) != index:
-                info = dict(info)
-                info["index"] = index
-                params["home_slice_info"] = info
-                changed = True
+        before = repr((params.get("home_slice_info"), params.get("crop_regions"),
+                       params.get("precise_logical_bounds"), params.get("axis_interval")))
+        params["home_slice_info"] = {
+            "axis": axis_index, "index": mid, "mode": "integral", "range": (low, up),
+        }
+        params["axis_interval"] = interval.as_dict()
 
         regions = list(params.get("crop_regions") or [])
         first = regions[0] if regions else None
         if isinstance(first, dict) and first.get("view") == "3d":
             bounds = list(first.get("bounds") or [])
-            if len(bounds) == 6 and bounds[2 * axis_index] != source_value:
-                bounds[2 * axis_index] = source_value
-                bounds[2 * axis_index + 1] = source_value
-                updated = dict(first)
-                updated["bounds"] = tuple(bounds)
-                params["crop_regions"] = [updated] + regions[1:]
-                changed = True
+            if len(bounds) == 6:
+                bounds[2 * axis_index:2 * axis_index + 2] = [source_low, source_up]
+                params["crop_regions"] = [dict(first, bounds=tuple(bounds))] + regions[1:]
 
         precise = params.get("precise_logical_bounds")
         if precise is not None and len(precise) == 6:
-            if float(precise[2 * axis_index]) != float(index):
-                precise = list(precise)
-                precise[2 * axis_index] = float(index)
-                precise[2 * axis_index + 1] = float(index)
-                params["precise_logical_bounds"] = precise
-                changed = True
-
-        if not changed:
-            return False
-
-        # 位置在采样点之间时模型保留精确物理值，实际切片取最近采样点；
-        # 把保存的区间对齐到该采样点，切页回来时位置与切片下标才一致。
-        space = getattr(self, "axis_space", None)
-        if space is not None:
-            params["axis_interval"] = space.as_interval(low=value, up=value).as_dict()
-
-        # 当前页的会话状态与页面参数保持同一份值。
-        if self._is_current_page(spec):
-            if isinstance(params.get("home_slice_info"), dict) and self.home_slice_info is not None:
-                self.home_slice_info = dict(params["home_slice_info"])
+            precise = list(precise)
+            precise[2 * axis_index:2 * axis_index + 2] = [float(low), float(up)]
+            params["precise_logical_bounds"] = precise
+        after = repr((params.get("home_slice_info"), params.get("crop_regions"),
+                      params.get("precise_logical_bounds"), params.get("axis_interval")))
+        changed = before != after
+        if changed and self._is_current_page(spec):
+            self.home_slice_info = dict(params["home_slice_info"])
             if params.get("precise_logical_bounds") is not None:
                 self.precise_logical_bounds = list(params["precise_logical_bounds"])
                 self.last_synced_slice_texts = self._logical_bounds_to_texts(
                     self.precise_logical_bounds
                 )
-        return True
+        return changed
 
     def _on_crop_selection_changed(self):
         selection = self.crop_controller.selection
@@ -408,6 +384,16 @@ class CropInteractionMixin:
         spec = AnalysisPageSpec(self._make_page_id(), title, kind, source.source_module,
                                 params=params, source_page_id=source.page_id, source_title=source.title,
                                 data_scope_id=scope_id)
+        if not erasing and selection.view == "3d" and cropped.get("view") == "2d":
+            info = cropped.get("slice_info") or {}
+            axis_index = int(info.get("axis", self._spec_slice_axis(spec)))
+            index = int(info.get("index", 0))
+            self._seed_axis_interval_params(
+                spec, axis_index=axis_index, low=index, up=index, mid=index, locked=True,
+            )
+            params["home_slice_info"] = {
+                "axis": axis_index, "index": index, "mode": "integral", "range": (index, index),
+            }
         controller.popup.hide()
         self.left_workspace.add_page(spec)
         if volume_roi:

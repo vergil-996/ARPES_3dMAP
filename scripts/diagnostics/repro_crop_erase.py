@@ -390,8 +390,8 @@ def main():
             log("[SKIP] home 模式：直接用加载后的原始 3D 视图")
             return
         window.left_workspace.activate_page(window.left_workspace.home_page_id)
-        window.page_data.combo_ax.setCurrentIndex(2)  # Z 轴（能量）积分 -> kx–ky
-        window.page_data.btn_ax_apply.click()
+        from scripts.validation._common import create_axis_slice
+        create_axis_slice(window, 2)
 
     @step("进入裁剪模式", ready=crop_mode_ready)
     def _enter_crop():

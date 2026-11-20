@@ -148,31 +148,45 @@ def independent_opacity_values(values, info, style, unit_distance=1.0):
         return -np.expm1(-sigma * distance)
 
 
-def channels(values, info, mode, *, view="3d", style=None, unit_distance=None):
-    """Resolve final display coordinates without quantizing the science data."""
+def channels(values, info, mode, *, view="3d", style=None, unit_distance=None,
+             color=None, alpha=None):
+    """Resolve display channels, reusing any channel supplied by the caller."""
     source = np.asarray(values)
+    if color is not None and alpha is not None:
+        return color, alpha
     independent = is_independent(style)
     if view == "3d" and source.size >= 500_000:
         from bandscope.processing import gpu_display
 
         accelerated = gpu_display.try_channels(
             source, info, mode, style=style, unit_distance=unit_distance,
+            color=color, alpha=alpha,
         )
         if accelerated is not None:
             return accelerated
-    t = normalized_color_samples(source, info)
-    color = mapped_positions(info, t)
-    if view == "2d":
-        alpha = np.ones(source.shape, dtype=np.float32)
-    elif independent:
-        alpha = independent_opacity_values(
-            source, info, style, 1.0 if unit_distance is None else unit_distance,
-        )
-    else:
-        ramp = OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"])
-        alpha = np.interp(color, np.linspace(0., 1., len(ramp)), ramp)
+    computed_color = color
+    if color is None or (alpha is None and not independent and view != "2d"):
+        t = normalized_color_samples(source, info)
+        computed_color = mapped_positions(info, t)
+    computed_alpha = alpha
+    if alpha is None:
+        if view == "2d":
+            computed_alpha = np.ones(source.shape, dtype=np.float32)
+        elif independent:
+            computed_alpha = independent_opacity_values(
+                source, info, style, 1.0 if unit_distance is None else unit_distance,
+            )
+        else:
+            ramp = OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"])
+            computed_alpha = np.interp(computed_color, np.linspace(0., 1., len(ramp)), ramp)
     finite = np.isfinite(source)
-    return np.where(finite, color, 0).astype(np.float64 if view == "2d" else np.float32), np.where(finite, alpha, 0).astype(np.float32)
+    if color is None:
+        computed_color = np.where(finite, computed_color, 0).astype(
+            np.float64 if view == "2d" else np.float32
+        )
+    if alpha is None:
+        computed_alpha = np.where(finite, computed_alpha, 0).astype(np.float32)
+    return computed_color, computed_alpha
 
 
 def normalized_color_samples(values, info):

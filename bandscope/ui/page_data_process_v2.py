@@ -1,13 +1,11 @@
 from PyQt5.QtCore import QSignalBlocker
-from PyQt5.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout
 from siui.components.combobox_ import SiCapsuleComboBox
-from siui.components.widgets import SiLabel
 
 import bandscope.ui.theme as theme
 from bandscope.ui.control_layout_utils import (
     animate_widget_visibility,
     centered_widget_row,
-    combo_index_for_text,
     set_widget_visibility_instant,
 )
 from bandscope.ui.control_page_base import ControlPageBase
@@ -52,42 +50,6 @@ class DataProcessPage(ControlPageBase):
         theme.raise_well_on_card(combo)
         return combo
 
-    def _create_length_block(self):
-        """「积分长度」输入行：与上下限滑条块同高，数值框右对齐。"""
-        container = QWidget(self)
-        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        container.setFixedWidth(self.MIN_SLIDER_BLOCK_WIDTH)
-        self._adaptive_slider_blocks.append(container)
-
-        block = QVBoxLayout(container)
-        block.setContentsMargins(0, 0, 0, 0)
-        block.setSpacing(6)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        label = SiLabel("积分长度", container)
-        label.setStyleSheet(theme.field_label_qss())
-        head.addWidget(label)
-        head.addStretch()
-        block.addLayout(head)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addStretch()
-        row.addWidget(self.input_ax_length)
-        block.addLayout(row)
-        return container
-
-    def _create_button_row(self, buttons):
-        container = QWidget(self)
-        container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(self.AXIS_VALUE_BOX_SPACING)
-        for button in buttons:
-            row.addWidget(button)
-        return container
-
     def build_body(self):
         grp_t, v_t = self._create_group("对时间轴积分")
         self.grp_t = grp_t
@@ -106,38 +68,6 @@ class DataProcessPage(ControlPageBase):
         self._add_centered_slider_block(v_t, "积分下限", self.s_t_low, self.input_t_low)
         v_t.addLayout(centered_widget_row(self.btn_t_apply, self.BUTTON_WIDTH))
         self.vbox.addLayout(centered_widget_row(grp_t, self.MIN_GROUP_WIDTH))
-
-        grp_ax, v_ax = self._create_group("对坐标轴积分")
-
-        self.combo_ax = self._create_combo("选择轴向", ["X轴", "Y轴", "Z轴"], self._adaptive_combo_controls)
-
-        self.s_ax_up = self._create_accent_slider(axis=True)
-        self.input_ax_up = self._create_axis_value_box()
-        self.input_ax_up.setToolTip("积分上限（物理坐标）")
-
-        self.s_ax_low = self._create_accent_slider(axis=True)
-        self.input_ax_low = self._create_axis_value_box()
-        self.input_ax_low.setToolTip("积分下限（物理坐标）")
-
-        # 中心位置控件已删除：位置由画布底栏的位置滑条控制，这里只保留
-        # 区间本身的端点、长度与锁定。
-        self.input_ax_length = self._create_axis_value_box()
-        self.input_ax_length.setToolTip("积分长度（物理跨度，可直接输入）")
-
-        self.btn_ax_lock = self._create_btn("锁定区间", "secondary")
-        self.btn_ax_lock.setCheckable(True)
-        self.btn_ax_lock.setToolTip("锁定后上下限一起平移，区间长度保持不变")
-
-        self.btn_ax_apply = self._create_btn("应用", "primary")
-
-        v_ax.addLayout(centered_widget_row(self.combo_ax, self.MIN_COMBO_WIDTH))
-        self._add_centered_slider_block(v_ax, "积分上限", self.s_ax_up, self.input_ax_up)
-        self._add_centered_slider_block(v_ax, "积分下限", self.s_ax_low, self.input_ax_low)
-        v_ax.addLayout(centered_widget_row(self._create_length_block(), self.MIN_SLIDER_BLOCK_WIDTH))
-        v_ax.addLayout(
-            centered_widget_row(self._create_button_row((self.btn_ax_lock, self.btn_ax_apply)), self.MIN_GROUP_WIDTH)
-        )
-        self.vbox.addLayout(centered_widget_row(grp_ax, self.MIN_GROUP_WIDTH))
 
         grp_other, v_other = self._create_group("其他积分")
 
@@ -365,9 +295,6 @@ class DataProcessPage(ControlPageBase):
         if value < self.s_t_low.value():
             self.s_t_low.setValue(value)
 
-    # 上下限的约束与联动由 bandscope.ui.axis_interval_controller 统一负责：
-    # 本页只在控件上暴露意图，不再自己维护中心/半宽，也不再在事件里回写。
-
     def export_state(self):
         return {
             "s_t_low": {
@@ -390,12 +317,8 @@ class DataProcessPage(ControlPageBase):
                 "maximum": float(self.input_t_up.maximum()),
                 "value": float(self.input_t_up.value()),
             },
-            "combo_ax": {
-                "index": int(self.combo_ax.currentIndex()),
-                "text": self.combo_ax.currentText(),
-            },
             # 积分区间的真值放在页面参数的 axis_interval 里；本页只保存
-            # 轴向选择和「其他积分」下拉，避免同一份状态存两份。下拉状态以稳定
+            # 「其他积分」下拉，避免同一份状态存两份。下拉状态以稳定
             # 动作键为主：展示文本与下标都可能随插件加载变化。
             "combo_other": {
                 "key": self.current_other_key(),
@@ -411,7 +334,6 @@ class DataProcessPage(ControlPageBase):
             self.s_t_up,
             self.input_t_low,
             self.input_t_up,
-            self.combo_ax,
             self.combo_other,
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
@@ -440,17 +362,6 @@ class DataProcessPage(ControlPageBase):
                     value_box.setValue(box_value)
                 elif "value" in slider_state:
                     value_box.setValue(float(slider.value()))
-
-            combo_ax_state = state.get("combo_ax") or {}
-            combo_ax_index = combo_ax_state.get("index")
-            if combo_ax_index is None and "text" in combo_ax_state:
-                combo_ax_index = combo_index_for_text(
-                    self.combo_ax,
-                    combo_ax_state["text"],
-                    aliases=self.COMBO_TEXT_ALIASES,
-                )
-            if combo_ax_index is not None and 0 <= int(combo_ax_index) < self.combo_ax.count():
-                self.combo_ax.setCurrentIndex(int(combo_ax_index))
 
             combo_other_state = state.get("combo_other") or {}
             # 下拉项会随时间轴有无与插件加载动态变化：先按稳定键恢复，其次按

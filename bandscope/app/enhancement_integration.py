@@ -22,7 +22,7 @@ from bandscope.processing.local_enhancement import cached_finite_range, finite_r
 from bandscope.rendering.local_enhancement import (
     add_region_scalar_bars_3d, draw_region_colorbars_2d, enhancement_legend,
 )
-from bandscope.rendering.refresh_pipeline import ComputeJob, RefreshCause, RenderQuality
+from bandscope.rendering.refresh_pipeline import ComputeJob, ComputeResult, RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.ui import theme
 from bandscope.ui.control_layout_utils import combo_index_for_text, sync_slider_visual
@@ -175,6 +175,7 @@ class EnhancementInteractionMixin:
         self.page_render.btn_lock.toggled.connect(self.on_toggle_color_lock)
         self.page_render.display_mode_changed.connect(self._on_display_mode_changed)
         self.page_render.display_value_changed.connect(self._on_display_values_changed)
+        self.page_render.display_value_committed.connect(self.flush_render_levels_refresh)
         self.canvas_2d.mpl_connect("button_press_event", self._pick_enhancement_region)
 
     def _enhancement_spec(self):
@@ -795,6 +796,97 @@ class EnhancementInteractionMixin:
         if timer is not None:
             timer.stop()
 
+    def _display_cache_key(self, context, state, region_data):
+        data = np.asarray(context["data"])
+        # 每次刷新拿到的都是同一帧的新视图（id 变化、内存不变），键必须落在底层缓冲上。
+        from bandscope.processing.gpu_display import array_key
+
+        data_key, _base = array_key(data)
+        context_key = (
+            data_key,
+            self.__dict__.get("shared_denoise_version", 0), self.__dict__.get("rotation_angle", 0),
+            repr(context.get("slice_info")), repr(context.get("plot_logical_bounds")),
+            repr(context.get("data_bounds")), repr(context.get("full_shape")),
+            context.get("enhancement_include_zero"), tuple((k, id(v)) for k, v in region_data.items()),
+            VisualEngine.locked_data_range(),
+        )
+        key = (context_key, repr({k: v for k, v in state.items() if k != "show_all_regions"}))
+        return key, context_key
+
+    def _display_channel_update(self, context, state, cached, context_key):
+        both = frozenset(("color", "alpha"))
+        if cached is None or len(cached) < 3 or cached[2] != context_key:
+            return both
+        fields = cached[1]
+        if (fields is None or fields.get("regions") or
+                matching_regions(context, state.get("regions", []))):
+            return both
+        previous_style = fields.get("background_style", {})
+        style = state.get("background", DEFAULT_STYLE)
+        if not is_independent(style) or not is_independent(previous_style):
+            return both
+        if previous_style.get("normalization") != style.get("normalization"):
+            return both
+        update = set()
+        if previous_style.get("levels") != style.get("levels"):
+            update.add("color")
+        if previous_style.get("opacity") != style.get("opacity"):
+            update.add("alpha")
+        return frozenset(update)
+
+    def _cache_display_fields(self, key, context_key, fields, update):
+        for channel in ("color", "alpha"):
+            attribute = f"_enhancement_{channel}_token"
+            token = int(self.__dict__.get(attribute, 0)) + int(channel in update)
+            setattr(self, attribute, token)
+            if fields is not None:
+                fields[f"{channel}_token"] = token
+        if update:
+            self._enhancement_display_token = int(self.__dict__.get("_enhancement_display_token", 0)) + 1
+        self._enhancement_cache = (key, fields, context_key)
+        return fields
+
+    def _schedule_display_mapping_compute(self, request, spec):
+        from bandscope.processing import gpu_display
+
+        if gpu_display.enabled() or spec is None:
+            return False
+        state = self._enhancement_state(spec)
+        if not state or not is_independent(state.get("background", DEFAULT_STYLE)):
+            return False
+        context = self._context_for_display_refresh(
+            spec, request.cause, self.__dict__.get("current_render_context")
+        )
+        if (context is None or context.get("view") != "3d" or context.get("crop_empty")
+                or np.asarray(context["data"]).size < 500_000
+                or matching_regions(context, state.get("regions", []))):
+            return False
+        context, region_data = self._enhancement_crop_data(
+            context, spec, state, allow_compute=False,
+        )
+        key, context_key = self._display_cache_key(context, state, region_data)
+        cached = self.__dict__.get("_enhancement_cache")
+        if cached is not None and cached[0] == key:
+            return False
+        update = self._display_channel_update(context, state, cached, context_key)
+        previous = cached[1] if cached is not None else None
+        worker_context = dict(context)
+        worker_state = copy.deepcopy(state)
+        locked_range = VisualEngine.locked_data_range()
+
+        def work():
+            fields = resolve_display(
+                worker_context, worker_state, background_locked_range=locked_range,
+                region_data=region_data, previous=previous, update=update,
+            )
+            return ComputeResult(
+                value=fields, backend="CPU",
+                metadata={"display_cache": (key, context_key, fields, update)},
+            )
+
+        self.refresh_coordinator.submit_compute(request, work)
+        return True
+
     def _enhancement_display(self, context, spec=None, *, freeze_pending=True, allow_compute=None):
         state = self._enhancement_state(spec)
         if not state or context is None or context.get("view") not in {"2d", "3d"} or context.get("crop_empty"):
@@ -820,25 +912,17 @@ class EnhancementInteractionMixin:
                     if state.get("common") and state.pop("common_lock_pending", False):
                         state["common_locked_range"] = tuple(record["data_range"])
                         state["revision"] += 1
-        data = np.asarray(context["data"])
-        # 每次刷新拿到的都是同一帧的新视图（id 变化、内存不变），键必须落在底层缓冲上。
-        from bandscope.processing.gpu_display import array_key
-
-        data_key, _base = array_key(data)
-        key = (data_key,
-               self.__dict__.get("shared_denoise_version", 0), self.__dict__.get("rotation_angle", 0),
-               repr(context.get("slice_info")), repr(context.get("plot_logical_bounds")),
-               repr(context.get("data_bounds")),
-               context.get("enhancement_include_zero"), tuple((k, id(v)) for k, v in region_data.items()),
-               repr({k: v for k, v in state.items() if k != "show_all_regions"}),
-               VisualEngine.locked_data_range())
+        key, context_key = self._display_cache_key(context, state, region_data)
         cached = self.__dict__.get("_enhancement_cache")
         if cached is None or cached[0] != key:
-            cached = (key, resolve_display(context, state, background_locked_range=VisualEngine.locked_data_range(),
-                                          region_data=region_data))
-            self._enhancement_cache = cached
-            # 递增 token 让渲染层区分「同一份通道」与「重新算过」：只有前者可以跳过重传。
-            self._enhancement_display_token = int(self.__dict__.get("_enhancement_display_token", 0)) + 1
+            update = self._display_channel_update(context, state, cached, context_key)
+            fields = resolve_display(
+                context, state, background_locked_range=VisualEngine.locked_data_range(),
+                region_data=region_data, previous=cached[1] if cached is not None else None,
+                update=update,
+            )
+            self._cache_display_fields(key, context_key, fields, update)
+            cached = self._enhancement_cache
         if cached[1] is not None and VisualEngine.locked_data_range() is None:
             info = cached[1]["background_level_info"]
             VisualEngine._last_data_range = (info["data_min"], info["data_max"])

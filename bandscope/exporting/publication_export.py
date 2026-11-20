@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from bandscope.exporting.curve_presentation import source_revision
 from bandscope.core.crop_model import waterfall_offsets
+from bandscope.rendering.path_slice import axis_edges, matching_colorbar, segment_rgba
 
 from bandscope.exporting.publication_models import (
     DEFAULT_STYLE_ID,
@@ -57,18 +58,57 @@ class ExportError(Exception):
 _UNIFORM_RTOL = 1e-5
 
 
+def _fits_rounded_uniform_grid(coords: np.ndarray, values: np.ndarray) -> bool:
+    """检查是否存在一条直线同时落入所有原精度坐标的舍入区间。
+
+    固定步长后，每个点给出允许的截距区间；最冲突的一对区间决定步长搜索方向。
+    """
+    with np.errstate(over="ignore"):
+        below = values - np.nextafter(coords, coords.dtype.type(-np.inf))
+        above = np.nextafter(coords, coords.dtype.type(np.inf)) - values
+    center = int(np.argmin(np.abs(values)))
+    indices = np.arange(values.size, dtype=np.float64) - center
+    centered = values - values[center]
+    lower = centered - np.where(np.isfinite(below), below, above) / 2
+    upper = centered + np.where(np.isfinite(above), above, below) / 2
+    span = values.size - 1
+    min_step = (lower[-1] - upper[0]) / span
+    max_step = (upper[-1] - lower[0]) / span
+    while min_step <= max_step:
+        step = min_step + (max_step - min_step) / 2
+        lower_intercepts = lower - step * indices
+        upper_intercepts = upper - step * indices
+        lower_index = int(np.argmax(lower_intercepts))
+        upper_index = int(np.argmin(upper_intercepts))
+        if lower_intercepts[lower_index] <= upper_intercepts[upper_index]:
+            return True
+        if lower_index > upper_index:
+            min_step = np.nextafter(step, np.inf)
+        else:
+            max_step = np.nextafter(step, -np.inf)
+    return False
+
+
 def _check_uniform(coords: np.ndarray, axis_key: str) -> None:
-    """均匀网格校验（plan §5）：非均匀网格首版明确报不支持。"""
-    values = np.asarray(coords, dtype=np.float64).ravel()
-    if values.size < 3:
-        return
-    diffs = np.diff(values)
-    scale = max(1e-12, float(np.max(np.abs(diffs))))
-    if float(np.max(np.abs(diffs - np.median(diffs)))) > _UNIFORM_RTOL * scale + 1e-12:
-        raise ExportError(
-            f"{axis_key} 轴坐标为非均匀网格，首版科研导出暂不支持该网格；"
-            "请在主视图中确认坐标来源。"
-        )
+    """保留原有步长容差，允许低精度坐标的舍入误差，不重采样网格。"""
+    coords = np.asarray(coords).ravel()
+    values = coords.astype(np.float64, copy=False)
+    if np.isfinite(values).all():
+        with np.errstate(over="ignore"):
+            diffs = np.diff(values)
+        if np.isfinite(diffs).all() and (np.all(diffs > 0) or np.all(diffs < 0)):
+            if diffs.size < 2:
+                return
+            scale = max(1e-12, float(np.max(np.abs(diffs))))
+            if float(np.max(np.abs(diffs - np.median(diffs)))) <= _UNIFORM_RTOL * scale + 1e-12:
+                return
+            if (coords.dtype.kind == "f" and coords.dtype.itemsize < values.dtype.itemsize
+                    and _fits_rounded_uniform_grid(coords, values)):
+                return
+    raise ExportError(
+        f"{axis_key} 轴坐标为非均匀网格，首版科研导出暂不支持该网格；"
+        "请在主视图中确认坐标来源。"
+    )
 
 
 def _coord_meta(window) -> Tuple[Dict[str, np.ndarray], Dict[str, str], Dict[str, Optional[str]]]:
@@ -78,7 +118,7 @@ def _coord_meta(window) -> Tuple[Dict[str, np.ndarray], Dict[str, str], Dict[str
         values = core.coords.get(key)
         if values is None:
             values = np.arange(core.raw_data.shape[{"X": 0, "Y": 1, "E": 2, "delay": 3}[key]])
-        coords[key] = np.asarray(values, dtype=np.float64).ravel().copy()
+        coords[key] = np.asarray(values).ravel().copy()
     sources = dict(getattr(core, "coord_sources", {}) or {})
     units = dict(getattr(core, "coord_units", {}) or {})
     for key in coords:
@@ -230,6 +270,8 @@ def capture_snapshot(window) -> PublicationSnapshot:
         _freeze_3d(window, snapshot, render_context)
     elif view == "2d":
         _freeze_2d(window, snapshot, render_context)
+    elif view == "path_slice":
+        _freeze_path_slice(window, snapshot, render_context)
     elif view == "1d":
         _freeze_1d(window, snapshot, render_context)
     elif view == "1d_comparison":
@@ -310,7 +352,7 @@ def _build_source_desc(window, spec, render_context) -> str:
     elif spec.page_kind == "time_integral":
         params = spec.params
         parts.append(f"时间积分 {int(params.get('t_low', 0))}~{int(params.get('t_up', 0))}")
-    elif view == "waterfall":
+    elif view in {"waterfall", "path_slice"}:
         params = spec.params
         if params.get("source_mode") == "time_integral":
             parts.append("时间积分来源")
@@ -487,6 +529,58 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
         ),
         "level_info": level_info,
         "intensity_label": intensity_label_for(snapshot.page_kind),
+    })
+
+
+def _freeze_path_slice(window, snapshot: PublicationSnapshot, render_context) -> None:
+    sample = render_context["path_sample"]
+    model = render_context["path_model"]
+    energy = np.asarray(sample.energy, dtype=np.float64)
+    descending = energy.size > 1 and energy[0] > energy[-1]
+    segments = []
+    first_info = None
+    for item in sample.segments:
+        values = np.asarray(item.intensity, dtype=np.float64)
+        k = np.linspace(item.start_k, item.end_k, values.shape[0])
+        if descending:
+            values = np.flip(values, axis=1)
+        rgba, info = segment_rgba(
+            values, model.segments[item.index], snapshot.cmap_name,
+            locked_range=snapshot.locked_range,
+        )
+        if item.index and rgba.shape[0]:
+            rgba[0, :, 3] = 0.0
+        first_info = first_info or info
+        segments.append({"k": k.copy(), "rgba": np.transpose(rgba, (1, 0, 2)).copy()})
+    colorbar = matching_colorbar(model, sample, snapshot.locked_range)
+    colorbar_payload = None
+    if colorbar is not None:
+        info, style = colorbar
+        colorbar_payload = {
+            "level_info": dict(info),
+            "intensity_map": str(style.intensity_map),
+        }
+    edges = axis_edges(energy)
+    y_edges = [float(edges[0]), float(edges[-1])]
+    if bool(render_context.get("display_e_flip")):
+        y_edges.reverse()
+    snapshot.payload.update({
+        "path_segments": segments,
+        "energy": np.array(energy, copy=True),
+        "node_k": np.asarray(sample.node_k, dtype=np.float64).copy(),
+        "node_names": [node.label for node in model.nodes],
+        "show_guides": bool(model.show_guides),
+        "show_labels": bool(model.show_labels),
+        "extent": [float(sample.k[0]), float(sample.k[-1]), *y_edges],
+        "title": str(render_context.get("title") or model.path_name()),
+        "xlabel": sample.calibration.label,
+        "ylabel": window._axis_label_text("E"),
+        "path_colorbar": colorbar_payload,
+        "level_info": colorbar_payload["level_info"] if colorbar_payload else first_info,
+        "intensity_label": (
+            f"Intensity · {model.segment_name(model.selected[0])}"
+            if len(model.selected) == 1 else intensity_label_for(snapshot.page_kind)
+        ),
     })
 
 

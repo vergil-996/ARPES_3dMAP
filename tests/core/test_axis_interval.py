@@ -78,13 +78,23 @@ class IntervalRuleTests(unittest.TestCase):
         self.assertEqual(self.interval.low, 5.0)
         self.assertEqual(self.interval.up, 8.0)
 
-    def test_unlocked_endpoints_push_the_other_end_when_crossing(self):
+    def test_unlocked_endpoints_stop_on_contact_and_lock(self):
         self.assertTrue(self.interval.set_up(1.0))
-        self.assertEqual((self.interval.low, self.interval.up), (1.0, 1.0))
+        self.assertEqual((self.interval.low, self.interval.up), (2.0, 2.0))
+        self.assertTrue(self.interval.locked)
 
         self.interval = AxisInterval(0.0, 10.0, low=2.0, up=8.0)
         self.assertTrue(self.interval.set_low(9.0))
-        self.assertEqual((self.interval.low, self.interval.up), (9.0, 9.0))
+        self.assertEqual((self.interval.low, self.interval.up), (8.0, 8.0))
+        self.assertTrue(self.interval.locked)
+
+    def test_unlock_keeps_coincident_endpoints_until_they_separate(self):
+        self.interval.set_up(2.0)
+        self.interval.set_locked(False)
+        self.assertEqual((self.interval.low, self.interval.up), (2.0, 2.0))
+        self.interval.set_low(1.25)
+        self.assertEqual((self.interval.low, self.interval.up), (1.25, 2.0))
+        self.assertFalse(self.interval.locked)
 
     def test_zero_length_is_allowed(self):
         self.interval.set_up(2.0)

@@ -64,21 +64,34 @@ def draw_region_layers_2d(ax, layers, cmap, existing=()):
     return images
 
 
-def apply_volume_display(channel, color, alpha, cmap, multiplier=None, *, color_rules=None):
+def apply_volume_display(channel, color, alpha, cmap, multiplier=None, *, color_rules=None,
+                         update_color=True, update_alpha=True):
     """Upload color coordinates and final alpha as two independent components."""
     import vtk
     from bandscope.rendering.render_core import identity_opacity_function
 
     channel.attach()
     volume_shape = np.shape(color)
-    # Write straight into the interleaved buffer through a transposed view: one
-    # pass instead of "raven(order=F) + strided column assignment" (two passes
-    # and an 18 MB temporary for a 4.5M-voxel volume).
-    np.copyto(channel.buffer[:, 0].reshape(volume_shape, order="F"), np.asarray(color))
+    source_color = np.asarray(color)
+    source_alpha = np.asarray(alpha)
+    packed = source_color.base if source_color.base is source_alpha.base else None
+    if (isinstance(packed, np.ndarray) and packed.size == source_color.size * 2
+            and packed.dtype == np.dtype(np.float32)
+            and source_alpha.__array_interface__["data"][0]
+            == source_color.__array_interface__["data"][0] + packed.itemsize):
+        packed = packed.reshape(source_color.size, 2)
+    else:
+        packed = None
     final = np.asarray(alpha, dtype=np.float32)
-    if multiplier is not None:
+    if update_alpha and multiplier is not None:
         final = np.clip(final * np.asarray(multiplier)[None, None, :], 0, 1)
-    np.copyto(channel.buffer[:, 1].reshape(volume_shape, order="F"), final)
+    if update_color and update_alpha and packed is not None and multiplier is None:
+        np.copyto(channel.buffer, packed)
+    else:
+        if update_color:
+            np.copyto(channel.buffer[:, 0].reshape(volume_shape, order="F"), source_color)
+        if update_alpha:
+            np.copyto(channel.buffer[:, 1].reshape(volume_shape, order="F"), final)
     channel.vtk_array.Modified()
     channel.volume.mapper.Modified()
     palette = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap

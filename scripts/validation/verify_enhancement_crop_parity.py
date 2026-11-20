@@ -129,10 +129,8 @@ def main():
                 window.btn_tb_crop.setChecked(False)
                 window.left_workspace.activate_page(progress["source"].page_id)
             elif step == 3:
-                window.page_data.combo_ax.setCurrentIndex(1)
-                window.page_data.s_ax_low.setValue(0)
-                window.page_data.s_ax_up.setValue(window.page_data.s_ax_up.maximum())
-                window.on_apply_axis_integral()
+                from scripts.validation._common import create_axis_slice
+                create_axis_slice(window, 1, full_range=True)
             elif step == 4:
                 state = window._enhancement_state()
                 for roi in list(state["regions"]):

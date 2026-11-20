@@ -44,6 +44,7 @@ VIEW_KIND_LABELS = {
     "time_integral": "3D VOLUME",
     "axis_integral": "2D MAP",
     "axis_integral_crop": "2D MAP",
+    "path_slice": "E–k PATH",
     "slice_dos": "1D CURVE",
     "energy_dos": "1D CURVE",
     "edc_curve": "1D CURVE",
@@ -395,6 +396,9 @@ class ResultWorkspace(QWidget):
         """在画布正下方挂一个常驻底部条（如时间轴横条），随所有显示页共现。"""
         self.footer_widget = widget
         self.content_layout.addWidget(widget)
+
+    def insert_footer_widget(self, widget: QWidget, before: QWidget):
+        self.content_layout.insertWidget(self.content_layout.indexOf(before), widget)
 
     def set_home_page(self, spec: AnalysisPageSpec):
         # 主页是否可删除由调用方决定：多数据源下删除根页面等于关闭整份数据源。
