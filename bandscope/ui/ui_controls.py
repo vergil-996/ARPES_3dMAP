@@ -12,13 +12,28 @@ ContinuousFrameSlider 拖动后也会自行覆盖精确进度，因此重写这�
 不会破坏用户交互动画。
 """
 
-from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, pyqtProperty
-from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
-from PyQt5.QtWidgets import QDoubleSpinBox, QPushButton
+from PyQt5.QtCore import QEasingCurve, QPropertyAnimation, QPointF, QRectF, Qt, pyqtProperty
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
+from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox, QPushButton
 from siui.components.button import SiSwitchRefactor
 from siui.components.slider_ import SiSlider
 
 import bandscope.ui.theme as theme
+
+
+class ChevronComboBox(QComboBox):
+    """在应用的无边框下拉按钮上绘制随调色板变化的箭头。"""
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(self.palette().text().color(), 1.5, Qt.SolidLine,
+                            Qt.RoundCap, Qt.RoundJoin))
+        x, y = self.width() - 16, self.height() / 2
+        painter.drawPolyline(QPolygonF([
+            QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2),
+        ]))
 
 
 class ActionButton(QPushButton):

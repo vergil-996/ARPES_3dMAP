@@ -45,7 +45,7 @@ class BlenderRecipeContractTests(unittest.TestCase):
         )
         document = build_blender_recipe(request)
         self.assertEqual(document["format"], BLENDER_RECIPE_FORMAT)
-        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["schema_version"], 2)
         self.assertEqual([group["entry_ids"] for group in document["groups"]], [
             ["entry-001", "entry-003"], ["entry-002"],
         ])

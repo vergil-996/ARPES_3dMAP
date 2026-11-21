@@ -143,24 +143,21 @@ def try_channels(values, info, mode, *, style=None, unit_distance=None, color=No
                     computed_color = cmap_low + (cmap_high - cmap_low) * mapped
             if independent:
                 if need_alpha:
-                    opacity = resolved_display_style(style)["opacity"]
+                    from bandscope.core.display_style import DEFAULT_OPACITY_REFERENCE_DISTANCE
+
+                    reference = (DEFAULT_OPACITY_REFERENCE_DISTANCE
+                                 if unit_distance is None else float(unit_distance))
+                    points = resolved_display_style(
+                        style, reference_distance=reference,
+                    )["opacity"]["points"]
+                    curve = np.asarray(points, dtype=np.float64)
                     span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
                     if not np.isfinite(span) or span <= 0.0:
                         span = 1.0
                     q = (device.astype(cp.float64) - float(info["data_min"])) / span
-                    threshold = float(opacity["threshold"]) / 100.0
-                    transition = float(opacity["transition"]) / 100.0
-                    signal = cp.maximum(q - threshold, 0.0)
-                    if transition > 0.0:
-                        position = cp.clip((q - threshold) / transition, 0.0, 1.0)
-                        gate = position * position * (3.0 - 2.0 * position)
-                    else:
-                        gate = 1.0
-                    sigma = (float(opacity["density"]) / 200.0) * cp.power(
-                        signal, float(opacity["gamma"])
-                    ) * gate
-                    distance = 1.0 if unit_distance is None else max(float(unit_distance), 0.0)
-                    computed_alpha = -cp.expm1(-sigma * distance)
+                    computed_alpha = cp.interp(
+                        q, cp.asarray(curve[:, 0]), cp.asarray(curve[:, 1]),
+                    )
             elif need_alpha:
                 ramp = np.asarray(OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"]), dtype=np.float64)
                 computed_alpha = cp.interp(mapped, cp.linspace(0.0, 1.0, ramp.size, dtype=cp.float64),

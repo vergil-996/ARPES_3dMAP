@@ -229,19 +229,17 @@ def configure_volume_quality(volume, plotter, quality="exact", quality_config=No
     config = resolved_render_quality(quality_config)
     mapper = volume.mapper
     interactive = str(getattr(quality, "value", quality)).lower() == "preview"
-    if config["mode"] == "explicit":
-        interpolation = (
-            vtk.VTK_LINEAR_INTERPOLATION
-            if config["interpolation"] == "linear"
-            else vtk.VTK_NEAREST_INTERPOLATION
-        )
-        if hasattr(mapper, "SetInterpolationMode"):
-            mapper.SetInterpolationMode(interpolation)
-        else:
-            volume.GetProperty().SetInterpolationType(interpolation)
-        mapper.SetAutoAdjustSampleDistances(False)
-        if hasattr(mapper, "SetInteractiveAdjustSampleDistances"):
-            mapper.SetInteractiveAdjustSampleDistances(False)
+    interpolation = (vtk.VTK_LINEAR_INTERPOLATION if config["interpolation"] == "linear"
+                     else vtk.VTK_NEAREST_INTERPOLATION)
+    if hasattr(mapper, "SetInterpolationMode"):
+        mapper.SetInterpolationMode(interpolation)
+    else:
+        volume.GetProperty().SetInterpolationType(interpolation)
+    explicit = config["mode"] == "explicit"
+    mapper.SetAutoAdjustSampleDistances(not explicit)
+    if hasattr(mapper, "SetInteractiveAdjustSampleDistances"):
+        mapper.SetInteractiveAdjustSampleDistances(not explicit)
+    if explicit:
         if publication:
             factor = 0.25
         elif interactive:
@@ -250,8 +248,6 @@ def configure_volume_quality(volume, plotter, quality="exact", quality_config=No
             factor = 0.25 if config["resting"] == "fine" else 0.5
         spacing = tuple(float(value) for value in mapper.dataset.spacing)
         mapper.SetSampleDistance(display_transfer.display_unit_distance(spacing) * factor)
-    else:
-        mapper.SetAutoAdjustSampleDistances(True)
     interactor = getattr(plotter, "iren", None)
     native = getattr(interactor, "interactor", interactor)
     if native is not None:

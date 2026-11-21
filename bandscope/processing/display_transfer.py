@@ -1,11 +1,20 @@
 """Shared scalar-to-color and opacity rules for crops and local display regions."""
+import math
+
 import numpy as np
 
 from bandscope.core.display_style import (
     DEFAULT_COLORMAP_RANGE,
+    DEFAULT_LEVELS,
+    DEFAULT_OPACITY_MODE,
+    DEFAULT_OPACITY_REFERENCE_DISTANCE,
     is_independent,
     resolved_display_style,
 )
+
+# 折线逼近旧曲线时允许的 α 误差：半个量化步长，保证最终误差不超过 1/255。
+OPACITY_POINT_TOLERANCE = 1.0 / 255.0 / 2.0
+OPACITY_POINT_MAX_DEPTH = 14
 
 
 OPACITY_MAPS = {
@@ -137,21 +146,128 @@ def normalized_intensity_samples(values, info):
     return (source - float(info["data_min"])) / span
 
 
-def independent_opacity_values(values, info, style, unit_distance=1.0):
-    opacity = resolved_display_style(style)["opacity"]
+def independent_opacity_values(values, info, style, unit_distance=None):
+    """可编辑曲线的最终逐体素 α；``unit_distance`` 是曲线的参考距离。"""
+    reference = (DEFAULT_OPACITY_REFERENCE_DISTANCE if unit_distance is None
+                 else float(unit_distance))
+    points = np.asarray(
+        resolved_display_style(style, reference_distance=reference)["opacity"]["points"],
+        dtype=np.float64,
+    )
     q = normalized_intensity_samples(values, info)
-    threshold = float(opacity["threshold"]) / 100.0
-    transition = float(opacity["transition"]) / 100.0
+    with np.errstate(invalid="ignore"):
+        return np.interp(q, points[:, 0], points[:, 1])
+
+
+def rebase_opacity(alpha, source_distance, target_distance):
+    """把同一消光系数在不同参考距离下的 α 互换：1−α₂=(1−α₁)^(d₂/d₁)。"""
+    source = float(source_distance)
+    target = float(target_distance)
+    if source <= 0.0 or target <= 0.0 or np.isclose(source, target):
+        return alpha
+    bounded = np.clip(np.asarray(alpha, dtype=np.float64), 0.0, 1.0 - 1.0e-12)
+    return 1.0 - np.power(1.0 - bounded, target / source)
+
+
+def _legacy_parameter_alpha(samples, params, reference_distance):
+    q = np.asarray(samples, dtype=np.float64)
+    threshold = float(params["threshold"]) / 100.0
+    transition = float(params["transition"]) / 100.0
     signal = np.maximum(q - threshold, 0.0)
     if transition > 0.0:
         position = np.clip((q - threshold) / transition, 0.0, 1.0)
         gate = position * position * (3.0 - 2.0 * position)
     else:
         gate = 1.0
-    distance = max(float(unit_distance), 0.0)
     with np.errstate(invalid="ignore", over="ignore"):
-        sigma = (float(opacity["density"]) / 200.0) * np.power(signal, float(opacity["gamma"])) * gate
-        return -np.expm1(-sigma * distance)
+        sigma = (float(params["density"]) / 200.0) * np.power(
+            signal, float(params["gamma"]),
+        ) * gate
+        return -np.expm1(-sigma * max(float(reference_distance), 0.0))
+
+
+def _compatible_alpha(samples, levels, opacity_mode):
+    """旧“兼容映射”的 α 抽样，按保存时的色阶、Gamma 与映射方式重建。"""
+    q = np.asarray(samples, dtype=np.float64)
+    black, gamma, white = (float(value) for value in levels)
+    low = float(np.clip(black / 100.0, 0.0, 1.0))
+    high = float(np.clip(white / 100.0, 0.0, 1.0))
+    if high <= low:
+        high = min(1.0, low + 0.01)
+    if high <= low:
+        low = max(0.0, high - 0.01)
+    power = max(float(np.power(10.0, (50.0 - gamma) / 50.0)), 1.0e-6)
+    position = np.clip((q - low) / max(high - low, 1.0e-9), 0.0, 1.0)
+    mapped = np.power(position, power)
+    ramp = OPACITY_MAPS.get(str(opacity_mode), OPACITY_MAPS["linear"])
+    return np.interp(mapped, np.linspace(0.0, 1.0, len(ramp)), ramp)
+
+
+def _refine_opacity_segment(alpha, x0, a0, x1, a1, tolerance, depth, out):
+    if depth >= OPACITY_POINT_MAX_DEPTH or x1 - x0 <= 1.0e-7:
+        return
+    middle = 0.5 * (x0 + x1)
+    middle_alpha = float(alpha(middle))
+    error = abs(middle_alpha - 0.5 * (a0 + a1))
+    for fraction in (0.25, 0.75):
+        predicted = a0 + (a1 - a0) * fraction
+        error = max(error, abs(float(alpha(x0 + fraction * (x1 - x0))) - predicted))
+    if error <= tolerance:
+        return
+    _refine_opacity_segment(alpha, x0, a0, middle, middle_alpha, tolerance, depth + 1, out)
+    out.append((middle, middle_alpha))
+    _refine_opacity_segment(alpha, middle, middle_alpha, x1, a1, tolerance, depth + 1, out)
+
+
+def _adaptive_opacity_points(alpha, breakpoints, tolerance=OPACITY_POINT_TOLERANCE):
+    xs = sorted({min(1.0, max(0.0, float(x))) for x in (0.0, 1.0, *breakpoints)})
+    nodes = [(x, min(1.0, max(0.0, float(alpha(x))))) for x in xs]
+    points = [nodes[0]]
+    for (x0, a0), (x1, a1) in zip(nodes, nodes[1:]):
+        _refine_opacity_segment(alpha, x0, a0, x1, a1, tolerance, 0, points)
+        points.append((x1, a1))
+    return points
+
+
+def legacy_opacity_points(params, reference_distance=DEFAULT_OPACITY_REFERENCE_DISTANCE):
+    """旧四参数曲线按其原公式转换为点列（端点与转折处保留）。"""
+    values = {
+        "threshold": min(100.0, max(0.0, float(params.get("threshold", 0.0)))),
+        "transition": min(100.0, max(0.0, float(params.get("transition", 0.0)))),
+        "gamma": min(4.0, max(0.1, float(params.get("gamma", 1.4)))),
+        "density": min(100.0, max(0.0, float(params.get("density", 12.0)))),
+    }
+    distance = max(float(reference_distance), 0.0)
+
+    def alpha(samples):
+        return _legacy_parameter_alpha(samples, values, distance)
+
+    threshold = values["threshold"] / 100.0
+    transition = values["transition"] / 100.0
+    return _adaptive_opacity_points(
+        alpha,
+        (0.0, threshold, min(1.0, threshold + transition), 1.0),
+    )
+
+
+def compatible_opacity_points(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE,
+                              reference_distance=DEFAULT_OPACITY_REFERENCE_DISTANCE,
+                              source_distance=None):
+    """旧兼容曲线按其保存的色阶、Gamma、映射方式及参考距离转换为点列。"""
+    black, _gamma, white = (float(value) for value in levels)
+    low = float(np.clip(black / 100.0, 0.0, 1.0))
+    high = float(np.clip(white / 100.0, 0.0, 1.0))
+    if high <= low:
+        high = min(1.0, low + 0.01)
+    source = float(reference_distance if source_distance is None else source_distance)
+    target = float(reference_distance)
+
+    def alpha(samples):
+        values = _compatible_alpha(samples, levels, opacity_mode)
+        return rebase_opacity(values, source, target)
+
+    return _adaptive_opacity_points(alpha, (0.0, low, high, 1.0))
+
 
 
 def channels(values, info, mode, *, view="3d", style=None, unit_distance=None,
@@ -217,7 +333,13 @@ def display_unit_distance(spacing):
     return float(np.min(positive)) if positive.size else 1.0
 
 
-def volume_display_unit_distance(full_shape):
-    shape = np.asarray(full_shape, dtype=np.float64)
-    spacing = np.divide(200.0, shape - 1.0, out=np.ones(3), where=shape > 1.0)
-    return display_unit_distance(spacing)
+def opacity_reference_distance(full_shape):
+    """可编辑曲线的参考距离：旧“兼容映射 → 线性”在完整显示网格上的单位距离。
+
+    完整网格只影响采样步长、不受裁剪影响，因此同一份数据裁剪前后参考距离一致；
+    未裁剪时它就等于旧兼容渲染实际使用的 ``volume_unit_distance``。
+    """
+    shape = np.asarray(full_shape, dtype=np.float64).reshape(-1)[:3]
+    if shape.size != 3 or not np.all(np.isfinite(shape)) or np.any(shape < 2.0):
+        shape = np.array([2.0, 2.0, 2.0])
+    return volume_unit_distance(shape, shape)

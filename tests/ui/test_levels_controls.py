@@ -20,6 +20,13 @@ def drag_to(widget, position):
     QApplication.sendEvent(widget, event)
 
 
+def grab_pixel(widget, x, y):
+    image = widget.grab().toImage()
+    scale_x = image.width() / max(widget.width(), 1)
+    scale_y = image.height() / max(widget.height(), 1)
+    return image.pixelColor(int(round(x * scale_x)), int(round(y * scale_y)))
+
+
 class LevelsEditorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,6 +73,58 @@ class LevelsEditorTests(unittest.TestCase):
         QTest.mouseRelease(editor, Qt.LeftButton, pos=QPoint(white_x - 12, track_y))
         self.assertEqual(editor.gray.value(), gamma)
 
+    def test_handle_fills_match_timeline_palette_in_both_themes(self):
+        editor = self.make_editor()
+        original = theme.current_theme()
+        try:
+            for name in ("dark", "light"):
+                theme.set_theme(name)
+                QApplication.processEvents()
+                y = editor._track_rect().center().y()
+                positions = editor._handle_positions()
+                colors = {
+                    handle: grab_pixel(editor, positions[handle], y)
+                    for handle in ("black", "gray", "white")
+                }
+                self.assertEqual(colors["black"].name(), theme.RANGE_HANDLE_DARK_FILL.lower())
+                self.assertEqual(colors["gray"].name(), theme.RANGE_HANDLE_MID_FILL.lower())
+                self.assertEqual(colors["white"].name(), theme.RANGE_HANDLE_LIGHT_FILL.lower())
+                self.assertLess(colors["black"].lightness(), colors["gray"].lightness())
+                self.assertLess(colors["gray"].lightness(), colors["white"].lightness())
+        finally:
+            theme.set_theme(original)
+
+    def test_black_to_gray_track_segment_is_black(self):
+        editor = self.make_editor()
+        y = editor._track_rect().center().y()
+        positions = editor._handle_positions()
+        x = (positions["black"] + positions["gray"]) / 2.0
+        self.assertEqual(
+            grab_pixel(editor, x, y).name(),
+            theme.RANGE_HANDLE_DARK_FILL.lower(),
+        )
+
+    def test_output_range_handles_use_timeline_fills(self):
+        editor = ColormapRangeEditor("gray")
+        editor.resize(300, editor.height())
+        editor.show()
+        self.addCleanup(editor.close)
+        self.addCleanup(editor.deleteLater)
+        y = editor._handle_center_y()
+        positions = editor._handle_positions()
+        self.assertEqual(
+            grab_pixel(editor, positions["cmap_low"], y).name(),
+            theme.RANGE_HANDLE_DARK_FILL.lower(),
+        )
+        self.assertEqual(
+            grab_pixel(editor, positions["cmap_high"], y).name(),
+            theme.RANGE_HANDLE_LIGHT_FILL.lower(),
+        )
+        self.assertGreater(
+            y - editor.HOUSE_HEIGHT / 2.0, editor._track_rect().bottom(),
+        )
+        self.assertGreaterEqual(editor.height(), editor.LABEL_TOP + 16)
+
     def test_output_range_survives_palette_switch_and_orders_mouse_drag(self):
         editor = ColormapRangeEditor("gray")
         editor.resize(300, editor.height())
@@ -78,7 +137,7 @@ class LevelsEditorTests(unittest.TestCase):
         self.assertEqual(editor.get_range(), (0.2, 0.8))
 
         low_x = int(round(editor._handle_positions()["cmap_low"]))
-        y = editor._track_rect().center().y()
+        y = int(round(editor._handle_center_y()))
         QTest.mousePress(editor, Qt.LeftButton, pos=QPoint(low_x, y))
         drag_to(editor, QPoint(editor.width() - 2, y))
         QTest.mouseRelease(editor, Qt.LeftButton, pos=QPoint(editor.width() - 2, y))

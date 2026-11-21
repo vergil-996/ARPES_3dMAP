@@ -24,6 +24,20 @@ class ThemeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             theme.set_theme("mint")
 
+    def test_token_color_parses_rgba_tokens(self):
+        theme.set_theme("dark")
+        dark = theme.token_color("ACCENT_DIM")
+        self.assertTrue(dark.isValid())
+        self.assertEqual(dark.getRgb()[:3], (255, 255, 255))
+        self.assertAlmostEqual(dark.alphaF(), 0.38, places=2)
+
+        theme.set_theme("light")
+        light = theme.token_color("ACCENT_DIM")
+        self.assertTrue(light.isValid())
+        self.assertEqual(light.getRgb()[:3], (27, 31, 37))
+        self.assertAlmostEqual(light.alphaF(), 0.35, places=2)
+        self.assertEqual(theme.token_color("BG_1").name().upper(), theme.BG_1)
+
     def test_existing_widgets_are_restyled_without_reconstruction(self):
         root = QWidget()
         button = QPushButton("导出", root)

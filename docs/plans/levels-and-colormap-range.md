@@ -7,13 +7,13 @@
 ## 上组 · 输入色阶
 
 - 直方图紧贴滑轨上方，两者共用实际强度横轴。用密集、无间隙的细柱绘制，每根柱的高度为强度大于等于当前阈值的点数。例如数据为 `1、2、2、5` 时，强度 `2` 处的柱高为 `3`。悬停显示阈值和点数。
-- 三个滑块从左到右分别为黑、灰、白。黑到灰之间的轨道为黑色，灰到白之间为灰色，两端外侧使用弱化底轨。滑块加对比描边，在深浅主题下都能辨认。
+- 三个滑块从左到右分别为黑、灰、白，与底部时间轴区间滑块共用同一套手柄样式：10×16 胶囊手柄、固定中性填充与对比描边，不在手柄内写文字。滑轨为 5 px 圆角 `BG_4` 底轨；黑到灰之间的线段为纯黑并覆盖中轴，灰到白之间用 `ACCENT_DIM` 弱化高亮，其余中轴为 `BORDER_HEX` 细线；悬停、拖动或键盘聚焦时描边变亮。深浅主题下三枚手柄都靠填充和描边区分。
 - 黑、白滑块设置输入强度的下限和上限。灰滑块指向**映射到色带中点的输入强度**。向左拖会提亮中间调，向右拖会压暗。拖动黑点或白点时保留当前 Gamma，灰滑块随窗口移动。三个滑块始终有序，支持键盘微调。
 - 统计对象默认跟随左侧当前帧和调整目标。三维页统计当前有效体素，二维页统计当前显示的切片，选中局部增强区域时统计该区域，「全部显示」统计当前视图全体有效点。使用上色前的强度，排除 NaN 和无穷值。复用后台统计与缓存，拖动色阶时仅移动滑块并更新预览。
 
 ## 下组 · 输出色带
 
-- 横向铺满当前选用的完整色带，下沿放置左黑、右白两个滑块，默认位于 `0%` 和 `100%`。选区外加淡遮罩，方便看清截去了哪些颜色。
+- 横向铺满当前选用的完整色带，下方留出间隙放置左黑、右白两枚小房屋标记（等腰三角屋顶 + 底边圆角的长方形），与色带不重叠，默认位于 `0%` 和 `100%`，下方显示百分比。选区外加淡遮罩，方便看清截去了哪些颜色。
 - 截断按**选取色带子区间**实现。例如设为 `20%–80%`，黑场取原色带 `20%` 处的颜色，白场取 `80%` 处的颜色，中间调连续映射到二者之间。该操作只影响颜色，透明度仍由现有设置控制。切换色带时保留两个端点的百分比。
 
 ## 接入与兼容
@@ -34,4 +34,9 @@
 - 合成数据聚焦回归曾通过 55 项，覆盖累计点数、重复强度、常量与全无效输入、灰点方向、配方回显、灰度 `20%–80%`、屏幕／出版／Blender 结果及路径多选。并行集成后，纯数值回归通过 24 项，局部增强模块通过 49 项，配方／出版／Blender 复测通过 28 项，控件及主题生命周期复测分别通过 4 项和 19 项。
 - 一轮全量完成 1863 项测试，记录 8 项失败、28 项错误、4 项跳过；其中本任务主题监听问题已修复，相关 19 项复测通过。其余稳定复现的外部问题为两个裁剪弹层位置断言和一个主窗口测试替身生命周期错误；后续全量分别受并行坐标轴改动的中间状态和测试间原生中断影响，未形成全量通过结果。仍需在稳定工作区重跑，不把上述结果写成回归通过。
 - 真实窗口使用 `.local/data/integration_context_menu_synthetic.npz` 完成替代验收：切帧、局部区域、全部显示、连续拖动、色带切换、窄面板、深浅主题及二维切片均通过；三维帧缓冲截图确认灰度体积与色标。报告和截图在 `.local/outputs/levels-and-colormap-range-smoke/`。
-- `.local/data/WSe2_step.npz` 与约定的原始数据目录在本机均不存在，因此 WSe₂ 专项验收未执行，不能记为通过。可复用脚本为 `scripts/validation/verify_levels_and_colormap_range.py`。
+- 2026-11-21 视觉返工：输入色阶与输出色带手柄改为与底部时间轴 `DualRangeSlider` 共用的 10×16 胶囊形，去掉手柄内“黑/灰/白”文字；输入轨道改为 5 px 圆角 `BG_4` 底轨、`ACCENT_DIM` 有效区间和 `BORDER_HEX` 中轴，三枚手柄分别为黑、灰、白，输出色带仍为左黑右白。新增 `theme.token_color()`，同时修正时间轴选区把 `rgba(...)` 令牌当无效 `QColor`、实际画成黑色的问题。
+- 2026-11-21 自动化：`python -m unittest tests.ui.test_levels_controls tests.ui.test_theme -v` 通过 18 项，新增深浅主题手柄中心像素与 `token_color` 解析断言。视觉返工后的全量回归最终通过 1898 项（`python -m unittest discover -s tests -t . -v`，约 241 s，日志 `.local/logs/levels-timeline-handles-full-retry2.log`）；此前两次全量运行在同一集成测试处遇到 Windows 原生访问冲突（0xC0000005，日志 `.local/logs/levels-timeline-handles-full.log` 与 `.local/logs/levels-timeline-handles-full-retry.log`），该模块单独运行 33 项、与相邻模块合跑 44 项均通过；以最终完整一次 1898 项全通过为准，同时保留上述中断记录。`python -m compileall -q bandscope tests scripts` 与 `git diff --check` 通过。
+- 2026-11-21 真实窗口：本机现已存在 `.local/data/WSe2_step.npz`，此前“数据不存在”的缺口已补；`python scripts/validation/verify_levels_and_colormap_range.py .local/data/WSe2_step.npz` 的 8 项检查通过，`report.json` 与窗口、三维帧缓冲、深浅主题色阶卡片及两组控件截图位于 `.local/outputs/levels-and-colormap-range/`。
+- 2026-11-21 二次视觉调整：输入色阶黑场到灰场之间的线段改为纯黑并覆盖中轴，灰场到白场保持 `ACCENT_DIM` 有效区间；输出色带手柄改为左黑右白的小房屋符号（等腰三角屋顶 + 底角圆角的长方形），整体移到色带下方并留出间隙，百分比读数下移，控件高度 54 → 66；黑房屋使用中灰描边，保证深色主题下也能辨认。新增黑段像素、房屋中心色及“房屋顶部在色带底边之外”的几何断言，目标测试共 19 项通过。
+- 2026-11-21 二次真实窗口：调整后重跑 `verify_levels_and_colormap_range.py .local/data/WSe2_step.npz`，8 项检查通过，截图已更新到 `.local/outputs/levels-and-colormap-range/`（含 `levels-card-*.png`、`colormap-range-*.png`）。
+- 2026-11-21 二次全量回归：单进程 `unittest discover` 连续三次在 `tests.integration.test_axis_interval_pages` 触发 Windows 原生访问冲突（0xC0000005，伴随 `QPaintDevice: Cannot destroy paint device that is being painted`）；未修改的 HEAD 基线复跑也在同一处崩溃，判定为既有测试环境问题而非本次回归。改用分段全量：除该模块外 1866 项通过（约 484 s，日志 `.local/logs/levels-house-full-chunked.log`），该模块单独 33 项通过（日志 `.local/logs/levels-house-flaky-module.log`），合计 1899 项全部通过。`compileall` 与 `git diff --check` 通过。

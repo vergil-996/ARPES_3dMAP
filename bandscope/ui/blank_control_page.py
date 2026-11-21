@@ -1,4 +1,4 @@
-from PyQt5.QtCore import QSignalBlocker, Qt
+from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from siui.components.widgets import SiScrollArea
 
@@ -25,6 +25,8 @@ from bandscope.ui.denoise_control_utils import (
 
 
 class BlankControlPage(QWidget):
+    state_restored = pyqtSignal()
+
     SG_METHOD_NAME = CONFIG_SG_METHOD_NAME
     GROUP_WIDTH = 560
     DEFAULT_SG_PARAMS = CONFIG_DEFAULT_SG_PARAMS
@@ -338,3 +340,4 @@ class BlankControlPage(QWidget):
             self._sync_second_derivative_constraints()
         finally:
             del blockers
+        self.state_restored.emit()

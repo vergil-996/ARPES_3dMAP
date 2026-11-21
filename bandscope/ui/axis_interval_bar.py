@@ -91,8 +91,10 @@ class CoordinatePopup(QFrame):
         self.value_edit.setSuffix(f" {unit}" if unit else "")
         self.value_edit.setValue(value)
         self.value_edit.blockSignals(False)
-        color = "#17191C" if endpoint == "low" else "#FFFFFF"
-        border = "#555B64" if endpoint == "low" else "#9CA1A8"
+        color = (theme.RANGE_HANDLE_DARK_FILL if endpoint == "low"
+                 else theme.RANGE_HANDLE_LIGHT_FILL)
+        border = (theme.RANGE_HANDLE_DARK_BORDER if endpoint == "low"
+                  else theme.RANGE_HANDLE_LIGHT_BORDER)
         self.endpoint_marker.setStyleSheet(
             f"background: {color}; border: 1px solid {border}; border-radius: 3px;"
         )
@@ -380,7 +382,7 @@ class DualRangeSlider(QWidget):
         low_x = self.handle_center("low")
         up_x = self.handle_center("up")
         selected = QRectF(low_x, self.TRACK_Y - 2.5, max(up_x - low_x, 0.0), 5.0)
-        painter.setBrush(QColor(theme.ACCENT_DIM))
+        painter.setBrush(theme.token_color("ACCENT_DIM"))
         if selected.width() > 0:
             painter.drawRoundedRect(selected, 2.5, 2.5)
         painter.setPen(QPen(QColor(theme.BORDER_HEX), 1))
@@ -404,8 +406,10 @@ class DualRangeSlider(QWidget):
             self.HANDLE_HEIGHT + outline,
         )
         white = endpoint == "up"
-        fill = QColor("#FFFFFF" if white else "#17191C")
-        border = QColor("#9CA1A8" if white else "#555B64")
+        fill = QColor(theme.RANGE_HANDLE_LIGHT_FILL if white
+                      else theme.RANGE_HANDLE_DARK_FILL)
+        border = QColor(theme.RANGE_HANDLE_LIGHT_BORDER if white
+                        else theme.RANGE_HANDLE_DARK_BORDER)
         if self._hovered == endpoint or self._drag_mode == endpoint:
             border = QColor(theme.TEXT_1)
         painter.setBrush(fill)

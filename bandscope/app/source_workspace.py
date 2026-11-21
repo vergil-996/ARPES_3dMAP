@@ -1019,9 +1019,8 @@ class SourceWorkspaceMixin:
             # 结果页沿用来源页当时的控件状态，而不是当前活动源的控件状态。
             spec.params.setdefault("control_state", control_state)
         source_params = source.params if source is not None else {}
-        for key in ("local_enhancement", "render_quality"):
-            if key in source_params:
-                spec.params[key] = copy.deepcopy(source_params[key])
+        if "local_enhancement" in source_params:
+            spec.params["local_enhancement"] = copy.deepcopy(source_params["local_enhancement"])
         if "local_enhancement" in spec.params:
             from bandscope.core.local_enhancement import defer_range_locks
 

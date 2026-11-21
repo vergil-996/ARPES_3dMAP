@@ -642,5 +642,26 @@ class CameraResetTests(unittest.TestCase):
             analyzer.plotter.close()
 
 
+class RightPanelResetEntryTests(unittest.TestCase):
+    """「重置视角」只保留画布工具条上的图标入口，右侧面板标题区不再重复。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_right_panel_header_has_no_reset_button(self):
+        from tests.support.view_recipe import control_window
+
+        window = control_window()
+        try:
+            self.assertFalse(hasattr(window, "btn_reset_view"))
+            self.assertEqual(
+                window.canvas_tool_overlay.reset_button.accessibleName(),
+                "重置视角",
+            )
+        finally:
+            window.close()
+
+
 if __name__ == "__main__":
     unittest.main()

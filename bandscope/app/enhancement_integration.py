@@ -9,14 +9,13 @@ from PyQt5.QtWidgets import QAction
 from matplotlib.patches import Rectangle
 
 from bandscope.core.local_enhancement import (
-    DEFAULT_STYLE, RENDER_QUALITY_KEY, STATE_KEY, EnhancementRegion, adapt_regions, defer_range_locks,
+    DEFAULT_STYLE, STATE_KEY, EnhancementRegion, adapt_regions, defer_range_locks,
     ensure_display_state, geometry, logical_bounds, matching_regions, physical_bounds,
     region_slices, update_region_bounds,
 )
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.core.display_style import (
-    INDEPENDENT_MODE, is_independent, legacy_render_quality,
-    new_render_quality, resolved_display_style, with_display_mode,
+    is_independent, new_display_style, resolved_display_style, same_display_style,
 )
 from bandscope.processing.local_enhancement import (
     cached_cumulative_histogram,
@@ -180,7 +179,6 @@ class EnhancementInteractionMixin:
         combo.target_changed.connect(self._select_enhancement_target)
         combo.rename_committed.connect(self._rename_enhancement_region)
         self.page_render.btn_lock.toggled.connect(self.on_toggle_color_lock)
-        self.page_render.display_mode_changed.connect(self._on_display_mode_changed)
         self.page_render.display_value_changed.connect(self._on_display_values_changed)
         self.page_render.display_value_committed.connect(self.flush_render_levels_refresh)
         self.canvas_2d.mpl_connect("button_press_event", self._pick_enhancement_region)
@@ -228,8 +226,6 @@ class EnhancementInteractionMixin:
             inherited = copy.deepcopy(state)
             defer_range_locks(inherited)
             spec.params[STATE_KEY] = inherited
-        if RENDER_QUALITY_KEY in source.params:
-            spec.params[RENDER_QUALITY_KEY] = copy.deepcopy(source.params[RENDER_QUALITY_KEY])
 
     def _enhancement_ui_style(self):
         getter = getattr(self.page_render, "get_display_style", None)
@@ -240,8 +236,7 @@ class EnhancementInteractionMixin:
         else:
             levels_getter = getattr(self, "_get_display_levels", None)
             levels = tuple(levels_getter()) if levels_getter is not None else (0.0, 50.0, 100.0)
-        return {"levels": levels,
-                "opacity_mode": str(self.page_render.combo_map.currentText()) if hasattr(self.page_render, "combo_map") else "线性"}
+        return new_display_style(levels)
 
     def _enhancement_background_style(self):
         state = self._enhancement_state()
@@ -272,7 +267,7 @@ class EnhancementInteractionMixin:
         changed = False
         for target, key in targets:
             current = target.get(key)
-            if current != style and resolved_display_style(current) != resolved_display_style(style):
+            if current != style and not same_display_style(current, style):
                 target[key] = copy.deepcopy(style)
                 changed = True
         if changed:
@@ -287,10 +282,7 @@ class EnhancementInteractionMixin:
             style = state["background"]
             for key, value in zip(("s_low", "s_gamma", "s_up"), style["levels"]):
                 render_state[key] = dict(render_state[key], value=int(value))
-            render_state["combo_map"] = style["opacity_mode"]
             render_state["display_style"] = copy.deepcopy(style)
-            spec = self._enhancement_spec()
-            render_state["render_quality"] = copy.deepcopy(spec.params.get(RENDER_QUALITY_KEY))
             cached = self.__dict__.get("_enhancement_cache")
             if cached is not None and cached[1] is not None:
                 render_state["display_range"] = tuple(cached[1]["background_range"])
@@ -321,49 +313,18 @@ class EnhancementInteractionMixin:
         region = None if state.get("show_all_regions") else self._enhancement_selected()
         style = (state.get("common_style", DEFAULT_STYLE) if region and state.get("common")
                  else region.get("style", DEFAULT_STYLE) if region else state["background"])
-        spec = self._enhancement_spec()
         context = self.__dict__.get("current_render_context") or {}
         self.page_render.set_display_style(
             style,
-            spec.params.get(RENDER_QUALITY_KEY),
             resolved_range=self._display_range_for_target(state),
             view=context.get("view", "3d"),
         )
         self._enhancement_restored_style = copy.deepcopy(self._enhancement_ui_style())
 
-    def _commit_render_quality(self):
-        spec = self._enhancement_spec()
-        if spec is None:
-            return False
-        quality = self.page_render.get_render_quality()
-        if spec.params.get(RENDER_QUALITY_KEY) == quality:
-            return False
-        spec.params[RENDER_QUALITY_KEY] = copy.deepcopy(quality)
-        return True
-
     def _on_display_values_changed(self):
         if getattr(self, "_syncing_controls", False):
             return
-        self._commit_render_quality()
         self.schedule_render_levels_refresh(None)
-
-    def _on_display_mode_changed(self, mode):
-        state = self._enhancement_state()
-        if state is None or getattr(self, "_syncing_controls", False):
-            return
-        styles = [(state, "background")]
-        if "common_style" in state:
-            styles.append((state, "common_style"))
-        styles.extend((region, "style") for region in state["regions"])
-        for target, key in styles:
-            target[key] = with_display_mode(target.get(key, DEFAULT_STYLE), mode)
-        state["revision"] = int(state.get("revision", 0)) + 1
-        spec = self._enhancement_spec()
-        spec.params[RENDER_QUALITY_KEY] = (
-            new_render_quality() if mode == INDEPENDENT_MODE else legacy_render_quality()
-        )
-        self._restore_enhancement_style()
-        self._enhancement_refresh()
 
     def _enhancement_refresh(self, *, interactive=False):
         self._enhancement_cache = None

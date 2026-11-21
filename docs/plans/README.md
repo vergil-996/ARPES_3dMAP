@@ -2,9 +2,10 @@
 
 本索引只列尚待设计或实施的工作；按任务选择对应计划，不批量读取本目录。
 
-- [BandScope 自动轴分配与加载后重设](axis-assignment.md)（已实施；WSe₂ 真实数据验收待补，全量另有 3 项非本任务失败）
-- [BandScope 画布工具栏与 Z 轴旋钮改造](canvas-toolbar-rotation-dial.md)（已实施；定向测试与替代数据窗口验收通过，WSe₂ 验收待补，全量回归存在其他模块失败）
-- [色阶调整：累计直方图、三滑块与色带截断](levels-and-colormap-range.md)（已实施；稳定工作区全量回归与 WSe₂ 真实窗口验收待补）
+- [BandScope 自动轴分配与加载后重设](axis-assignment.md)（已实施；自动化与 WSe₂ 真实窗口验收通过）
+- [BandScope 画布工具栏与 Z 轴旋钮改造](canvas-toolbar-rotation-dial.md)（已实施；定向测试与 WSe₂ 真实窗口验收通过）
+- [色阶调整：累计直方图、三滑块与色带截断](levels-and-colormap-range.md)（已实施；2026-11-21 视觉返工后分段全量回归与 WSe₂ 真实窗口验收通过；单进程全量存在既有原生崩溃）
+- [三维不透明度曲线直接编辑](opacity-curve-control-points.md)（已实施；WSe₂ 真实窗口与 CPU/CUDA／出版／Blender 数据验收通过，真实 Blender 进程渲染与人工视觉复核未执行）
 - [移除强度归一化卡片，改造独立不透明度曲线](independent-opacity-curve.md)（已实施；WSe₂ 验收待补，全量回归存在其他任务失败）
 - [NiHITP 大体数据色阶与独立透明度滑条优化](independent-display-slider-performance.md)（诊断完成，待实施）
 - [体渲染显示与质量改进](volume-display-quality.md)：首期已实现独立透明度、归一化、自定义参数和质量策略，复现 schema 2 与 Blender 独立显示（schema 10 起）已贯通，新建工程现为 schema 11；真实对照和开发冻结包验收通过，已随 v1.20.0 发布（2026-11-13），保留维护者人工视觉复核，不包含等值面。

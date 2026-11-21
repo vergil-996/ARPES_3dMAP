@@ -3,17 +3,24 @@ from unittest.mock import patch
 
 import numpy as np
 
-from bandscope.core.display_style import new_display_style
+from bandscope.core.display_style import new_display_style, resolved_display_style
 from bandscope.processing import gpu_display
 from bandscope.processing.display_transfer import (
     channels,
     display_level_info,
     independent_opacity_values,
     normalization_range,
-    volume_display_unit_distance,
+    opacity_reference_distance,
+    rebase_opacity,
 )
 from bandscope.processing.local_enhancement import clear_range_cache, finite_range, resolve_display
 from tests.support.enhancement import context_2d, region
+
+
+def opacity_style(points):
+    style = new_display_style()
+    style["opacity"] = {"points": [list(point) for point in points]}
+    return style
 
 
 class IndependentDisplayTests(unittest.TestCase):
@@ -21,32 +28,36 @@ class IndependentDisplayTests(unittest.TestCase):
         clear_range_cache()
         self.addCleanup(clear_range_cache)
         self.data = np.array([-2.0, 0.0, 0.1, 0.25, 0.5, 1.0, 2.0, np.nan, np.inf, -np.inf])
-        self.style = new_display_style()
+        self.style = opacity_style(((0.0, 0.0), (0.5, 0.5), (1.0, 1.0)))
         self.style["normalization"] = {
             "mode": "manual", "percentiles": (0.0, 99.5), "manual_range": (0.0, 1.0),
         }
         self.info = display_level_info(self.data, self.style)
 
-    def test_alpha_formula_threshold_smoothstep_extremes_and_nonfinite(self):
-        self.style["opacity"] = {
-            "threshold": 25.0, "transition": 25.0, "gamma": 2.0,
-            "density": 40.0, "preset": "custom",
-        }
+    def test_alpha_is_the_piecewise_linear_curve_of_the_normalized_intensity(self):
+        points = ((0.0, 0.0), (0.2, 0.8), (0.6, 0.8), (1.0, 0.1))
+        self.style["opacity"] = {"points": [list(point) for point in points]}
         actual = independent_opacity_values(self.data, self.info, self.style, 2.0)
         q = (np.asarray(self.data, dtype=float) - self.info["data_min"]) / self.info["span"]
-        signal = np.maximum(q - 0.25, 0.0)
-        position = np.clip((q - 0.25) / 0.25, 0.0, 1.0)
-        gate = position * position * (3.0 - 2.0 * position)
-        expected = 1.0 - np.exp(-(0.2 * signal ** 2 * gate) * 2.0)
+        expected = np.interp(q, [point[0] for point in points], [point[1] for point in points])
         finite = np.isfinite(self.data)
         np.testing.assert_allclose(actual[finite], expected[finite], rtol=1e-12, atol=1e-12)
-        self.assertEqual(float(actual[0]), 0.0)
-        self.assertGreater(actual[6], actual[5])
+
+    def test_alpha_endpoints_and_plateaus_are_exact(self):
+        points = ((0.0, 0.0), (0.25, 1.0), (0.75, 1.0), (1.0, 0.0))
+        self.style["opacity"] = {"points": [list(point) for point in points]}
+        samples = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+        info = display_level_info(np.array([0.0, 1.0]), self.style)
+        actual = independent_opacity_values(samples, info, self.style, 3.5)
+        np.testing.assert_allclose(actual, [0.0, 1.0, 1.0, 1.0, 0.0], atol=1e-12)
+        self.assertEqual(float(actual[-1]), 0.0)
+        self.assertTrue(np.all(np.isfinite(actual)))
 
     def test_color_and_opacity_controls_are_independent(self):
         original = self.data.copy()
         other_color = new_display_style(levels=(20, 100, 80))
         other_color["normalization"] = self.style["normalization"].copy()
+        other_color["opacity"] = {"points": self.style["opacity"]["points"]}
         other_info = display_level_info(self.data, other_color)
         color_a, alpha_a = channels(self.data, self.info, "linear", style=self.style, unit_distance=2.0)
         color_b, alpha_b = channels(self.data, other_info, "sigmoid", style=other_color, unit_distance=2.0)
@@ -55,7 +66,7 @@ class IndependentDisplayTests(unittest.TestCase):
 
         stronger = new_display_style()
         stronger["normalization"] = self.style["normalization"].copy()
-        stronger["opacity"].update(threshold=50.0, gamma=2.0, density=60.0, preset="custom")
+        stronger["opacity"] = {"points": [[0.0, 0.0], [0.25, 0.9], [1.0, 1.0]]}
         color_c, alpha_c = channels(self.data, self.info, "linear", style=stronger, unit_distance=2.0)
         np.testing.assert_array_equal(color_a, color_c)
         self.assertFalse(np.array_equal(alpha_a, alpha_c))
@@ -67,6 +78,7 @@ class IndependentDisplayTests(unittest.TestCase):
         )
         other = new_display_style(levels=(20, 100, 80))
         other["normalization"] = self.style["normalization"].copy()
+        other["opacity"] = {"points": self.style["opacity"]["points"]}
         other_info = display_level_info(self.data, other)
         with patch("bandscope.processing.display_transfer.independent_opacity_values") as opacity:
             color, alpha = channels(
@@ -81,7 +93,7 @@ class IndependentDisplayTests(unittest.TestCase):
         np.testing.assert_array_equal(color, expected_color)
         np.testing.assert_array_equal(alpha, expected_alpha)
 
-        other["opacity"]["density"] = 45.0
+        other["opacity"] = {"points": [[0.0, 0.0], [0.3, 0.7], [1.0, 1.0]]}
         with patch("bandscope.processing.display_transfer.normalized_color_samples") as normalized:
             color, alpha = channels(
                 self.data, other_info, "linear", style=other, unit_distance=2.0,
@@ -94,14 +106,27 @@ class IndependentDisplayTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(alpha, expected_alpha)
 
-    def test_zero_density_and_zero_transition(self):
-        self.style["opacity"].update(density=0.0)
+    def test_zero_alpha_curve_returns_transparent_display(self):
+        self.style["opacity"] = {"points": [[0.0, 0.0], [1.0, 0.0]]}
         alpha = independent_opacity_values(self.data, self.info, self.style, 100.0)
         self.assertTrue(np.all(alpha[np.isfinite(self.data)] == 0.0))
-        self.style["opacity"].update(density=100.0, threshold=75.0)
+        self.style["opacity"] = {"points": [[0.0, 0.0], [0.75, 0.0], [1.0, 1.0]]}
         alpha = independent_opacity_values(self.data, self.info, self.style, 1.0)
         self.assertEqual(float(alpha[3]), 0.0)
         self.assertGreater(float(alpha[6]), 0.0)
+
+    def test_reference_distance_is_derived_from_the_full_display_grid(self):
+        from bandscope.processing.display_transfer import volume_unit_distance
+
+        full = (100, 80, 40)
+        self.assertEqual(opacity_reference_distance(full), volume_unit_distance(full, full))
+        self.assertEqual(opacity_reference_distance(full),
+                         opacity_reference_distance((100, 80, 40, 25)))
+        self.assertGreater(opacity_reference_distance(full), 0.0)
+        alpha = np.array([0.0, 0.25, 0.5, 1.0])
+        rebased = rebase_opacity(alpha, 1.0, 2.0)
+        np.testing.assert_allclose(rebased[:-1], 1.0 - (1.0 - alpha[:-1]) ** 2.0, rtol=1e-12)
+        self.assertEqual(float(rebased[-1]), 1.0)
 
     def test_full_range_ignores_removed_policies_and_handles_empty_and_constant_data(self):
         values = np.array([0.0, 1.0, 2.0, 100.0, np.nan, np.inf])
@@ -138,14 +163,6 @@ class IndependentDisplayTests(unittest.TestCase):
         unlocked = resolve_display(context, state)
         self.assertEqual(unlocked["regions"][0]["data_range"], (0.0, 3000.0))
 
-    def test_unit_distance_depends_on_display_grid_not_crop_size(self):
-        full = (100, 80, 40)
-        expected = volume_display_unit_distance(full)
-        self.assertEqual(expected, min(200.0 / 99.0, 200.0 / 79.0, 200.0 / 39.0))
-        for cropped in ((20, 20, 10), (100, 80, 40)):
-            with self.subTest(cropped=cropped):
-                self.assertEqual(volume_display_unit_distance(full), expected)
-
     def test_cuda_independent_mapping_matches_cpu(self):
         if not gpu_display.set_enabled(True):
             self.skipTest(f"CUDA display mapping unavailable: {gpu_display.failure_reason()}")
@@ -156,7 +173,7 @@ class IndependentDisplayTests(unittest.TestCase):
         values[0, 0, 0] = np.nan
         values[1, 0, 0] = np.inf
         style = new_display_style()
-        style["opacity"].update(threshold=13.0, transition=17.0, gamma=1.7, density=33.0, preset="custom")
+        style["opacity"] = {"points": [[0.0, 0.0], [0.15, 0.4], [0.6, 0.9], [1.0, 0.2]]}
         info = display_level_info(values, style)
         gpu_display.set_enabled(False)
         cpu_color, cpu_alpha = channels(values, info, "linear", style=style, unit_distance=2.5)
@@ -176,6 +193,12 @@ class IndependentDisplayTests(unittest.TestCase):
         )
         self.assertIs(partial_color, gpu_color)
         np.testing.assert_allclose(partial_alpha, cpu_alpha, rtol=0.0, atol=1e-7)
+
+    def test_resolved_style_keeps_points_canonical(self):
+        self.style["opacity"] = {"points": [[0.9, 0.2], [0.1, 0.6], [0.1, 0.3]]}
+        resolved = resolved_display_style(self.style, reference_distance=2.0)
+        self.assertEqual(resolved["opacity"]["points"][0], [0.0, 0.3])
+        self.assertEqual(resolved["opacity"]["points"][-1], [1.0, 0.2])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.display_style import new_render_quality
 from bandscope.exporting.publication_export import capture_snapshot
 from bandscope.exporting.publication_models import resolve_axis_labels
 from bandscope.rendering.render_core import VisualEngine
@@ -47,6 +48,7 @@ def _context(axis_index=2, x_key=None, y_key=None, x_label="kx", y_label="ky"):
 def _analyzer(context=None, *, sources=None, units=None, spec=None):
     analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
     spec = spec or AnalysisPageSpec(PAGE, "X轴积分", "axis_integral", "test")
+    analyzer.render_quality = new_render_quality()
     analyzer.axis_title_state = AxisTitleState()
     analyzer.left_workspace = SimpleNamespace(
         current_spec=lambda: spec,

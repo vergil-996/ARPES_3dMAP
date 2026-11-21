@@ -1766,7 +1766,8 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
                 or float(level_info["gamma_power"]) != 1.):
             from bandscope.rendering.render_core import VolumeAlphaChannel
             from bandscope.rendering.local_enhancement import apply_volume_display
-            from bandscope.processing.display_transfer import channels, volume_display_unit_distance
+            from bandscope.processing.display_transfer import channels, opacity_reference_distance
+            reference_distance = opacity_reference_distance(snapshot.payload["full_shape"])
             if alpha_channel is not None:
                 alpha_channel.detach()
             if enhancement is not None and (enhancement["active"] or independent):
@@ -1774,14 +1775,12 @@ def render_3d(snapshot, style, overrides, options, dpi: int) -> Figure:
             else:
                 color, alpha = channels(
                     volume, level_info, snapshot.payload["opacity_mode"], style=display_style,
-                    unit_distance=volume_display_unit_distance(snapshot.payload["full_shape"]),
+                    unit_distance=reference_distance,
                 )
             alpha_channel = VolumeAlphaChannel(volume_actor, grid, color)
             apply_volume_display(alpha_channel, color, alpha, snapshot.cmap_name, opacity_multiplier)
             if independent:
-                volume_actor.GetProperty().SetScalarOpacityUnitDistance(
-                    volume_display_unit_distance(snapshot.payload["full_shape"])
-                )
+                volume_actor.GetProperty().SetScalarOpacityUnitDistance(reference_distance)
         from bandscope.rendering.render_core import configure_volume_quality
         configure_volume_quality(
             volume_actor, plotter, "fine", snapshot.payload.get("render_quality"), publication=True,

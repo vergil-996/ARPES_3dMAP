@@ -25,8 +25,9 @@ from bandscope.exporting.blender_panel import BlenderExportPanel, _BlenderTask
 from bandscope.exporting.blender_project import (
     BlenderProjectError, load_blender_project, update_snapshot_display,
 )
-from bandscope.processing.display_transfer import channels, volume_display_unit_distance
+from bandscope.processing.display_transfer import channels, opacity_reference_distance
 from bandscope.core.display_style import (
+    has_opacity_points,
     is_independent,
     legacy_display_style,
     legacy_render_quality,
@@ -34,8 +35,10 @@ from bandscope.core.display_style import (
     new_render_quality,
     resolved_display_style,
     resolved_render_quality,
+    sanitized_legacy_opacity,
 )
-from bandscope.ui.page_render_control import RenderControlPage
+from bandscope.ui.colormap_selector import COLORMAP_OPTIONS
+from bandscope.ui.opacity_controls import OpacityCurveEditor
 
 
 class BlenderProjectEditor(QWidget):
@@ -80,7 +83,7 @@ class BlenderProjectEditor(QWidget):
         controls.addWidget(self.entry_combo)
         form = QFormLayout()
         self.cmap_combo = QComboBox()
-        self.cmap_combo.addItems(RenderControlPage.CMAP_OPTIONS)
+        self.cmap_combo.addItems(COLORMAP_OPTIONS)
         form.addRow("Colormap", self.cmap_combo)
         self.level_spins = []
         for name, value in (("黑点", 0.0), ("Gamma", 50.0), ("白点", 100.0)):
@@ -124,6 +127,7 @@ class BlenderProjectEditor(QWidget):
                 self.quality_rows.append((label, widget))
 
         self.opacity_spins = {}
+        self.opacity_spin_rows = []
         for name, text, minimum, maximum, decimals, value in (
             ("threshold", "阈值（%）", 0.0, 100.0, 3, 0.0),
             ("transition", "起始过渡宽度（%）", 0.0, 100.0, 1, 0.0),
@@ -135,7 +139,14 @@ class BlenderProjectEditor(QWidget):
             spin.setDecimals(decimals)
             spin.setValue(value)
             self.opacity_spins[name] = spin
-            add_independent_row(text, spin)
+            label = QLabel(text)
+            form.addRow(label, spin)
+            self.independent_rows.append((label, spin))
+            self.opacity_spin_rows.append((label, spin))
+        self.opacity_curve = OpacityCurveEditor(self)
+        self.opacity_curve_label = QLabel("不透明度曲线")
+        form.addRow(self.opacity_curve_label, self.opacity_curve)
+        self.independent_rows.append((self.opacity_curve_label, self.opacity_curve))
         self.interpolation_combo = QComboBox()
         self.interpolation_combo.addItem("线性", "linear")
         self.interpolation_combo.addItem("最近邻", "nearest")
@@ -209,6 +220,7 @@ class BlenderProjectEditor(QWidget):
                 widget.toggled.connect(self._on_display_changed)
             else:
                 widget.valueChanged.connect(self._on_display_changed)
+        self.opacity_curve.valueChanged.connect(self._on_display_changed)
 
     @property
     def busy(self):
@@ -315,25 +327,48 @@ class BlenderProjectEditor(QWidget):
             style = (snapshot.payload.get("display") or {}).get("background_style")
             if style is None:
                 style = legacy_display_style(snapshot.levels_params, snapshot.payload.get("opacity_mode", "linear"))
-            style = resolved_display_style(style)
+            points_supported = self._project_supports_points()
+            reference = opacity_reference_distance(
+                snapshot.payload.get("full_shape", snapshot.payload["volume"].shape)
+            )
+            style = resolved_display_style(
+                style, reference_distance=reference, convert_opacity=points_supported,
+            )
             independent = is_independent(style)
-            extended = style if independent else new_display_style(style["levels"], style["opacity_mode"])
+            legacy_values = sanitized_legacy_opacity(style.get("opacity"))
             for name, spin in self.opacity_spins.items():
-                spin.setValue(float(extended["opacity"][name]))
+                spin.setValue(float(legacy_values[name]))
+            if has_opacity_points((style.get("opacity") or {})):
+                self.opacity_curve.set_points(style["opacity"]["points"])
             quality = resolved_render_quality(snapshot.payload.get("render_quality"))
             index = self.interpolation_combo.findData(quality["interpolation"])
             self.interpolation_combo.setCurrentIndex(max(0, index))
             index = self.resting_combo.findData(quality["resting"])
             self.resting_combo.setCurrentIndex(max(0, index))
-            self.display_mode_label.setText("独立透明度（schema 10）" if independent else "兼容映射")
+            self.display_mode_label.setText(
+                "独立透明度（schema 12 · 控制点）" if independent and points_supported
+                else "独立透明度（schema 10 · 四参数）" if independent
+                else "兼容映射"
+            )
             self._sync_display_mode_rows()
         finally:
             self._loading = previous
 
+    def _project_supports_points(self):
+        return bool(self.project and self.project.supports_opacity_points)
+
     def _sync_display_mode_rows(self):
         style = (self.current_snapshot.payload.get("display") or {}).get("background_style") if self.current_snapshot else None
         independent = bool(self.project and self.project.supports_display_styles and is_independent(style))
+        points_supported = self._project_supports_points()
+        for label, widget in self.opacity_spin_rows:
+            label.setVisible(independent and not points_supported)
+            widget.setVisible(independent and not points_supported)
+        self.opacity_curve_label.setVisible(independent and points_supported)
+        self.opacity_curve.setVisible(independent and points_supported)
         for label, widget in self.independent_rows:
+            if (label, widget) in self.opacity_spin_rows or widget is self.opacity_curve:
+                continue
             label.setVisible(independent)
             widget.setVisible(independent)
         self.opacity_label.setVisible(not independent)
@@ -368,10 +403,15 @@ class BlenderProjectEditor(QWidget):
         current_style = (snapshot.payload.get("display") or {}).get("background_style") if snapshot else None
         colormap_range = (current_style or {}).get("colormap_range", (0.0, 1.0))
         if self.project and self.project.supports_display_styles and is_independent(current_style):
-            style = new_display_style(levels, opacity_mode, colormap_range)
-            style["opacity"] = dict(current_style["opacity"])
-            for name, spin in self.opacity_spins.items():
-                style["opacity"][name] = float(spin.value())
+            if self.project.supports_opacity_points:
+                style = new_display_style(
+                    levels, opacity_mode, colormap_range, self.opacity_curve.points(),
+                )
+            else:
+                style = new_display_style(levels, opacity_mode, colormap_range)
+                style["opacity"] = sanitized_legacy_opacity(current_style.get("opacity"))
+                for name, spin in self.opacity_spins.items():
+                    style["opacity"][name] = float(spin.value())
             quality = new_render_quality()
             quality["interpolation"] = str(self.interpolation_combo.currentData())
             quality["resting"] = str(self.resting_combo.currentData())
@@ -454,7 +494,8 @@ class BlenderProjectEditor(QWidget):
             info = snapshot.payload["level_info"]
             style = (snapshot.payload.get("display") or {}).get("background_style")
             independent = is_independent(style)
-            unit_distance = volume_display_unit_distance(snapshot.payload["full_shape"]) if independent else None
+            unit_distance = (opacity_reference_distance(snapshot.payload["full_shape"])
+                             if independent else None)
             color, alpha = channels(
                 volume, info, snapshot.payload["opacity_mode"],
                 style=style, unit_distance=unit_distance,

@@ -65,15 +65,17 @@ from bandscope.exporting.blender_texts import (
 from bandscope.exporting.publication_models import PublicationSnapshot
 from bandscope.exporting.publication_renderers import compute_level_info
 
-BLENDER_PROJECT_SCHEMA = 11
+BLENDER_PROJECT_SCHEMA = 12
 BLENDER_PROJECT_BOX_MATERIAL_SCHEMA = 8
 BLENDER_PROJECT_TEXT_SCHEMA = 9
 BLENDER_PROJECT_DISPLAY_SCHEMA = 10
 BLENDER_PROJECT_VOLUME_SCHEMA = 11
+BLENDER_PROJECT_OPACITY_POINTS_SCHEMA = 12
 # schema 7–10 回读和原位更新保留原版本及创作内容，不升级为柔和受光。
 BLENDER_PROJECT_MIN_ENTRY_SCHEMA = 7
 BLENDER_PROJECT_FORMAT = "bandscope-blender-project"
 BLENDER_EDIT_FORMAT = BLENDER_DISPLAY_EDIT_FORMAT
+BLENDER_LEGACY_EDIT_FORMAT = 2
 BOX_GROUP_PRESET = "thin_boxes"
 PRESET_KEYS = ("coordinates", "guide_frame", "orientation", BOX_GROUP_PRESET, TEXT_GROUP_PRESET)
 PRESET_LABELS = {
@@ -302,6 +304,10 @@ class LoadedBlenderProject:
         return self.schema_version >= BLENDER_PROJECT_DISPLAY_SCHEMA
 
     @property
+    def supports_opacity_points(self) -> bool:
+        return self.schema_version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
+
+    @property
     def volume_shading(self):
         if self.schema_version < BLENDER_PROJECT_VOLUME_SCHEMA:
             return resolve_volume_shading()
@@ -327,6 +333,11 @@ class LoadedBlenderProject:
             messages.append(
                 f"工程为 schema {self.schema_version}：原位更新保留兼容显示；"
                 "需要独立不透明度时请重新导出 schema 10。"
+            )
+        elif not self.legacy and not self.supports_opacity_points:
+            messages.append(
+                f"工程为 schema {self.schema_version}：不透明度仍以四参数保存；"
+                "需要自由控制点曲线时请重新导出为新版工程。"
             )
         if self.recipe is None:
             messages.append("未找到 Blender 配套复现配置；现有显示编辑仍可使用，从原始数据重新导出可获得完整复现配置。")
@@ -905,12 +916,17 @@ def _validate_text_configuration(metadata):
 
 
 def _validate_display_configuration(metadata):
-    if (metadata.get("project") or {}).get("display_edit_format") != BLENDER_EDIT_FORMAT:
-        raise BlenderProjectError("schema 10 工程缺少显示编辑格式 2 配置。")
+    version = int(metadata.get("schema_version", 0) or 0)
+    required_format = (BLENDER_EDIT_FORMAT if version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
+                       else BLENDER_LEGACY_EDIT_FORMAT)
+    if (metadata.get("project") or {}).get("display_edit_format") != required_format:
+        raise BlenderProjectError(f"schema {version} 工程缺少显示编辑格式 {required_format} 配置。")
     for entry in metadata.get("entries") or ():
         edit = entry.get("bandscope_edit") or {}
-        if edit.get("format_version") != BLENDER_EDIT_FORMAT:
-            raise BlenderProjectError(f"条目 {entry.get('entry_id')} 的显示编辑格式不是 2。")
+        if edit.get("format_version") != required_format:
+            raise BlenderProjectError(
+                f"条目 {entry.get('entry_id')} 的显示编辑格式不是 {required_format}。"
+            )
         if not isinstance(edit.get("display_style"), dict) or not isinstance(edit.get("render_quality"), dict):
             raise BlenderProjectError(f"条目 {entry.get('entry_id')} 缺少显示样式或渲染质量。")
         resolved_display_style(edit["display_style"])
@@ -919,6 +935,29 @@ def _validate_display_configuration(metadata):
         if (not isinstance(data_range, (list, tuple)) or len(data_range) != 2
                 or not np.all(np.isfinite(np.asarray(data_range, dtype=float)))):
             raise BlenderProjectError(f"条目 {entry.get('entry_id')} 的已解析强度范围无效。")
+    if version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA:
+        _validate_opacity_points_configuration(metadata)
+    return metadata
+
+
+def _validate_opacity_points_configuration(metadata):
+    from bandscope.core.display_style import has_opacity_points
+
+    for entry in metadata.get("entries") or ():
+        edit = entry.get("bandscope_edit") or {}
+        style = edit.get("display_style") or {}
+        if not is_independent(style):
+            continue
+        if not has_opacity_points(style.get("opacity")):
+            raise BlenderProjectError(
+                f"条目 {entry.get('entry_id')} 的独立不透明度缺少控制点曲线。"
+            )
+        points = resolved_display_style(style)["opacity"]["points"]
+        if (len(points) < 2 or abs(float(points[0][0])) > 1.0e-9
+                or abs(float(points[-1][0]) - 1.0) > 1.0e-9):
+            raise BlenderProjectError(
+                f"条目 {entry.get('entry_id')} 的不透明度曲线端点无效。"
+            )
     return metadata
 
 
@@ -1111,10 +1150,17 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
     if legacy:
         baked = ["unknown_legacy_effects"]
     display_schema = int(entry.get("schema_version", 0)) >= BLENDER_PROJECT_DISPLAY_SCHEMA
+    points_supported = int(entry.get("schema_version", 0)) >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
     if display_schema:
+        from bandscope.processing.display_transfer import opacity_reference_distance
+
         original_style = edit.get("display_style") or legacy_display_style(levels, opacity_mode)
         restricted = has_restricted_normalization(original_style)
-        display_style = resolved_display_style(original_style)
+        display_style = resolved_display_style(
+            original_style,
+            reference_distance=opacity_reference_distance(full_shape),
+            convert_opacity=points_supported,
+        )
         if restricted and locked is not None:
             finite = volume[np.isfinite(volume)]
             locked = ((float(np.min(finite)), float(np.max(finite))) if finite.size else None)
@@ -1198,6 +1244,7 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
                 "needs_cmap": not bool(cmap_name),
                 "frozen_result": True,
                 "display_schema": display_schema,
+                "points_supported": points_supported,
                 "display_edited": False,
             },
         },
@@ -1286,6 +1333,7 @@ def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range,
         raise BlenderProjectError("色阶需要黑点、gamma 和白点三个参数。")
     state = snapshot.payload.setdefault("blender_project", {})
     display_schema = bool(state.get("display_schema", False))
+    points_supported = bool(state.get("points_supported", False))
     current = (snapshot.payload.get("display") or {}).get("background_style")
     if display_style is not None:
         selected = display_style
@@ -1297,9 +1345,19 @@ def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range,
         selected = legacy_display_style(
             levels, opacity_mode, (current or {}).get("colormap_range", (0.0, 1.0)),
         )
-    selected = resolved_display_style(selected)
+    from bandscope.core.display_style import has_opacity_points
+    from bandscope.processing.display_transfer import opacity_reference_distance
+
+    reference = opacity_reference_distance(
+        snapshot.payload.get("full_shape", snapshot.payload["volume"].shape)
+    )
+    selected = resolved_display_style(
+        selected, reference_distance=reference, convert_opacity=points_supported,
+    )
     if not display_schema and is_independent(selected):
         raise BlenderProjectError("schema 7–9 工程不能原位启用独立显示，请重新导出 schema 10。")
+    if not points_supported and is_independent(selected) and has_opacity_points(selected.get("opacity")):
+        raise BlenderProjectError("旧工程以四参数保存不透明度；需要自由控制点时请重新导出为新版工程。")
     quality = resolved_render_quality(
         render_quality if render_quality is not None else snapshot.payload.get("render_quality")
     )
@@ -1355,6 +1413,14 @@ def merge_updated_entry(original, generated):
         opacity = result.get("opacity") or {}
         opacity.pop("display_mode", None)
         opacity.pop("independent_parameters", None)
+    elif int(original.get("schema_version", 0)) < BLENDER_PROJECT_OPACITY_POINTS_SCHEMA:
+        # schema 10–11 原位更新保留原编辑格式与四参数不透明度：新版生成结果里的
+        # 格式 3 字段在这里降回格式 2，避免旧读端把点列当成四参数。
+        edit = result.setdefault("bandscope_edit", {})
+        edit["format_version"] = BLENDER_LEGACY_EDIT_FORMAT
+        edit["capabilities"] = [
+            name for name in edit.get("capabilities", []) if name != "opacity_points"
+        ]
     previous_edit = original.get("bandscope_edit") or {}
     discarded = list(previous_edit.get("baked_effects") or ())
     if discarded:

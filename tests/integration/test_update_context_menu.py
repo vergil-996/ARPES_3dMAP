@@ -3,66 +3,91 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from tests.support.view_recipe import control_window
+
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QPoint, QRect
-from PyQt5.QtWidgets import QApplication, QMenu, QPushButton, QWidget
+from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtWidgets import QApplication, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
 
 
-class SettingsMenuTests(unittest.TestCase):
+class SettingsWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def _analyzer(self):
-        button = QPushButton()
-        self.addCleanup(button.deleteLater)
-        analyzer = SimpleNamespace(
-            btn_tb_settings=button,
-            CONTEXT_MENU_STYLE=My3DAnalyzer.CONTEXT_MENU_STYLE,
-            update_controller=SimpleNamespace(open_settings=Mock()),
-            open_plugin_manager=Mock(),
-            open_denoise_settings=Mock(),
+    def test_navigation_and_global_preferences(self):
+        window = control_window()
+        self.addCleanup(window.close)
+        for key in ("rendering/quality", "compute_backend"):
+            self.addCleanup(window.settings.remove, key)
+        window.request_refresh = Mock()
+        with patch.object(window, "open_plugin_manager") as plugins:
+            window.btn_tb_settings.click()
+            dialog = window.settings_dialog
+            nav = dialog.navigation
+            self.assertEqual(nav.currentItem().text(0), "计算后端")
+            self.assertFalse(hasattr(window.page_render, "combo_backend"))
+            self.assertFalse(hasattr(window.page_render, "grp_quality"))
+            if not window.backend_manager.gpu_available:
+                self.assertFalse(dialog.backend.model().item(2).isEnabled())
+                self.assertIn("CUDA", dialog.backend.itemData(2, Qt.ToolTipRole))
+            dialog.backend.setCurrentText("CPU")
+            self.assertEqual(window.backend_manager.mode, "CPU")
+            nav.setCurrentItem(nav.topLevelItem(2).child(0))
+            dialog.plugins.click()
+            plugins.assert_called_once_with()
+            nav.setCurrentItem(nav.topLevelItem(2).child(1))
+            dialog.updates.click()
+            window.update_controller.open_settings.assert_called_once_with()
+
+        nav.setCurrentItem(nav.topLevelItem(0).child(1))
+        self.assertEqual(nav.currentItem().text(0), "3D渲染质量")
+        dialog.mode.setCurrentIndex(dialog.mode.findData("legacy"))
+        self.assertFalse(dialog.interpolation.isEnabled())
+        self.assertFalse(dialog.resting.isEnabled())
+        dialog.mode.setCurrentIndex(dialog.mode.findData("explicit"))
+        dialog.resting.setCurrentIndex(dialog.resting.findData("fine"))
+        window.request_refresh.assert_not_called()
+        expected = dict(window.render_quality)
+        self.assertEqual(expected["resting"], "fine")
+        dialog.close()
+        self.assertIs(window.open_settings(), dialog)
+        self.assertEqual(nav.currentItem().text(0), "3D渲染质量")
+        other = control_window()
+        self.addCleanup(other.close)
+        self.assertEqual(other.render_quality, expected)
+        self.assertEqual(other.backend_manager.mode, "CPU")
+        window.current_render_context = {"view": "2d"}
+        dialog.resting.setCurrentIndex(dialog.resting.findData("standard"))
+        window.request_refresh.assert_not_called()
+        window.current_render_context = {"view": "3d"}
+        dialog.resting.setCurrentIndex(dialog.resting.findData("fine"))
+        from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
+        window.request_refresh.assert_called_once_with(
+            RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True
         )
-        return analyzer
 
-    def test_gear_menu_contains_only_the_three_settings_entries(self):
-        analyzer = self._analyzer()
-
-        menu = My3DAnalyzer._create_settings_menu(analyzer)
-        self.addCleanup(menu.deleteLater)
-        actions = {action.text(): action for action in menu.actions()}
-
-        self.assertEqual(
-            list(actions),
-            ["更新设置…", "插件管理…", "去噪参数设置…"],
-        )
-        self.assertIs(analyzer.plugin_manager_action, actions["插件管理…"])
-
-        actions["更新设置…"].trigger()
-        analyzer.update_controller.open_settings.assert_called_once_with()
-        actions["插件管理…"].trigger()
-        analyzer.open_plugin_manager.assert_called_once_with()
-        actions["去噪参数设置…"].trigger()
-        analyzer.open_denoise_settings.assert_called_once_with()
-
-    def test_settings_button_opens_menu_below_the_gear(self):
-        analyzer = self._analyzer()
-        menu = My3DAnalyzer._create_settings_menu(analyzer)
-        self.addCleanup(menu.deleteLater)
-        analyzer.settings_menu = menu
-        opened = []
-
-        with patch.object(QMenu, "exec_", lambda target, pos: opened.append((target, pos))):
-            My3DAnalyzer._show_settings_menu(analyzer)
-
-        expected = analyzer.btn_tb_settings.mapToGlobal(
-            analyzer.btn_tb_settings.rect().bottomLeft()
-        )
-        self.assertEqual(opened, [(menu, expected)])
+    def test_denoise_details_follow_source_and_edits(self):
+        window = control_window()
+        self.addCleanup(window.close)
+        dialog = window.open_settings()
+        nav = dialog.navigation
+        nav.setCurrentItem(nav.topLevelItem(1).child(0))
+        detail = window.page_control_blank
+        saved = detail.export_state()
+        detail.wavelet_level_box.setValue(4)
+        dialog.denoise.wavelet_level_box.setValue(2)
+        dialog.denoise.wavelet_level_box.editingFinished.emit()
+        self.assertEqual(detail.get_wavelet_params()["level"], 2)
+        dialog.denoise.wavelet_strength_box.setValue(0.987654321)
+        dialog.denoise.wavelet_strength_box.editingFinished.emit()
+        self.assertEqual(detail.get_wavelet_params()["strength"], 0.987654321)
+        detail.restore_state(saved)
+        self.assertEqual(dialog.denoise.wavelet_level_box.value(), detail.wavelet_level_box.value())
 
     def test_canvas_menu_no_longer_contains_moved_settings_entries(self):
         owner = QWidget()
@@ -78,23 +103,6 @@ class SettingsMenuTests(unittest.TestCase):
 
         self.assertEqual(global_pos, owner.mapToGlobal(QPoint(4, 6)))
         self.assertEqual(menu.actions(), [])
-
-    def test_denoise_entry_centers_the_existing_popup_on_the_main_window(self):
-        popup = SimpleNamespace(
-            adjustSize=Mock(),
-            rect=Mock(return_value=QRect(0, 0, 500, 400)),
-            show_at=Mock(),
-        )
-        analyzer = SimpleNamespace(
-            denoise_popup=popup,
-            frameGeometry=Mock(return_value=QRect(100, 100, 800, 600)),
-        )
-
-        My3DAnalyzer.open_denoise_settings(analyzer)
-
-        popup.adjustSize.assert_called_once_with()
-        popup.show_at.assert_called_once_with(QPoint(250, 200))
-
 
 if __name__ == "__main__":
     unittest.main()

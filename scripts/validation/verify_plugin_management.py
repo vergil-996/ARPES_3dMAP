@@ -1,44 +1,21 @@
 # -*- coding: utf-8 -*-
-"""齿轮设置菜单、插件管理窗口与布局的真实窗口验收。
-
-验证点：
-1. 顶部不显示计算硬件指示灯、旧扩展按钮和旧版本按钮；28×26 齿轮按钮
-   位于导出按钮右侧，菜单包含更新设置、插件管理和去噪参数设置；
-2. 1550×950、1280×800 及可用最窄宽度下齿轮按钮不被挤压，底部版本号保留；
-3. 菜单动作打开（复用）非模态管理窗口；未加载数据、开启裁剪时也能进入；
-4. 管理窗口显示已安装插件、状态与操作按钮；重开复用同一窗口；
-5. 画布不显示计算状态浮层，底部状态栏仍接收计算状态更新；
-6. 真实应用启动时按 schema v2 加载已安装插件，并写入 last_good 健康记录。
-
-安装根目录隔离到临时目录，不触碰用户真实扩展与设置；验收用真实构建的
-flat_band_opacity 包安装，覆盖“安装 → 重启加载 → 健康回报”整条路径。
-
-用法: .venv/Scripts/python.exe scripts/validation/verify_plugin_management.py
-"""
+"""在隔离环境中验收齿轮设置窗口、插件管理及真实 WSe₂ 三维质量切换。"""
+import argparse
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-# 隔离环境要在导入 Qt / bandscope 之前就位（QSettings 与扩展根）。
+from tests.support.environment import isolate_runtime
+
+isolate_runtime()
+os.environ.pop("QT_QPA_PLATFORM", None)
 _SANDBOX = tempfile.TemporaryDirectory(prefix="bandscope-plugin-entry-")
 _SANDBOX_PATH = Path(_SANDBOX.name)
-os.environ["BANDSCOPE_EXTENSION_ROOT"] = str(_SANDBOX_PATH / "extensions")
-os.environ.pop("QT_QPA_PLATFORM", None)
-
-from bandscope.app.qt_bootstrap import configure_qt_high_dpi, configure_qt_plugin_path
-
-configure_qt_high_dpi()
-configure_qt_plugin_path()
-
-from PyQt5.QtCore import QSettings
-
-QSettings.setDefaultFormat(QSettings.IniFormat)
-for _scope in (QSettings.UserScope, QSettings.SystemScope):
-    QSettings.setPath(QSettings.IniFormat, _scope, _SANDBOX.name)
 
 import bandscope.app_metadata as app_metadata
 from bandscope.extensions.plugin_manager import InstallSource, install_package
@@ -55,8 +32,60 @@ def check(label, condition):
         failures.append(label)
 
 
+def verify_volume_quality(source):
+    from PyQt5.QtCore import QSettings
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    from bandscope.app.refactored_app import My3DAnalyzer
+
+    QSettings("ARPES", "ARPES_3dMAP").setValue("compute_backend", "CPU")
+    window = My3DAnalyzer()
+    window.resize(1020, 670)
+    window.show()
+    app.processEvents()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    def fail_on_message(title, detail, *_args):
+        raise AssertionError(f"{title} — {detail}")
+    window._show_message = fail_on_message
+    print(f"加载 {source.name}，计算后端 {window.backend_manager.mode}", flush=True)
+    if not window.load_data(str(source)):
+        raise RuntimeError(f"无法加载 {source}")
+
+    def wait_for_volume():
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            QTest.qWait(80)
+            if window.volume_session.active and window._render_exact_ready:
+                return window.volume_session.volume.mapper
+        raise RuntimeError("等待 WSe₂ 精确三维帧超时")
+
+    print("等待标准采样帧", flush=True)
+    standard = wait_for_volume().GetSampleDistance()
+    settings = window.open_settings()
+    settings.navigation.setCurrentItem(settings.navigation.topLevelItem(0).child(1))
+    settings.resting.setCurrentIndex(settings.resting.findData("fine"))
+    fine = wait_for_volume().GetSampleDistance()
+    check(f"WSe₂ 精细采样距离为标准的一半（{standard:.4f} → {fine:.4f}）",
+          standard > 0 and abs(fine - standard * 0.5) < 1e-5)
+    window.plotter.render()
+    frame = window.plotter.screenshot(str(OUT_DIR / "wse2_fine.png"), return_img=True)
+    check("精细采样后的三维帧含可见内容", frame.max() > frame.min())
+    window.close()
+    app.processEvents()
+    return int(bool(failures))
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--volume", nargs="?", type=Path, const=REPO_ROOT / ".local/data/WSe2_step.npz",
+                        help="单独验证真实三维采样；默认使用 WSe₂")
+    args = parser.parse_args()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if args.volume:
+        return verify_volume_quality(args.volume)
 
     # 用真实构建的平带插件包预置一份已安装插件（schema v2 布局）。
     root = Path(os.environ["BANDSCOPE_EXTENSION_ROOT"])
@@ -83,8 +112,10 @@ def main() -> int:
     check("旧扩展按钮已移除", not hasattr(window, "btn_tb_plugins"))
     check("旧版本按钮已移除", not hasattr(window, "btn_tb_version"))
     button = window.btn_tb_settings
-    actions = {action.text(): action for action in window.settings_menu.actions()}
-    plugin_action = actions["插件管理…"]
+    button.click()
+    settings = window.settings_dialog
+    nav = settings.navigation
+    plugin_action = settings.plugins
     check("齿轮按钮存在且可用", button.isEnabled())
     check("齿轮按钮提示正确", button.toolTip() == "设置")
     check(
@@ -92,8 +123,10 @@ def main() -> int:
         (button.width(), button.height()) == (28, 26),
     )
     check(
-        "设置菜单包含三个集中入口",
-        list(actions) == ["更新设置…", "插件管理…", "去噪参数设置…"],
+        "设置窗口的分类及详情页",
+        [[nav.topLevelItem(i).child(j).text(0) for j in range(nav.topLevelItem(i).childCount())]
+         for i in range(nav.topLevelItemCount())]
+        == [["计算后端", "3D渲染质量"], ["去噪参数"], ["插件管理", "更新设置"]],
     )
     check("插件管理动作可用", plugin_action.isEnabled())
     check("插件管理动作提示正确", plugin_action.toolTip() == "安装、卸载及启用/停用插件")
@@ -140,7 +173,8 @@ def main() -> int:
     check("底部状态栏显示就绪", "就绪" in window.status_state.text())
 
     # 未加载数据即可通过菜单打开；开启裁剪后也能进入。
-    plugin_action.trigger()
+    nav.setCurrentItem(nav.topLevelItem(2).child(0))
+    plugin_action.click()
     dialog = window.__dict__.get("_plugin_dialog")
     check("管理窗口打开", dialog is not None and dialog.isVisible())
     check("窗口标题为「插件管理」", dialog.windowTitle() == "插件管理")
@@ -152,24 +186,25 @@ def main() -> int:
     dialog.grab().save(str(OUT_DIR / "manager_window.png"))
     dialog.close()
 
-    actions["去噪参数设置…"].trigger()
-    check("去噪参数窗口由设置菜单打开", window.denoise_popup.isVisible())
-    window.denoise_popup.grab().save(str(OUT_DIR / "denoise_settings.png"))
-    window.denoise_popup.close()
+    nav.setCurrentItem(nav.topLevelItem(1).child(0))
+    check("去噪参数直接显示在设置中", settings.denoise.isVisible())
+    settings.grab().save(str(OUT_DIR / "denoise_settings.png"))
 
+    from PyQt5.QtCore import QTimer
+    from PyQt5.QtTest import QTest
     from bandscope.updates.update_settings_dialog import UpdateSettingsDialog
 
-    update_dialog = UpdateSettingsDialog(window)
-    update_dialog.show()
-    app.processEvents()
-    check(
-        "更新设置包含检查更新按钮",
-        update_dialog.check_updates_button.isVisible()
-        and update_dialog.check_updates_button.text() == "检查更新",
-    )
-    update_dialog.grab().save(str(OUT_DIR / "update_settings.png"))
-    update_dialog.close()
-    update_dialog.deleteLater()
+    def inspect_update_dialog():
+        update_dialog = app.activeModalWidget()
+        check("从设置打开更新配置", isinstance(update_dialog, UpdateSettingsDialog))
+        if update_dialog is not None:
+            check("更新设置包含检查更新按钮", update_dialog.check_updates_button.isVisible())
+            update_dialog.grab().save(str(OUT_DIR / "update_settings.png"))
+            update_dialog.reject()
+
+    nav.setCurrentItem(nav.topLevelItem(2).child(1))
+    QTimer.singleShot(100, inspect_update_dialog)
+    settings.updates.click()
 
     window.btn_tb_crop.setChecked(True)
     app.processEvents()
@@ -179,6 +214,16 @@ def main() -> int:
     window.btn_tb_crop.setChecked(False)
     app.processEvents()
 
+    nav.setCurrentItem(nav.topLevelItem(0).child(1))
+    settings.resize(646, 400)
+    for palette in ("dark", "light"):
+        window._set_theme(palette)
+        QTest.qWait(150)
+        check(f"{palette} 主题窄窗下静止质量控件完整可见",
+              settings.resting.visibleRegion().boundingRect() == settings.resting.rect())
+        settings.grab().save(str(OUT_DIR / f"settings_{palette}.png"))
+
+    settings.close()
     window.close()
     app.processEvents()
 

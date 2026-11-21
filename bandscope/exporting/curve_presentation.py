@@ -230,7 +230,7 @@ def source_revision(window, spec):
     return (state.get("shared_denoise_version", 0),
             bool(flip.isChecked()) if flip is not None else False,
             int(time.value()) if time is not None else None,
-            repr(getattr(spec, "params", {})))
+            repr(state.get("render_quality")), repr(getattr(spec, "params", {})))
 
 
 class PublicationSession:

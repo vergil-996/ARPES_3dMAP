@@ -24,8 +24,12 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
 
     def test_schema_1_is_validated_then_migrated_to_current_schema(self):
         migrated = ViewRecipeDocument(self.document).validate().data
-        self.assertEqual(migrated["schema_version"], 4)
-        self.assertEqual(migrated["pages"][0]["params"][STATE_KEY]["background"]["display_mode"], "legacy")
+        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["pages"][0]["params"][STATE_KEY]["background"]["display_mode"], "independent")
+        self.assertEqual(
+            migrated["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["points"][0],
+            [0.0, 0.0],
+        )
         self.assertEqual(migrated["pages"][0]["params"][STATE_KEY]["background"]["colormap_range"], (0.0, 1.0))
         self.assertEqual(migrated["pages"][0]["params"][RENDER_QUALITY_KEY]["mode"], "legacy")
         self.assertTrue(all(node["operation_version"] == 1 for node in migrated["recipes"].values()))
@@ -67,9 +71,11 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
             ViewRecipeDocument(tampered).validate()
 
         migrated = ViewRecipeDocument(document).validate().data
-        self.assertEqual(migrated["schema_version"], 4)
+        self.assertEqual(migrated["schema_version"], 5)
         restored_state = migrated["pages"][0]["params"][STATE_KEY]
         self.assertEqual(restored_state["background"]["normalization"], {"mode": "full"})
+        self.assertEqual(restored_state["background"]["display_mode"], "independent")
+        self.assertIn("points", restored_state["background"]["opacity"])
         self.assertNotIn("locked_range", restored_state["regions"][0])
         self.assertTrue(restored_state["regions"][0]["lock_pending"])
         self.assertIsNone(migrated["view_state"]["locked_range"])
@@ -97,10 +103,12 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
         restored = ViewRecipeDocument.load(path).data
         style = restored["pages"][0]["params"][STATE_KEY]["background"]
         self.assertEqual(style["display_mode"], "independent")
-        self.assertEqual(style["opacity"]["density"], 12.0)
+        self.assertEqual(style["opacity"]["points"], [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
         self.assertEqual(tuple(style["colormap_range"]), (0.2, 0.8))
         self.assertEqual(restored["pages"][0]["params"][RENDER_QUALITY_KEY]["interpolation"], "linear")
-        restored["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["density"] = 90.0
+        restored["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["points"] = [
+            [0.0, 0.0], [0.5, 0.9], [1.0, 1.0],
+        ]
         with self.assertRaises(RecipeError):
             ViewRecipeDocument(restored).validate()
 

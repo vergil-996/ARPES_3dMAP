@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import numpy as np
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.display_style import new_display_style, new_render_quality
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, opacity_ramp_points
 
@@ -20,6 +21,7 @@ class TimePreviewTests(unittest.TestCase):
 
     def analyzer(self, *, flipped=False, compact=False):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.render_quality = new_render_quality()
         spec = SimpleNamespace(page_kind="home", params={})
         coords = {"X": np.arange(137), "Y": np.arange(139), "E": np.arange(133)}
         context = {"view": "3d", "data": self.data, "coords": coords,
@@ -33,8 +35,10 @@ class TimePreviewTests(unittest.TestCase):
         analyzer.left_display_stack = Mock()
         analyzer.ax_2d = Mock()
         analyzer.plot_coordinate_tooltip = Mock()
-        analyzer.page_render = SimpleNamespace(combo_map=SimpleNamespace(currentText=lambda: "linear"),
-                                               get_selected_cmap=lambda: "magma")
+        analyzer.page_render = SimpleNamespace(
+            get_display_style=lambda: new_display_style(),
+            get_selected_cmap=lambda: "magma",
+        )
         analyzer.timeline_bar = SimpleNamespace(switch_axes=SimpleNamespace(isChecked=lambda: True),
                                                 switch_flip=SimpleNamespace(isChecked=lambda: flipped))
         analyzer.volume_session = Mock()

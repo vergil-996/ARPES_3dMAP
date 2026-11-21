@@ -265,7 +265,6 @@ def capture_snapshot(window) -> PublicationSnapshot:
             ),
             "resolved": display_fields is not None,
         }
-    snapshot.payload["render_quality"] = copy.deepcopy(spec.params.get("render_quality"))
 
     if view == "3d":
         _freeze_3d(window, snapshot, render_context)
@@ -281,6 +280,7 @@ def capture_snapshot(window) -> PublicationSnapshot:
         _freeze_waterfall(window, snapshot, render_context)
     else:
         raise ExportError(f"暂不支持导出的视图类型：{view}")
+    snapshot.payload["render_quality"] = dict(window.render_quality)
     _freeze_enhancement(
         window, snapshot, spec, context, render_context, display_fields=display_fields,
     )

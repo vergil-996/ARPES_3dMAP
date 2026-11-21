@@ -58,8 +58,10 @@ class BlenderRecipeRoundtripTests(unittest.TestCase):
         quality = new_render_quality()
         quality["interpolation"] = "nearest"
         quality["resting"] = "fine"
-        page.params["render_quality"] = copy.deepcopy(quality)
+        self.addCleanup(self.window.settings.remove, "rendering/quality")
+        self.window.set_render_quality(quality)
         derived = capture_snapshot(self.window)
+        self.window.set_render_quality(new_render_quality())
         return [home, derived]
 
     def test_same_source_multi_page_rotation_quality_and_export_draft(self):
@@ -83,7 +85,9 @@ class BlenderRecipeRoundtripTests(unittest.TestCase):
         self.assertEqual(other.active_page_spec.page_kind, "home")
         pages = {spec.title: spec for spec in other.left_workspace.page_specs.values()}
         self.assertEqual(pages["不同旋转的积分"].params["control_state"]["image"]["rotation_angle"], 23.0)
-        self.assertEqual(pages["不同旋转的积分"].params["render_quality"]["interpolation"], "nearest")
+        self.assertEqual(snapshots[1].payload["render_quality"]["interpolation"], "nearest")
+        self.assertNotIn("render_quality", pages["不同旋转的积分"].params)
+        self.assertEqual(capture_snapshot(other).payload["render_quality"], new_render_quality())
         dialog = other._blender_project_dialog
         self.assertEqual(dialog.export_panel.selected_volume_mode(), "hybrid_lit")
         self.assertFalse(dialog.export_panel.selected_presets()["guide_frame"])
@@ -228,7 +232,9 @@ class BlenderRecipeRoundtripTests(unittest.TestCase):
         snapshot.payload["opacity_multiplier"] = weights
         snapshot.payload["enhancement"] = {"active": True}
         original = build_blender_recipe(BlenderProjectRequest([snapshot]))
-        snapshot.payload["blender_project"] = {"display_schema": True}
+        snapshot.payload["blender_project"] = {
+            "display_schema": True, "points_supported": True,
+        }
         update_snapshot_display(
             snapshot, cmap_name="viridis", levels_params=(5.0, 60.0, 90.0),
             locked_range=None, include_zero=False, opacity_mode="linear",

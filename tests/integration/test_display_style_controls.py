@@ -11,9 +11,8 @@ from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.display_style import (
     is_independent,
     new_display_style,
-    new_render_quality,
 )
-from bandscope.core.local_enhancement import RENDER_QUALITY_KEY, STATE_KEY
+from bandscope.core.local_enhancement import STATE_KEY
 from bandscope.processing.local_enhancement import cached_finite_range, clear_range_cache, resolve_display
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
@@ -31,49 +30,41 @@ class DisplayControlStateTests(unittest.TestCase):
         self.addCleanup(self.page.close)
         self.addCleanup(self.page.deleteLater)
 
-    def test_independent_controls_roundtrip_and_old_state_resets_everything(self):
+    def test_independent_controls_roundtrip_and_old_state_gets_an_editable_curve(self):
         style = self.page.get_display_style()
         self.assertTrue(is_independent(style))
-        slider, _spin, _scale = self.page.display_parameters["threshold"]
-        slider.setValue(217)
-        self.page.combo_resting_quality.setCurrentIndex(
-            self.page.combo_resting_quality.findData("fine")
-        )
+        self.page.opacity_editor.set_points([[0.0, 0.0], [0.4, 0.7], [1.0, 0.2]])
         saved = self.page.export_state()
         other = RenderControlPage()
         self.addCleanup(other.close)
         self.addCleanup(other.deleteLater)
-        other.restore_state(saved)
+        other.restore_state({**saved, "render_quality": {"resting": "fine"}})
         self.assertEqual(other.export_state(), saved)
-        self.assertEqual(other.display_parameters["threshold"][0].value(), 217)
-        self.assertEqual(other.combo_resting_quality.currentData(), "fine")
+        self.assertEqual(other.opacity_editor.points(),
+                         [[0.0, 0.0], [0.4, 0.7], [1.0, 0.2]])
+        self.assertNotIn("render_quality", saved)
 
         other.restore_state({
             "s_low": {"value": 7}, "s_gamma": {"value": 61}, "s_up": {"value": 88},
             "combo_map": "sigmoid",
         })
         restored = other.get_display_style()
-        self.assertFalse(is_independent(restored))
+        self.assertTrue(is_independent(restored))
         self.assertEqual(restored["levels"], (7.0, 61.0, 88.0))
         self.assertEqual(restored["opacity_mode"], "sigmoid")
-        self.assertFalse(other.grp_opacity.isVisible())
-        self.assertEqual(other.display_parameters["threshold"][0].value(), 0)
-        self.assertEqual(other.get_render_quality()["mode"], "legacy")
+        self.assertEqual(restored["opacity"]["points"],
+                         [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
 
-    def test_independent_sliders_commit_on_release_but_value_boxes_keep_idle_commit(self):
+    def test_opacity_curve_editor_forwards_preview_and_commit(self):
         committed = Mock()
         changed = Mock()
         self.page.display_value_committed.connect(committed)
         self.page.display_value_changed.connect(changed)
-        for slider, spin, _scale in self.page.display_parameters.values():
-            with self.subTest(control=slider.toolTip(), kind="slider"):
-                slider.sliderReleased.emit()
-            with self.subTest(control=slider.toolTip(), kind="spin"):
-                spin.editingFinished.emit()
-        self.assertEqual(committed.call_count, 4)
-        spin.setValue(spin.value() + spin.singleStep())
-        self.assertEqual(committed.call_count, 4)
-        self.assertGreater(changed.call_count, 0)
+        curve = self.page.opacity_editor.curve
+        curve.pointsChanged.emit()
+        curve.pointsCommitted.emit()
+        self.assertEqual(changed.call_count, 1)
+        self.assertEqual(committed.call_count, 1)
 
     def test_color_lock_style_refresh_keeps_button_icon_only(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
@@ -87,32 +78,31 @@ class DisplayControlStateTests(unittest.TestCase):
                 self.assertEqual(self.page.btn_lock.attachment().text(), "")
                 self.assertEqual(self.page.btn_lock.property("buttonKind"), kind)
 
-    def test_presets_and_normalization_card_are_removed(self):
-        self.assertFalse(hasattr(self.page, "combo_opacity_preset"))
-        self.assertFalse(hasattr(self.page, "btn_apply_opacity_preset"))
-        self.assertFalse(hasattr(self.page, "grp_normalize"))
-        self.assertFalse(hasattr(self.page, "combo_normalization"))
-        self.assertFalse(hasattr(self.page, "display_parameter_labels"))
+    def test_obsolete_mode_mapping_and_parameter_controls_are_removed(self):
+        for name in ("combo_opacity_preset", "btn_apply_opacity_preset", "grp_normalize",
+                     "combo_normalization", "display_parameter_labels", "combo_map",
+                     "btn_apply_map", "combo_display_mode", "display_parameters"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(self.page, name))
         style = self.page.get_display_style()
         self.assertEqual(style["normalization"], {"mode": "full"})
-        self.assertEqual(style["opacity"]["preset"], "custom")
-        for name in ("threshold", "transition", "gamma", "density"):
-            slider, spin, _scale = self.page.display_parameters[name]
-            self.assertTrue(slider.isHidden())
-            self.assertTrue(spin.toolTip())
+        self.assertEqual(style["opacity"]["points"], [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
 
         before = {key: style[key] for key in ("levels", "opacity_mode", "normalization")}
-        self.page.display_parameters["threshold"][0].setValue(21739)
-        self.page.display_parameters["transition"][0].setValue(0)
-        self.page.display_parameters["gamma"][0].setValue(130)
-        self.page.display_parameters["density"][0].setValue(400)
+        self.page.opacity_editor.set_points([[0.0, 0.0], [0.25, 0.8], [1.0, 1.0]])
         changed = self.page.get_display_style()
-        self.assertEqual(changed["opacity"], {
-            "threshold": 21.739, "transition": 0.0, "gamma": 1.3,
-            "density": 40.0, "preset": "custom",
-        })
+        self.assertEqual(changed["opacity"]["points"],
+                         [[0.0, 0.0], [0.25, 0.8], [1.0, 1.0]])
         for key, value in before.items():
             self.assertEqual(changed[key], value)
+
+    def test_opacity_card_only_shows_for_three_dimensional_views(self):
+        self.page.set_display_style(new_display_style(), view="3d")
+        self.assertTrue(self.page.grp_opacity.isVisibleTo(self.page))
+        self.page.set_display_view("2d")
+        self.assertFalse(self.page.grp_opacity.isVisibleTo(self.page))
+        self.page.set_display_view("path_slice")
+        self.assertFalse(self.page.grp_opacity.isVisibleTo(self.page))
 
 
 class DisplayRefreshContextTests(unittest.TestCase):
@@ -261,7 +251,7 @@ class DisplayStatisticsTests(unittest.TestCase):
         finite = self.data[np.isfinite(self.data)]
         np.testing.assert_allclose(result, (float(finite.min()), float(finite.max())))
         state["background"]["levels"] = (10, 80, 90)
-        state["background"]["opacity"]["density"] = 35.0
+        state["background"]["opacity"] = {"points": [[0.0, 0.0], [0.3, 0.6], [1.0, 1.0]]}
         self.assertFalse(host._prepare_display_statistics(context, host.active_page_spec, state))
         host.request_refresh.assert_called_once()
 
@@ -283,7 +273,7 @@ class DisplayStatisticsTests(unittest.TestCase):
         self.assertEqual(second["alpha_token"], first["alpha_token"])
         self.assertGreater(second["color_token"], first["color_token"])
 
-        state["background"]["opacity"]["density"] = 35.0
+        state["background"]["opacity"] = {"points": [[0.0, 0.0], [0.4, 0.8], [1.0, 1.0]]}
         with patch("bandscope.processing.display_transfer.normalized_color_samples") as normalized:
             third = host._enhancement_display(context, spec)
         normalized.assert_not_called()
@@ -318,7 +308,7 @@ class DisplayStatisticsTests(unittest.TestCase):
         self.assertEqual(update, frozenset(("color", "alpha")))
         host._cache_display_fields(key, context_key, fields, update)
 
-        state["background"]["opacity"]["density"] = 42.0
+        state["background"]["opacity"] = {"points": [[0.0, 0.0], [0.5, 0.9], [1.0, 1.0]]}
         host.refresh_coordinator.reset_mock()
         with patch("bandscope.processing.gpu_display.enabled", return_value=False):
             self.assertTrue(host._schedule_display_mapping_compute(request, spec))

@@ -62,7 +62,7 @@ def main():
                 update_region_bounds(window._enhancement_selected(), (10, 50, 20, 70, 30, 80))
                 window._enhancement_refresh()
                 window.page_render.s_gamma.setValue(65)
-                window.page_render.combo_map.setCurrentIndex(3)
+                window.page_render.opacity_editor.set_points([[0.0, 0.0], [0.35, 0.85], [1.0, 0.6]])
                 window.flush_render_levels_refresh()
                 progress["first_id"] = window._enhancement_selected()["region_id"]
                 window._add_enhancement_region()

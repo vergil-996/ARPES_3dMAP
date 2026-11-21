@@ -4,7 +4,7 @@ import numpy as np
 from matplotlib import colormaps
 from PyQt5 import sip
 from PyQt5.QtCore import QPointF, QRect, QRectF, Qt
-from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QLabel, QSlider, QToolTip, QWidget
 
 import bandscope.ui.theme as theme
@@ -12,14 +12,23 @@ from bandscope.processing.display_transfer import gamma_for_gray_position, level
 
 
 class _HandleEditor(QWidget):
+    # 与时间轴 DualRangeSlider 保持同一套手柄尺寸：SIDE_MARGIN 10 + 半个手柄。
+    HANDLE_WIDTH = 10
+    HANDLE_HEIGHT = 16
+    TRACK_HEIGHT = 5
+    TRACK_INSET = 15
+    HANDLE_HIT_TOLERANCE_Y = 18
+
     def __init__(self, height, parent=None):
         super().__init__(parent)
         self.setFixedHeight(int(height))
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self._active_name = None
+        self._hovered = None
         self._dragging = False
         self._handle_fills = {}
+        self._handle_borders = {}
         theme.changed.connect(self._on_theme_changed)
         self.destroyed.connect(self._disconnect_theme)
 
@@ -55,6 +64,10 @@ class _HandleEditor(QWidget):
     def _track_rect(self):
         raise NotImplementedError
 
+    def _handle_center_y(self):
+        """手柄命中区域的纵向中心；默认与轨道中心一致。"""
+        return self._track_rect().center().y()
+
     def _handle_positions(self):
         raise NotImplementedError
 
@@ -72,7 +85,7 @@ class _HandleEditor(QWidget):
         slider = getattr(self, name)
         if not slider.isEnabled() or abs(position.x() - positions[name]) > 12:
             return None
-        if abs(position.y() - self._track_rect().center().y()) > 18:
+        if abs(position.y() - self._handle_center_y()) > self.HANDLE_HIT_TOLERANCE_Y:
             return None
         return name
 
@@ -83,6 +96,7 @@ class _HandleEditor(QWidget):
         if name is None:
             return super().mousePressEvent(event)
         self._active_name = name
+        self._hovered = name
         self._dragging = True
         self.setFocus(Qt.MouseFocusReason)
         getattr(self, name).sliderPressed.emit()
@@ -139,30 +153,45 @@ class _HandleEditor(QWidget):
 
     def leaveEvent(self, event):
         QToolTip.hideText()
+        if self._hovered is not None:
+            self._hovered = None
+            self.update()
         super().leaveEvent(event)
 
     def _update_hover(self, position):
         name = self._handle_at(position)
+        if name != self._hovered:
+            self._hovered = name
+            self.update()
         self.setCursor(Qt.PointingHandCursor if name is not None else Qt.ArrowCursor)
 
-    def _draw_handle(self, painter, name, x, y, text):
+    def _paint_order(self):
+        """按视觉顺序返回手柄名；悬停或聚焦的手柄最后画，重叠时保持可见。"""
+        names = list(self._handle_fills)
+        top = self._hovered or (self._active_name if self.hasFocus() else None)
+        if top in names:
+            names.remove(top)
+            names.append(top)
+        return names
+
+    def _handle_border(self, name):
+        if (name == self._hovered or (self._dragging and name == self._active_name)
+                or (self._active_name == name and self.hasFocus())):
+            return QColor(theme.TEXT_1)
+        return QColor(self._handle_borders[name])
+
+    def _draw_handle(self, painter, name, x, y):
         fill = QColor(self._handle_fills[name])
-        contrast = QColor("#111111") if fill.lightnessF() > 0.55 else QColor("#FFFFFF")
-        center = QPointF(float(x), float(y))
-        painter.setPen(QPen(QColor(theme.BG_0), 4.0))
+        border = self._handle_border(name)
+        half_width = self.HANDLE_WIDTH / 2.0
+        half_height = self.HANDLE_HEIGHT / 2.0
+        rect = QRectF(
+            float(x) - half_width, float(y) - half_height,
+            float(self.HANDLE_WIDTH), float(self.HANDLE_HEIGHT),
+        )
+        painter.setPen(QPen(border, 1.0))
         painter.setBrush(fill)
-        painter.drawEllipse(center, 7.0, 7.0)
-        painter.setPen(QPen(contrast, 1.2))
-        painter.drawEllipse(center, 6.0, 6.0)
-        if self._active_name == name and self.hasFocus():
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor(theme.ACCENT_HOVER), 1.2))
-            painter.drawEllipse(center, 9.0, 9.0)
-        painter.setPen(contrast)
-        font = painter.font()
-        font.setPointSizeF(7.0)
-        painter.setFont(font)
-        painter.drawText(QRectF(x - 7, y - 7, 14, 14), Qt.AlignCenter, text)
+        painter.drawRoundedRect(rect, half_width, half_width)
 
 
 class LevelsEditor(_HandleEditor):
@@ -170,7 +199,16 @@ class LevelsEditor(_HandleEditor):
         super().__init__(94, parent)
         self._histogram = None
         self._data_range = None
-        self._handle_fills = {"black": "#090909", "gray": "#858585", "white": "#FFFFFF"}
+        self._handle_fills = {
+            "black": theme.RANGE_HANDLE_DARK_FILL,
+            "gray": theme.RANGE_HANDLE_MID_FILL,
+            "white": theme.RANGE_HANDLE_LIGHT_FILL,
+        }
+        self._handle_borders = {
+            "black": theme.RANGE_HANDLE_DARK_BORDER,
+            "gray": theme.RANGE_HANDLE_DARK_BORDER,
+            "white": theme.RANGE_HANDLE_LIGHT_BORDER,
+        }
         self.black = self._make_proxy("black", 100, 0)
         self.white = self._make_proxy("white", 100, 100)
         self.gray = self._make_proxy("gray", 100, 50)
@@ -184,10 +222,12 @@ class LevelsEditor(_HandleEditor):
         self.update()
 
     def _track_rect(self):
-        return QRect(10, 61, max(1, self.width() - 20), 9)
+        return QRect(self.TRACK_INSET, 61,
+                     max(1, self.width() - 2 * self.TRACK_INSET), self.TRACK_HEIGHT)
 
     def _histogram_rect(self):
-        return QRect(10, 3, max(1, self.width() - 20), 48)
+        return QRect(self.TRACK_INSET, 3,
+                     max(1, self.width() - 2 * self.TRACK_INSET), 48)
 
     def _axis_range(self):
         values = []
@@ -289,29 +329,54 @@ class LevelsEditor(_HandleEditor):
         painter.setPen(QPen(QColor(theme.BORDER_HEX), 1.0))
         painter.drawLine(histogram_rect.bottomLeft(), histogram_rect.bottomRight())
         track = self._track_rect()
-        painter.fillRect(track, QColor(theme.BG_4))
         positions = self._handle_positions()
-        painter.save()
-        painter.setClipRect(track)
-        painter.fillRect(QRectF(positions["black"], track.top(),
-                                max(0.0, positions["gray"] - positions["black"]), track.height()),
-                         QColor("#050505"))
-        painter.fillRect(QRectF(positions["gray"], track.top(),
-                                max(0.0, positions["white"] - positions["gray"]), track.height()),
-                         QColor("#888888"))
-        painter.restore()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.BG_4))
+        painter.drawRoundedRect(QRectF(track), 2.5, 2.5)
+        selected_left = min(positions["black"], positions["white"])
+        selected_width = max(0.0, positions["white"] - positions["black"])
+        if selected_width > 0.0:
+            painter.setBrush(theme.token_color("ACCENT_DIM"))
+            painter.drawRoundedRect(
+                QRectF(selected_left, track.top(), selected_width, track.height()),
+                2.5, 2.5,
+            )
         painter.setPen(QPen(QColor(theme.BORDER_HEX), 1.0))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(track)
-        for name, text in (("black", "黑"), ("gray", "灰"), ("white", "白")):
-            self._draw_handle(painter, name, positions[name], track.center().y(), text)
+        painter.drawLine(QPointF(track.left(), track.center().y()),
+                         QPointF(track.right(), track.center().y()))
+        # 黑场到灰场之间保持纯黑，并覆盖中轴线，避免被中轴灰线切成浅色。
+        black_width = max(0.0, positions["gray"] - positions["black"])
+        if black_width > 0.0:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(theme.RANGE_HANDLE_DARK_FILL))
+            painter.drawRect(QRectF(positions["black"], track.top(),
+                                    black_width, track.height()))
+        for name in self._paint_order():
+            self._draw_handle(painter, name, positions[name], track.center().y())
 
 
 class ColormapRangeEditor(_HandleEditor):
+    # 色带下方的小房屋标记：等腰三角屋顶 + 底角圆角的长方形；整体位于色带之外。
+    HOUSE_WIDTH = 12
+    HOUSE_HEIGHT = 14
+    HOUSE_ROOF_HEIGHT = 6
+    HOUSE_BOTTOM_RADIUS = 2.5
+    HANDLE_TOP_GAP = 4
+    HANDLE_HIT_TOLERANCE_Y = 10
+    LABEL_TOP = 46
+
     def __init__(self, cmap="magma", parent=None):
-        super().__init__(54, parent)
+        super().__init__(66, parent)
         self._cmap = str(cmap)
-        self._handle_fills = {"cmap_low": "#090909", "cmap_high": "#FFFFFF"}
+        self._handle_fills = {
+            "cmap_low": theme.RANGE_HANDLE_DARK_FILL,
+            "cmap_high": theme.RANGE_HANDLE_LIGHT_FILL,
+        }
+        self._handle_borders = {
+            # 房屋标记脱离色带后直接落在卡片底色上；深色主题用中灰描边保证黑块可辨。
+            "cmap_low": theme.RANGE_HANDLE_MID_FILL,
+            "cmap_high": theme.RANGE_HANDLE_LIGHT_BORDER,
+        }
         self.cmap_low = self._make_proxy("cmap_low", 1000, 0)
         self.cmap_high = self._make_proxy("cmap_high", 1000, 1000)
         self._active_name = "cmap_low"
@@ -326,7 +391,12 @@ class ColormapRangeEditor(_HandleEditor):
         return self.cmap_low.value() / 1000.0, self.cmap_high.value() / 1000.0
 
     def _track_rect(self):
-        return QRect(10, 7, max(1, self.width() - 20), 18)
+        return QRect(self.TRACK_INSET, 7,
+                     max(1, self.width() - 2 * self.TRACK_INSET), 18)
+
+    def _handle_center_y(self):
+        return (self._track_rect().bottom() + self.HANDLE_TOP_GAP
+                + self.HOUSE_HEIGHT / 2.0)
 
     def _handle_positions(self):
         track = self._track_rect()
@@ -344,6 +414,27 @@ class ColormapRangeEditor(_HandleEditor):
 
     def _step_handle(self, name, step):
         self._set_fraction(name, (getattr(self, name).value() + step) / 1000.0)
+
+    def _draw_handle(self, painter, name, x, y):
+        fill = QColor(self._handle_fills[name])
+        border = self._handle_border(name)
+        half_width = self.HOUSE_WIDTH / 2.0
+        top = float(y) - self.HOUSE_HEIGHT / 2.0
+        bottom = top + self.HOUSE_HEIGHT
+        body_top = top + self.HOUSE_ROOF_HEIGHT
+        radius = self.HOUSE_BOTTOM_RADIUS
+        path = QPainterPath()
+        path.moveTo(float(x) - half_width, body_top)
+        path.lineTo(float(x), top)
+        path.lineTo(float(x) + half_width, body_top)
+        path.lineTo(float(x) + half_width, bottom - radius)
+        path.quadTo(float(x) + half_width, bottom, float(x) + half_width - radius, bottom)
+        path.lineTo(float(x) - half_width + radius, bottom)
+        path.quadTo(float(x) - half_width, bottom, float(x) - half_width, bottom - radius)
+        path.closeSubpath()
+        painter.setPen(QPen(border, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(fill)
+        painter.drawPath(path)
 
     def _update_hover(self, position):
         super()._update_hover(position)
@@ -371,13 +462,14 @@ class ColormapRangeEditor(_HandleEditor):
         painter.setPen(QPen(QColor(theme.BORDER_HEX), 1.0))
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(track)
-        for name, text in (("cmap_low", "黑"), ("cmap_high", "白")):
-            self._draw_handle(painter, name, positions[name], track.bottom() + 1, text)
+        handle_y = self._handle_center_y()
+        for name in self._paint_order():
+            self._draw_handle(painter, name, positions[name], handle_y)
         painter.setPen(QColor(theme.TEXT_2))
         font = painter.font()
         font.setPointSizeF(8.0)
         painter.setFont(font)
         for name in ("cmap_low", "cmap_high"):
             x = positions[name]
-            painter.drawText(QRectF(x - 38, 35, 76, 16), Qt.AlignCenter,
+            painter.drawText(QRectF(x - 38, self.LABEL_TOP, 76, 16), Qt.AlignCenter,
                              f"{getattr(self, name).value() / 10.0:.1f}%")

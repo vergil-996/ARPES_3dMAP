@@ -35,14 +35,6 @@ class _Slider:
         return self._value
 
 
-class _Combo:
-    def __init__(self, text="线性"):
-        self.text = text
-
-    def currentText(self):
-        return self.text
-
-
 class PathSliceHostTests(unittest.TestCase):
     def setUp(self):
         self.raw = np.zeros((4, 5, 3, 2), dtype=np.float32)
@@ -239,7 +231,6 @@ class PathSliceHostTests(unittest.TestCase):
         self.model.write_params(spec.params)
         self.window.page_render = SimpleNamespace(
             s_low=_Slider(12), s_gamma=_Slider(50), s_up=_Slider(100),
-            combo_map=_Combo("线性"), btn_apply_map=object(),
         )
         self.window.sender = lambda: self.window.page_render.s_low
         self.window.request_refresh = lambda *args, **kwargs: None
@@ -261,17 +252,19 @@ class PathSliceHostTests(unittest.TestCase):
         self.model.write_params(spec.params)
         self.window.page_render = SimpleNamespace(
             s_low=_Slider(10), s_gamma=_Slider(45), s_up=_Slider(90),
-            combo_map=_Combo("幂函数"),
         )
         requests = []
         self.window.request_refresh = lambda *args, **kwargs: requests.append((args, kwargs))
-        self.controller._write_levels(spec, include_map=True)
+        self.controller._write_levels(spec)
         self.assertEqual(spec.params["path_selected_segments"], [0, 1])
         for segment in spec.params["path_segments"]:
             self.assertEqual(segment["black"], 10)
             self.assertEqual(segment["gray"], 45)
             self.assertEqual(segment["white"], 90)
-            self.assertEqual(segment["intensity_map"], "幂函数")
+        self.assertEqual(
+            [segment["intensity_map"] for segment in spec.params["path_segments"]],
+            ["线性", "对数"],
+        )
         self.assertEqual(len(requests), 1)
 
     def test_output_endpoint_change_does_not_flatten_other_segment_fields(self):
@@ -286,7 +279,6 @@ class PathSliceHostTests(unittest.TestCase):
         self.window.page_render = SimpleNamespace(
             s_low=_Slider(12), s_gamma=_Slider(50), s_up=_Slider(100),
             s_cmap_low=_Slider(200), s_cmap_high=_Slider(800),
-            combo_map=_Combo("线性"), btn_apply_map=object(),
         )
         self.window.sender = lambda: self.window.page_render.s_cmap_low
         self.window.request_refresh = lambda *args, **kwargs: None

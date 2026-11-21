@@ -12,7 +12,8 @@ from bandscope.processing.display_transfer import (
     display_unit_distance,
     level_info,
     normalization_range,
-    volume_display_unit_distance,
+    opacity_reference_distance,
+    rebase_opacity,
     volume_unit_distance,
 )
 from bandscope.processing.gpu_display import array_key
@@ -132,8 +133,7 @@ def clear_range_cache():
 def _rebased_alpha(alpha, source_distance, target_distance):
     if source_distance <= 0.0 or target_distance <= 0.0 or np.isclose(source_distance, target_distance):
         return alpha
-    bounded = np.clip(np.asarray(alpha, dtype=np.float64), 0.0, 1.0 - 1.0e-12)
-    return (1.0 - np.power(1.0 - bounded, target_distance / source_distance)).astype(np.float32)
+    return rebase_opacity(alpha, source_distance, target_distance).astype(np.float32)
 
 
 def resolve_display(context, state, *, background_locked_range=None, region_data=None,
@@ -156,7 +156,7 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
     region_data = region_data or {}
     full_shape = context.get("full_shape", source.shape)
     legacy_distance = volume_unit_distance(source.shape, full_shape) if view == "3d" else 0.0
-    unified_distance = volume_display_unit_distance(full_shape) if view == "3d" else 0.0
+    unified_distance = opacity_reference_distance(full_shape) if view == "3d" else 0.0
     candidates = []
     for region in regions:
         slices = region_slices(context, region)

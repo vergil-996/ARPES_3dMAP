@@ -100,7 +100,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
         )
         self.assertGreaterEqual(hybrid.recommended_samples, 128)
         metadata = self._metadata(hybrid)
-        self.assertEqual(metadata["schema_version"], 11)
+        self.assertEqual(metadata["schema_version"], 12)
         self.assertEqual(metadata["project"]["render"]["samples"], 128)
         self.assertEqual(metadata["project"]["render"]["volume_bounces"], 2)
         self.assertEqual(metadata["project"]["volume_shading"]["mode"], "hybrid_lit")
@@ -150,7 +150,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             blend, metadata = write_fake_blender_project(directory, volume_mode="hybrid_lit")
             project = load_blender_project(blend)
-            self.assertEqual(project.schema_version, 11)
+            self.assertEqual(project.schema_version, 12)
             self.assertEqual(project.volume_shading["mode"], "hybrid_lit")
             self.assertEqual(len(project.metadata["entries"][0]["volume_lighting"]["lights"]), 3)
             original = copy.deepcopy(project.metadata["entries"][0]["volume_lighting"])
@@ -162,7 +162,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
             project.metadata["project"]["volume_shading"] = custom_shading
             generated = prepare_scene_for_update(project.entries[0].snapshot).metadata()
             merged = merged_project_metadata(project, {"entry-001": generated})
-            self.assertEqual(merged["schema_version"], 11)
+            self.assertEqual(merged["schema_version"], 12)
             self.assertEqual(merged["project"]["volume_shading"], custom_shading)
             self.assertEqual(merged["entries"][0]["volume_lighting"], original)
             self.assertNotEqual(
@@ -170,6 +170,8 @@ class BlenderVolumeProjectTests(unittest.TestCase):
             )
 
     def test_schema_7_through_10_default_to_emission_and_never_upgrade_on_update(self):
+        from bandscope.core.display_style import sanitized_legacy_opacity
+
         for version in range(7, 11):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
                 blend, metadata = write_fake_blender_project(directory)
@@ -179,6 +181,18 @@ class BlenderVolumeProjectTests(unittest.TestCase):
                 for entry in legacy["entries"]:
                     entry["schema_version"] = version
                     entry.pop("volume_lighting")
+                    if version >= 10:
+                        edit = entry["bandscope_edit"]
+                        edit["format_version"] = 2
+                        edit["capabilities"] = [
+                            name for name in edit.get("capabilities", [])
+                            if name != "opacity_points"
+                        ]
+                        edit["display_style"]["opacity"] = sanitized_legacy_opacity(
+                            edit["display_style"].get("opacity")
+                        )
+                if version >= 10:
+                    legacy["project"]["display_edit_format"] = 2
                 assets = blend.parent / f"{blend.stem}.assets"
                 (assets / "scene.json").write_text(json.dumps(legacy), encoding="utf-8")
                 project = load_blender_project(blend)
@@ -189,6 +203,10 @@ class BlenderVolumeProjectTests(unittest.TestCase):
                 self.assertEqual(merged["schema_version"], version)
                 self.assertNotIn("volume_shading", merged["project"])
                 self.assertNotIn("volume_lighting", merged["entries"][0])
+                self.assertEqual(
+                    merged["entries"][0]["bandscope_edit"]["format_version"],
+                    2 if version >= 10 else 1,
+                )
 
 
 if __name__ == "__main__":

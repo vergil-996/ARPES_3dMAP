@@ -6,7 +6,10 @@ import numpy as np
 from bandscope.core.display_style import new_display_style, new_render_quality
 from bandscope.exporting.publication_models import OutputOptions, resolve_style
 from bandscope.exporting.publication_renderers import render_snapshot
-from bandscope.processing.display_transfer import volume_display_unit_distance
+from bandscope.processing.display_transfer import (
+    display_unit_distance,
+    opacity_reference_distance,
+)
 from bandscope.processing.local_enhancement import resolve_display
 from bandscope.rendering.local_enhancement import apply_volume_display
 from tests.support.environment import requires_opengl
@@ -59,6 +62,7 @@ class IndependentPublicationTests(unittest.TestCase):
             captured["sample_distance"] = actor.mapper.GetSampleDistance()
             captured["interpolation"] = actor.mapper.GetInterpolationMode()
             captured["auto_adjust"] = actor.mapper.GetAutoAdjustSampleDistances()
+            captured["opacity_unit_distance"] = actor.GetProperty().GetScalarOpacityUnitDistance()
             return result
 
         with patch("bandscope.rendering.local_enhancement.apply_volume_display", side_effect=record_display), \
@@ -71,7 +75,12 @@ class IndependentPublicationTests(unittest.TestCase):
         np.testing.assert_array_equal(captured["color"], fields["color"])
         np.testing.assert_array_equal(captured["alpha"], fields["alpha"])
         self.assertAlmostEqual(
-            captured["sample_distance"], 0.25 * volume_display_unit_distance(volume.shape), places=5,
+            captured["sample_distance"],
+            0.25 * display_unit_distance(tuple(200.0 / (size - 1) for size in volume.shape)),
+            places=5,
+        )
+        self.assertAlmostEqual(
+            captured["opacity_unit_distance"], opacity_reference_distance(volume.shape), places=5,
         )
         self.assertEqual(captured["auto_adjust"], 0)
         self.assertEqual(captured["interpolation"], 1)

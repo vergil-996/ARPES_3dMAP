@@ -422,7 +422,7 @@ class TransferSignatureTests(SessionTestCase):
         energy = np.linspace(-1.0, 1.0, 9)
         window, spec = make_window(energy=energy)
         window.page_render = SimpleNamespace(
-            combo_map=SimpleNamespace(currentText=lambda: "线性"),
+            get_display_style=lambda: {"opacity_mode": "线性"},
             get_selected_cmap=lambda: "magma",
         )
         window._get_display_levels = lambda: (0, 50, 100)

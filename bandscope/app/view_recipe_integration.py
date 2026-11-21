@@ -191,6 +191,7 @@ class ViewRecipeMixin:
             record = asdict(item)
             record["params"] = {k: v for k, v in record["params"].items() if not k.startswith("_restored_")}
             params = record["params"]
+            params["render_quality"] = dict(snapshot.payload["render_quality"])
             if item.page_kind == "plugin_derived":
                 saved = self.__dict__.get("_recipe_derived_results", {}).get(pid)
                 if saved is None:
@@ -332,6 +333,12 @@ class ViewRecipeMixin:
         id_map, target_id = self._remap_recipe_pages(evaluator.pages, document)
         self.__dict__["_last_recipe_id_map"] = id_map
         pages = list(evaluator.pages.values())
+        # 文件中的质量是冻结记录；本机会话的各页面共同使用应用偏好。
+        for page in pages:
+            page.params.pop("render_quality", None)
+            render = (page.params.get("control_state") or {}).get("render")
+            if render is not None:
+                render.pop("render_quality", None)
         home_id = id_map.get(str(document["home_page_id"]), pages[0].page_id if pages else None)
         results = {
             id_map[str(pid)]: copy.deepcopy(saved)

@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
 import bandscope.ui.theme as theme
 from bandscope.core.data_scope import scoped_descriptor_from_array
-from bandscope.core.display_style import LEGACY_MODE
+from bandscope.core.display_style import DEFAULT_OPACITY_MODE
 from bandscope.core.path_slice import (
     PATH_SELECTED_KEY,
     PATH_SLICE_PAGE_KIND,
@@ -424,7 +424,7 @@ class PathSliceController:
             self.window.page_render.s_gamma,
             self.window.page_render.s_up,
         ))
-        intensity_map = str(self.window.page_render.combo_map.currentText())
+        intensity_map = DEFAULT_OPACITY_MODE
         colormap_range = self.window.page_render.get_display_style().get("colormap_range", (0.0, 1.0))
         styles = [
             PathSegmentStyle(0.0, *levels, intensity_map, *colormap_range)
@@ -705,11 +705,8 @@ class PathSliceController:
         if not self.is_path_page(spec):
             if self._path_controls_active:
                 for control in (page.s_low, page.s_gamma, page.s_up,
-                                page.s_cmap_low, page.s_cmap_high,
-                                page.combo_map, page.btn_apply_map):
+                                page.s_cmap_low, page.s_cmap_high):
                     control.setEnabled(True)
-                page.combo_map.setEditable(False)
-                page.combo_display_mode.setEnabled(True)
                 page.region_combo.show()
                 page._sync_display_visibility()
                 self._path_controls_active = False
@@ -736,17 +733,6 @@ class PathSliceController:
             slider.setToolTip("多值：调整后写入全部选中段" if common.get(key) is None else "当前选中段的共同值")
         page.levels_editor.update()
         page.colormap_range_editor.sync_from_proxies()
-        page.combo_map.setEnabled(enabled)
-        page.btn_apply_map.setEnabled(enabled)
-        page.combo_map.setEditable(True)
-        with QSignalBlocker(page.combo_map):
-            if common.get("intensity_map") is None:
-                page.combo_map.setEditText("多值")
-            else:
-                page.combo_map.setEditText(str(common["intensity_map"]))
-        with QSignalBlocker(page.combo_display_mode):
-            page._set_combo_data(page.combo_display_mode, LEGACY_MODE)
-        page.combo_display_mode.setEnabled(False)
         page.region_combo.hide()
         page._display_view = PATH_SLICE_PAGE_KIND
         page._sync_display_visibility()
@@ -765,25 +751,23 @@ class PathSliceController:
                              ("colormap_end", getattr(page, "s_cmap_high", None))):
             if slider is not None and sender is slider:
                 return name
-        if sender is page.btn_apply_map:
-            return "intensity_map"
         return None
 
     def handle_levels_schedule(self) -> bool:
         spec = self.current_spec()
         if not self.is_path_page(spec):
             return False
-        self._write_levels(spec, include_map=False, field=self._display_change_field())
+        self._write_levels(spec, field=self._display_change_field())
         return True
 
     def handle_levels_commit(self) -> bool:
         spec = self.current_spec()
         if not self.is_path_page(spec):
             return False
-        self._write_levels(spec, include_map=True, field=self._display_change_field())
+        self._write_levels(spec, field=self._display_change_field())
         return True
 
-    def _write_levels(self, spec, *, include_map: bool, field=None) -> None:
+    def _write_levels(self, spec, *, field=None) -> None:
         if self.window._syncing_controls:
             return
         model = self.model_for(spec)
@@ -805,12 +789,6 @@ class PathSliceController:
             model.update_selected(levels=tuple(float(slider.value()) for slider in (
                 page.s_low, page.s_gamma, page.s_up,
             )))
-        if include_map and field != "intensity_map" and field is not None:
-            text = None
-        else:
-            text = str(page.combo_map.currentText())
-        if include_map and text and text != "多值":
-            model.update_selected(intensity_map=text)
         model.write_params(spec.params)
         from bandscope.rendering.refresh_pipeline import RenderQuality, RefreshCause
 

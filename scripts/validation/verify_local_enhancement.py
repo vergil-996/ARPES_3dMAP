@@ -81,33 +81,41 @@ def main():
     def set_style(style):
         for slider, value in zip((window.page_render.s_low, window.page_render.s_gamma, window.page_render.s_up), style["levels"]):
             slider.setValue(int(value))
-        window.page_render.combo_map.setCurrentText(style["opacity_mode"])
+        if "points" in style:
+            window.page_render.opacity_editor.set_points(style["points"])
         window.flush_render_levels_refresh()
+
+    def curve_style(levels, points):
+        from bandscope.core.display_style import new_display_style
+
+        return new_display_style(levels, "线性", (0., 1.), points)
 
     def verify_global_gamma(view):
         from matplotlib import colormaps
-        set_style(dict(levels=(0, 100, 100), opacity_mode="线性"))
+        from bandscope.processing.display_transfer import opacity_reference_distance
+        set_style(curve_style((0, 100, 100), [[0.0, 0.0], [1.0, 1.0]]))
         context = window.current_render_context
-        check(view + " gamma100 uses the global mapping", window._enhancement_display(context) is None)
-        if view == "3D":
-            info = window.volume_session.level_info
-            source = np.asarray(context["data"])
-        else:
-            image = window.ax_2d._arpes_image
-            info = VisualEngine._level_info(context["data"], (0, 100, 100))
-            source = np.asarray(image.get_array())
+        fields = window._enhancement_display(context)
+        check(view + " background mapping is present", fields is not None and not fields["active"])
+        info = fields["background_level_info"]
+        source = np.asarray(context["data"])
         normalized = np.clip((source.astype(np.float64) - info["black_value"]) /
                              (info["white_value"] - info["black_value"]), 0, 1)
         expected = normalized ** .1
+        span = max(float(info["data_max"]) - float(info["data_min"]), 1e-12)
+        q = np.clip((source.astype(np.float64) - float(info["data_min"])) / span, 0, 1)
         weak = np.isfinite(source) & (normalized > 0) & (normalized < .1)
         check(view + " real spectrum contains weak samples", np.any(weak))
         if view == "3D":
             actual = window.volume_session.display_channel.buffer.reshape(source.shape + (2,), order="F")
             check(view + " global weak colors receive gamma before lookup", np.allclose(actual[..., 0][weak], expected[weak]))
-            check(view + " global weak opacity receives gamma before lookup", np.allclose(actual[..., 1][weak], expected[weak]))
+            check(view + " global weak opacity follows the editable curve", np.allclose(actual[..., 1][np.isfinite(source)], q[np.isfinite(source)]))
+            check(view + " positive reference distance is used",
+                  np.isclose(window.volume_session.volume.GetProperty().GetScalarOpacityUnitDistance(),
+                             opacity_reference_distance(context.get("full_shape", source.shape))))
         else:
-            actual = image.to_rgba(image.get_array(), bytes=True)
-            palette = colormaps.get_cmap(window.page_render.combo_cmap.currentText())
+            actual = window.ax_2d._arpes_image.to_rgba(window.ax_2d._arpes_image.get_array(), bytes=True)
+            palette = colormaps.get_cmap(window.page_render.get_selected_cmap())
             check(view + " global weak colors receive gamma before lookup", np.array_equal(actual[weak], palette(expected, bytes=True)[weak]))
             check(view + " weak samples remain opaque", np.all(actual[..., 3][weak] == 255))
         screenshot(view.lower() + "_global_gamma100")
@@ -117,19 +125,23 @@ def main():
         first, second = state["regions"]
         first_id, second_id = first["region_id"], second["region_id"]
         background_levels = (6., 57., 94.) if view == "2D" else (3., 54., 97.)
-        targets = ((second_id, second["label"], (8., 43., 93.), "对数"),
-                   (first_id, first["label"], (12., 62., 88.), "线性"),
-                   ("", "background", background_levels, "幂函数"))
-        for region_id, label, levels, mode in targets:
+        targets = ((second_id, second["label"], (8., 43., 93.),
+                    [[0.0, 0.0], [0.25, 0.55], [0.6, 0.85], [1.0, 1.0]]),
+                   (first_id, first["label"], (12., 62., 88.),
+                    [[0.0, 0.0], [0.4, 0.2], [0.7, 0.9], [1.0, 0.6]]),
+                   ("", "background", background_levels,
+                    [[0.0, 0.05], [0.35, 0.9], [1.0, 0.95]]))
+        for region_id, label, levels, points in targets:
             name = view + " " + label
             select_target(region_id, name)
             previous = styles()
             before = window._enhancement_display(window.current_render_context)
-            expected = dict(levels=levels, opacity_mode=mode)
-            check(name + " acceptance changes the previous style", expected != previous[region_id])
+            expected = curve_style(levels, points)
+            check(name + " acceptance changes the previous style",
+                  expected != previous[region_id])
             set_style(expected)
             current = styles()
-            check(name + " edits its levels and mapping", current[region_id] == expected)
+            check(name + " edits its levels and curve", current[region_id] == expected)
             check(name + " preserves every other target style",
                   all(current[key] == value for key, value in previous.items() if key != region_id))
             after = window._enhancement_display(window.current_render_context)
@@ -141,10 +153,12 @@ def main():
             print(f"[INFO] {name} mapping acceptance sample range: {data_range}", flush=True)
             check(name + " has intermediate intensities for mapping acceptance",
                   data_range is not None and np.any((samples > data_range[0]) & (samples < data_range[1])))
-            check(name + " updates its display channels", any(not np.array_equal(before[key][selected], after[key][selected])
-                  for key in ("color", "alpha")))
-            check(name + " preserves other display channels", all(np.array_equal(before[key][~selected], after[key][~selected])
-                  for key in ("color", "alpha")))
+            check(name + " updates its display channels",
+                  any(not np.array_equal(before[key][selected], after[key][selected])
+                      for key in ("color", "alpha")))
+            check(name + " preserves other display channels",
+                  all(np.array_equal(before[key][~selected], after[key][~selected])
+                      for key in ("color", "alpha")))
         for region_id, label, _, _ in targets:
             select_target(region_id, view + " revisit " + label)
         select_target(first_id, view + " active " + first["label"])
@@ -234,11 +248,12 @@ def main():
                 menu.deleteLater()
                 progress["colors"] = window.volume_session.display_channel.buffer[:, 0].copy()
                 progress["alphas"] = window.volume_session.display_channel.buffer[:, 1].copy()
-                window.page_render.combo_map.setCurrentIndex(3)
+                window.page_render.opacity_editor.set_points(
+                    [[0.0, 0.0], [0.3, 0.9], [1.0, 0.4]])
                 window.flush_render_levels_refresh()
             elif step == 3:
-                check("opacity mode leaves color positions unchanged", np.array_equal(progress["colors"], window.volume_session.display_channel.buffer[:, 0]))
-                check("opacity mode updates alpha", not np.array_equal(progress["alphas"], window.volume_session.display_channel.buffer[:, 1]))
+                check("opacity curve leaves color positions unchanged", np.array_equal(progress["colors"], window.volume_session.display_channel.buffer[:, 0]))
+                check("opacity curve updates alpha", not np.array_equal(progress["alphas"], window.volume_session.display_channel.buffer[:, 1]))
                 screenshot("3d_regions")
                 export("3d_publication")
                 # 全局锁定：背景与所有区域同时锁定，每个区域锁定自己的强度范围。
@@ -270,13 +285,23 @@ def main():
             elif step == 6:
                 check("last deletion leaves background and show-all entries", window.page_render.region_combo.count() == 2)
                 session = window.volume_session
-                check("last deletion restores global-only mapping", window._enhancement_display(window.current_render_context) is None)
+                fields = window._enhancement_display(window.current_render_context)
+                check("last deletion restores global-only mapping",
+                      fields is not None and not fields["active"] and not fields["regions"])
                 if session.display_channel is not None:
-                    from bandscope.processing.display_transfer import channels
+                    from bandscope.processing.display_transfer import (
+                        channels, opacity_reference_distance,
+                    )
+                    context = window.current_render_context
                     style = window._enhancement_background_style()
-                    color, alpha = channels(window.current_render_context["data"], session.level_info, style["opacity_mode"])
-                    check("global gamma colors survive last region deletion", np.allclose(session.display_channel.buffer[:, 0], color.ravel(order="F")))
-                    check("global gamma opacity survives last region deletion", np.allclose(session.display_channel.buffer[:, 1], alpha.ravel(order="F")))
+                    distance = opacity_reference_distance(
+                        context.get("full_shape", context["data"].shape))
+                    color, alpha = channels(
+                        context["data"], session.level_info, style["opacity_mode"],
+                        style=style, unit_distance=distance,
+                    )
+                    check("global curve colors survive last region deletion", np.allclose(session.display_channel.buffer[:, 0], color.ravel(order="F")))
+                    check("global curve opacity survives last region deletion", np.allclose(session.display_channel.buffer[:, 1], alpha.ravel(order="F")))
                 screenshot("3d_restored")
                 from scripts.validation._common import create_axis_slice
                 create_axis_slice(window, 1)
@@ -322,9 +347,10 @@ def main():
                 check("show-all selection preserves independent styles", styles() == progress["styles_before_all"])
                 check("show-all restores background as the batch starting point",
                       window._enhancement_ui_style() == styles()[""])
-                batch_style = dict(levels=(4., 58., 96.), opacity_mode="sigmoid")
+                batch_style = curve_style(
+                    (4., 58., 96.), [[0.0, 0.0], [0.35, 0.75], [1.0, 1.0]])
                 set_style(batch_style)
-                check("show-all sliders and mapping update background and every region",
+                check("show-all sliders and curve update background and every region",
                       all(style == batch_style for style in styles().values()))
                 for region_id in styles():
                     select_target(region_id, "2D batch revisit " + (region_id or "background"))

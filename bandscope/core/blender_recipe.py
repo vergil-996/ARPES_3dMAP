@@ -11,12 +11,16 @@ from bandscope.core.view_recipe import (
     RecipeError,
     ViewRecipeDocument,
     digest,
+    document_reference_distance,
+    editable_display_value,
     full_range_display_override,
     plain,
 )
 
 BLENDER_RECIPE_FORMAT = "bandscope.blender-recipe"
-BLENDER_RECIPE_SCHEMA_VERSION = 1
+# 2：内嵌视图配方升级为可编辑不透明度点列；1 仍可读取并升级。
+BLENDER_RECIPE_SCHEMA_VERSION = 2
+BLENDER_RECIPE_READABLE_SCHEMAS = frozenset({1, 2})
 OVERRIDE_KEYS = frozenset({
     "levels", "levels_controls", "locked_range", "cmap", "level_info", "display",
     "render_quality", "include_zero", "opacity_mode", "opacity_multiplier",
@@ -135,7 +139,7 @@ class BlenderRecipeDocument:
         document = _object(self.data, "Blender 复现配置")
         if (document.get("format") != BLENDER_RECIPE_FORMAT
                 or type(document.get("schema_version")) is not int
-                or document["schema_version"] != BLENDER_RECIPE_SCHEMA_VERSION):
+                or document["schema_version"] not in BLENDER_RECIPE_READABLE_SCHEMAS):
             raise RecipeError("不是受支持的 BandScope Blender 复现配置版本。")
         groups = document.get("groups")
         entries = document.get("entries")
@@ -194,7 +198,11 @@ class BlenderRecipeDocument:
         for entry_id, entry in by_entry.items():
             entry["recipe"] = validated_recipes[entry_id]
             if entry.get("display_override") is not None:
-                entry["display_override"] = full_range_display_override(entry["display_override"])
+                override = full_range_display_override(entry["display_override"])
+                entry["display_override"] = editable_display_value(
+                    override, document_reference_distance(validated_recipes[entry_id]),
+                )
+        document["schema_version"] = BLENDER_RECIPE_SCHEMA_VERSION
         document["state_digest"] = blender_recipe_digest(document)
         plain(document)
         return self

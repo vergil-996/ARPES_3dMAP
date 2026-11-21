@@ -1,6 +1,6 @@
 # BandScope 自动轴分配与加载后重设
 
-2026-11-21 · 已实施；WSe₂ 真实数据验收待补（全量另有 3 项非本任务失败）
+2026-11-21 · 已实施；已补做 WSe₂ 真实窗口验收（18 项通过）
 
 加载数据时先自动分配轴，直接进入工作区。用户可以随时点击左栏「搜索页面」下方的**数据源卡片**查看和修改分配。第四轴作为扫描轴，支持时间、角度、温度和自定义类型。同一套切帧、区间求和和强度曲线操作使用实际轴名与单位。
 
@@ -39,3 +39,4 @@
 - 自动化聚焦回归：`tests.core.test_axis_assignment`、`tests.ui.test_axis_assignment_dialog`、`tests.integration.test_axis_assignment` 共 25 项通过，覆盖计划列出的合成 NPZ/MAT 边界、可追踪强度、回滚、两类重设、图片／数值导出、插件和同一文件两种分配的复现往返。
 - 真实 Windows 窗口：`scripts/validation/verify_axis_assignment.py --synthetic-only` 的 11 项检查通过，实际写出出版 PNG、数值 NPZ、对话框／窗口截图和 `.local/outputs/axis-assignment/report.json`；中文扫描名与底条标题已复核。WSe₂ 文件 `.local/data/WSe2_step.npz` 及约定原始路径均不存在，真实时间数据验收未执行。
 - `python -m compileall -q bandscope plugins scripts tests start.py` 与 `git diff --check` 通过。最终全量 `python -m unittest discover -s tests -t . -v` 已执行：共 1895 项，3 项失败、4 项跳过；本计划 25 项全部通过。`tests.exporting.test_orientation_preview.OrientationPreviewTests.test_hover_cursor_and_disabled_interaction` 独立复跑通过；`tests.integration.test_crop_controls` 的两个弹窗位置用例独立复跑仍失败，相关源码与测试不在本任务改动范围，未修改无关逻辑。完整输出见 `.local/logs/axis-assignment-unittest-final.log`。
+- 2026-11-21 补做 WSe₂ 真实窗口验收：`python scripts/validation/verify_axis_assignment.py .local/data/WSe2_step.npz` 18 项检查通过（`report.json` 的 `wse2_executed: true`、`passed: true`），覆盖 WSe₂ 自动识别为时间扫描并保持缺省 `fs`、帧数 `150×150×200×25`、数据源卡片摘要（Kx:维1 · Ky:维2 · E:维3 · 时间:维4）、卡片打开原始轴窗口并显示原始维度、取消重设保留当前来源，以及降序温度扫描首帧、等长 Kx/Ky 待确认说明、卡片重设交换原始维度、强度曲线与出版图使用「样品温度 (K)」、数值导出含扫描元数据。报告与截图在 `.local/outputs/axis-assignment/`。

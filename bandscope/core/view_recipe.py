@@ -14,12 +14,16 @@ from pathlib import Path
 import numpy as np
 
 from bandscope.core.display_style import (
+    INDEPENDENT_MODE,
+    editable_display_state,
     has_restricted_normalization,
     is_independent,
     legacy_display_style,
     legacy_render_quality,
+    looks_like_display_style,
     migrate_display_state,
     resolved_display_style,
+    with_display_mode,
 )
 from bandscope.core.local_enhancement import (
     DISPLAY_PAGE_KINDS,
@@ -29,8 +33,10 @@ from bandscope.core.local_enhancement import (
 )
 
 FORMAT = "bandscope.view"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 TIME_PAGE_SCHEMA_VERSION = 3
+FULL_RANGE_SCHEMA_VERSION = 4
+OPACITY_POINTS_SCHEMA_VERSION = 5
 PAGE_KINDS = frozenset({"home", "axis_integral", "axis_integral_crop",
                         "slice_dos", "energy_dos", "edc_curve", "second_derivative",
                         "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived", "path_slice"})
@@ -306,7 +312,88 @@ def _migrate_full_range_document(document):
             view["locked_range"] = None
             view["relock_full_range"] = True
     result["view_state"] = view
-    result["schema_version"] = SCHEMA_VERSION
+    result["schema_version"] = FULL_RANGE_SCHEMA_VERSION
+    result["state_digest"] = state_digest(result)
+    return result
+
+
+def document_reference_distance(document):
+    """复现文件对应的不透明度参考距离：取第一个带完整形状的 ROI 来源。"""
+    from bandscope.processing.display_transfer import opacity_reference_distance
+
+    for scope in (document.get("scopes") or {}).values():
+        shape = scope.get("full_shape") if isinstance(scope, dict) else None
+        if isinstance(shape, (list, tuple)) and len(shape) >= 3:
+            return opacity_reference_distance(shape[:3])
+    return None
+
+
+def editable_display_value(value, reference_distance=None):
+    """递归把显示样式（含控制状态与色阶覆写）转换为可编辑点列。"""
+    if isinstance(value, dict):
+        if looks_like_display_style(value):
+            return with_display_mode(
+                value, INDEPENDENT_MODE, reference_distance=reference_distance,
+            )
+        converted = {}
+        for key, item in value.items():
+            if key == STATE_KEY and isinstance(item, dict):
+                converted[key] = editable_display_state(
+                    item, reference_distance=reference_distance,
+                )
+            else:
+                converted[key] = editable_display_value(item, reference_distance)
+        return converted
+    if isinstance(value, list):
+        return [editable_display_value(item, reference_distance) for item in value]
+    if isinstance(value, tuple):
+        return tuple(editable_display_value(item, reference_distance) for item in value)
+    return value
+
+
+def _migrate_editable_opacity_document(document):
+    """schema 5：把四参数／兼容曲线统一转换成可编辑的不透明度点列。"""
+    result = copy.deepcopy(document)
+    reference_distance = document_reference_distance(result)
+
+    def convert(value):
+        return editable_display_value(value, reference_distance)
+
+    pages = result["pages"]
+    params_by_node = {page["recipe_id"]: convert(page["params"]) for page in pages}
+    key_map = {}
+    migrated_nodes = {}
+
+    def visit(old_key):
+        if old_key in key_map:
+            return key_map[old_key]
+        node = copy.deepcopy(result["recipes"][old_key])
+        node["inputs"] = [visit(parent) for parent in node["inputs"]]
+        node["params"] = _remap_recipe_references(
+            params_by_node.get(old_key, convert(node["params"])), key_map,
+        )
+        new_key = digest(node)
+        key_map[old_key] = new_key
+        migrated_nodes[new_key] = node
+        return new_key
+
+    for old_key in result["recipes"]:
+        visit(old_key)
+    for page in pages:
+        old_key = page["recipe_id"]
+        page["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        page["recipe_id"] = key_map[old_key]
+    result["recipes"] = migrated_nodes
+    for saved in (result.get("results") or {}).values():
+        if isinstance(saved, dict):
+            if isinstance(saved.get("params"), dict):
+                saved["params"] = _remap_recipe_references(convert(saved["params"]), key_map)
+            if isinstance(saved.get("context"), dict):
+                saved["context"] = convert(saved["context"])
+    result["view_state"] = convert(result.get("view_state") or {})
+    if isinstance(result.get("publication"), dict):
+        result["publication"] = convert(result["publication"])
+    result["schema_version"] = OPACITY_POINTS_SCHEMA_VERSION
     result["state_digest"] = state_digest(result)
     return result
 
@@ -482,6 +569,9 @@ class ViewRecipeDocument:
             return self.validate()
         if version == 3:
             self.data = _migrate_full_range_document(d)
+            return self.validate()
+        if version == 4:
+            self.data = _migrate_editable_opacity_document(d)
             return self.validate()
         return self
 

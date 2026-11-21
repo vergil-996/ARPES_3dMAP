@@ -8,6 +8,7 @@ from scripts.validation._common import arguments
 
 def main():
     args = arguments("enhancement_crop_parity", default_data=".local/data/WSe2_step.npz")
+    import copy
     import json
     import traceback
     import numpy as np
@@ -67,7 +68,7 @@ def main():
                 window.page_render.s_low.setValue(12)
                 window.page_render.s_gamma.setValue(68)
                 window.page_render.s_up.setValue(87)
-                window.page_render.combo_map.setCurrentIndex(3)
+                window.page_render.opacity_editor.set_points([[0.0, 0.0], [0.35, 0.85], [1.0, 0.6]])
                 window.flush_render_levels_refresh()
                 progress["source"] = window.left_workspace.current_spec()
                 progress["science"] = window.core.raw_data[::25, ::25, ::25, :].copy()
@@ -77,8 +78,9 @@ def main():
                 rgb = [0., 0., 0.]
                 value = float(window.current_render_context["data"][point])
                 window.volume_session.volume.GetProperty().GetRGBTransferFunction().GetColor(value, rgb)
+                background_fields = window._enhancement_display(window.current_render_context)
                 progress.update(bg_point=point, bg_rgb=rgb,
-                    bg_alpha=window.volume_session.volume.GetProperty().GetScalarOpacity().GetValue(value))
+                    bg_alpha=float(background_fields["alpha"][point]))
                 window.page_render.btn_lock.setChecked(True)
                 progress["background_lock"] = VisualEngine.locked_data_range()
                 window._add_enhancement_region()
@@ -87,7 +89,11 @@ def main():
             elif step == 1:
                 context = window.current_render_context
                 fields = window._enhancement_display(context)
-                check("new region inherits current crop settings", window._enhancement_selected()["style"] == dict(levels=(12., 68., 87.), opacity_mode="sigmoid"))
+                expected_style = window.page_render.get_display_style()
+                check("new region inherits current crop settings", window._enhancement_selected()["style"] == expected_style)
+                check("new region keeps current levels and curve",
+                      expected_style["levels"] == (12., 68., 87.)
+                      and expected_style["opacity"]["points"] == [[0.0, 0.0], [0.35, 0.85], [1.0, 0.6]])
                 check("adding 3D region keeps background lock", VisualEngine.locked_data_range() == progress["background_lock"])
                 check("adding 3D region keeps original background range", fields["background_level_info"] == progress["background_info"])
                 check("adding 3D region retains volume actor", window.volume_session.volume is progress["before_actor"])
@@ -98,6 +104,7 @@ def main():
                 check("3D background color transfer unchanged", np.allclose(rgb, progress["bg_rgb"], atol=2e-5))
                 check("3D background opacity transfer unchanged", np.isclose(fields["alpha"][point], progress["bg_alpha"], atol=1e-6))
                 progress["roi_info"] = dict(fields["regions"][0]["level_info"])
+                progress["background_style"] = copy.deepcopy(fields["background_style"])
                 progress["full_distance"] = prop.GetScalarOpacityUnitDistance()
                 samples = []
                 for point in ((10, 20, 30), (30, 45, 55), (50, 70, 80)):
@@ -112,19 +119,21 @@ def main():
                 window.btn_tb_crop.setChecked(True)
                 window.crop_controller.set_selection(selection)
                 window.on_cut()
-                # Reference the ordinary crop path, without inheriting display ROIs.
-                window.left_workspace.current_spec().params.pop(STATE_KEY, None)
+                # 普通裁剪页沿用同一显示样式，但不继承增强区域。
+                from bandscope.core.local_enhancement import STATE_KEY
+                crop_state = window.left_workspace.current_spec().params.get(STATE_KEY)
+                if crop_state is not None:
+                    crop_state["regions"] = []
+                    crop_state["selected_id"] = None
+                    crop_state["show_all_regions"] = False
                 window.global_refresh()
             elif step == 2:
-                check("actual 3D crop has identical level range and thresholds", window.volume_session.level_info == progress["roi_info"])
-                prop = window.volume_session.volume.GetProperty()
-                ratio = progress["full_distance"] / prop.GetScalarOpacityUnitDistance()
-                for i, sample in enumerate(progress["samples"], 1):
-                    rgb = [0., 0., 0.]
-                    prop.GetRGBTransferFunction().GetColor(sample["value"], rgb)
-                    check(f"3D sample {i} crop color equals enhancement", np.allclose(rgb, sample["rgb"], atol=2e-5))
-                    a = prop.GetScalarOpacity().GetValue(sample["value"])
-                    check(f"3D sample {i} crop attenuation equals enhancement", np.isclose(sample["alpha"], 1-(1-a)**ratio, atol=1e-6))
+                crop_context = window.current_render_context
+                crop_fields = window._enhancement_display(crop_context)
+                check("actual 3D crop has identical level range and thresholds", crop_fields["background_level_info"] == progress["roi_info"])
+                check("actual 3D crop uses the same editable curve",
+                      crop_fields["background_style"]["opacity"] == progress["background_style"]["opacity"]
+                      and crop_fields["background_style"]["levels"] == progress["background_style"]["levels"])
                 screenshot("3d_crop")
                 window.btn_tb_crop.setChecked(False)
                 window.left_workspace.activate_page(progress["source"].page_id)

@@ -21,7 +21,7 @@ from bandscope.core.display_style import (
 )
 from bandscope.processing.display_transfer import (
     channels,
-    volume_display_unit_distance,
+    opacity_reference_distance,
     volume_unit_distance,
 )
 
@@ -34,8 +34,9 @@ from bandscope.processing.display_transfer import (
 # 9: 十种统一大写 A 的可编辑文本样式、打包字体、下方两行五列布局与独立辅助灯。
 # 10: 独立归一化、颜色／透明度样式与渲染质量；schema 7–9 更新保持旧模式。
 # 11: 可选混合受光数据体材质与逐条目灯光；density 统一描述为总消光系数。
-BLENDER_SCENE_SCHEMA = 11
-BLENDER_DISPLAY_EDIT_FORMAT = 2
+# 12: 不透明度改为可编辑控制点点列，编辑格式 3；schema 10–11 仍按四参数回读与更新。
+BLENDER_SCENE_SCHEMA = 12
+BLENDER_DISPLAY_EDIT_FORMAT = 3
 DISPLAY_TO_BLENDER = 0.01
 ALPHA_CAP = 1.0 - 1.0e-6
 DEFAULT_RENDER_LONG_EDGE = 1920
@@ -270,7 +271,7 @@ class BlenderSceneData:
                 "editable": True,
                 "capabilities": [
                     "colormap", "levels", "locked_range", "include_zero", "opacity_mode",
-                    "normalization", "independent_opacity", "render_quality",
+                    "normalization", "independent_opacity", "opacity_points", "render_quality",
                 ],
                 "baked_effects": list(self.baked_effects),
                 "baked_effects_warning": (
@@ -477,10 +478,17 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
     if len(spacing) != 3 or not np.all(np.isfinite(spacing)) or any(v <= 0 for v in spacing):
         raise BlenderSceneError("体数据间距必须为三个正有限数。")
     display = payload.get("display") or {}
+    unit_display = (opacity_reference_distance(full_shape)
+                    if is_independent(display.get("background_style"))
+                    else volume_unit_distance(volume.shape, full_shape))
     display_style = display.get("background_style") or legacy_display_style(
         snapshot.levels_params, payload.get("opacity_mode", "linear"),
     )
-    display_style = resolved_display_style(display_style)
+    # 旧工程（schema 10–11）仍以四参数写回，只有新版工程保存控制点点列。
+    points_supported = bool((payload.get("blender_project") or {}).get("points_supported", True))
+    display_style = resolved_display_style(
+        display_style, reference_distance=unit_display, convert_opacity=points_supported,
+    )
     independent = is_independent(display_style)
     resolved_range = None if independent else display.get("resolved_range")
     saved_level_info = None if independent else payload.get("level_info")
@@ -490,8 +498,6 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
     ))
     if resolved_range is None:
         resolved_range = (level_info["data_min"], level_info["data_max"])
-    unit_display = (volume_display_unit_distance(full_shape) if is_independent(display_style)
-                    else volume_unit_distance(volume.shape, full_shape))
     color_coordinates, alpha = _display_channels(
         snapshot, volume, level_info, display_style, unit_display,
     )

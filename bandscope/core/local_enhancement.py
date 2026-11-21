@@ -7,9 +7,7 @@ from bandscope.core.axis_mapping import interpolate_axis
 from bandscope.core.crop_model import prepare_context, spatial_bounds
 from bandscope.core.display_style import (
     create_display_state,
-    legacy_render_quality,
     migrate_display_state,
-    new_render_quality,
 )
 
 
@@ -31,9 +29,6 @@ def ensure_display_state(spec, *, legacy=False):
     else:
         state = migrate_display_state(state, legacy=legacy)
     spec.params[STATE_KEY] = state
-    spec.params.setdefault(
-        RENDER_QUALITY_KEY, legacy_render_quality() if legacy else new_render_quality(),
-    )
     return state
 
 

@@ -20,7 +20,7 @@ from bandscope.exporting.blender_jobs import BlenderProjectExportJob
 from bandscope.exporting.blender_project import BlenderProjectRequest
 from bandscope.exporting.publication_export import capture_snapshot, render_and_save
 from bandscope.exporting.publication_models import OutputOptions, resolve_style
-from bandscope.processing.display_transfer import volume_display_unit_distance
+from bandscope.processing.display_transfer import display_unit_distance
 
 
 def _hidden_kwargs():
@@ -184,7 +184,7 @@ class VolumeQualityAcceptance:
         weak = (q > 0.0) & (q < 0.01) & np.isfinite(q)
         weak_visible = int(np.count_nonzero(fields["alpha"][weak] > 0.0))
         mapper = self.window.volume_session.volume.mapper
-        expected = 0.5 * volume_display_unit_distance(snapshot.payload["full_shape"])
+        expected = 0.5 * display_unit_distance(tuple(200.0 / (size - 1) for size in snapshot.payload["full_shape"]))
         if abs(mapper.GetSampleDistance() - expected) > max(1e-6, expected * 1e-5):
             raise AssertionError(f"静止标准采样距离 {mapper.GetSampleDistance()} != {expected}")
         self.window.volume_session._set_interactive_quality("preview", snapshot.payload["render_quality"])
@@ -241,10 +241,8 @@ class VolumeQualityAcceptance:
 
     def _strong_case(self):
         self.window.timeline_bar.slider_time.setValue(self.initial_frame)
-        values = {"threshold": 21.739, "transition": 0.0, "gamma": 1.3, "density": 40.0}
-        for name, value in values.items():
-            slider, _spin, scale = self.window.page_render.display_parameters[name]
-            slider.setValue(int(round(value * scale)))
+        self.window.page_render.opacity_editor.set_points(
+            [[0.0, 0.0], [0.25, 0.55], [0.6, 0.85], [1.0, 0.95]])
         self.window._commit_enhancement_controls(apply_all=True)
         self.window._enhancement_refresh()
         self._wait_ready(self._strong_ready)

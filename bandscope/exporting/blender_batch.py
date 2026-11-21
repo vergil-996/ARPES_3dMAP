@@ -211,7 +211,7 @@ def _set_freeze_controls(window, frozen):
         if stored is not None:
             return
         widgets = {}
-        for name in ("main_splitter", "page_container", "toolbar", "source_switcher_bar"):
+        for name in ("main_splitter", "page_container", "toolbar", "source_switcher_bar", "settings_dialog"):
             widget = getattr(window, name, None)
             if widget is not None:
                 widgets[name] = widget

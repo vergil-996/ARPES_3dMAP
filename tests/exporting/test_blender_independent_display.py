@@ -8,7 +8,12 @@ import numpy as np
 from matplotlib import colormaps
 from PyQt5.QtWidgets import QApplication
 
-from bandscope.core.display_style import legacy_display_style, new_display_style, new_render_quality
+from bandscope.core.display_style import (
+    legacy_display_style,
+    new_display_style,
+    new_render_quality,
+    sanitized_legacy_opacity,
+)
 from bandscope.exporting.blender_project import (
     BlenderProjectError,
     load_blender_project,
@@ -20,15 +25,17 @@ from bandscope.exporting.blender_scene import ALPHA_CAP, prepare_blender_scene
 from bandscope.processing.display_transfer import (
     channels,
     display_level_info,
-    volume_display_unit_distance,
+    opacity_reference_distance,
 )
 from tests.support.blender import make_blender_snapshot, write_fake_blender_project
 
+CURVE = [[0.0, 0.0], [0.15, 0.45], [0.6, 0.9], [1.0, 1.0]]
 
-def independent_snapshot():
+
+def independent_snapshot(points=None):
     snapshot = make_blender_snapshot()
     style = new_display_style()
-    style["opacity"].update(threshold=10.0, transition=20.0, gamma=1.7, density=30.0, preset="custom")
+    style["opacity"] = {"points": [list(point) for point in (points or CURVE)]}
     volume = snapshot.payload["volume"]
     volume.flat[0] = 100.0
     info = display_level_info(volume, style)
@@ -41,30 +48,68 @@ def independent_snapshot():
     return snapshot
 
 
+def downgrade_to_schema_11(metadata):
+    """把新生成工程改成 schema 11（四参数、显示编辑格式 2）。"""
+    legacy = json.loads(json.dumps(metadata))
+    legacy["schema_version"] = 11
+    legacy["project"]["display_edit_format"] = 2
+    for entry in legacy["entries"]:
+        entry["schema_version"] = 11
+        edit = entry["bandscope_edit"]
+        edit["format_version"] = 2
+        edit["capabilities"] = [
+            name for name in edit.get("capabilities", []) if name != "opacity_points"
+        ]
+        edit["display_style"]["opacity"] = {
+            "threshold": 10.0, "transition": 20.0, "gamma": 1.7, "density": 30.0,
+        }
+        entry["opacity"]["independent_parameters"] = dict(edit["display_style"]["opacity"])
+    return legacy
+
+
 class IndependentBlenderSceneTests(unittest.TestCase):
-    def test_density_and_schema_11_metadata_match_shared_channels(self):
+    def test_density_and_schema_12_metadata_match_shared_channels(self):
         snapshot = independent_snapshot()
         volume = snapshot.payload["volume"]
         original = volume.copy()
         scene = prepare_blender_scene(snapshot)
-        unit = volume_display_unit_distance(snapshot.payload["full_shape"])
-        _color, alpha = channels(
-            volume, snapshot.payload["level_info"], "linear",
-            style=snapshot.payload["display"]["background_style"], unit_distance=unit,
-        )
+        unit = opacity_reference_distance(snapshot.payload["full_shape"])
+        with np.errstate(divide="ignore"):
+            _color, alpha = channels(
+                volume, snapshot.payload["level_info"], "linear",
+                style=snapshot.payload["display"]["background_style"], unit_distance=unit,
+            )
         np.testing.assert_array_equal(scene.alpha, alpha)
         expected = -np.log1p(-np.minimum(alpha, ALPHA_CAP)) / np.float32(scene.unit_distance_blender)
         np.testing.assert_allclose(scene.density, expected, rtol=1e-6, atol=1e-7)
+        self.assertTrue(np.all(np.isfinite(scene.density)))
         metadata = scene.metadata()
-        self.assertEqual(metadata["schema_version"], 11)
-        self.assertEqual(metadata["bandscope_edit"]["format_version"], 2)
-        self.assertEqual(metadata["bandscope_edit"]["display_style"]["opacity"]["density"], 30.0)
+        self.assertEqual(metadata["schema_version"], 12)
+        self.assertEqual(metadata["bandscope_edit"]["format_version"], 3)
+        self.assertEqual(metadata["bandscope_edit"]["display_style"]["opacity"]["points"], CURVE)
         self.assertEqual(metadata["bandscope_edit"]["render_quality"]["interpolation"], "linear")
+        self.assertIn("opacity_points", metadata["bandscope_edit"]["capabilities"])
         self.assertEqual(metadata["bandscope_edit"]["resolved_range"], [
             snapshot.payload["level_info"]["data_min"], snapshot.payload["level_info"]["data_max"],
         ])
         self.assertEqual(metadata["opacity"]["unit_distance_display"], unit)
         np.testing.assert_array_equal(volume, original)
+
+    def test_alpha_one_becomes_finite_extinction(self):
+        volume = np.array([[[0.0]], [[1.0]]], dtype=np.float32)
+        snapshot = make_blender_snapshot(volume=volume, cmap_name="gray")
+        style = new_display_style()
+        style["opacity"] = {"points": [[0.0, 0.0], [1.0, 1.0]]}
+        info = display_level_info(volume, style)
+        snapshot.payload.update(
+            level_info=info,
+            display={"background_style": style, "resolved_range": (0.0, 1.0), "state": None},
+        )
+        scene = prepare_blender_scene(snapshot)
+        self.assertEqual(float(scene.alpha[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(scene.alpha[-1, 0, 0]), 1.0, places=6)
+        self.assertTrue(np.all(np.isfinite(scene.density)))
+        self.assertGreater(float(scene.density[-1, 0, 0]), 0.0)
 
     def test_blender_colors_use_selected_palette_interval_without_changing_alpha(self):
         volume = np.array([[[0.0]], [[0.5]], [[1.0]]], dtype=np.float32)
@@ -83,13 +128,13 @@ class IndependentBlenderSceneTests(unittest.TestCase):
         metadata = scene.metadata()
         self.assertEqual(tuple(metadata["bandscope_edit"]["display_style"]["colormap_range"]), (0.2, 0.8))
 
-    def test_schema_11_roundtrip_and_editor_restore_independent_controls(self):
+    def test_schema_12_roundtrip_and_editor_restore_points(self):
         with tempfile.TemporaryDirectory() as root:
             blend, _metadata = write_fake_blender_project(root, [independent_snapshot()])
             project = load_blender_project(blend)
+            self.assertTrue(project.supports_opacity_points)
             snapshot = project.entries[0].snapshot
-            self.assertTrue(project.supports_display_styles)
-            self.assertEqual(snapshot.payload["display"]["background_style"]["opacity"]["gamma"], 1.7)
+            self.assertEqual(snapshot.payload["display"]["background_style"]["opacity"]["points"], CURVE)
             self.assertEqual(snapshot.payload["render_quality"]["mode"], "explicit")
             update_snapshot_display(
                 snapshot, cmap_name="magma", levels_params=(0, 50, 100), locked_range=None,
@@ -104,6 +149,7 @@ class IndependentBlenderSceneTests(unittest.TestCase):
 
             app = QApplication.instance() or QApplication([])
             editor = BlenderProjectEditor(SimpleNamespace(settings=None, _show_message=Mock()))
+
             def dispose():
                 editor.close_preview()
                 editor.close()
@@ -114,10 +160,48 @@ class IndependentBlenderSceneTests(unittest.TestCase):
             self.assertFalse(hasattr(editor, "normalization_combo"))
             self.assertFalse(hasattr(editor, "manual_low"))
             self.assertFalse(hasattr(editor, "manual_high"))
-            self.assertAlmostEqual(editor.opacity_spins["density"].value(), 30.0)
-            editor.opacity_spins["density"].setValue(33.0)
-            self.assertEqual(editor.current_snapshot.payload["display"]["background_style"]["opacity"]["density"], 33.0)
+            self.assertEqual(editor.opacity_curve.points(), CURVE)
+            self.assertTrue(editor.opacity_curve.isVisibleTo(editor))
+            self.assertFalse(editor.opacity_spins["density"].isVisibleTo(editor))
+            editor.opacity_curve.set_points([[0.0, 0.0], [0.3, 0.2], [1.0, 1.0]])
+            editor._on_display_changed()
+            self.assertEqual(
+                editor.current_snapshot.payload["display"]["background_style"]["opacity"]["points"],
+                [[0.0, 0.0], [0.3, 0.2], [1.0, 1.0]],
+            )
             self.assertIn("entry-001", editor._dirty_ids)
+
+    def test_schema_11_project_keeps_four_parameter_style_and_updates_in_place(self):
+        with tempfile.TemporaryDirectory() as root:
+            blend, metadata = write_fake_blender_project(root, [independent_snapshot()])
+            legacy = downgrade_to_schema_11(metadata)
+            assets = blend.parent / f"{blend.stem}.assets"
+            (assets / "scene.json").write_text(json.dumps(legacy), encoding="utf-8")
+            project = load_blender_project(blend)
+            self.assertEqual(project.schema_version, 11)
+            self.assertFalse(project.supports_opacity_points)
+            snapshot = project.entries[0].snapshot
+            style = snapshot.payload["display"]["background_style"]
+            self.assertEqual(sanitized_legacy_opacity(style.get("opacity"))["density"], 30.0)
+            self.assertNotIn("points", style["opacity"])
+            with self.assertRaisesRegex(BlenderProjectError, "重新导出"):
+                update_snapshot_display(
+                    snapshot, cmap_name="magma", levels_params=(0, 50, 100), locked_range=None,
+                    include_zero=False, opacity_mode="linear",
+                    display_style=new_display_style(),
+                )
+            update_snapshot_display(
+                snapshot, cmap_name="viridis", levels_params=(5, 60, 90), locked_range=None,
+                include_zero=False, opacity_mode="linear",
+            )
+            self.assertIn("density", snapshot.payload["display"]["background_style"]["opacity"])
+            merged = merge_updated_entry(
+                project.metadata["entries"][0],
+                prepare_blender_scene(snapshot).metadata(),
+            )
+            self.assertEqual(merged["bandscope_edit"]["format_version"], 2)
+            self.assertNotIn("opacity_points", merged["bandscope_edit"]["capabilities"])
+            self.assertIn("density", merged["bandscope_edit"]["display_style"]["opacity"])
 
     def test_old_restricted_project_relocks_to_frozen_full_range(self):
         snapshot = independent_snapshot()
@@ -158,7 +242,7 @@ class IndependentBlenderSceneTests(unittest.TestCase):
         generated = prepare_blender_scene(make_blender_snapshot()).metadata()
         generated["display_style"] = {"unexpected": True}
         merged = merge_updated_entry(original, generated)
-        self.assertEqual(merged["schema_version"], 11)
+        self.assertEqual(merged["schema_version"], 12)
         self.assertEqual(merged["text_layout"], original["text_layout"])
         self.assertEqual(merged["bandscope_edit"]["format_version"], 1)
         self.assertNotIn("display_style", merged["bandscope_edit"])

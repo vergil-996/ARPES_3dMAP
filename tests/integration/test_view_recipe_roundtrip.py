@@ -272,18 +272,24 @@ class RecipeRoundtripTests(unittest.TestCase):
         page.params["derived_params"] = {"step": -1}  # A failed edit must not describe the visible result.
         from bandscope.core.display_style import create_display_state, new_display_style, new_render_quality
         style = new_display_style()
-        style["opacity"]["density"] = 33.0
+        style["opacity"] = {"points": [[0.0, 0.0], [0.2, 0.6], [1.0, 1.0]]}
         quality = new_render_quality()
         quality["interpolation"] = "nearest"
         page.params["local_enhancement"] = create_display_state(style)
-        page.params["render_quality"] = quality
+        self.addCleanup(w.settings.remove, "rendering/quality")
+        w.set_render_quality(quality)
         w.left_workspace.activate_page(page.page_id)
         path, before = self.save()
         target = next(p for p in before.view_recipe["pages"] if p["page_id"] == "plugin")
         self.assertEqual(target["params"]["derived_params"], {"step": 1})
-        self.assertEqual(target["params"]["local_enhancement"]["background"]["opacity"]["density"], 33.0)
+        self.assertEqual(
+            target["params"]["local_enhancement"]["background"]["opacity"]["points"],
+            [[0.0, 0.0], [0.2, 0.6], [1.0, 1.0]],
+        )
         self.assertEqual(target["params"]["render_quality"]["interpolation"], "nearest")
+        w.set_render_quality(new_render_quality())
         w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
+        self.assertEqual(capture_snapshot(w).payload["render_quality"], new_render_quality())
         self.assertTrue(w.current_render_context["restored_snapshot"])
         self.assertIn("无法重新计算", w.left_workspace.scope_label.text())
         np.testing.assert_allclose(w.current_render_context["raw_curves"], context["raw_curves"])

@@ -1,10 +1,14 @@
 from PyQt5.QtCore import QSignalBlocker, Qt, pyqtSignal
 from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
-from siui.components.combobox_ import SiCapsuleComboBox
 from siui.components.widgets import SiLabel
 
 import bandscope.ui.theme as theme
 from bandscope.ui.camera_view_controls import CameraViewPanel
+from bandscope.ui.colormap_selector import (
+    COLORMAP_OPTIONS,
+    DEFAULT_COLORMAP,
+    OutputColormapSelector,
+)
 from bandscope.ui.enhancement_controls import RegionComboBox
 from bandscope.ui.levels_controls import ColormapRangeEditor, LevelsEditor
 from bandscope.ui.opacity_controls import OpacityCurveEditor
@@ -19,26 +23,16 @@ from bandscope.ui.ui_controls import AnimatedLockButton
 from bandscope.processing.denoise_config import DENOISE_METHODS as CONFIG_DENOISE_METHODS
 from bandscope.core.display_style import (
     INDEPENDENT_MODE,
-    LEGACY_MODE,
-    OPACITY_PRESET_CUSTOM,
-    legacy_display_style,
-    legacy_render_quality,
+    is_independent,
     new_display_style,
-    new_render_quality,
     resolved_display_style,
-    resolved_render_quality,
+    with_display_mode,
 )
 
 
 class RenderControlPage(ControlPageBase):
-    CMAP_OPTIONS = [
-        "magma", "inferno", "plasma", "viridis", "cividis", "turbo",
-        "afmhot", "hot", "gist_heat", "coolwarm", "RdBu_r", "seismic",
-        "Spectral", "jet", "rainbow", "nipy_spectral", "cubehelix",
-        "twilight", "twilight_shifted", "Greys", "gray", "bone", "pink",
-        "spring", "summer", "autumn", "winter", "cool", "hsv", "terrain",
-        "ocean", "gnuplot", "gnuplot2",
-    ]
+    #: 色带顺序的兼容引用；权威列表在 ``colormap_selector``，Blender 导出窗口共用同一份。
+    CMAP_OPTIONS = COLORMAP_OPTIONS
     DENOISE_METHODS = CONFIG_DENOISE_METHODS
 
     #: CardGroup 的左右内边距（control_page_base.CardGroup 构造参数）。
@@ -50,7 +44,8 @@ class RenderControlPage(ControlPageBase):
     #: 输入框提交新姿态（姿态, 本次改动的字段名）/ 请求重置相机：由主窗口连接渲染状态与相机实例。
     camera_pose_committed = pyqtSignal(object, str)
     camera_view_reset_requested = pyqtSignal()
-    display_mode_changed = pyqtSignal(str)
+    #: 用户从「输出色带」菜单选中另一条色带；由主窗口接一次精确刷新。
+    colormap_changed = pyqtSignal()
     display_value_changed = pyqtSignal()
     display_value_committed = pyqtSignal()
 
@@ -65,27 +60,6 @@ class RenderControlPage(ControlPageBase):
         v_camera.addWidget(self.camera_panel, 0, Qt.AlignHCenter)
         self.grp_camera = grp_camera
         self.vbox.addLayout(centered_widget_row(grp_camera, self.MIN_GROUP_WIDTH))
-
-        # 色带选择
-        grp_cmap, v_cmap = self._create_group("色带选择")
-        h_cmap = QHBoxLayout()
-        self.combo_cmap = SiCapsuleComboBox(self)
-        self.combo_cmap.setTitle("色带")
-        self.combo_cmap.setFixedHeight(30)
-        self.combo_cmap.setFixedWidth(self.MIN_COMBO_WIDTH)
-        self._adaptive_combo_controls.append(self.combo_cmap)
-        self.combo_cmap.setEditable(False)
-        self.combo_cmap.addItems(self.CMAP_OPTIONS)
-        theme.raise_well_on_card(self.combo_cmap)
-        self.btn_apply_cmap = self._create_btn("确定", "primary")
-
-        h_cmap.addStretch()
-        h_cmap.addWidget(self.combo_cmap)
-        h_cmap.addWidget(self.btn_apply_cmap)
-        h_cmap.addStretch()
-        v_cmap.addLayout(h_cmap)
-
-        self.vbox.addLayout(centered_widget_row(grp_cmap, self.MIN_GROUP_WIDTH))
 
         # 色阶调整
         grp_exp, v_exp = self._create_group("色阶调整")
@@ -113,13 +87,6 @@ class RenderControlPage(ControlPageBase):
         self._adaptive_row_controls.append(target_row)
         v_exp.addLayout(centered_widget_row(target_row, self.MIN_CONTROL_ROW_WIDTH))
 
-        self.combo_display_mode = self._create_denoise_combo("显示模式", [])
-        self.combo_display_mode.addItem("独立透明度", INDEPENDENT_MODE)
-        self.combo_display_mode.addItem("兼容映射", LEGACY_MODE)
-        self.combo_display_mode.setToolTip("兼容映射保留旧色阶与四条透明度曲线；独立不透明度使用完整强度范围和曲线控制。")
-        self.combo_display_mode.currentIndexChanged.connect(self._on_display_mode_combo)
-        v_exp.addLayout(centered_widget_row(self.combo_display_mode, self.MIN_CONTROL_ROW_WIDTH))
-
         input_label = SiLabel("输入色阶 · 累计直方图")
         input_label.setStyleSheet(theme.field_label_qss())
         v_exp.addWidget(input_label)
@@ -133,50 +100,31 @@ class RenderControlPage(ControlPageBase):
         self.s_up.setToolTip("白场：输入强度窗口上限。")
         v_exp.addLayout(centered_widget_row(self.levels_editor))
 
-        output_label = SiLabel("输出色带")
-        output_label.setStyleSheet(theme.field_label_qss())
-        v_exp.addWidget(output_label)
-        self.colormap_range_editor = ColormapRangeEditor(self.combo_cmap.currentText(), self)
+        # 「输出色带」标题行是主界面唯一的色带选择入口：左侧标题，右侧当前
+        # 色带名和下拉箭头，点击展开带色样的单列菜单。
+        self.colormap_selector = OutputColormapSelector(self)
+        self.colormap_selector.colormap_changed.connect(self._on_colormap_selected)
+        self._adaptive_slider_blocks.append(self.colormap_selector)
+        v_exp.addLayout(centered_widget_row(self.colormap_selector))
+        self.colormap_range_editor = ColormapRangeEditor(self.get_selected_cmap(), self)
         self._adaptive_slider_blocks.append(self.colormap_range_editor)
         self.s_cmap_low = self.colormap_range_editor.cmap_low
         self.s_cmap_high = self.colormap_range_editor.cmap_high
-        self.combo_cmap.currentTextChanged.connect(self.colormap_range_editor.set_colormap)
         v_exp.addLayout(centered_widget_row(self.colormap_range_editor))
-
-        self.combo_map = self._create_denoise_combo("强度映射方式", ["线性", "对数", "幂函数", "sigmoid"])
-        self.btn_apply_map = self._create_btn("应用设置", "primary")
-
-        v_exp.addLayout(centered_widget_row(self.combo_map, self.MIN_CONTROL_ROW_WIDTH))
-        v_exp.addLayout(centered_widget_row(self.btn_apply_map, self.BUTTON_WIDTH))
 
         self.vbox.addLayout(centered_widget_row(grp_exp, self.MIN_GROUP_WIDTH))
 
         self.grp_opacity, v_opacity = self._create_group("独立不透明度")
         self.opacity_editor = OpacityCurveEditor(self)
-        self.display_parameters = self.opacity_editor.display_parameters
         self._adaptive_slider_blocks.append(self.opacity_editor)
         self.opacity_editor.valueChanged.connect(self.display_value_changed)
         self.opacity_editor.valueCommitted.connect(self.display_value_committed)
         v_opacity.addLayout(centered_widget_row(self.opacity_editor))
         self.vbox.addLayout(centered_widget_row(self.grp_opacity, self.MIN_GROUP_WIDTH))
 
-        self.grp_quality, v_quality = self._create_group("渲染质量")
-        self.combo_quality_mode = self._create_denoise_combo("质量模式", [])
-        self.combo_quality_mode.addItem("明确采样", "explicit")
-        self.combo_quality_mode.addItem("兼容质量", LEGACY_MODE)
-        self.combo_interpolation = self._create_denoise_combo("体插值", [])
-        self.combo_interpolation.addItem("线性", "linear")
-        self.combo_interpolation.addItem("最近邻", "nearest")
-        self.combo_resting_quality = self._create_denoise_combo("静止质量", [])
-        self.combo_resting_quality.addItem("标准（0.5 × 最小间距）", "standard")
-        self.combo_resting_quality.addItem("精细（0.25 × 最小间距）", "fine")
-        for combo in (self.combo_quality_mode, self.combo_interpolation, self.combo_resting_quality):
-            combo.currentIndexChanged.connect(self._queue_display_value_change)
-            v_quality.addLayout(centered_widget_row(combo, self.MIN_CONTROL_ROW_WIDTH))
-        self.vbox.addLayout(centered_widget_row(self.grp_quality, self.MIN_GROUP_WIDTH))
         self._resolved_range = None
         self._display_view = "3d"
-        self.set_display_style(new_display_style(), new_render_quality(), view="3d")
+        self.set_display_style(new_display_style(), view="3d")
 
         # 去噪处理
         grp_noise, v_noise = self._create_group("去噪处理")
@@ -207,86 +155,50 @@ class RenderControlPage(ControlPageBase):
         self._extension_slot.setSpacing(self.SECTION_SPACING)
         self.vbox.addLayout(self._extension_slot)
 
-        # 全局计算后端（不随分析结果页保存）
-        grp_backend, v_backend = self._create_group("性能与硬件")
-        self.combo_backend = self._create_denoise_combo("计算后端", ["Auto", "CPU", "NVIDIA GPU"])
-        v_backend.addLayout(centered_widget_row(self.combo_backend, self.MIN_CONTROL_ROW_WIDTH))
-
-        self.vbox.addLayout(centered_widget_row(grp_backend, self.MIN_GROUP_WIDTH))
-
         # 启动时还没有有效 3D 场景：先直接收起，避免首帧闪现再收起。
         self.set_camera_view_visible(False, animate=False)
 
-    def _on_display_mode_combo(self, _index):
-        self.display_mode_changed.emit(str(self.combo_display_mode.currentData()))
+    def _on_colormap_selected(self, name):
+        # 菜单收起后渐变条立即更新；刷新由页面信号交给主窗口，只发一次。
+        self.colormap_range_editor.set_colormap(name)
+        self.colormap_changed.emit()
 
-    def _queue_display_value_change(self, *_args):
-        self._sync_display_visibility()
-        self.display_value_changed.emit()
-
-    @staticmethod
-    def _set_combo_data(combo, value):
-        index = combo.findData(value)
-        if index >= 0:
-            combo.setCurrentIndex(index)
+    def _restore_colormap(self, name):
+        """按保存的名称静默同步标题与渐变条，不触发用户选色的刷新流程。"""
+        self.colormap_selector.set_colormap(str(name or DEFAULT_COLORMAP))
+        self.colormap_range_editor.set_colormap(self.colormap_selector.current_colormap())
 
     def _display_style_widgets(self):
-        widgets = [
-            self.combo_display_mode, self.s_low, self.s_gamma, self.s_up,
-            self.s_cmap_low, self.s_cmap_high, self.combo_map,
-            self.combo_quality_mode, self.combo_interpolation, self.combo_resting_quality,
+        return [
+            self.s_low, self.s_gamma, self.s_up,
+            self.s_cmap_low, self.s_cmap_high,
         ]
-        for slider, spin, _scale in self.display_parameters.values():
-            widgets.extend((slider, spin))
-        return widgets
 
-    def set_display_style(self, style, quality=None, *, resolved_range=None, view="3d"):
-        independent = isinstance(style, dict) and style.get("display_mode") == INDEPENDENT_MODE
-        canonical = resolved_display_style(style)
-        extended = canonical if independent else new_display_style(
-            canonical["levels"], canonical["opacity_mode"], canonical["colormap_range"],
-        )
-        opacity = extended["opacity"]
-        quality = resolved_render_quality(quality)
+    def set_display_style(self, style, *, resolved_range=None, view="3d"):
+        canonical = (resolved_display_style(style) if is_independent(style)
+                     else with_display_mode(style, INDEPENDENT_MODE))
         blockers = [QSignalBlocker(widget) for widget in self._display_style_widgets()]
         try:
-            self._set_combo_data(self.combo_display_mode, INDEPENDENT_MODE if independent else LEGACY_MODE)
             for slider, value in zip((self.s_low, self.s_gamma, self.s_up), canonical["levels"]):
                 slider.setValue(int(round(float(value))))
             for slider, value in zip(
                 (self.s_cmap_low, self.s_cmap_high), canonical["colormap_range"],
             ):
                 slider.setValue(int(round(float(value) * 1000.0)))
-            index = combo_index_for_text(self.combo_map, canonical["opacity_mode"])
-            if index < 0:
-                self.combo_map.addItem(str(canonical["opacity_mode"]))
-                index = self.combo_map.count() - 1
-            self.combo_map.setCurrentIndex(index)
-            for name, (slider, spin, scale) in self.display_parameters.items():
-                slider.setValue(int(round(float(opacity[name]) * scale)))
-                spin.setValue(float(opacity[name]))
-            self._set_combo_data(self.combo_quality_mode, quality["mode"])
-            self._set_combo_data(self.combo_interpolation, quality["interpolation"])
-            self._set_combo_data(self.combo_resting_quality, quality["resting"])
+            self.opacity_editor.set_points(canonical["opacity"]["points"])
         finally:
             del blockers
         self._display_view = str(view)
         self._resolved_range = None if resolved_range is None else tuple(float(v) for v in resolved_range)
+        self._opacity_mode = str(canonical.get("opacity_mode", "线性"))
         self._sync_display_visibility()
         self.levels_editor.sync_from_proxies()
         self.colormap_range_editor.sync_from_proxies()
         self.opacity_editor.sync_from_proxies()
 
     def _sync_display_visibility(self):
-        independent = self.combo_display_mode.currentData() == INDEPENDENT_MODE
         is_3d = self._display_view == "3d"
-        self.grp_opacity.setVisible(bool(independent and is_3d))
-        self.grp_quality.setVisible(bool(is_3d))
-        self.combo_map.setVisible(not independent)
-        self.btn_apply_map.setVisible(not independent)
-        explicit = self.combo_quality_mode.currentData() == "explicit"
-        self.combo_interpolation.setEnabled(bool(explicit))
-        self.combo_resting_quality.setEnabled(bool(explicit))
+        self.grp_opacity.setVisible(bool(is_3d))
         self.relayout_scroll_content()
 
     def set_display_view(self, view):
@@ -301,24 +213,13 @@ class RenderControlPage(ControlPageBase):
 
     def get_display_style(self):
         levels = tuple(float(slider.value()) for slider in (self.s_low, self.s_gamma, self.s_up))
-        opacity_mode = str(self.combo_map.currentText())
-        colormap_range = self.get_colormap_range()
-        if self.combo_display_mode.currentData() != INDEPENDENT_MODE:
-            return legacy_display_style(levels, opacity_mode, colormap_range)
-        style = new_display_style(levels, opacity_mode, colormap_range)
-        opacity = {"preset": OPACITY_PRESET_CUSTOM}
-        for name, (slider, _spin, scale) in self.display_parameters.items():
-            opacity[name] = slider.value() / float(scale)
-        style["opacity"] = opacity
-        return resolved_display_style(style)
+        return new_display_style(
+            levels, self._opacity_mode, self.get_colormap_range(),
+            self.opacity_editor.points(),
+        )
 
-    def get_render_quality(self):
-        if self.combo_quality_mode.currentData() != "explicit":
-            return legacy_render_quality()
-        quality = new_render_quality()
-        quality["interpolation"] = str(self.combo_interpolation.currentData())
-        quality["resting"] = str(self.combo_resting_quality.currentData())
-        return quality
+    def get_opacity_points(self):
+        return self.opacity_editor.points()
 
     # ------------------------------------------------------------------
     # 扩展卡片（插件提供内容，宿主负责挂载、显隐与自适应宽度）
@@ -412,7 +313,7 @@ class RenderControlPage(ControlPageBase):
         )
 
     def get_selected_cmap(self):
-        return self.combo_cmap.currentText()
+        return self.colormap_selector.current_colormap()
 
     def closeEvent(self, event):
         # 高度动画会回调滚动页；先停掉再交给 Qt 析构页面与图形效果。
@@ -427,27 +328,9 @@ class RenderControlPage(ControlPageBase):
             self.combo_n3.currentText()
         ]
 
-    def set_backend_mode(self, mode):
-        index = combo_index_for_text(self.combo_backend, mode)
-        if index >= 0:
-            self.combo_backend.setCurrentIndex(index)
-
-    def set_nvidia_backend_available(self, available):
-        index = combo_index_for_text(self.combo_backend, "NVIDIA GPU")
-        if index < 0:
-            return
-        item = self.combo_backend.model().item(index)
-        if item is not None:
-            item.setEnabled(bool(available))
-        self.combo_backend.setItemData(
-            index,
-            None if available else "当前环境未安装或无法使用 CuPy/CUDA，Auto 将使用 CPU。",
-            3,
-        )
-
     def export_state(self):
         return {
-            "combo_cmap": self.combo_cmap.currentText(),
+            "combo_cmap": self.get_selected_cmap(),
             "s_low": {
                 "minimum": int(self.s_low.minimum()),
                 "maximum": int(self.s_low.maximum()),
@@ -473,25 +356,21 @@ class RenderControlPage(ControlPageBase):
                 "maximum": int(self.s_cmap_high.maximum()),
                 "value": int(self.s_cmap_high.value()),
             },
-            "combo_map": self.combo_map.currentText(),
             "combo_n1": self.combo_n1.currentText(),
             "combo_n2": self.combo_n2.currentText(),
             "combo_n3": self.combo_n3.currentText(),
             "display_style": self.get_display_style(),
-            "render_quality": self.get_render_quality(),
             "display_range": self._resolved_range,
         }
 
     def restore_state(self, state, *, block_signals=True):
         state = state or {}
         widgets = [
-            self.combo_cmap,
             self.s_low,
             self.s_gamma,
             self.s_up,
             self.s_cmap_low,
             self.s_cmap_high,
-            self.combo_map,
             self.combo_n1,
             self.combo_n2,
             self.combo_n3,
@@ -514,9 +393,9 @@ class RenderControlPage(ControlPageBase):
                                 int(slider_state.get("maximum", 1000)))
                 slider.setValue(int(slider_state.get("value", default)))
 
+            # 色带按名称恢复：列表重排不影响选中项，也不触发用户选色的刷新。
+            self._restore_colormap(state.get("combo_cmap", DEFAULT_COLORMAP))
             for combo_name, combo, default in (
-                ("combo_cmap", self.combo_cmap, "magma"),
-                ("combo_map", self.combo_map, "线性"),
                 ("combo_n1", self.combo_n1, "None"),
                 ("combo_n2", self.combo_n2, "None"),
                 ("combo_n3", self.combo_n3, "None"),
@@ -526,16 +405,15 @@ class RenderControlPage(ControlPageBase):
                     combo.setCurrentIndex(index)
             if "display_style" in state:
                 style = state["display_style"]
-                quality = state.get("render_quality", new_render_quality())
             else:
                 has_colormap_range = "s_cmap_low" in state or "s_cmap_high" in state
                 colormap_range = self.get_colormap_range() if has_colormap_range else (0.0, 1.0)
-                style = legacy_display_style(
-                    self.get_display_style()["levels"], self.combo_map.currentText(), colormap_range,
+                style = new_display_style(
+                    self.get_display_style()["levels"],
+                    state.get("combo_map", "线性"), colormap_range,
                 )
-                quality = legacy_render_quality()
             self.set_display_style(
-                style, quality, resolved_range=state.get("display_range"), view=self._display_view,
+                style, resolved_range=state.get("display_range"), view=self._display_view,
             )
         finally:
             del blockers

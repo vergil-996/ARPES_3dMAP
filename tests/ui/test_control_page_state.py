@@ -19,7 +19,7 @@ from bandscope.processing.denoise_config import (
 )
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
-from bandscope.ui.settings_popups import DenoiseSettingsPopup
+from bandscope.ui.settings_popups import DenoiseSettingsPanel
 from bandscope.ui.timeline_bar import TimelineBar
 
 
@@ -37,15 +37,18 @@ class ControlPageStateTests(unittest.TestCase):
         page.s_gamma.setValue(47)
         page.s_up.setValue(91)
         page.combo_n1.setCurrentIndex(3)
+        page.colormap_selector.set_colormap("coolwarm")
         expected = page.export_state()
 
         page.s_low.setValue(0)
         page.s_gamma.setValue(0)
         page.s_up.setValue(0)
         page.combo_n1.setCurrentIndex(0)
+        page.colormap_selector.set_colormap("magma")
         page.restore_state(expected)
 
         self.assertEqual(page.export_state(), expected)
+        self.assertEqual(page.get_selected_cmap(), "coolwarm")
         self.assertEqual(
             [slider._value_label.text() for slider in (page.s_low, page.s_gamma, page.s_up)],
             ["13", "47", "91"],
@@ -139,28 +142,41 @@ class ControlPageStateTests(unittest.TestCase):
         self.assertFalse(hasattr(blank, "waterfall_step_box"))
         self.assertNotIn("waterfall", blank.export_state())
 
-    def test_compact_combo_boxes_leave_room_for_current_text(self):
+    def test_colormap_selector_is_the_only_entry_in_the_levels_card(self):
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        self.assertEqual(page.get_selected_cmap(), "magma")
+        self.assertEqual(page.colormap_selector.current_colormap(), "magma")
+        self.assertEqual(page.export_state()["combo_cmap"], "magma")
+        for name in ("combo_cmap", "btn_apply_cmap", "grp_cmap"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(page, name))
+        card_titles = [group.toggle_button.text() for group in page._adaptive_groups]
+        self.assertNotIn("色带选择", card_titles)
+        self.assertIn("色阶调整", card_titles)
+        # 菜单首两项与 coolwarm 唯一性由 tests.ui.test_colormap_selector 覆盖。
+        self.assertEqual(page.colormap_selector.options()[:2], ["magma", "coolwarm"])
+
+    def test_colormap_header_fits_the_longest_name_in_a_narrow_card(self):
         page = RenderControlPage()
         self.addCleanup(page.deleteLater)
         page.resize(336, 900)
         page.show()
-        combo = page.combo_cmap
-        editor = combo._line_edit
-        available = (
-            editor._calcTextRect().width()
-            - editor._calcContainerMargins().right()
-            - 16
+        page.colormap_selector.set_colormap("twilight_shifted")
+        selector = page.colormap_selector
+        required = (
+            selector.title_label.fontMetrics().horizontalAdvance(selector.title_label.text())
+            + selector.name_label.fontMetrics().horizontalAdvance(selector.name_label.text())
+            + selector.arrow_label.fontMetrics().horizontalAdvance(selector.arrow_label.text())
+            + 3 * 6
         )
-        required = editor.fontMetrics().horizontalAdvance(combo.currentText()) + 8
-        self.assertGreaterEqual(
-            available,
-            required,
-            f"{combo._title} 的当前值空间不足：{combo.currentText()}",
-        )
+        self.assertGreaterEqual(selector.width(), required)
+        self.assertLessEqual(selector.width(), page.width())
+        self.assertEqual(selector.width(), page.colormap_range_editor.width())
 
     def test_denoise_pages_share_defaults_and_options(self):
         blank = BlankControlPage()
-        popup = DenoiseSettingsPopup(blank)
+        popup = DenoiseSettingsPanel(blank)
 
         self.assertEqual(blank.get_savgol_params(), DEFAULT_SG_PARAMS)
         self.assertEqual(blank.get_wavelet_params(), DEFAULT_WAVELET_PARAMS)

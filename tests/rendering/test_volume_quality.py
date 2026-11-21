@@ -5,8 +5,11 @@ import pyvista as pv
 import vtk
 from vtkmodules.util.numpy_support import vtk_to_numpy
 
-from bandscope.core.display_style import new_display_style, new_render_quality
-from bandscope.processing.display_transfer import volume_display_unit_distance
+from bandscope.core.display_style import legacy_render_quality, new_display_style, new_render_quality
+from bandscope.processing.display_transfer import (
+    display_unit_distance,
+    opacity_reference_distance,
+)
 from bandscope.processing.local_enhancement import resolve_display
 from bandscope.rendering.render_core import VolumeRenderSession
 from tests.support.environment import requires_opengl
@@ -27,7 +30,7 @@ class VolumeQualityTests(unittest.TestCase):
             quality="preview", quality_config=quality,
         )
         mapper = self.session.volume.mapper
-        minimum = volume_display_unit_distance(self.data.shape)
+        minimum = display_unit_distance(tuple(200.0 / (size - 1) for size in self.data.shape))
         self.assertEqual(mapper.GetInterpolationMode(), vtk.VTK_LINEAR_INTERPOLATION)
         self.assertEqual(mapper.GetAutoAdjustSampleDistances(), 0)
         self.assertEqual(mapper.GetInteractiveAdjustSampleDistances(), 0)
@@ -55,6 +58,13 @@ class VolumeQualityTests(unittest.TestCase):
         )
         self.assertEqual(mapper.GetInterpolationMode(), vtk.VTK_NEAREST_INTERPOLATION)
 
+        quality["interpolation"] = "linear"
+        self.session._set_interactive_quality("exact", quality)
+        self.session._set_interactive_quality("exact", legacy_render_quality())
+        self.assertEqual(mapper.GetInterpolationMode(), vtk.VTK_NEAREST_INTERPOLATION)
+        self.assertTrue(mapper.GetAutoAdjustSampleDistances())
+        self.assertTrue(mapper.GetInteractiveAdjustSampleDistances())
+
     def test_masked_gpu_volume_configures_interpolation_on_volume_property(self):
         self.data[2:6, 3:7, :] = np.nan
         quality = new_render_quality()
@@ -70,7 +80,7 @@ class VolumeQualityTests(unittest.TestCase):
         self.assertEqual(mapper.GetAutoAdjustSampleDistances(), 0)
         self.assertAlmostEqual(
             mapper.GetSampleDistance(),
-            0.5 * volume_display_unit_distance(self.data.shape),
+            0.5 * display_unit_distance(tuple(200.0 / (size - 1) for size in self.data.shape)),
             places=5,
         )
 
@@ -112,7 +122,7 @@ class VolumeQualityTests(unittest.TestCase):
         np.testing.assert_array_equal(science, original.ravel(order="F"))
         self.assertAlmostEqual(
             self.session.volume.GetProperty().GetScalarOpacityUnitDistance(),
-            volume_display_unit_distance(self.data.shape),
+            opacity_reference_distance(self.data.shape),
         )
         np.testing.assert_allclose(
             first[:, 1], np.clip(fields["alpha"] * gains[None, None, :], 0, 1).ravel(order="F"),
@@ -122,7 +132,7 @@ class VolumeQualityTests(unittest.TestCase):
         _fields, second = render(2)
         self.assertFalse(np.array_equal(first[:, 0], second[:, 0]))
         np.testing.assert_array_equal(first[:, 1], second[:, 1])
-        state["background"]["opacity"]["threshold"] = 35.0
+        state["background"]["opacity"] = {"points": [[0.0, 0.0], [0.35, 0.0], [0.7, 0.8], [1.0, 1.0]]}
         _fields, third = render(3)
         np.testing.assert_array_equal(second[:, 0], third[:, 0])
         self.assertFalse(np.array_equal(second[:, 1], third[:, 1]))

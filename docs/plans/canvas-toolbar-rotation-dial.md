@@ -1,6 +1,6 @@
 # BandScope 画布工具栏与 Z 轴旋钮改造
 
-2026-11-21 · 已实施。定向功能回归与 Windows 替代数据窗口验收通过；WSe₂ 实数据验收待补，全量回归仍有其他模块失败。
+2026-11-21 · 已实施。定向功能回归、Windows 替代数据与 WSe₂ 实数据窗口验收均通过。
 
 将「显示坐标」「图像翻转」「Z 轴旋转」移到画布右上角的悬浮工具栏。前两项改为图标开关，Z 轴旋转改为按需展开的旋钮。底部宽度全部留给位置和时间滑条。
 
@@ -38,5 +38,6 @@
 - Windows 真实窗口使用 `.local/data/integration_context_menu_synthetic.npz`（6×7×8×3）完成 13 项检查，覆盖原生弹层、负小数、跨零一次提交、归零、宽窄与低高度、路径选段条和系统缩放（DPR 4，`QT_SCALE_FACTOR=2.0`）。截图与报告位于 `.local/outputs/canvas-rotation-dial/`；`.local/data/WSe2_step.npz` 及原始来源均不存在，因此未执行指定 WSe₂ 验收。
 - `verify_time_axis_visibility.py` 使用上述动态数据及 `integration_context_menu_static.npz` 全部通过，确认无区间组时底栏折叠、悬浮视图控件保留。退出时隔离扩展锁文件出现 WinError 32 清理警告，不影响已通过的断言。
 - 路径页验收发现现有显示统计任务随新数组标识持续重排；本计划未修改该子系统，报告保留警告，路径选段条以首个真实路径视图和实际显隐验收。
+- 2026-11-21 补做 WSe₂ 真实窗口验收：`python scripts/validation/verify_canvas_rotation_dial.py .local/data/WSe2_step.npz` 13 项检查通过，覆盖系统缩放（DPR 1.5625／`QT_SCALE_FACTOR=1.25`）、坐标与翻转图标开关、旋钮弹层位于按钮左侧且使用原生窗口、负小数同步读数与提示、拖动期间不精确提交、跨零拖动只在松手提交一次、归零熄灭高亮且相机不变、再次点击 Z 收起、宽窗位置与时间等分、窄窗两行、低高度收起视角预设且底部操作可达，以及路径选段条独立显隐。截图与报告在 `.local/outputs/canvas-rotation-dial/`；报告保留「路径页显示统计任务持续重排」的既有警告。
 
-下一步仅需在 WSe₂ 文件可用后运行 `scripts/validation/verify_canvas_rotation_dial.py` 补做同一验收；其余独立失败与路径统计重排由对应责任任务跟进。
+下一步：路径页显示统计任务的持续重排由对应责任任务跟进；本计划的 WSe₂ 专项验收缺口已补齐。

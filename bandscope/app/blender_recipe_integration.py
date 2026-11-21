@@ -197,7 +197,7 @@ class BlenderRecipeMixin:
         if not override:
             return
         for key in ("levels", "levels_controls", "locked_range", "cmap", "level_info",
-                    "display", "render_quality"):
+                    "display"):
             if key in override:
                 view_state[key] = copy.deepcopy(override[key])
         display = copy.deepcopy(override.get("display") or {})
@@ -209,10 +209,7 @@ class BlenderRecipeMixin:
             render[key] = {**(render.get(key) or {}), "value": value}
         if style is not None:
             render["display_style"] = copy.deepcopy(style)
-            render["combo_map"] = style.get("opacity_mode", render.get("combo_map"))
-        render["render_quality"] = copy.deepcopy(override.get("render_quality"))
         render["display_range"] = display.get("resolved_range")
-        spec.params[RENDER_QUALITY_KEY] = copy.deepcopy(override.get("render_quality"))
         removed = set(override.get("removed_effects") or ())
         if "local_enhancement" in removed:
             spec.params[STATE_KEY] = create_display_state(style)
@@ -227,7 +224,6 @@ class BlenderRecipeMixin:
             view_state["display"] = display
         if override.get("relock_full_range"):
             view_state["relock_full_range"] = True
-        view_state["render_quality"] = copy.deepcopy(override.get("render_quality"))
 
     def _apply_blender_group_workspace(self, prepared):
         target_id = self._apply_recipe_workspace(

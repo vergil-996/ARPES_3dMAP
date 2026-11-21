@@ -163,6 +163,12 @@ FONT_MONO = '"Cascadia Mono", "Consolas", "Courier New", monospace'
 MPL_FONT_FAMILIES = ["DejaVu Sans", "Microsoft YaHei", "SimHei", "sans-serif"]
 TINT_CLEAR = "#00FFFFFF"
 TINT_HOVER = "#12FFFFFF"
+# 时间轴区间滑块与色阶滑条共用的手柄色；固定中性色，不随深浅主题切换。
+RANGE_HANDLE_DARK_FILL = "#17191C"
+RANGE_HANDLE_DARK_BORDER = "#555B64"
+RANGE_HANDLE_LIGHT_FILL = "#FFFFFF"
+RANGE_HANDLE_LIGHT_BORDER = "#9CA1A8"
+RANGE_HANDLE_MID_FILL = "#858585"
 CURVE_PALETTE = []
 QSS_TOKENS = {}
 _CURRENT_THEME = "light"
@@ -260,8 +266,13 @@ def _install_palette(name):
 _install_palette(_CURRENT_THEME)
 
 
+def token_color(name):
+    """把主题令牌解析为 QColor；支持 #RRGGBB 与 rgba(...) 令牌。"""
+    return _palette_qcolor(PALETTES[_CURRENT_THEME][name])
+
+
 def accent_qcolor():
-    return QColor(ACCENT)
+    return token_color("ACCENT")
 
 
 def fluent_icon(name, size=16, color=None):

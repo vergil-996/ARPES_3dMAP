@@ -11,7 +11,7 @@ configure_qt_plugin_path()
 
 import numpy as np
 import vtk
-from PyQt5.QtCore import QEvent, QSettings, QSignalBlocker, QSize, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QSettings, QSize, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
@@ -99,7 +99,8 @@ from bandscope.ui.result_workspace import (
     ResultWorkspace,
     unique_title_among,
 )
-from bandscope.ui.settings_popups import DenoiseSettingsPopup
+from bandscope.ui.settings_dialog import SettingsDialog
+from bandscope.core.display_style import new_render_quality, resolved_render_quality
 from bandscope.ui.source_switcher import SourceSwitcherBar
 from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.ui.toast import ToastManager
@@ -216,6 +217,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._camera_interaction_observer_id = None
         self._camera_view_sync_timer = None
 
+        self.settings_dialog = None
+        self.render_quality = resolved_render_quality(
+            self.settings.value("rendering/quality", new_render_quality())
+        )
         saved_backend = self.settings.value("compute_backend", "Auto", type=str)
         self.backend_manager = BackendManager(saved_backend)
         self._sync_gpu_display_backend()
@@ -275,8 +280,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
         except Exception:
             self._camera_interaction_observer_id = None
-        self.page_render.set_nvidia_backend_available(self.backend_manager.gpu_available)
-        self.page_render.set_backend_mode(self.backend_manager.mode)
         # 扩展在 Qt 与宿主接口就绪之后才加载；未安装任何扩展时这里什么都不做，
         # 主程序的行为与之前完全一致。整段兜底：扩展出任何问题都不能让主程序
         # 打不开——没有扩展时功能照旧，有扩展时最差也只是效果没应用。
@@ -290,14 +293,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         except Exception as exc:
             print(f"Extension startup failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
-        # 设置菜单先于本段构造：会话就绪（或失败）后刷新插件管理入口状态。
-        self._update_plugin_button_state()
         # 提示要等窗口显示之后再弹，构造期 Toast 还没有可用的落点。
         QTimer.singleShot(0, self._notify_plugin_load_issues)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
         self.bind_all_events()
         self._initialize_result_workspace()
-        self.denoise_popup = DenoiseSettingsPopup(self.page_control_blank)
         self._install_page_keyboard_shortcuts()
         self.initial_control_state = self._capture_control_state()
         self._update_export_button_states()
@@ -654,13 +654,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.control_panel_title = QLabel("视图设置", self.right_panel)
         self.control_panel_title.setStyleSheet(theme.card_title_qss())
         inspector_header.addWidget(self.control_panel_title, 1)
-        self.btn_reset_view = ActionButton(self.right_panel)
-        self.btn_reset_view.setFixedSize(28, 28)
-        self.btn_reset_view.setToolTip("重置当前 3D 视角")
-        theme.style_push_button(self.btn_reset_view, "quiet")
-        theme.set_button_icon(self.btn_reset_view, "ic_fluent_arrow_reset_regular", 15)
-        self.btn_reset_view.clicked.connect(self.on_camera_view_reset)
-        inspector_header.addWidget(self.btn_reset_view)
+        # 「重置视角」只保留画布工具条上的入口；右侧面板标题区不再放重复按钮。
         right_vbox.addLayout(inspector_header)
 
         self.page_container = QStackedWidget()
@@ -850,9 +844,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         theme.style_push_button(self.btn_tb_settings, "quiet")
         theme.set_button_icon(self.btn_tb_settings, "ic_fluent_settings_regular", 18)
         self.btn_tb_settings.setIconSize(QSize(18, 18))
-        self.settings_menu = self._create_settings_menu()
-        self.btn_tb_settings.clicked.connect(self._show_settings_menu)
-        self._update_plugin_button_state()
+        self.btn_tb_settings.clicked.connect(self.open_settings)
         row.addWidget(self.btn_tb_settings)
 
         self.btn_tb_export = _make_tb_btn("导出结果", "secondary")
@@ -877,7 +869,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.btn_theme_dark.setChecked(name == "dark")
         self.btn_theme_light.setChecked(name == "light")
         self.CONTEXT_MENU_STYLE = theme.context_menu_qss()
-        self.settings_menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         self._apply_feedback_styles()
         self.left_display_stack.setStyleSheet(
             f"QStackedWidget#display_stack {{ background-color: {theme.CANVAS_BG}; border-radius: 10px; }}"
@@ -1400,12 +1391,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         return gpu_display.set_enabled(self.backend_manager.selected_backend_name() == "NVIDIA GPU")
 
     def on_backend_mode_changed(self, mode):
+        previous = self.backend_manager.mode
         selected = self.backend_manager.set_mode(mode)
+        if self.settings_dialog is not None:
+            self.settings_dialog.set_backend(selected)
+        if selected == previous:
+            return
         self._sync_gpu_display_backend()
-        if selected != mode:
-            blocker = QSignalBlocker(self.page_render.combo_backend)
-            self.page_render.set_backend_mode(selected)
-            del blocker
         self.settings.setValue("compute_backend", selected)
         self.backend_manager.clear_caches()
         self._computed_volume_cache.clear()
@@ -1887,21 +1879,16 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             effect_signature = (effect_signature, repr(enhancement))
         style_getter = getattr(self, "_enhancement_ui_style", None)
         display_signature = (style_getter() if style_getter is not None else (
-            tuple(self._get_display_levels()), str(self.page_render.combo_map.currentText()),
+            tuple(self._get_display_levels()), self.page_render.get_display_style()["opacity_mode"],
         ))
-        quality_signature = repr(
-            self.page_render.get_render_quality()
-            if hasattr(self.page_render, "get_render_quality") else None
-        )
-        effect_signature = (effect_signature, quality_signature)
         return (
             tuple(self._get_display_levels()),
-            (str(self.page_render.combo_map.currentText()), repr(display_signature)),
+            (str(self.page_render.get_display_style()["opacity_mode"]), repr(display_signature)),
             str(self.page_render.get_selected_cmap()),
             VisualEngine.locked_data_range(),
             # 插件参数只改变不透明度，不改数据；不把它算进签名的话，改一条平带
             # 会被判成“传输函数没变”而整帧跳过。
-            effect_signature,
+            (effect_signature, repr(self.__dict__.get("render_quality"))),
         )
 
     # ------------------------------------------------------------------
@@ -1936,10 +1923,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         登记表损坏、迁移失败或单个插件加载失败都不该挡住管理入口——这些正是
         需要进管理窗口看诊断、做恢复的情况。
         """
-        action = self.__dict__.get("plugin_manager_action")
-        if action is None:
+        dialog = self.settings_dialog
+        if dialog is None:
             return
         available = self.__dict__.get("plugin_session") is not None
+        action = dialog.plugins
         action.setEnabled(available)
         if available:
             action.setToolTip("安装、卸载及启用/停用插件")
@@ -2121,7 +2109,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.canvas_tool_overlay.rotation_preview.connect(self.on_rotation_angle_preview)
         self.canvas_tool_overlay.rotation_committed.connect(self.on_rotation_angle_changed)
 
-        self.page_render.btn_apply_cmap.clicked.connect(
+        # 「输出色带」菜单选中另一条色带：只在这里接一次精确刷新（同色带重选不发信号）。
+        self.page_render.colormap_changed.connect(
             lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
         )
         self.page_render.s_low.valueChanged.connect(self.schedule_render_levels_refresh)
@@ -2134,11 +2123,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_cmap_low.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_cmap_high.sliderReleased.connect(self.flush_render_levels_refresh)
-        self.page_render.btn_apply_map.clicked.connect(
-            self.flush_render_levels_refresh
-        )
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
-        self.page_render.combo_backend.currentTextChanged.connect(self.on_backend_mode_changed)
         self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
         self.page_render.camera_view_reset_requested.connect(self.on_camera_view_reset)
 
@@ -2550,7 +2535,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         path_controller = self.__dict__.get("path_slice_controller")
         if path_controller is not None and path_controller.handle_levels_commit():
             return
-        self._commit_render_quality()
         local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(
             RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION,
@@ -2564,7 +2548,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         path_controller = self.__dict__.get("path_slice_controller")
         if path_controller is not None and path_controller.handle_levels_schedule():
             return
-        self._commit_render_quality()
         local = self._commit_enhancement_controls(apply_all=True)
         self.request_refresh(RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION, interactive=True)
 
@@ -3682,29 +3665,30 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.left_workspace.add_page(new_spec)
         return True
 
-    def _create_settings_menu(self):
-        menu = QMenu(self.btn_tb_settings)
-        menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
-        update_action = menu.addAction("更新设置…")
-        update_action.triggered.connect(lambda: self.update_controller.open_settings())
-        self.plugin_manager_action = menu.addAction("插件管理…")
-        self.plugin_manager_action.triggered.connect(
-            lambda _checked=False: self.open_plugin_manager()
-        )
-        denoise_action = menu.addAction("去噪参数设置…")
-        denoise_action.triggered.connect(
-            lambda _checked=False: self.open_denoise_settings()
-        )
-        return menu
+    def open_settings(self):
+        if self.settings_dialog is None:
+            dialog = SettingsDialog(self.backend_manager, self.render_quality, self.page_control_blank, self)
+            self.settings_dialog = dialog
+            dialog.backend_changed.connect(self.on_backend_mode_changed)
+            dialog.quality_changed.connect(self.set_render_quality)
+            dialog.plugins_requested.connect(self.open_plugin_manager)
+            dialog.updates_requested.connect(lambda: self.update_controller.open_settings())
+        self._update_plugin_button_state()
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+        return self.settings_dialog
 
-    def _show_settings_menu(self):
-        button = self.btn_tb_settings
-        self.settings_menu.exec_(button.mapToGlobal(button.rect().bottomLeft()))
-
-    def open_denoise_settings(self):
-        popup = self.denoise_popup
-        popup.adjustSize()
-        popup.show_at(self.frameGeometry().center() - popup.rect().center())
+    def set_render_quality(self, quality):
+        quality = resolved_render_quality(quality)
+        if self.render_quality == quality:
+            return
+        self.render_quality = quality
+        self.settings.setValue("rendering/quality", quality)
+        if self.settings_dialog is not None:
+            self.settings_dialog.set_quality(quality)
+        if (self.current_render_context or {}).get("view") == "3d":
+            self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
 
     def _create_canvas_context_menu(self, owner, pos):
         global_pos = owner.mapToGlobal(pos)
@@ -5890,15 +5874,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             delta = target_angle - float(self._rendered_rotation_angle)
             session.volume.SetOrigin(100.0, 100.0, 100.0)
             session.volume.SetOrientation(0.0, 0.0, delta)
-            workspace = self.__dict__.get("left_workspace")
-            current_spec = getattr(workspace, "current_spec", None)
-            spec = current_spec() if callable(current_spec) else None
             import inspect
 
             setter = session._set_interactive_quality
-            quality_config = spec.params.get("render_quality") if spec is not None else None
             if len(inspect.signature(setter).parameters) >= 2:
-                setter(RenderQuality.PREVIEW.value, quality_config)
+                setter(RenderQuality.PREVIEW.value, self.render_quality)
             else:
                 setter(RenderQuality.PREVIEW.value)
             self.plotter.render()
@@ -7685,7 +7665,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         levels = self._get_display_levels()
         enhancement = self._enhancement_state(spec)
         mapping_mode = (enhancement["background"]["opacity_mode"] if enhancement
-                        else self.page_render.combo_map.currentText())
+                        else self.page_render.get_display_style()["opacity_mode"])
         current_cmap = self.page_render.get_selected_cmap()
         # 必须与 _current_transfer_signature() 同构：这是 EXACT 刷新时判断“传输
         # 函数没变、可以整帧跳过”的依据，结构不一致会让判等永远失败。
@@ -7738,7 +7718,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 core_coords=render_context.get("coords", self.core.coords),
                 cmap=current_cmap,
                 quality=quality.value,
-                quality_config=spec.params.get("render_quality"),
+                quality_config=self.render_quality,
                 data_bounds=render_context.get("data_bounds"),
                 full_shape=render_context.get("full_shape"),
                 include_zero=bool(render_context.get("include_zero", False)),
@@ -7863,6 +7843,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             manager.unregister_page(page_id)
 
     def closeEvent(self, event):
+        if self.settings_dialog is not None:
+            self.settings_dialog.close()
         theme.changed.disconnect(self._on_theme_changed)
         self._clear_enhancement_interaction()
         self._save_splitter_sizes()

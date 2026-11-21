@@ -1,149 +1,72 @@
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QVBoxLayout, QWidget
+"""去噪设置详情页。参数范围、选项及约束由现有处理控件提供。"""
+from PyQt5.QtCore import QSignalBlocker
+from PyQt5.QtWidgets import QDoubleSpinBox, QFormLayout, QGroupBox, QSpinBox, QVBoxLayout, QWidget
 
-import bandscope.ui.theme as theme
-from bandscope.ui.control_layout_utils import combo_index_for_text
-from bandscope.ui.denoise_control_utils import (
-    create_savgol_control_group,
-    create_wavelet_control_group,
-)
+from bandscope.ui.ui_controls import ChevronComboBox
 
 
-class _NonModalPopup(QWidget):
-    def __init__(self, parent=None):
+class DenoiseSettingsPanel(QWidget):
+    def __init__(self, controls, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_DeleteOnClose, False)
-        # 独立顶层窗口不继承主窗口样式：不自己上底色时内容是深色卡片、
-        # 窗体却是系统默认浅色，分组标题的白字会糊成一片。
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"_NonModalPopup {{ background-color: {theme.BG_2}; }}"
-            f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
-        )
+        self._spins = []
+        self._combos = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
-    def closeEvent(self, event):
-        event.ignore()
-        self.hide()
+        savgol = QGroupBox(controls.SG_METHOD_NAME)
+        layout.addWidget(savgol)
+        form = QFormLayout(savgol)
+        self.sg_window_box = self._spin(form, "滑动窗口长度", controls.sg_window_box,
+                                        QSpinBox(), controls._sync_savgol_constraints)
+        self.sg_polyorder_box = self._spin(form, "多项式阶数", controls.sg_polyorder_box,
+                                           QSpinBox(), controls._sync_savgol_constraints)
+        self.sg_axis_combo = self._combo(form, "窗口滑动轴", controls.sg_axis_combo)
 
-    def show_at(self, global_pos):
-        self.adjustSize()
-        self.move(global_pos)
-        self.show()
-        self.raise_()
+        wavelet = QGroupBox(controls.WAVELET_METHOD_NAME)
+        layout.addWidget(wavelet)
+        form = QFormLayout(wavelet)
+        self.wavelet_combo = self._combo(form, "小波基", controls.wavelet_combo)
+        self.wavelet_level_box = self._spin(form, "分解层数", controls.wavelet_level_box,
+                                            QSpinBox(), controls._sync_wavelet_constraints)
+        self.wavelet_threshold_rule_combo = self._combo(form, "阈值规则", controls.wavelet_threshold_rule_combo)
+        self.wavelet_threshold_mode_combo = self._combo(form, "阈值模式", controls.wavelet_threshold_mode_combo)
+        strength = QDoubleSpinBox()
+        strength.setDecimals(10)
+        self.wavelet_strength_box = self._spin(form, "阈值强度", controls.wavelet_strength_box,
+                                               strength, controls._sync_wavelet_constraints)
+        layout.addStretch()
+        controls.state_restored.connect(self.sync)
+        self.sync()
 
+    def _spin(self, form, label, source, editor, validate):
+        editor.setSingleStep(source.singleStep())
+        self._spins.append((editor, source))
+        form.addRow(label, editor)
 
-class DenoiseSettingsPopup(_NonModalPopup):
-    POPUP_WIDTH = 500
+        def commit():
+            source.setValue(editor.value())
+            validate()
+            self.sync()
 
-    def __init__(self, page_control_blank, parent=None):
-        super().__init__(parent)
-        self._blank = page_control_blank
-        self.setWindowTitle("去噪参数设置")
-        self.setMinimumWidth(self.POPUP_WIDTH)
-        self._build_ui()
+        editor.editingFinished.connect(commit)
+        source.editingFinished.connect(self.sync)
+        return editor
 
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+    def _combo(self, form, label, source):
+        editor = ChevronComboBox()
+        editor.addItems([source.itemText(index) for index in range(source.count())])
+        self._combos.append((editor, source))
+        form.addRow(label, editor)
+        editor.currentIndexChanged.connect(source.setCurrentIndex)
+        source.currentIndexChanged.connect(self.sync)
+        return editor
 
-        self.group_savgol = self._create_savgol_group()
-        self.group_wavelet = self._create_wavelet_group()
-        root.addWidget(self.group_savgol)
-        root.addWidget(self.group_wavelet)
-        root.addStretch()
-
-    def _create_savgol_group(self):
-        controls = create_savgol_control_group(
-            self,
-            self.POPUP_WIDTH - 60,
-            self.POPUP_WIDTH - 100,
-        )
-        self.sg_window_box = controls.window_box
-        self.sg_polyorder_box = controls.polyorder_box
-        self.sg_axis_combo = controls.axis_combo
-
-        self.sg_window_box.editingFinished.connect(self._on_sg_window_changed)
-        self.sg_polyorder_box.editingFinished.connect(self._on_sg_polyorder_changed)
-        self.sg_axis_combo.currentIndexChanged.connect(self._on_sg_axis_changed)
-
-        return controls.group
-
-    def _create_wavelet_group(self):
-        controls = create_wavelet_control_group(
-            self,
-            self.POPUP_WIDTH - 60,
-            self.POPUP_WIDTH - 100,
-        )
-        self.wavelet_combo = controls.wavelet_combo
-        self.wavelet_level_box = controls.level_box
-        self.wavelet_threshold_rule_combo = controls.threshold_rule_combo
-        self.wavelet_threshold_mode_combo = controls.threshold_mode_combo
-        self.wavelet_strength_box = controls.strength_box
-
-        self.wavelet_combo.currentIndexChanged.connect(self._on_wavelet_combo_changed)
-        self.wavelet_level_box.editingFinished.connect(self._on_wavelet_level_changed)
-        self.wavelet_threshold_rule_combo.currentIndexChanged.connect(self._on_wavelet_rule_changed)
-        self.wavelet_threshold_mode_combo.currentIndexChanged.connect(self._on_wavelet_mode_changed)
-        self.wavelet_strength_box.editingFinished.connect(self._on_wavelet_strength_changed)
-
-        return controls.group
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._sync_from_blank()
-
-    def _sync_from_blank(self):
-        blank = self._blank
-        self.sg_window_box.setValue(blank.sg_window_box.value())
-        self.sg_polyorder_box.setValue(blank.sg_polyorder_box.value())
-        sg_axis_text = blank.sg_axis_combo.currentText()
-        sg_axis_idx = combo_index_for_text(self.sg_axis_combo, sg_axis_text)
-        if sg_axis_idx >= 0:
-            self.sg_axis_combo.setCurrentIndex(sg_axis_idx)
-
-        self.wavelet_combo.setCurrentIndex(blank.wavelet_combo.currentIndex())
-        self.wavelet_level_box.setValue(blank.wavelet_level_box.value())
-        self.wavelet_threshold_rule_combo.setCurrentIndex(blank.wavelet_threshold_rule_combo.currentIndex())
-        self.wavelet_threshold_mode_combo.setCurrentIndex(blank.wavelet_threshold_mode_combo.currentIndex())
-        self.wavelet_strength_box.setValue(blank.wavelet_strength_box.value())
-
-    def _on_sg_window_changed(self):
-        value = int(self.sg_window_box.value())
-        self._blank.sg_window_box.setValue(value)
-        self._blank._sync_savgol_constraints()
-        self._sync_from_blank()
-
-    def _on_sg_polyorder_changed(self):
-        value = int(self.sg_polyorder_box.value())
-        self._blank.sg_polyorder_box.setValue(value)
-        self._blank._sync_savgol_constraints()
-        self._sync_from_blank()
-
-    def _on_sg_axis_changed(self, _idx):
-        sg_axis_text = self.sg_axis_combo.currentText()
-        idx = combo_index_for_text(self._blank.sg_axis_combo, sg_axis_text)
-        if idx >= 0:
-            self._blank.sg_axis_combo.setCurrentIndex(idx)
-
-    def _on_wavelet_combo_changed(self, _idx):
-        self._blank.wavelet_combo.setCurrentIndex(self.wavelet_combo.currentIndex())
-
-    def _on_wavelet_level_changed(self):
-        value = int(self.wavelet_level_box.value())
-        self._blank.wavelet_level_box.setValue(value)
-        self._blank._sync_wavelet_constraints()
-        self._sync_from_blank()
-
-    def _on_wavelet_rule_changed(self, _idx):
-        self._blank.wavelet_threshold_rule_combo.setCurrentIndex(self.wavelet_threshold_rule_combo.currentIndex())
-
-    def _on_wavelet_mode_changed(self, _idx):
-        self._blank.wavelet_threshold_mode_combo.setCurrentIndex(self.wavelet_threshold_mode_combo.currentIndex())
-
-    def _on_wavelet_strength_changed(self):
-        value = float(self.wavelet_strength_box.value())
-        self._blank.wavelet_strength_box.setValue(value)
-        self._blank._sync_wavelet_constraints()
-        self._sync_from_blank()
+    def sync(self):
+        for editor, source in self._spins:
+            with QSignalBlocker(editor):
+                editor.setRange(source.minimum(), source.maximum())
+                editor.setValue(source.value())
+        for editor, source in self._combos:
+            with QSignalBlocker(editor):
+                editor.setCurrentIndex(source.currentIndex())

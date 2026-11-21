@@ -68,10 +68,14 @@ class BlenderBatchTests(unittest.TestCase):
 
     def test_batch_freezes_exact_independent_pages_and_restores_workspace(self):
         first_id, first_page, second_id, second_home = self._load_two_sources()
+        dialog = self.window.open_settings()
+        dialog.resting.setCurrentIndex(dialog.resting.findData("fine"))
+        self.addCleanup(self.window.settings.remove, "rendering/quality")
         before_camera = np.asarray(self.window._current_3d_camera_position(), dtype=float)
 
         def check_controls_during_freeze(index, total, _message):
             if index < total:
+                self.assertFalse(dialog.isEnabled())
                 self.assertFalse(self.window.page_container.isEnabled())
                 self.assertFalse(self.window.source_switcher_bar.isEnabled())
 
@@ -81,6 +85,10 @@ class BlenderBatchTests(unittest.TestCase):
             progress=check_controls_during_freeze,
         )
         self.assertEqual(len(snapshots), 2)
+        dialog.resting.setCurrentIndex(dialog.resting.findData("standard"))
+        for snapshot in snapshots:
+            self.assertEqual(snapshot.payload["render_quality"]["resting"], "fine")
+            self.assertEqual(snapshot.view_recipe["view_state"]["render_quality"]["resting"], "fine")
         self.assertEqual(snapshots[0].source_session_id, first_id)
         self.assertEqual(snapshots[1].source_session_id, second_id)
         self.assertEqual(snapshots[0].view, "3d")
