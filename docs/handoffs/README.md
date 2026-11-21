@@ -9,7 +9,12 @@
 | 事项与适用范围 | 需要继续确认的内容 | 状态主记录 |
 | --- | --- | --- |
 | 界面重做：深浅双主题与布局（v1.21.0／v1.21.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（两主题对比度与观感、折叠分组与窄栏、画布工具条与专注模式、滚轮手感、次级窗口）；高 DPI／多显示器；冻结包与安装器验收 | [界面重做](ui-redesign-2026-11-16.md) |
-| 输出色带菜单（2026-11-21 源码、自动化与 WSe₂ 真实窗口验收通过） | 维护者人工视觉复核（窄侧栏、深浅主题下的色名／色样／手柄观感与菜单滚动手感）；冻结包与安装器验收 | [将色带选择并入“输出色带”](../plans/output-colormap-selector.md) |
+| 输出色带菜单（v1.22.1 已发布 GitHub 与 MatElab；2026-11-21 自动化与 WSe₂ 真实窗口验收通过） | 维护者人工视觉复核（窄侧栏、深浅主题下的色名／色样／手柄观感与菜单滚动手感）；冻结包与安装器验收 | [将色带选择并入“输出色带”](../plans/output-colormap-selector.md) |
+| 自动轴分配与扫描轴（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工复核：数据源卡片重设手感、MAT／NPZ 歧义提示文案、温度与角度单位显示、同一文件两种分配的复现恢复；冻结包与安装器验收 | [自动轴分配](../plans/axis-assignment.md) |
+| 画布悬浮工具栏与 Z 轴旋钮（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工复核：旋钮弹层拖动与数值输入手感、低高度布局、路径选段条显隐；高 DPI／多显示器；冻结包与安装器验收 | [画布工具栏与 Z 轴旋钮](../plans/canvas-toolbar-rotation-dial.md) |
+| 色阶调整改造（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：累计直方图、胶囊手柄与输出色带房屋标记在深浅主题和窄栏下的观感；冻结包与安装器验收 | [色阶调整](../plans/levels-and-colormap-range.md) |
+| 三维不透明度曲线（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：底轨加点、零点保留与 Delete 删除手感；真实 Blender 进程渲染对照；冻结包与安装器验收 | [三维不透明度曲线](../plans/opacity-curve-control-points.md) |
+| 分级设置窗口（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：分级导航与三分类页布局、窄窗滚动、深浅主题；发布后重跑 `verify_plugin_management.py` 并按新入口更新 `verify_ui_themes.py`；冻结包与安装器验收 | [分级设置窗口](settings-dialog-2026-11-21.md) |
 | 我的分组与页面副本（v1.18.1／v1.19.0 已发布 GitHub 与 MatElab） | 拖动 / 粘贴手感、窄栏与多分组布局、真实数据跨源激活；嵌套子分组的深层布局；冻结包与安装器验收；分组不跨重启保留 | [我的分组与页面副本](page-groups-2026-11-02.md) |
 | Blender 工程导出与八材质薄板（v1.19.0／v1.20.0／v1.21.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感，多视图共享预设的重开与总览）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
 | Blender 数据体两种外观（v1.20.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：灰白合成体高光截断、内部连续性、遮蔽、偏色、弱带去噪及多页／Append 观感 | [柔和受光实施与验收](../plans/blender-volume-lighting.md) |
