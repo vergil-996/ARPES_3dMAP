@@ -177,24 +177,6 @@ class AxisLabelControlTests(unittest.TestCase):
         )
         self.assertEqual(self._collect(), {})
 
-    def test_hint_warns_when_main_view_axes_switch_is_off(self):
-        # 3D 轴名只在主视图「坐标轴」开关打开时绘制：关掉时提示用户，
-        # 但输入框保持可用（预置的轴名仍会被记住）
-        snap = _make_3d_snapshot()
-        snap.payload["show_axes"] = False
-        self._load_snapshot(snap, "3d_minimal", "3d")
-        self.assertFalse(self.dialog.label_axis_hint.isHidden())
-        self.assertTrue(self.dialog.edit_axis_x.isEnabled())
-        self.dialog.edit_axis_x.setText("kx (1/Å)")
-        self.assertEqual(self._collect(), {"xlabel_text": "kx (1/Å)"})
-
-    def test_no_hint_when_axes_are_drawn(self):
-        self._load_snapshot(_make_3d_snapshot(), "3d_minimal", "3d")
-        self.assertTrue(self.dialog.label_axis_hint.isHidden())
-        # 2D / 1D 的坐标轴始终绘制，与 3D 开关无关
-        self._load_snapshot(_make_2d_snapshot(), "2d_open", "2d")
-        self.assertTrue(self.dialog.label_axis_hint.isHidden())
-
     # ------------------------------------------------------------- 持久化
 
     def test_committed_overrides_persist_including_empty_label(self):

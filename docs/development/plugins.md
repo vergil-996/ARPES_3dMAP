@@ -29,7 +29,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 | `data_snapshot_2d` | 抓取已完成二维结果的只读快照（API 2） |
 | `analysis_task` | 提交后台分析任务（API 2） |
 | `result_curve_1d` | 交回一维曲线，由宿主建结果页（API 2） |
-| `integration_action` | 向合法父页右键菜单的「创建结果页」子菜单注册动作（API 3） |
+| `integration_action` | 向视图右键的「处理分析」子菜单注册动作（API 3） |
 | `derived_result` | 基于宿主冻结的空间来源与逐页时间区间做派生计算（API 3） |
 | `plugin_settings` | 在插件管理里提供设置界面与默认值（API 3） |
 
@@ -78,7 +78,7 @@ host.cancel_analysis(handle)
 
 ### 派生结果与集成动作（API 3）
 
-最小能力范围固定为「合法父页的右键创建动作 → 宿主冻结空间来源并继承时间区间 → 插件同步计算 → 宿主建派生结果页」，
+最小能力范围固定为「当前页视图右键的处理分析动作 → 宿主冻结空间来源并继承时间区间 → 插件同步计算 → 宿主建派生结果页」，
 当前用于把 EDC 瀑布图这类「来源页 + 参数 → 曲线族」的功能移出主程序：
 
 ```python
@@ -101,9 +101,9 @@ class Plugin(Plugin):
 
 约定：
 
-- `integration_actions()` 报出的动作键以 `插件ID:动作ID` 进入合法父页右键菜单的「创建结果页」子菜单；动作 ID 必须跨版本稳定，展示文本可以改。`order` 决定与内置项的排序（内置项按 0/10/30/40 排布，EDC 瀑布图示例为 20）。菜单每次打开都重新查询，不用菜单下标或显示文本分派。
-- 宿主内部通过 `PageTreePanel.set_page_create_action_provider(provider)` 及 `ResultWorkspace` 的同名转发设置 `provider(page_id)`，后者返回 `(key, label, order)` 可迭代对象；页树与结果工作区以 `page_create_requested(parent_page_id, action_key)` 转发选择。主窗口 `_integration_actions_for_parent()` 负责过滤排序，`_on_page_create_requested()` 负责激活、复核与分派，插件公开协议不变。
-- 只有插件处于 ready，且目标为无擦除区域的 **X/Y 积分页**（或其矩形裁剪结果）时才显示动作；主页、E 积分、其他结果页和多选都不显示。来源树与「我的分组」中的页面副本使用同一规则。
+- `integration_actions()` 报出的动作键以 `插件ID:动作ID` 进入 2D／3D 视图右键的「处理分析」子菜单；动作 ID 必须跨版本稳定，展示文本可以改。`order` 决定与内置项的排序（内置项按 0/10/30/40 排布，EDC 瀑布图示例为 20）。菜单每次打开都重新查询，不用菜单下标或显示文本分派。
+- 宿主内部由主窗口的 `_append_analysis_actions(menu)` 在视图右键菜单中挂载「处理分析」子菜单，读取当前活动页并调用 `_integration_actions_for_parent(page_id)` 取得 `(key, label, order)`；动作 `QAction` 带稳定键数据并直接连到 `_on_page_create_requested()`，后者负责激活、复核与分派。页面树不再提供该入口，也没有 `page_create_requested` 信号或 provider 转发。
+- 只有插件处于 ready，且当前页为无擦除区域的 **X/Y 积分页**（或其矩形裁剪结果）时才显示动作；主页、E 积分、其他结果页都不显示。视图右键只作用于当前活动页。
 - 宿主内部以 `PluginSession.can_freeze_source(spec)` 转发 `DerivedPageController.can_freeze_source(spec)` 做页型、积分轴和擦除区域的轻量过滤；打开菜单不冻结数据、不弹窗也不试算。点击后先激活目标父页并重新校验，再走 `PluginSession.invoke_integration_action()` 与 `DerivedPageController.invoke_action()` 的完整创建链路，`invoke_action` 签名不变。
 - 执行动作时宿主冻结该 **目标父页**为 `DerivedSource2D`：空间积分范围、裁剪范围与数据域在创建时固定；新派生页继承来源页当前时间区间，之后在本页独立编辑并重算。带**擦除区域**的来源按分析插件同样的契约拒绝。
 - 新捕获的 `control_state` 不再写入 `data_process` / `combo_other`；恢复旧复现文件时忽略旧下拉选择，绝不把它当作一次创建命令。已有派生结果页、科学参数和 `source_module="data_process"` 来源标识继续兼容。

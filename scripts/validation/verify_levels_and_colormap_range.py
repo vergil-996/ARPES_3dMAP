@@ -218,7 +218,7 @@ def main():
     card = page.levels_editor.parentWidget()
     while card is not None and card.metaObject().className() != "CardGroup":
         card = card.parentWidget()
-    assert card is not None, "找不到“色阶调整”卡片"
+    assert card is not None, "找不到“色阶”卡片"
     selector = page.colormap_selector
     options = selector.options()
     assert page.get_selected_cmap() == "magma", page.get_selected_cmap()

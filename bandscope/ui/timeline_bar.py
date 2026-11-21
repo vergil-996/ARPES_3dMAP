@@ -96,8 +96,8 @@ class FrameSliderAdapter(QObject):
 class TimelineBar(QFrame):
     """位置组与时间组共享底栏宽度，只有空间不足时才分成两行。"""
 
-    HEIGHT = 64
-    SECOND_ROW_HEIGHT = 40
+    HEIGHT = 74
+    SECOND_ROW_HEIGHT = 60
     TIMELINE_STRETCH = 1
     SLIDER_STRETCH = 1
     AXIS_STRETCH = 1
@@ -168,13 +168,11 @@ class TimelineBar(QFrame):
     def _create_axis_controls(self):
         self.interval_control = AxisIntervalControl(self.axis_group)
         self._axis_layout.addWidget(self.interval_control, self.SLIDER_STRETCH)
-        self.axis_title_label = self.interval_control.title_label
 
     def _create_timeline_controls(self):
         self.time_interval_control = AxisIntervalControl(self.timeline_group)
         self._group_layout.addWidget(self.time_interval_control, self.SLIDER_STRETCH)
         self.slider_time = FrameSliderAdapter(self)
-        self.time_hint = self.time_interval_control.subtitle_label
         self.total_label = None
 
     def _bind_view_controls(self, view_controls):
@@ -371,7 +369,3 @@ class TimelineBar(QFrame):
         self._apply_wrap(self._should_wrap())
         self._sync_bar_visibility()
         self.layoutChanged.emit()
-
-    def set_position_label(self, text):
-        self.interval_control.subtitle_label.setText(f"沿 {text} 积分")
-        self._apply_wrap(self._should_wrap())

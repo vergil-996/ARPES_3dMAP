@@ -153,9 +153,15 @@ class ControlPageStateTests(unittest.TestCase):
                 self.assertFalse(hasattr(page, name))
         card_titles = [group.toggle_button.text() for group in page._adaptive_groups]
         self.assertNotIn("色带选择", card_titles)
-        self.assertIn("色阶调整", card_titles)
+        self.assertIn("色阶", card_titles)
         # 菜单首两项与 coolwarm 唯一性由 tests.ui.test_colormap_selector 覆盖。
         self.assertEqual(page.colormap_selector.options()[:2], ["magma", "coolwarm"])
+
+    def test_card_titles_are_short(self):
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        titles = [group.toggle_button.text() for group in page._adaptive_groups]
+        self.assertEqual(titles[:4], ["视角", "色阶", "不透明度", "去噪"])
 
     def test_colormap_header_fits_the_longest_name_in_a_narrow_card(self):
         page = RenderControlPage()

@@ -68,7 +68,6 @@ class OrientationControlTests(unittest.TestCase):
         self.assertTrue(self.dialog.chk_orientation.isEnabled())
         self.dialog.chk_orientation.setChecked(True)
         self.assertEqual(self.dialog._draft_overrides, {"show_orientation": True})
-        self.assertIn("三轴方向标仍可单独开启", self.dialog.label_axis_hint.text())
 
     def test_marker_is_hidden_and_discarded_for_other_families(self):
         for snapshot, style_id in (

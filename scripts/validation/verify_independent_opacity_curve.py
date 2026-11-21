@@ -145,7 +145,7 @@ def main():
             window.flush_render_levels_refresh()
             wait_ready()
 
-    check("独立不透明度卡片在三维页面可见", page.grp_opacity.isVisible())
+    check("不透明度卡片在三维页面可见", page.grp_opacity.isVisible())
     check("旧的显示模式与映射控件已移除",
           not hasattr(page, "combo_display_mode") and not hasattr(page, "combo_map")
           and not hasattr(page, "btn_apply_map") and not hasattr(page, "display_parameters"))

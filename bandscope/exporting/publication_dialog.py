@@ -60,7 +60,6 @@ from bandscope.exporting.publication_export import (
 from bandscope.exporting.publication_models import (
     AXIS_LABEL_OVERRIDE_KEYS,
     FAMILY_FORMATS,
-    FAMILY_LABELS,
     ENGLISH_FONTS,
     CHINESE_FONTS,
     DRAGGABLE_TEXT_IDS,
@@ -86,7 +85,7 @@ from bandscope.exporting.publication_renderers import (
 from bandscope.exporting.orientation_preview import OrientationPreviewLabel
 from bandscope.exporting.illustrator_export import IllustratorError, illustrator_available
 from bandscope.exporting.curve_presentation import (
-    Figure1DPresentation, publication_session, source_revision,
+    Figure1DPresentation, publication_session,
     load_presentation, save_presentation,
 )
 from bandscope.exporting.curve_style_editor import CurveStyleEditor
@@ -372,46 +371,14 @@ class PublicationExportDialog(QDialog):
         self._debounce.setInterval(200)
         self._debounce.timeout.connect(self._regenerate_previews)
 
-        self._stale_timer = QTimer(self)
-        self._stale_timer.setInterval(600)
-        self._stale_timer.timeout.connect(self._check_stale_source)
-
         self._build_ui()
 
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setContentsMargins(18, 12, 18, 12)
         layout.setSpacing(9)
-
-        header = QHBoxLayout()
-        export_icon = QLabel(self)
-        export_icon.setFixedSize(34, 34)
-        export_icon.setAlignment(Qt.AlignCenter)
-        export_icon.setPixmap(theme.fluent_icon("ic_fluent_arrow_export_regular", 18, theme.TEXT_2).pixmap(18, 18))
-        export_icon.setStyleSheet(
-            f"background-color: {theme.BG_3}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px;"
-        )
-        header.addWidget(export_icon)
-        self.title_label = QLabel("出版级导出")
-        self.title_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {theme.TEXT_1};")
-        header.addWidget(self.title_label)
-        header.addStretch(1)
-        self.family_badge = QLabel("")
-        self.family_badge.setStyleSheet(
-            f"color: {theme.TEXT_2}; background-color: {theme.ACCENT_SOFT};"
-            f" border: 1px solid {theme.BORDER_HEX}; border-radius: 5px; padding: 3px 8px; font-size: 10px;"
-        )
-        header.addWidget(self.family_badge)
-        layout.addLayout(header)
-
-        self.source_label = QLabel("")
-        self.source_label.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
-        layout.addWidget(self.source_label)
-        self.mode_note = QLabel("冻结当前视图快照；不会改变原始分析、数据、相机与色阶锁定。")
-        self.mode_note.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
-        layout.addWidget(self.mode_note)
 
         self.body_splitter = QSplitter(Qt.Horizontal, self)
         self.preview_host = QFrame(self.body_splitter)
@@ -426,7 +393,7 @@ class PublicationExportDialog(QDialog):
         self.options_scroll.setMaximumWidth(390)
         self.options_container = QWidget(self.options_scroll)
         self.options_layout = QVBoxLayout(self.options_container)
-        self.options_layout.setContentsMargins(4, 0, 4, 0)
+        self.options_layout.setContentsMargins(4, 4, 4, 0)
         self.options_layout.setSpacing(13)
         self.options_scroll.setWidget(self.options_container)
         self.body_splitter.addWidget(self.options_scroll)
@@ -707,16 +674,6 @@ class PublicationExportDialog(QDialog):
         self.axis_row.addWidget(self.btn_axis_auto)
         self.axis_row.addStretch(1)
         tune_layout.addLayout(self.axis_row)
-        # 3D 轴名只在主视图「坐标轴」开关打开时才绘制（自动轴名也一样），
-        # 关掉时提前说清楚，免得用户改了半天轴名却在导出图里看不到
-        self.label_axis_hint = QLabel(
-            "主视图的「坐标轴」开关已关闭：导出图不绘制带刻度的坐标轴及其轴标签；"
-            "三轴方向标仍可单独开启。"
-        )
-        self.label_axis_hint.setWordWrap(True)
-        self.label_axis_hint.setStyleSheet(f"color: {theme.TEXT_2}; font-size: 11px;")
-        self.label_axis_hint.setVisible(False)
-        tune_layout.addWidget(self.label_axis_hint)
 
         # 标题行：用户命名 + 位置/对齐/距离（四个视图族通用）
         self.title_row = QHBoxLayout()
@@ -933,8 +890,7 @@ class PublicationExportDialog(QDialog):
             ("面板编号", self.edit_panel_label, self.frame_row),
             ("坐标边框", self.combo_frame, self.frame_row),
         ])
-        self.title_label.setText("出版级导出")
-        for widget, padding in ((self.title_label, 4), (self.btn_update, 24), (self.btn_export, 24)):
+        for widget, padding in ((self.btn_update, 24), (self.btn_export, 24)):
             widget.setMinimumWidth(widget.fontMetrics().horizontalAdvance(widget.text()) + padding)
             widget.updateGeometry()
         self._sync_export_button()
@@ -969,7 +925,6 @@ class PublicationExportDialog(QDialog):
         self.show()
         self.raise_()
         self.activateWindow()
-        self._stale_timer.start()
         # 预览图生成于 show 之前，viewport 尺寸尚不可用；布局完成后重排大图
         QTimer.singleShot(0, self._refresh_big_preview)
         return True
@@ -986,9 +941,6 @@ class PublicationExportDialog(QDialog):
         self._big_ready = False
         family = snapshot.view_family
         self._editor_valid = True
-
-        self.family_badge.setText(f"当前：{FAMILY_LABELS.get(family, family)}")
-        self.source_label.setText(f"来源：{snapshot.source_desc}（{snapshot.view} 结果）")
 
         style, committed = committed_style_for(self.main_window.settings, family)
         self._committed_overrides = {
@@ -1085,8 +1037,6 @@ class PublicationExportDialog(QDialog):
             prefix.setText(hint)
         for widget in (self.label_axis_z, self.edit_axis_z):
             widget.setVisible(is_3d)
-        show_axes = bool((self.snapshot.payload or {}).get("show_axes", True))
-        self.label_axis_hint.setVisible(is_3d and not show_axes)
         # 标题行（命名/位置/对齐/距离）对四个视图族都可用，无可见性切换
 
     def _sync_tune_ui_from_draft(self):
@@ -2031,46 +1981,6 @@ class PublicationExportDialog(QDialog):
         if self._fit_to_window:
             self._refresh_big_preview()
 
-    # ------------------------------------------------------------- 过期提示
-
-    def _current_main_state_token(self):
-        window = self.main_window
-        spec = window.left_workspace.current_spec()
-        page_id = spec.page_id if spec is not None else None
-        # 页面改名也要算状态变化：快照里的来源名和默认文件名都跟着页面名走。
-        title = str(spec.title) if spec is not None else None
-        revision = source_revision(window, spec)
-        if self.snapshot is not None and not self.snapshot.source_revision:
-            revision = ()  # Older synthetic/external snapshots have no revision metadata.
-        return page_id, title, revision
-
-    def _snapshot_state_token(self):
-        if self.snapshot is None:
-            return None, None, ()
-        return (
-            self.snapshot.source_page_id,
-            self.snapshot.source_page_title,
-            self.snapshot.source_revision,
-        )
-
-    def _check_stale_source(self):
-        try:
-            if self.snapshot is None or not self.isVisible():
-                return
-            current = self._current_main_state_token()
-            frozen = self._snapshot_state_token()
-            if current != frozen:
-                self.source_label.setText(
-                    f"来源：{self.snapshot.source_desc}（预览来自之前的页面/帧，"
-                    "导出仍输出该快照；点击“更新预览”换取当前状态）"
-                )
-            else:
-                self.source_label.setText(
-                    f"来源：{self.snapshot.source_desc}（{self.snapshot.view} 结果）"
-                )
-        except Exception:  # noqa: BLE001 - 定时器槽绝不抛出
-            return
-
     # ------------------------------------------------------------- 动作
 
     def _on_update_preview(self):
@@ -2163,7 +2073,6 @@ class PublicationExportDialog(QDialog):
     def closeEvent(self, event):
         self._remember_page()
         self._debounce.stop()
-        self._stale_timer.stop()
         self._preview_revision += 1  # 使在途结果失效（协作式取消）
         self._pool.clear()
         self._cbar_pos_memory.clear()  # 面板关闭即清空各位置几何记忆
@@ -2172,7 +2081,6 @@ class PublicationExportDialog(QDialog):
     def reject(self):
         self._remember_page()
         self._debounce.stop()
-        self._stale_timer.stop()
         self._preview_revision += 1
         self._pool.clear()
         super().reject()

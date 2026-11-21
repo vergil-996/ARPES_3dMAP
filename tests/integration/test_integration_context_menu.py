@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QStackedWidget, QWidget
+from PyQt5.QtCore import QPoint
+from PyQt5.QtWidgets import QApplication, QMenu, QStackedWidget, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.analyzer_core import AnalyzerCore
@@ -136,6 +137,143 @@ class IntegrationContextMenuTests(unittest.TestCase):
 
     def action_keys(self, parent_id):
         return [item[0] for item in self.analyzer._integration_actions_for_parent(parent_id)]
+
+    @staticmethod
+    def analysis_submenu(menu):
+        return next(
+            (
+                action.menu()
+                for action in menu.actions()
+                if action.text() == "处理分析"
+            ),
+            None,
+        )
+
+    def test_view_menu_lists_the_current_pages_legal_actions(self):
+        menu = QMenu()
+        self.addCleanup(menu.deleteLater)
+
+        self.assertTrue(self.analyzer._append_analysis_actions(menu))
+
+        submenu = self.analysis_submenu(menu)
+        self.assertIsNotNone(submenu)
+        self.assertEqual(
+            [action.text() for action in submenu.actions()],
+            ["能级态密度", "二阶导"],
+        )
+
+    def test_view_menu_trigger_uses_the_current_page_and_stable_key(self):
+        menu = QMenu()
+        self.addCleanup(menu.deleteLater)
+        self.analyzer._on_page_create_requested = Mock(return_value=None)
+
+        self.analyzer._append_analysis_actions(menu)
+        self.analysis_submenu(menu).actions()[0].trigger()
+
+        self.analyzer._on_page_create_requested.assert_called_once_with(
+            "home", "builtin:energy_dos"
+        )
+
+    def test_view_menu_hides_itself_for_an_illegal_page(self):
+        self.add_page("dos", "energy_dos")
+        menu = QMenu()
+        self.addCleanup(menu.deleteLater)
+
+        self.assertFalse(self.analyzer._append_analysis_actions(menu))
+        self.assertEqual(menu.actions(), [])
+
+    def test_view_menu_includes_ready_plugin_actions(self):
+        self.analyzer.plugin_session = SimpleNamespace(
+            can_freeze_source=Mock(return_value=True),
+            integration_actions=Mock(
+                return_value=[("edc_waterfall:create", "EDC瀑布图", 20.0)]
+            ),
+        )
+        self.add_page("x", "axis_integral", params=integral_params(0))
+        menu = QMenu()
+        self.addCleanup(menu.deleteLater)
+
+        self.assertTrue(self.analyzer._append_analysis_actions(menu))
+
+        self.assertEqual(
+            [action.text() for action in self.analysis_submenu(menu).actions()],
+            ["切片内强度积分", "能级态密度", "EDC瀑布图", "二阶导"],
+        )
+
+    def test_2d_context_menu_adds_the_analysis_entry(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.current_render_context = {"view": "2d"}
+        analyzer.canvas_2d = QWidget()
+        self.addCleanup(analyzer.canvas_2d.deleteLater)
+        analyzer._can_copy_current_curve = Mock(return_value=False)
+        analyzer._can_paste_curve_to_current_page = Mock(return_value=False)
+        for name in (
+            "_append_band_actions",
+            "_append_enhancement_actions",
+            "_append_axis_title_actions",
+            "_append_analysis_actions",
+        ):
+            setattr(analyzer, name, Mock())
+
+        with patch.object(QMenu, "exec_"):
+            My3DAnalyzer._show_curve_context_menu(analyzer, QPoint(1, 1))
+
+        analyzer._append_analysis_actions.assert_called_once()
+
+    def test_3d_context_menu_adds_the_analysis_entry(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.current_render_context = {"view": "3d"}
+        analyzer.plotter = QWidget()
+        self.addCleanup(analyzer.plotter.deleteLater)
+        analyzer._three_d_band_target_at_cursor = Mock(return_value=None)
+        analyzer._enhancement_box_region_at_cursor = Mock(return_value=None)
+        for name in (
+            "_append_band_actions",
+            "_append_enhancement_actions",
+            "_append_axis_title_actions",
+            "_append_recipe_actions",
+            "_append_analysis_actions",
+        ):
+            setattr(analyzer, name, Mock())
+
+        with patch.object(QMenu, "exec_"):
+            My3DAnalyzer._show_main_context_menu(analyzer, QPoint(1, 1))
+
+        analyzer._append_analysis_actions.assert_called_once()
+
+    def test_2d_crop_mode_reopens_the_compact_context_menu(self):
+        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+        analyzer.current_render_context = {"view": "2d"}
+        analyzer.canvas_2d = QWidget()
+        self.addCleanup(analyzer.canvas_2d.deleteLater)
+        analyzer._crop_enabled = Mock(return_value=True)
+        analyzer._show_crop_popup = Mock()
+        analyzer._show_axis_title_menu = Mock()
+
+        My3DAnalyzer._show_curve_context_menu(analyzer, QPoint(1, 1))
+
+        analyzer._show_crop_popup.assert_called_once()
+        analyzer._show_axis_title_menu.assert_called_once()
+
+    def test_crop_mode_menu_includes_analysis_actions(self):
+        analyzer = self.analyzer
+        analyzer.current_render_context = {"view": "2d"}
+        analyzer._append_axis_title_actions = Mock(return_value=False)
+        analyzer._append_enhancement_actions = Mock(return_value=False)
+        owner = QWidget()
+        self.addCleanup(owner.deleteLater)
+        captured = []
+
+        def execute(menu, _pos):
+            captured.append(menu)
+
+        with patch.object(QMenu, "exec_", new=execute):
+            self.assertTrue(analyzer._show_axis_title_menu(owner, QPoint(2, 3)))
+
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(
+            [action.text() for action in captured[0].actions()], ["处理分析"]
+        )
 
     def test_builtin_action_legality_matrix(self):
         self.assertEqual(

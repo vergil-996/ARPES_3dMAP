@@ -429,23 +429,6 @@ class PageIntervalBindingTests(unittest.TestCase):
         self.assertIsNone(self.harness.analyzer.axis_interval)
         self.assertEqual(self.harness.refreshes, [])
 
-    def test_position_bar_label_uses_the_axis_and_its_unit(self):
-        spec = _spec("integral", low=0, up=10, mid=5)
-        self.harness.bind(spec)
-        self.assertEqual(self.harness.bar.interval_control.subtitle_label.text(), "沿 kx 积分")
-
-        source = _spec("integral2", low=0, up=10, mid=5)
-        self.harness.core.coord_units["X"] = "Å⁻¹"
-        self.harness.bind(source)
-        self.assertEqual(self.harness.bar.interval_control.subtitle_label.text(), "沿 kx / Å⁻¹ 积分")
-
-    def test_index_coordinates_are_labelled_index(self):
-        harness = _AxisHarness()
-        harness.core.coord_sources["X"] = "index"
-        spec = _spec("integral", low=0, up=10, mid=5)
-        harness.bind(spec)
-        self.assertEqual(harness.bar.interval_control.subtitle_label.text(), "沿 kx (index) 积分")
-
 
 class SliceSourceRangeTests(unittest.TestCase):
     """单层切片页移动位置：更新产生该切面的源范围，保留裁剪链其余部分。"""

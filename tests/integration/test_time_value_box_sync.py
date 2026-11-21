@@ -102,7 +102,6 @@ class TimeIntervalControlTests(unittest.TestCase):
     def test_delay_axis_starts_as_a_locked_single_frame(self):
         interval = self.analyzer.time_interval
         self.assertEqual(self.control.title_label.text(), "时间延迟")
-        self.assertEqual(self.control.subtitle_label.text(), "合拢逐帧 · 分离积分")
         self.assertTrue(interval.locked)
         self.assertEqual((interval.low, interval.up), (-300.0, -300.0))
         self.assertEqual(self.bar.slider_time.value(), 0)

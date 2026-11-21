@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""「相机视角」面板验收：显隐动画、双向同步、重置与 E 轴翻转。
+"""「视角」面板验收：显隐动画、双向同步、重置与 E 轴翻转。
 
 流程：启动窗口 → 断言初始隐藏 → 加载数据后断言平滑展开（高频采样高度，
 必须出现中间帧）→ 普通 3D 重绘不重播动画 → 30 Hz 交互回读 → 真实键入角度
@@ -14,6 +14,7 @@ RPC_E_CANTCALLOUT_ININPUTSYNCCALL 致命错误）。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_camera_view_panel.py <npz路径> [--output-dir <目录>]
 """
+import copy
 import faulthandler
 import os
 import sys
@@ -203,6 +204,17 @@ def main():
         QTest.keyClicks(box.lineEdit(), text)
         QTest.keyClick(box.lineEdit(), Qt.Key_Return)
 
+    def set_home_slice(info):
+        """切换主页的 3D / 2D 显示。
+
+        3D 刷新会把 ``home_slice_info`` 持久化到页面参数，渲染时页面参数优先于
+        窗口属性；只改窗口属性不会再切换视图，所以两处一起写。
+        """
+        window.home_slice_info = copy.deepcopy(info)
+        spec = window.left_workspace.current_spec()
+        if spec is not None:
+            spec.params["home_slice_info"] = copy.deepcopy(info)
+
     sampler = QTimer(window)
     sampler.setInterval(15)
     sampler.timeout.connect(lambda: height_samples.append(group.height()))
@@ -232,7 +244,7 @@ def main():
 
     # ------------------------------------------------------------------ 启动
     def step_initial():
-        check("启动时「相机视角」隐藏（不闪现）", group.isHidden())
+        check("启动时「视角」隐藏（不闪现）", group.isHidden())
         check("启动时显隐目标状态为收起", page._camera_view_visible_target is False)
         check("启动时渲染控制页仍可见", page.isVisible())
         height_samples.clear()
@@ -262,7 +274,7 @@ def main():
         labels = [label.text() for label in panel._labels]
         check(f"四个输入框文案正确（{'/'.join(labels)}）",
               labels == ["方位角", "仰角", "滚转角", "距离"])
-        check("唯一的操作按钮为「重置视角」", panel.reset_button.text() == "重置视角")
+        check("卡片内不再重复「重置视角」按钮", not hasattr(panel, "reset_button"))
 
         initial = pose()
         expected_azimuth, expected_elevation, expected_roll = default_pose_values()
@@ -287,7 +299,12 @@ def main():
         save_shot("camera_panel_3d.png")
 
         # 面板展开后内容变高：滚动条必须跟着内容高度走，否则底部卡片够不着。
+        # 视角卡片去掉重复的「重置视角」按钮后，默认高度下内容已经放得下；
+        # 先临时压低窗口制造溢出，验证完再恢复原尺寸。
         scroll = page.scroll
+        original_size = window.size()
+        window.resize(original_size.width(), max(720, original_size.height() - 260))
+        QTest.qWait(400)
         overflows = page.container.height() > scroll.height()
         check(
             f"内容高出视口时滚动条可见（内容 {page.container.height()}px / 视口 {scroll.height()}px）",
@@ -298,15 +315,19 @@ def main():
             f"底部卡片初始显示不全（最下方卡片 y={bottom.y()} 高 {bottom.height()}）",
             bottom.y() + bottom.height() > scroll.height(),
         )
-        event = QWheelEvent(
-            QPoint(10, 10), QPoint(10, 10), QPoint(0, 0), QPoint(0, -120),
-            Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
-        )
-        scroll.wheelEvent(event)
-        QTest.qWait(700)
+        events = []
+        for _ in range(4):
+            event = QWheelEvent(
+                QPoint(10, 10), QPoint(10, 10), QPoint(0, 0), QPoint(0, -120),
+                Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False,
+            )
+            scroll.wheelEvent(event)
+            events.append(event)
+            QTest.qWait(150)
+        QTest.qWait(400)
         check(
             f"滚轮可以滚动控制页（容器 y {page.container.y()}）",
-            event.isAccepted() and page.container.y() < 0,
+            all(item.isAccepted() for item in events) and page.container.y() < 0,
         )
         check(
             "滚动后底部卡片完整进入视口",
@@ -316,6 +337,8 @@ def main():
         scroll.widget_scroll_animation.setCurrent([page.container.x(), 0])
         scroll.widget_scroll_animation.setTarget([page.container.x(), 0])
         page.container.move(page.container.x(), 0)
+        window.resize(original_size)
+        QTest.qWait(300)
 
         height_samples.clear()
         sampler.start()
@@ -491,7 +514,10 @@ def main():
 
     # ------------------------------------------------------------ 重置
     def step_reset():
-        window.on_camera_view_reset()
+        # 走真实入口：画布右侧工具条上的「重置视角」按钮。
+        reset_button = window.canvas_tool_overlay.reset_button
+        check("画布工具条「重置视角」在 3D 场景下可用", reset_button.isEnabled())
+        reset_button.click()
         reset = pose()
         expected_azimuth, expected_elevation, expected_roll = default_pose_values()
         check(
@@ -575,7 +601,7 @@ def main():
 
     # ------------------------------------------------------------ 收放动画
     def step_2d():
-        window.home_slice_info = {"axis": 2, "index": int(window.core.raw_data.shape[2] // 2)}
+        set_home_slice({"axis": 2, "index": int(window.core.raw_data.shape[2] // 2)})
         height_samples.clear()
         sampler.start()
         window.global_refresh()
@@ -598,11 +624,11 @@ def main():
         check("2D 视图下不留空白占位", group.height() == 0, f"height={group.height()}")
 
         for _ in range(3):
-            window.home_slice_info = None
+            set_home_slice(None)
             window.global_refresh()
-            window.home_slice_info = {"axis": 2, "index": 5}
+            set_home_slice({"axis": 2, "index": 5})
             window.global_refresh()
-        window.home_slice_info = None
+        set_home_slice(None)
         window.global_refresh()
         soon(1500, step_rapid_3d)
 
@@ -610,7 +636,7 @@ def main():
         check("快速 3D/2D 来回切换后终态为展开（3D）",
               not group.isHidden() and group.height() > 0,
               f"height={group.height()}")
-        window.home_slice_info = {"axis": 2, "index": 5}
+        set_home_slice({"axis": 2, "index": 5})
         window.global_refresh()
         soon(1200, step_rapid_2d)
 
@@ -618,7 +644,7 @@ def main():
         check("快速切换后停在 2D 时正确收起",
               group.isHidden() and group.height() == 0, f"height={group.height()}")
         save_shot("camera_panel_2d.png")
-        window.home_slice_info = None
+        set_home_slice(None)
         window.global_refresh()
         soon(1200, step_narrow_start)
 
@@ -645,15 +671,24 @@ def main():
         )
         check("窄窗口下字段标签完整可读", labels_ok, detail)
 
-        boxes_ok = all(box.width() >= box.sizeHint().width() for box in panel._boxes.values())
+        def box_text_fits(box):
+            """按实际显示文本判断截断：`sizeHint` 含步进/边框余量，会高估需求宽度。"""
+            line_edit = box.lineEdit()
+            if line_edit is None:
+                return True
+            text_width = line_edit.fontMetrics().horizontalAdvance(line_edit.text())
+            return line_edit.width() >= text_width
+
+        boxes_ok = all(box_text_fits(box) for box in panel._boxes.values())
         box_detail = " ".join(
-            f"{box.value():.1f}={box.width()}/{box.sizeHint().width()}"
+            f"{box.lineEdit().text()}={box.lineEdit().width()}/"
+            f"{box.lineEdit().fontMetrics().horizontalAdvance(box.lineEdit().text())}"
             for box in panel._boxes.values()
         )
         check("窄窗口下数值框不截断", boxes_ok, box_detail)
         check(
-            f"面板宽度不超出卡片内容（面板 {panel.width()}px / 卡片 {group.width()}px）",
-            panel.width() <= group.width() - 2 * page.CARD_HORIZONTAL_PADDING,
+            f"面板宽度不超出卡片内容（面板 {panel.width()}px / 卡片内容 {group.body_host.width()}px）",
+            panel.width() <= group.body_host.width(),
         )
         save_shot("camera_panel_narrow.png")
         soon(100, finish)

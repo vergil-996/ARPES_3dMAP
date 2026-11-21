@@ -250,43 +250,6 @@ class ExportSnapshotAxisTitleTests(unittest.TestCase):
             export_module.default_filename(snapshot, style, options), "费米面_2d_open.png"
         )
 
-    def test_renaming_while_the_dialog_is_open_marks_the_snapshot_stale(self):
-        """快照的来源名与默认文件名跟着页面走，改名后要提示重新取快照。"""
-        from PyQt5.QtWidgets import QApplication, QWidget
-
-        from bandscope.exporting.publication_dialog import PublicationExportDialog
-        from tests.support.publication import _make_2d_snapshot
-
-        app = QApplication.instance() or QApplication([])
-        # 父窗口要留引用：临时 QWidget 被回收时会把子对话框一起带走。
-        parent = QWidget()
-        dialog = PublicationExportDialog(parent)
-        try:
-            snapshot = _make_2d_snapshot()
-            dialog.snapshot = snapshot
-            spec = AnalysisPageSpec(PAGE, snapshot.source_page_title, "axis_integral", "test")
-            dialog.main_window = SimpleNamespace(
-                left_workspace=SimpleNamespace(current_spec=lambda: spec),
-                core=SimpleNamespace(raw_data=None, has_time_axis=False),
-                timeline_bar=SimpleNamespace(),
-            )
-            self.assertEqual(
-                dialog._current_main_state_token(), dialog._snapshot_state_token()
-            )
-
-            spec.title = "换了个名字"
-            self.assertNotEqual(
-                dialog._current_main_state_token(), dialog._snapshot_state_token()
-            )
-        finally:
-            dialog._debounce.stop()
-            dialog._stale_timer.stop()
-            dialog.close()
-            dialog.deleteLater()
-            parent.close()
-            parent.deleteLater()
-        self.assertIsNotNone(app)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -613,7 +613,6 @@ class PageTreePanel(QWidget):
     group_rename_requested = pyqtSignal(str)
     group_delete_requested = pyqtSignal(str)
     group_copy_page_requested = pyqtSignal(str, str)
-    page_create_requested = pyqtSignal(str, str)
     source_assignment_requested = pyqtSignal()
 
     MAX_DEPTH = 64
@@ -640,7 +639,6 @@ class PageTreePanel(QWidget):
         self._signature = None
         self._editor: Optional[InlineRenameEditor] = None
         self._editing_page_id: Optional[str] = None
-        self._page_create_action_provider = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -866,9 +864,6 @@ class PageTreePanel(QWidget):
                 item.setIcon(0, page_kind_icon(entry.page_kind))
 
     # ------------------------------------------------------------ 对外接口
-    def set_page_create_action_provider(self, provider):
-        self._page_create_action_provider = provider
-
     def set_source_summary(
         self,
         title,
@@ -1474,39 +1469,6 @@ class PageTreePanel(QWidget):
         self.group_copy_page_requested.emit(self._clipboard_page_id, str(group_id))
 
     # ------------------------------------------------------------ 右键菜单
-    def _page_create_actions(self, page_id):
-        if self._page_create_action_provider is None or page_id not in self._entries:
-            return []
-        actions = []
-        for key, label, order in self._page_create_action_provider(page_id) or ():
-            key = str(key or "")
-            label = str(label or "")
-            if not key.strip() or not label.strip():
-                continue
-            actions.append((key, label, order))
-        return sorted(actions, key=lambda action: action[2])
-
-    def _add_page_create_menu(self, menu, page_id):
-        actions = self._page_create_actions(page_id)
-        if not actions:
-            return None
-        create_menu = menu.addMenu("创建结果页")
-        for key, label, _order in actions:
-            action = create_menu.addAction(label)
-            action.setData(key)
-            action.triggered.connect(
-                lambda _checked=False, pid=page_id, action_key=key: self._request_page_create(
-                    pid, action_key
-                )
-            )
-        return create_menu
-
-    def _request_page_create(self, page_id, action_key):
-        for key, _label, _order in self._page_create_actions(page_id):
-            if key == action_key:
-                self.page_create_requested.emit(page_id, action_key)
-                return
-
     def _on_context_menu(self, pos):
         item = self.tree.row_at(pos)
         page_id = self.tree.item_page_id(item)
@@ -1533,8 +1495,6 @@ class PageTreePanel(QWidget):
         copy_action = menu.addAction("复制页面")
         copy_action.setEnabled(len(selected_ids) == 1)
         copy_action.triggered.connect(lambda: self._copy_page(page_id))
-        if len(selected_ids) == 1:
-            self._add_page_create_menu(menu, page_id)
 
         menu.addSeparator()
         delete_label = (
@@ -1571,7 +1531,6 @@ class PageTreePanel(QWidget):
         else:
             entry = self._entries.get(page_id)
             menu.addAction("复制页面").triggered.connect(lambda: self._copy_page(page_id))
-            self._add_page_create_menu(menu, page_id)
             rename_action = menu.addAction("重命名")
             rename_action.setEnabled(bool(entry and entry.renameable))
             rename_action.triggered.connect(lambda: self.begin_rename(page_id))

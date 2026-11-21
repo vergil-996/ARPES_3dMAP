@@ -572,7 +572,7 @@ class OpacityCurveEditor(QWidget):
         self.curve.pointsCommitted.connect(self.valueCommitted)
         layout.addWidget(self.curve)
         self.setMinimumHeight(self.curve.height())
-        self.setAccessibleName("独立不透明度曲线")
+        self.setAccessibleName("不透明度曲线")
 
     def points(self):
         return self.curve.points()

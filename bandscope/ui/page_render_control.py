@@ -38,31 +38,27 @@ class RenderControlPage(ControlPageBase):
     #: CardGroup 的左右内边距（control_page_base.CardGroup 构造参数）。
     CARD_HORIZONTAL_PADDING = 14
 
-    #: 「相机视角」模块的显隐目标状态：构造时可见，主窗口在启动阶段直接收起。
+    #: 「视角」模块的显隐目标状态：构造时可见，主窗口在启动阶段直接收起。
     _camera_view_visible_target = True
 
-    #: 输入框提交新姿态（姿态, 本次改动的字段名）/ 请求重置相机：由主窗口连接渲染状态与相机实例。
+    #: 输入框提交新姿态（姿态, 本次改动的字段名）：由主窗口连接渲染状态与相机实例。
     camera_pose_committed = pyqtSignal(object, str)
-    camera_view_reset_requested = pyqtSignal()
     #: 用户从「输出色带」菜单选中另一条色带；由主窗口接一次精确刷新。
     colormap_changed = pyqtSignal()
     display_value_changed = pyqtSignal()
     display_value_committed = pyqtSignal()
 
     def build_body(self):
-        # 相机视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
-        grp_camera, v_camera = self._create_group("相机视角")
+        # 视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
+        grp_camera, v_camera = self._create_group("视角")
         self.camera_panel = CameraViewPanel(grp_camera)
         self.camera_panel.pose_committed.connect(self.camera_pose_committed)
-        self.camera_panel.reset_requested.connect(self.camera_view_reset_requested)
-        # 复用页面的按钮宽度规则（自适应布局会统一覆盖宽度）。
-        self._adaptive_buttons.append(self.camera_panel.reset_button)
         v_camera.addWidget(self.camera_panel, 0, Qt.AlignHCenter)
         self.grp_camera = grp_camera
         self.vbox.addLayout(centered_widget_row(grp_camera, self.MIN_GROUP_WIDTH))
 
-        # 色阶调整
-        grp_exp, v_exp = self._create_group("色阶调整")
+        # 色阶
+        grp_exp, v_exp = self._create_group("色阶")
 
         # 下拉框选择色阶滑条与强度映射的调整对象；「全部显示」展示所有区域，
         # 并在调节时同时调整背景与全部区域。锁定色带始终统一生效，
@@ -114,7 +110,7 @@ class RenderControlPage(ControlPageBase):
 
         self.vbox.addLayout(centered_widget_row(grp_exp, self.MIN_GROUP_WIDTH))
 
-        self.grp_opacity, v_opacity = self._create_group("独立不透明度")
+        self.grp_opacity, v_opacity = self._create_group("不透明度")
         self.opacity_editor = OpacityCurveEditor(self)
         self._adaptive_slider_blocks.append(self.opacity_editor)
         self.opacity_editor.valueChanged.connect(self.display_value_changed)
@@ -126,11 +122,8 @@ class RenderControlPage(ControlPageBase):
         self._display_view = "3d"
         self.set_display_style(new_display_style(), view="3d")
 
-        # 去噪处理
-        grp_noise, v_noise = self._create_group("去噪处理")
-        lbl_noise = SiLabel("自上向下依次生效：")
-        lbl_noise.setStyleSheet(theme.field_label_qss())
-        v_noise.addWidget(lbl_noise)
+        # 去噪
+        grp_noise, v_noise = self._create_group("去噪")
 
         self.combo_n1 = self._create_denoise_combo("一级去噪", self.DENOISE_METHODS)
         self.combo_n2 = self._create_denoise_combo("二级去噪", self.DENOISE_METHODS)
@@ -282,10 +275,10 @@ class RenderControlPage(ControlPageBase):
         return list(self._extension_cards)
 
     # ------------------------------------------------------------------
-    # 「相机视角」显隐与数值同步（相机实例由主窗口持有）
+    # 「视角」显隐与数值同步（相机实例由主窗口持有）
     # ------------------------------------------------------------------
     def set_camera_view_visible(self, visible, *, animate=True):
-        """平滑展开/收起「相机视角」模块；目标状态不变则不重复播放动画。"""
+        """平滑展开/收起「视角」模块；目标状态不变则不重复播放动画。"""
         visible = bool(visible)
         if self._camera_view_visible_target == visible:
             return

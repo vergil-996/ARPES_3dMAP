@@ -1182,7 +1182,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             self._saved_3d_camera_position = snapshot
 
     # ------------------------------------------------------------------
-    # 「相机视角」面板：显隐驱动、姿态双向同步与重置
+    # 「视角」面板：显隐驱动与姿态双向同步（「重置视角」入口在画布工具条）
     # ------------------------------------------------------------------
     def _camera_view_active(self):
         """当前是否确实在显示有效的 3D 场景（与 _render_active_page 的显隐判断同源）。"""
@@ -1254,7 +1254,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return None
 
     def _sync_camera_view_controls(self, *, force=False):
-        """把真实相机姿态回读到「相机视角」输入框（只读相机，不触发数据计算）。"""
+        """把真实相机姿态回读到「视角」输入框（只读相机，不触发数据计算）。"""
         page = self.__dict__.get("page_render")
         if page is None:
             return
@@ -2125,7 +2125,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.page_render.s_cmap_high.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
         self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
-        self.page_render.camera_view_reset_requested.connect(self.on_camera_view_reset)
 
         self.time_interval_controller.intervalChanged.connect(
             lambda: self.on_time_interval_changed()
@@ -2143,10 +2142,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.axis_interval_controller.lockChanged.connect(self.on_axis_lock_changed)
         self.timeline_bar.layoutChanged.connect(self._on_canvas_layout_changed)
 
-        self.left_workspace.set_page_create_action_provider(
-            self._integration_actions_for_parent
-        )
-        self.left_workspace.page_create_requested.connect(self._on_page_create_requested)
         self.left_workspace.page_tree.source_assignment_requested.connect(
             self.on_source_assignment_requested
         )
@@ -2558,7 +2553,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
 
     def on_toggle_color_lock(self, checked):
-        """「色阶调整」里「锁定色带」开关：全局生效——同时冻结/恢复背景与全部增强区域
+        """「色阶」里「锁定色带」开关：全局生效——同时冻结/恢复背景与全部增强区域
         的归一化范围（每个区域锁定自己的强度范围，不共用同一归一化）。"""
         if self._syncing_controls:
             return
@@ -2586,7 +2581,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
 
     def _update_color_lock_button_style(self):
-        """按锁定状态切换「色阶调整」里锁定按钮的配色。"""
+        """按锁定状态切换「色阶」里锁定按钮的配色。"""
         page = getattr(self, "page_render", None)
         btn = getattr(page, "btn_lock", None) if page is not None else None
         if btn is None:
@@ -3698,7 +3693,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
-            # 裁剪模式下右键先把范围窗口移到光标处（原有行为），再补上轴标题入口。
+            # 裁剪模式下右键先把范围窗口移到光标处（原有行为），再补上处理分析与轴标题入口。
             self._band_context_target = None
             global_pos = self.canvas_2d.mapToGlobal(pos)
             self._show_crop_popup(global_pos)
@@ -3717,6 +3712,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         can_paste = self._can_paste_curve_to_current_page(show_message=False) if show_curve_actions else False
 
         menu, global_pos = self._create_canvas_context_menu(self.canvas_2d, pos)
+        self._append_analysis_actions(menu)
         band_target = (self.__dict__.get("_band_context_target")
                        if context and context.get("view") == "2d" else None)
         if band_target is None and context and context.get("view") == "2d":
@@ -3763,6 +3759,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             # 右键观察者未先到时再按当前光标补一次拾取，避免菜单漏掉删除入口。
             target = self._enhancement_box_region_at_cursor()
         menu, global_pos = self._create_canvas_context_menu(self.plotter, pos)
+        self._append_analysis_actions(menu)
         self._append_band_actions(menu, band_target)
         self._append_enhancement_actions(menu, target)
         self._append_axis_title_actions(menu, self.plotter, global_pos)
@@ -6326,9 +6323,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         controller = self.__dict__.get("axis_interval_controller")
         if controller is not None:
             controller.bind(space, interval)
-        bar = self.__dict__.get("timeline_bar")
-        if bar is not None and not bar.axis_group.isHidden():
-            bar.set_position_label(space.display_label)
 
     def _axis_input_logical_values(self):
         """区间映射到采样下标（低、高、中心），供计算与页面参数使用。"""
@@ -7188,6 +7182,30 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         actions.sort(key=lambda item: (item[2], item[1], item[0]))
         return actions
 
+    def _append_analysis_actions(self, menu):
+        """把当前页的「处理分析」入口挂到视图右键菜单；没有合法动作时不出现。"""
+        spec = self._current_spec()
+        page_id = getattr(spec, "page_id", None)
+        if page_id is None:
+            return False
+        try:
+            actions = self._integration_actions_for_parent(page_id)
+        except Exception as exc:
+            print(f"Analysis action discovery failed: {type(exc).__name__}: {exc}")
+            return False
+        if not actions:
+            return False
+        submenu = menu.addMenu("处理分析")
+        for key, label, _order in actions:
+            action = submenu.addAction(label)
+            action.setData(key)
+            action.triggered.connect(
+                lambda _checked=False, pid=page_id, action_key=key: self._on_page_create_requested(
+                    pid, action_key
+                )
+            )
+        return True
+
     def _on_page_create_requested(self, parent_page_id, action_key):
         workspace = self.left_workspace
         parent = workspace.page_by_id(parent_page_id)
@@ -7551,13 +7569,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             self._on_axis_title_changed()
 
     def _show_axis_title_menu(self, owner, global_pos):
-        """单独弹一个只含轴标题条目的菜单（裁剪模式下右键被范围窗口占用时用）。"""
+        """裁剪模式下的右键菜单：处理分析、轴标题与局部增强。"""
         menu = QMenu(owner)
         menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         try:
+            has_analysis = self._append_analysis_actions(menu)
             has_titles = self._append_axis_title_actions(menu, owner, global_pos)
             has_enhancement = self._append_enhancement_actions(menu)
-            if not has_titles and not has_enhancement:
+            if not has_analysis and not has_titles and not has_enhancement:
                 return False
             menu.exec_(global_pos)
         finally:
@@ -7789,7 +7808,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 and preview_blitted):
             self._refresh_axis_crop_interaction(spec, context)
 
-        # 「相机视角」只在真正显示 3D 场景时展开：目标状态不变时不会重播动画，
+        # 「视角」只在真正显示 3D 场景时展开：目标状态不变时不会重播动画，
         self._sync_enhancement_controls(spec, context)
         if spec.page_kind == self.PATH_SLICE_PAGE_KIND:
             self._path_slices().sync_display_controls(spec)
@@ -7870,7 +7889,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         super().closeEvent(event)
 
     def _teardown_camera_view_bindings(self):
-        """窗口关闭时清掉「相机视角」新增的计时器与 VTK 观察器。"""
+        """窗口关闭时清掉「视角」新增的计时器与 VTK 观察器。"""
         self._stop_camera_view_sync_timer()
         interactor = None
         plotter = self.__dict__.get("plotter")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""「相机视角」面板 —— 相机姿态与「方位角 / 仰角 / 滚转角 / 距离」的往返换算。
+"""「视角」面板 —— 相机姿态与「方位角 / 仰角 / 滚转角 / 距离」的往返换算。
 
 坐标与旋转约定（固定世界向上轴 = +Z，即数据体的 E 轴，也是 VTK 的默认竖直轴）
 
@@ -38,7 +38,6 @@ from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QDoubleSpinBox,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QSizePolicy,
     QVBoxLayout,
@@ -46,7 +45,6 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
-from bandscope.ui.ui_controls import ActionButton
 
 #: 固定世界向上轴：数据体的 E 轴，也是 VTK 的默认竖直轴。
 WORLD_UP = np.array([0.0, 0.0, 1.0])
@@ -196,7 +194,7 @@ def vectors_from_pose(azimuth, elevation, roll, distance, focal_point):
 
 
 class _CameraValueBox(QDoubleSpinBox):
-    """「相机视角」数值框基类。
+    """「视角」数值框基类。
 
     - 编辑被 Esc 中止时通知面板：Qt 中止后既不还原文本也不发
       ``editingFinished``，只靠 ``textEdited`` 记录的“编辑中”标记会永远留着，
@@ -252,10 +250,11 @@ class _AngleSpinBox(_CameraValueBox):
 
 
 class CameraViewPanel(QWidget):
-    """「相机视角」卡片内容：四个数值框 + 唯一的「重置视角」按钮。
+    """「视角」卡片内容：四个数值框。
 
     面板只负责输入与回显，不直接接触相机：数值提交后发 :attr:`pose_committed`，
-    重置按钮发 :attr:`reset_requested`，由主窗口连接渲染状态与相机实例。
+    由主窗口连接渲染状态与相机实例。恢复默认视角统一走画布右侧工具条上的
+    「重置视角」按钮，卡片内不再重复放一个同样的入口。
     """
 
     ANGLE_DECIMALS = 1
@@ -268,9 +267,6 @@ class CameraViewPanel(QWidget):
     MAX_VALUE_BOX_WIDTH = 116
     COLUMN_SPACING = 10
     ROW_SPACING = 8
-
-    BUTTON_HEIGHT = 32
-    BUTTON_WIDTH = 92
 
     #: 字段顺序即 2×2 网格的排布顺序（一行两个参数）。
     FIELDS = (
@@ -291,7 +287,6 @@ class CameraViewPanel(QWidget):
     #: （``"azimuth"`` / ``"elevation"`` / ``"roll"`` / ``"distance"``）。
     #: 接收方只应采用该项、其余沿用相机的精确值，否则输入框的显示舍入会反写相机。
     pose_committed = pyqtSignal(object, str)
-    reset_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -303,7 +298,6 @@ class CameraViewPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
 
         grid = QGridLayout()
         grid.setContentsMargins(0, 0, 0, 0)
@@ -322,14 +316,6 @@ class CameraViewPanel(QWidget):
             self._labels.append(label)
             self._boxes[key] = box
         layout.addLayout(grid)
-
-        self.reset_button = self._create_reset_button()
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.addStretch()
-        button_row.addWidget(self.reset_button)
-        button_row.addStretch()
-        layout.addLayout(button_row)
         self.fit_value_box_width(self._preferred_content_width())
 
     # ------------------------------------------------------------------
@@ -366,20 +352,6 @@ class CameraViewPanel(QWidget):
         box.editingFinished.connect(lambda name=key: self._dirty.discard(name))
         box.edit_cancelled.connect(lambda name=key: self._cancel_edit(name))
         return box
-
-    def _create_reset_button(self):
-        button = ActionButton(self)
-        button.setFixedHeight(self.BUTTON_HEIGHT)
-        button.setFixedWidth(self.BUTTON_WIDTH)
-        button.setText("重置视角")
-        button.setToolTip(
-            "恢复默认观察方向与滚转（应用初次展示 3D 数据的等轴视图），\n"
-            "观察中心对准当前展示内容，并自动调整距离完整显示。\n"
-            "不改变数据、裁剪范围、时间帧、色带、色阶与去噪参数。"
-        )
-        theme.style_push_button(button, "primary")
-        button.clicked.connect(self.reset_requested)
-        return button
 
     def _preferred_content_width(self):
         """构造期先按最小卡片宽度定一个可读的数值框宽度，随后由页面自适应覆盖。"""

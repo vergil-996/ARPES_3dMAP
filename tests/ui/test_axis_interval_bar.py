@@ -108,6 +108,30 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertTrue(self.controller.interval.locked)
         self.assertNotAlmostEqual(self.controller.interval.center, -0.5)
 
+    def test_locked_center_drag_keeps_popup_on_the_merged_handle(self):
+        """合拢锁定后点开浮框、再回来拖合并手柄，浮框要跟上手柄和坐标。"""
+        self.controller.interval.set_up(-0.5)
+        self.controller.sync_widgets()
+        slider = self.slider
+        popup = slider.coordinate_popup
+
+        # 点开浮框后回到滑条时会因失焦提交而隐藏，这里先还原这个状态。
+        slider._show_popup("low")
+        self.assertTrue(popup.isVisible())
+        popup.hide()
+
+        start = self._point("low")
+        self._drag(start, self._point(x=start.x() + 90))
+
+        self.assertTrue(popup.isVisible())
+        self.assertAlmostEqual(
+            popup.value_edit.value(), self.controller.interval.low, delta=1e-3
+        )
+        anchor = slider.mapToGlobal(self._point("low")).x()
+        self.assertLessEqual(
+            abs(popup.pos().x() + popup.width() // 2 - anchor), 2
+        )
+
     def test_popup_commits_coordinate_and_escape_does_not_change_model(self):
         self.slider._show_popup("low")
         popup = self.slider.coordinate_popup
@@ -144,6 +168,28 @@ class DualIntervalMouseTests(unittest.TestCase):
 
         self.assertLess(QColor(image.pixel(low_x, y)).lightness(), 60)
         self.assertGreater(QColor(image.pixel(up_x, y)).lightness(), 200)
+
+    def test_track_is_centered_with_title_and_length_box(self):
+        self.control.resize(720, 60)
+        QApplication.processEvents()
+        track_y = self.slider.y() + self.slider.TRACK_Y
+        self.assertAlmostEqual(
+            track_y, self.control.title_label.geometry().center().y(), delta=1
+        )
+        self.assertAlmostEqual(
+            track_y, self.control.input_length.geometry().center().y(), delta=1
+        )
+
+    def test_lock_badge_stays_clear_of_the_handle(self):
+        self.controller.set_locked(True)
+        self.controller.sync_widgets()
+        self.control.resize(720, 60)
+        QApplication.processEvents()
+        badge = self.slider.lock_badge
+        self.assertTrue(badge.isVisible())
+        # 合拢时手柄多画 4px 外圈，徽标底边仍要留出间隙。
+        handle_top = self.slider.TRACK_Y - (self.slider.HANDLE_HEIGHT + 4) / 2
+        self.assertLessEqual(badge.geometry().bottom(), handle_top - 1)
 
     def test_collapsed_handle_paints_black_core_inside_white_shell(self):
         self.controller.interval.set_up(-0.5)

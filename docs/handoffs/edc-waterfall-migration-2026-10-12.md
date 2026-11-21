@@ -3,11 +3,32 @@
 任务目标：按[当前计划](../plans/edc-waterfall-plugin.md)把 EDC 瀑布图及步长设置迁入
 `edc_waterfall` 插件，新增 API 3，并把默认值与“应用当前页”移入插件管理。
 
-## 当前状态：创建入口再次迁移（2026-11-20）
+## 当前状态：入口改为视图右键「处理分析」（2026-11-21）
 
-- 原「处理分析」页及「其他积分」下拉已移除。插件就绪时，`edc_waterfall:create` 以「EDC瀑布图」显示在无擦除区域的 X/Y 轴积分或其矩形裁剪页的「右键 → 创建结果页」子菜单中；主页、E 积分、其他页型和多选不显示，未安装、未启用或加载失败时也不显示。
+- 创建入口从页面树移到视图区域：切到目标父页后，在 2D／3D 画布右键 →「处理分析」；插件就绪时 `edc_waterfall:create` 以「EDC瀑布图」显示在无擦除区域的 X/Y 轴积分或其矩形裁剪页中，主页、E 积分、其他页型不显示，未安装、未启用或加载失败时也不显示。
+- 页面树不再提供「创建结果页」子菜单；`PageTreePanel` / `ResultWorkspace` 的 provider 转发与 `page_create_requested` 信号已移除。视图右键只对当前活动页提供动作，打开菜单不切页；点击后由 `_on_page_create_requested()` 复核并冻结来源。
+- API 2 分析插件卡片继续挂在外观页，仍只在二维结果页显示。新状态不再保存旧下拉选择，恢复旧复现文件时忽略 `combo_other`，不会自动创建结果；已有瀑布页、逐页参数和插件设置继续保留。
+
+### 2026-11-21 实施与验证
+
+- 主窗口新增 `_append_analysis_actions(menu)`：读取当前页，调用 `_integration_actions_for_parent()` 取过滤排序后的动作，挂载「处理分析」子菜单；每个 `QAction` 带稳定键 `data()` 并直接连到 `_on_page_create_requested()`。2D 右键、3D 右键以及裁剪模式下的紧凑右键菜单（`_show_axis_title_menu`）都接入同一入口。
+- `PageTreePanel` / `ResultWorkspace` 删除 `page_create_requested` 信号、provider 字段与 `set_page_create_action_provider()` 转发；来源树与分组副本右键只保留改名、复制、删除等页面操作。
+- 更新 `tests/ui/test_page_tree.py`（断言页面树无创建子菜单）与 `tests/integration/test_integration_context_menu.py`（覆盖处理分析子菜单、稳定键分派、非法页隐藏、插件动作排序、2D/3D/裁剪模式接线）。`scripts/validation/verify_integration_context_menu.py` 改为激活父页后右键 2D／3D 视图，并检查页面树入口已移除；`export_acceptance.py`、`verify_2d_aspect.py`、`verify_derived_waterfall.py` 继续复用 `create_from_page_menu()`，无需改调用方。
+- 文档同步 README、插件开发指南、测试指南、EDC 插件 README/入口注释与相关计划的状态说明。
+
+验证结果：
+
+- 聚焦回归（`tests.ui.test_page_tree`、`tests.integration.test_integration_context_menu`、`test_curve_log`、`test_plugin_derived_flow`、`test_crop_controls`、`test_plugin_management_entry`、`test_plugin_analysis_flow`、`tests.extensions.test_derived_host`、`test_view_recipe_roundtrip`）：**177 项通过**。
+- 全量 `python -m unittest discover -s tests -t .`：**1943 项通过**（2026-11-21，163.854 秒；离屏平台、`PYTHONIOENCODING=utf-8`，`os.mkdir` 临时放宽以避开本机沙箱的 owner-only 临时目录 ACL）。
+- 真实窗口 `verify_integration_context_menu.py`（合成 6×7×8×3 动态 NPZ，隔离扩展根中构建并安装 `edc_waterfall`）：**25/25 通过**。2D 主页右键出现「处理分析 → 切片内强度积分／能级态密度／二阶导」，X 积分页出现「处理分析 → 切片内强度积分／能级态密度／EDC瀑布图／二阶导」，E 裁剪页提供「单条 EDC 曲线」，非法结果页与页面树均无入口；所有右键均保持当前页不变，创建后新页选中。报告与截图写在本机临时输出目录，验收后已清理，未提交。
+- 默认真实数据 `.local/data/WSe2_step.npz`（150×150×200×25，时间轴 −300–1000 fs）上的同一脚本：**25/25 通过**，覆盖深浅主题、X/E 积分父页、二阶导与 EDC／瀑布图创建；报告与截图写在本机临时输出目录，验收后已清理，未提交。未做人工视觉逐张复核。
+
+
+### 2026-11-20 记录：入口曾迁至页面树
+
+- 原「处理分析」页及「其他积分」下拉已移除。插件动作以「EDC瀑布图」显示在来源树或「我的分组」页面副本的「右键 → 创建结果页」子菜单中；该入口已在 2026-11-21 移除。
 - 来源树与「我的分组」中的页面副本使用同一动作过滤和创建链路。点击后先激活目标父页并重新校验，再冻结空间来源、继承时间区间并调用插件；打开菜单只做轻量检查，取消或失败不建页。
-- API 2 分析插件卡片同时迁到保留的「外观」页，仍只在二维结果页显示。新状态不再保存旧下拉选择，恢复旧复现文件时忽略 `combo_other`，不会自动创建结果；已有瀑布页、逐页参数和插件设置继续保留。
+- 当日实测与未执行项保留在下一节，作为过渡入口的历史证据。
 
 ### 新入口实测结果（2026-11-20）
 

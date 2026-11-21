@@ -23,7 +23,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QSizePolicy,
     QToolButton,
-    QVBoxLayout,
     QWidget,
 )
 
@@ -142,7 +141,7 @@ class LockBadge(QToolButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._open_progress = 0.0
-        self.setFixedSize(24, 20)
+        self.setFixedSize(24, 16)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("解锁区间；随后向左拖黑端、向右拖白端")
         self.setAccessibleName("解锁切片区间")
@@ -189,19 +188,19 @@ class LockBadge(QToolButton):
         pen = QPen(QColor(theme.TEXT_1), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        body = QRectF(7.0, 9.0, 10.0, 7.0)
+        body = QRectF(7.0, 7.0, 10.0, 6.5)
         painter.drawRoundedRect(body, 2, 2)
         lift = 3.0 * self._open_progress
         shackle = QPainterPath()
-        shackle.moveTo(9.0, 9.0)
-        shackle.lineTo(9.0, 6.5 - lift)
-        shackle.cubicTo(9.0, 2.5 - lift, 15.0, 2.5 - lift, 15.0, 6.5 - lift)
+        shackle.moveTo(9.0, 7.0)
+        shackle.lineTo(9.0, 4.5 - lift)
+        shackle.cubicTo(9.0, 0.5 - lift, 15.0, 0.5 - lift, 15.0, 4.5 - lift)
         if self._open_progress < 0.55:
-            shackle.lineTo(15.0, 9.0)
+            shackle.lineTo(15.0, 7.0)
         painter.drawPath(shackle)
         painter.setBrush(QColor(theme.TEXT_1))
         painter.setPen(Qt.NoPen)
-        painter.drawEllipse(QPointF(12.0, 12.0), 1.0, 1.0)
+        painter.drawEllipse(QPointF(12.0, 10.0), 1.0, 1.0)
 
 
 class DualRangeSlider(QWidget):
@@ -225,7 +224,7 @@ class DualRangeSlider(QWidget):
         self._drag_center = 0.0
         self._hovered = None
         self._badge_locked = False
-        self.setMinimumSize(170, 48)
+        self.setMinimumSize(170, 60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
@@ -318,6 +317,10 @@ class DualRangeSlider(QWidget):
             value = self._value_for(event.pos().x())
             if self._drag_mode == "center":
                 self.centerPreview.emit(self._drag_center + value - self._drag_origin)
+                # 合拢/锁定后拖的是整体平移，浮框也要跟着手柄走。以前这条
+                # 分支只发预览，浮框停在按下时的位置和坐标，看起来像“跟不上”。
+                if self._interval.locked or self.coordinate_popup.isVisible():
+                    self._show_popup("low" if self._interval.locked else self._popup_endpoint)
             else:
                 self.endpointPreview.emit(self._drag_mode, value)
                 self._show_popup(self._drag_mode)
@@ -437,16 +440,9 @@ class AxisIntervalControl(QWidget):
         )
         layout.addWidget(self.accent, 0, Qt.AlignVCenter)
 
-        title_block = QVBoxLayout()
-        title_block.setContentsMargins(0, 0, 0, 0)
-        title_block.setSpacing(2)
         self.title_label = QLabel("二维切片", self)
         self.title_label.setStyleSheet(theme.card_title_qss())
-        self.subtitle_label = QLabel("区间积分", self)
-        self.subtitle_label.setStyleSheet(theme.field_label_qss())
-        title_block.addWidget(self.title_label)
-        title_block.addWidget(self.subtitle_label)
-        layout.addLayout(title_block)
+        layout.addWidget(self.title_label, 0, Qt.AlignVCenter)
 
         self.range_slider = DualRangeSlider(self)
         layout.addWidget(self.range_slider, 1)
@@ -456,12 +452,6 @@ class AxisIntervalControl(QWidget):
         self.range_slider.interactionFinished.connect(self.interactionFinished)
         self.range_slider.lockRequested.connect(self.lockRequested)
 
-        length_block = QVBoxLayout()
-        length_block.setContentsMargins(0, 2, 0, 2)
-        length_block.setSpacing(3)
-        self.length_label = QLabel("区间长度", self)
-        self.length_label.setStyleSheet(theme.field_label_qss())
-        length_block.addWidget(self.length_label, 0, Qt.AlignRight)
         self.input_length = QDoubleSpinBox(self)
         self.input_length.setFixedSize(112, 29)
         self.input_length.setButtonSymbols(QDoubleSpinBox.NoButtons)
@@ -469,27 +459,24 @@ class AxisIntervalControl(QWidget):
         self.input_length.setAlignment(Qt.AlignCenter)
         self.input_length.setStyleSheet(theme.value_input_qss())
         self.input_length.setToolTip("区间长度 = 上限 − 下限；以中心扩缩，输入 0 合拢锁定")
-        length_block.addWidget(self.input_length)
-        layout.addLayout(length_block)
+        layout.addWidget(self.input_length, 0, Qt.AlignVCenter)
 
     def sync(self, space, interval, enabled=True):
         if space is None or interval is None:
             return
         if space.key == "delay":
             self.title_label.setText("时间延迟" if space.label == "时间" else space.label)
-            self.subtitle_label.setText("合拢逐帧 · 分离积分")
-            self.length_label.setText("积分长度")
+            self.input_length.setAccessibleName("积分长度")
         else:
             plane = {"X": "YZ", "Y": "XZ", "E": "XY"}.get(space.key, "二维")
             self.title_label.setText(f"{plane} 切片")
-            self.subtitle_label.setText(f"沿 {space.display_label} 积分")
-            self.length_label.setText("区间长度")
+            self.input_length.setAccessibleName("区间长度")
         unit = "" if space.describes_index else space.unit
         self.input_length.setSuffix(f" {unit}" if unit else "")
         self.range_slider.sync(space, interval, enabled)
 
     def minimumSizeHint(self):
-        return QSize(410, 48)
+        return QSize(370, 60)
 
 
 __all__ = ["AxisIntervalControl", "DualRangeSlider"]

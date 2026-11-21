@@ -462,26 +462,8 @@ class PageTreeMultiSelectionTests(_WorkspaceFixture):
         self.assertIsNone(self.tree._rubber_origin)
 
 
-class PageTreeCreateActionTests(_WorkspaceFixture):
-    def setUp(self):
-        super().setUp()
-        self.create_requests = []
-        self.workspace.page_create_requested.connect(
-            lambda parent_id, action_key: self.create_requests.append(
-                (parent_id, action_key)
-            )
-        )
-
-    @staticmethod
-    def create_menu(menu):
-        return next(
-            (
-                action.menu()
-                for action in menu.actions()
-                if action.text() == "创建结果页" and action.menu() is not None
-            ),
-            None,
-        )
+class PageTreeHasNoResultCreationEntryTests(_WorkspaceFixture):
+    """分析入口在视图右键：页面树不再提供「创建结果页 / 处理分析」子菜单。"""
 
     def capture_menu(self, handler, position):
         captured = []
@@ -494,138 +476,26 @@ class PageTreeCreateActionTests(_WorkspaceFixture):
         self.assertEqual(len(captured), 1)
         return captured[0]
 
-    def source_menu(self, page_id):
-        return self.capture_menu(
-            self.panel._on_context_menu,
-            self.tree.visualItemRect(self.item(page_id)).center(),
-        )
-
-    def group_menu(self, item):
-        return self.capture_menu(
-            self.panel._on_group_context_menu,
-            self.panel.group_tree.visualItemRect(item).center(),
-        )
-
-    def test_source_menu_sorts_actions_and_forwards_the_stable_key(self):
-        provider_calls = []
-
-        def provider(page_id):
-            provider_calls.append(page_id)
-            if page_id != "p1":
-                return ()
-            return (
-                ("builtin:second_derivative", "二阶导", 20),
-                ("builtin:edc_curve", "单条 EDC 曲线", 10),
-            )
-
-        self.workspace.set_page_create_action_provider(provider)
-
-        create_menu = self.create_menu(self.source_menu("p1"))
-
-        self.assertIsNotNone(create_menu)
-        self.assertEqual(
-            [action.text() for action in create_menu.actions()],
-            ["单条 EDC 曲线", "二阶导"],
-        )
-        self.assertEqual(
-            [action.data() for action in create_menu.actions()],
-            ["builtin:edc_curve", "builtin:second_derivative"],
-        )
-        create_menu.actions()[0].trigger()
-        self.assertEqual(self.create_requests, [("p1", "builtin:edc_curve")])
-        self.assertEqual(provider_calls, ["p1", "p1"])
-
-    def test_invalid_or_empty_actions_do_not_add_a_create_submenu(self):
-        self.panel.set_page_create_action_provider(
-            lambda page_id: (
-                ()
-                if page_id == "p1"
-                else (("", "空动作键", 0), ("builtin:empty_label", "", 10))
-            )
-        )
-
-        self.assertIsNone(self.create_menu(self.source_menu("p1")))
-        self.assertIsNone(self.create_menu(self.source_menu("p4")))
-        self.assertEqual(self.create_requests, [])
-
-    def test_multi_selection_hides_create_actions_and_keeps_batch_delete(self):
-        provider_calls = []
-        self.panel.set_page_create_action_provider(
-            lambda page_id: provider_calls.append(page_id) or (("key", "创建", 0),)
-        )
-        self.tree.clearSelection()
-        self.item("p2").setSelected(True)
-        self.item("p4").setSelected(True)
-        self.tree.setCurrentItem(self.item("p2"), 0, QItemSelectionModel.NoUpdate)
-
-        menu = self.source_menu("p2")
-
-        self.assertIsNone(self.create_menu(menu))
-        self.assertEqual(self.tree.selected_page_ids(), ["p2", "p4"])
-        self.assertIn("删除选中的 2 个页面", [action.text() for action in menu.actions()])
-        self.assertEqual(provider_calls, [])
-        self.assertEqual(self.create_requests, [])
-
-    def test_right_click_on_an_unselected_row_creates_from_that_single_page(self):
-        self.workspace.activate_page("p4")
-        self.activated.clear()
-        self.tree.clearSelection()
-        self.item("p2").setSelected(True)
-        self.item("p4").setSelected(True)
-        self.panel.set_page_create_action_provider(
-            lambda page_id: (("builtin:slice_dos", "切片内强度积分", 0),)
-        )
-
-        create_menu = self.create_menu(self.source_menu("p1"))
-        create_menu.actions()[0].trigger()
-
-        self.assertEqual(self.tree.selected_page_ids(), ["p1"])
-        self.assertEqual(self.create_requests, [("p1", "builtin:slice_dos")])
-        self.assertEqual(self.activated, [])
-        self.assertEqual(self.workspace.current_page_id, "p4")
-
-    def test_group_page_copy_uses_the_same_provider_and_signal(self):
+    def test_source_and_group_copy_menus_do_not_offer_result_creation(self):
         group = self.workspace.create_group("常用")
         copied = self.workspace.copy_page_to_group("p2", group.group_id)
-        self.workspace.set_page_create_action_provider(
-            lambda page_id: (("edc_waterfall:create", "EDC 瀑布图", 0),)
+        source_menu = self.capture_menu(
+            self.panel._on_context_menu,
+            self.tree.visualItemRect(self.item("p1")).center(),
+        )
+        group_menu = self.capture_menu(
+            self.panel._on_group_context_menu,
+            self.panel.group_tree.visualItemRect(
+                self.panel._group_items[copied.page_id]
+            ).center(),
         )
 
-        create_menu = self.create_menu(self.group_menu(self.panel._group_items[copied.page_id]))
-        create_menu.actions()[0].trigger()
-
-        self.assertEqual(
-            self.create_requests, [(copied.page_id, "edc_waterfall:create")]
-        )
-
-    def test_group_headers_and_blank_space_have_no_create_actions(self):
-        group = self.workspace.create_group("常用")
-        provider_calls = []
-        self.panel.set_page_create_action_provider(
-            lambda page_id: provider_calls.append(page_id) or (("key", "创建", 0),)
-        )
-
-        header_menu = self.group_menu(self.panel._group_headers[group.group_id])
-        blank_position = QPoint(
-            self.panel.group_tree.viewport().width() - 2,
-            self.panel.group_tree.viewport().height() - 2,
-        )
-        blank_menu = self.capture_menu(self.panel._on_group_context_menu, blank_position)
-
-        self.assertIsNone(self.create_menu(header_menu))
-        self.assertIsNone(self.create_menu(blank_menu))
-        self.assertEqual(provider_calls, [])
-
-    def test_stale_action_does_not_emit_or_fall_back_to_another_key(self):
-        actions = [("stable:key", "创建结果", 0)]
-        self.panel.set_page_create_action_provider(lambda _page_id: actions)
-        create_menu = self.create_menu(self.source_menu("p1"))
-        stale_action = create_menu.actions()[0]
-
-        actions[:] = [("other:key", "其他结果", 0)]
-        stale_action.trigger()
-
-        self.assertEqual(self.create_requests, [])
+        for menu in (source_menu, group_menu):
+            labels = [action.text() for action in menu.actions()]
+            self.assertNotIn("创建结果页", labels)
+            self.assertNotIn("处理分析", labels)
+            self.assertIn("复制页面", labels)
+            self.assertTrue(all(action.menu() is None for action in menu.actions()))
 
 
 class PageTreeSearchTests(_WorkspaceFixture):

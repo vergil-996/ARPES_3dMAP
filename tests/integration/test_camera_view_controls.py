@@ -9,7 +9,7 @@ import numpy as np
 import pyvista as pv
 from PyQt5.QtCore import Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QPushButton
 
 from bandscope.ui.camera_view_controls import (
     DEFAULT_AZIMUTH,
@@ -236,11 +236,12 @@ class CameraViewPanelTests(unittest.TestCase):
         self.panel.hide()
         self.panel.deleteLater()
 
-    def test_fields_and_single_reset_button(self):
+    def test_fields_and_no_duplicate_reset_button(self):
         labels = [label.text() for label in self.panel._labels]
         self.assertEqual(labels, ["方位角", "仰角", "滚转角", "距离"])
-        self.assertEqual(self.panel.reset_button.text(), "重置视角")
-        self.assertEqual(len(self.panel.findChildren(type(self.panel.reset_button))), 1)
+        # 重置视角只保留画布工具条上的图标入口，视角卡片内不再重复。
+        self.assertFalse(hasattr(self.panel, "reset_button"))
+        self.assertEqual(self.panel.findChildren(QPushButton), [])
 
     def test_typed_azimuth_wraps_into_signed_range(self):
         box = self.panel._boxes["azimuth"]
@@ -643,18 +644,20 @@ class CameraResetTests(unittest.TestCase):
 
 
 class RightPanelResetEntryTests(unittest.TestCase):
-    """「重置视角」只保留画布工具条上的图标入口，右侧面板标题区不再重复。"""
+    """「重置视角」只保留画布工具条上的图标入口，右侧面板不再重复。"""
 
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_right_panel_header_has_no_reset_button(self):
+    def test_right_panel_has_only_the_canvas_reset_entry(self):
         from tests.support.view_recipe import control_window
 
         window = control_window()
         try:
             self.assertFalse(hasattr(window, "btn_reset_view"))
+            self.assertFalse(hasattr(window.page_render, "camera_view_reset_requested"))
+            self.assertFalse(hasattr(window.page_render.camera_panel, "reset_button"))
             self.assertEqual(
                 window.canvas_tool_overlay.reset_button.accessibleName(),
                 "重置视角",
