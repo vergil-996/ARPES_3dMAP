@@ -3,8 +3,8 @@
 
 覆盖计划要求的检查：
 
-1. 下拉动作由插件注册，创建后进入瀑布页（`plugin_derived`）；
-2. 冻结来源：积分范围、裁剪范围、数据域与时间来源随页面固定；
+1. 右键创建菜单动作由插件注册，创建后进入瀑布页（`plugin_derived`）；
+2. 空间来源固定，时间区间由瀑布页独立持有并可重算；
 3. 自动步长与最近邻采样可用独立复算对上；
 4. **E 翻转开／关**分别验证屏幕、出版图和数值导出在相同 E 坐标下对应一致；
 5. 「插件设置」的保存默认值 / 应用当前页两个操作可用（默认值影响新建页）。
@@ -101,6 +101,7 @@ def main() -> int:
     import bandscope.app.refactored_app as refactored_app
     import bandscope.exporting.publication_export as pe
     from bandscope.exporting.publication_models import OutputOptions, resolve_style
+    from scripts.validation.verify_integration_context_menu import create_from_page_menu
 
     class NoUpdates:
         def __init__(self, *a, **k):
@@ -179,44 +180,60 @@ def main() -> int:
             step_create_waterfall,
         )
 
-    def _select_other_by_key(prefix):
-        combo = window.page_data.combo_other
-        for index, key in enumerate(window.page_data._other_keys):
-            if str(key).startswith(prefix):
-                combo.setCurrentIndex(index)
-                return True
-        return False
-
     def step_create_waterfall():
-        record(
-            "下拉注册插件动作",
-            any(key.startswith("edc_waterfall:") for key in window.page_data._other_keys),
-            "、".join(window.page_data._other_keys),
-        )
-        record("选中插件动作", _select_other_by_key("edc_waterfall:"), window.page_data.current_other_key())
+        parent_page_id = window.left_workspace.current_spec().page_id
+        pages_before = len(window.left_workspace.page_specs)
         # 越界的手动步长必须先被拒绝、且不建页。
         window.plugin_session.save_derived_defaults(
             "edc_waterfall", {"k_step_mode": "manual", "k_step": 1000.0}
         )
-        pages_before = len(window.left_workspace.page_specs)
-        window.on_apply_other_integral()
-        record(
-            "越界步长被拒绝且不建页",
-            len(window.left_workspace.page_specs) == pages_before
-            and any("步长" in text for _, text in messages),
-            repr(messages[-1] if messages else ()),
-        )
-        window.plugin_session.save_derived_defaults(
-            "edc_waterfall", {"k_step_mode": "manual", "k_step": float(args.step)}
-        )
-        window.on_apply_other_integral()
-        wait_for(
-            "瀑布页渲染",
-            lambda: window.left_workspace.current_spec() is not None
-            and window.left_workspace.current_spec().page_kind == "plugin_derived"
-            and window.current_render_context is not None
-            and window.current_render_context.get("view") == "waterfall",
-            step_checks,
+
+        def after_invalid(report):
+            record(
+                "右键菜单注册插件动作",
+                report["opened"] and report["create_present"] and "edc_waterfall:create" in report["keys"],
+                report["error"] or "、".join(report["keys"]),
+            )
+            record("选中插件动作", report["triggered"], report["error"])
+            QTimer.singleShot(300, lambda: check_invalid(report))
+
+        def check_invalid(invalid_report):
+            record(
+                "越界步长被拒绝且不建页",
+                invalid_report["triggered"]
+                and len(window.left_workspace.page_specs) == pages_before
+                and any("步长" in text for _, text in messages),
+                repr(messages[-1] if messages else ()),
+            )
+            if not invalid_report["triggered"]:
+                finish()
+                return
+            window.plugin_session.save_derived_defaults(
+                "edc_waterfall", {"k_step_mode": "manual", "k_step": float(args.step)}
+            )
+
+            def after_valid(report):
+                if not report["triggered"]:
+                    record("有效步长通过右键提交", False, report["error"])
+                    finish()
+                    return
+                wait_for(
+                    "瀑布页渲染",
+                    lambda: window.left_workspace.current_spec() is not None
+                    and window.left_workspace.current_spec().page_kind == "plugin_derived"
+                    and window.current_render_context is not None
+                    and window.current_render_context.get("view") == "waterfall",
+                    step_checks,
+                )
+
+            create_from_page_menu(
+                window, parent_page_id, "edc_waterfall:create", after_valid,
+                output_dir=args.output_dir,
+            )
+
+        create_from_page_menu(
+            window, parent_page_id, "edc_waterfall:create", after_invalid,
+            output_dir=args.output_dir,
         )
 
     def step_checks():
@@ -231,8 +248,8 @@ def main() -> int:
             return
         source = spec.params["derived_source"]
         record(
-            "冻结来源字段",
-            source["scope_id"] == "full" and source["source_mode"] == "frame",
+            "空间来源与逐页时间区间",
+            source["scope_id"] == "full" and source.get("time_interval", {}).get("axis_key") == "delay",
             json.dumps({k: source[k] for k in ("source_page_kind", "axis_index", "integral_low", "integral_up", "scope_id")}, ensure_ascii=False),
         )
         context_off = dict(window.current_render_context)
@@ -479,23 +496,41 @@ def main() -> int:
             previous = window.left_workspace.current_spec()
             source_page_id = previous.source_page_id
             window.left_workspace.activate_page(source_page_id or previous.page_id)
-            window.plugin_session.invoke_integration_action("edc_waterfall", "create")
-            created = window.left_workspace.current_spec()
-            record(
-                "新建页立即使用保存的默认值",
-                created.page_kind == "plugin_derived"
-                and created.page_id != previous.page_id
-                and abs(float((created.params.get("derived_params") or {}).get("k_step", 0.0)) - target_step) < 1e-9,
-                json.dumps(created.params.get("derived_params") or {}, ensure_ascii=False),
+
+            def after_create(report):
+                created = window.left_workspace.current_spec()
+                valid = (
+                    report["triggered"]
+                    and created is not None
+                    and created.page_kind == "plugin_derived"
+                    and created.page_id != previous.page_id
+                )
+                record(
+                    "新建页立即使用保存的默认值",
+                    valid
+                    and abs(float((created.params.get("derived_params") or {}).get("k_step", 0.0)) - target_step) < 1e-9,
+                    report["error"] or json.dumps((created.params if created is not None else {}).get("derived_params") or {}, ensure_ascii=False),
+                )
+                if not valid:
+                    dialog.close()
+                    finish()
+                    return
+                dialog.on_settings_apply("edc_waterfall")
+                record(
+                    "应用当前瀑布图提交到当前页",
+                    abs(float((created.params.get("derived_params") or {}).get("k_step", 0.0)) - target_step) < 1e-9,
+                    "",
+                )
+                dialog.close()
+                finish()
+
+            create_from_page_menu(
+                window,
+                source_page_id or previous.page_id,
+                "edc_waterfall:create",
+                after_create,
+                output_dir=args.output_dir,
             )
-            dialog.on_settings_apply("edc_waterfall")
-            record(
-                "应用当前瀑布图提交到当前页",
-                abs(float((created.params.get("derived_params") or {}).get("k_step", 0.0)) - target_step) < 1e-9,
-                "",
-            )
-            dialog.close()
-            finish()
 
         QTimer.singleShot(400, after_layout)
 

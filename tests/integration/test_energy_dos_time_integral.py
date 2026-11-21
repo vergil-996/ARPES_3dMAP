@@ -1,86 +1,66 @@
+"""能级态密度对当前页时间区间的数值与导出元数据测试。"""
 import unittest
 from types import SimpleNamespace
 
 import numpy as np
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.axis_interval import AxisInterval
 
 
-class EnergyDosTimeIntegralTests(unittest.TestCase):
-    @staticmethod
-    def _analyzer():
-        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
-        analyzer.page_data = SimpleNamespace(
-            s_t_low=SimpleNamespace(value=lambda: 0),
-            s_t_up=SimpleNamespace(value=lambda: 0),
-        )
-        analyzer._current_delay_text = lambda t: f"{t:.3f}"
-        return analyzer
-
-    def test_energy_dos_from_time_integral_uses_integrated_volume(self):
-        analyzer = self._analyzer()
-        coords = {
+def _analyzer():
+    analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
+    analyzer.core = SimpleNamespace(
+        raw_data=np.ones((2, 2, 3, 3), dtype=np.float32),
+        coords={
+            "X": np.arange(2),
+            "Y": np.arange(2),
             "E": np.asarray([-0.2, -0.1, 0.0]),
             "delay": np.asarray([0.0, 1.0, 2.0]),
-        }
-        raw_data = np.zeros((2, 2, 3, 3), dtype=np.float32)
-        integrated = np.full((2, 2, 3), 3.0, dtype=np.float32)
-        calls = []
+        },
+        coord_units={},
+        coord_sources={},
+        has_time_axis=True,
+    )
+    analyzer.rotation_angle = 0.0
+    analyzer._computed_volume_cache = None
+    analyzer._current_delay_text = lambda index: f"{index:.0f} fs"
+    return analyzer
 
-        def fake_integral(raw, low, up):
-            calls.append((low, up))
-            return integrated
 
-        analyzer._get_rotated_time_integral = fake_integral
-        spec = SimpleNamespace(
-            params={
-                "source_page_kind": "time_integral",
-                "source_t_low": 0,
-                "source_t_up": 1,
-            }
+def _spec(low, up):
+    delay = np.asarray([0.0, 1.0, 2.0])
+    return SimpleNamespace(
+        page_id="dos",
+        page_kind="energy_dos",
+        source_page_id=None,
+        params={
+            "source_page_kind": "home",
+            "time_interval": AxisInterval.from_indices(
+                delay, low, up, locked=low == up, axis_key="delay"
+            ).as_dict(),
+        },
+    )
+
+
+class EnergyDosTimeIntervalTests(unittest.TestCase):
+    def test_energy_dos_uses_the_current_page_time_range(self):
+        analyzer = _analyzer()
+        context = analyzer._get_energy_dos_context(
+            _spec(0, 1), analyzer.core.raw_data, analyzer.core.coords
         )
 
-        context = analyzer._get_energy_dos_context(spec, raw_data, coords)
+        np.testing.assert_allclose(context["y_data"], [8.0, 8.0, 8.0])
+        self.assertIn("0 fs~1 fs", context["title"])
 
-        self.assertEqual(calls, [(0, 1)])
-        self.assertEqual(context["view"], "1d")
-        np.testing.assert_allclose(context["x_data"], coords["E"])
-        np.testing.assert_allclose(context["y_data"], [12.0, 12.0, 12.0])
-        self.assertIn("Time-integrated", context["title"])
-
-    def test_time_integral_energy_dos_locks_time_slider(self):
-        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
-        locked = SimpleNamespace(
-            page_kind="energy_dos", params={"source_page_kind": "time_integral"}
-        )
-        unlocked = SimpleNamespace(
-            page_kind="energy_dos", params={"source_page_kind": "home"}
-        )
-        self.assertTrue(analyzer._is_time_locked_page(locked))
-        self.assertFalse(analyzer._is_time_locked_page(unlocked))
-
-    def test_build_energy_dos_spec_marks_time_integral_source(self):
-        analyzer = self._analyzer()
-        analyzer._make_page_id = lambda: "dos-1"
-        analyzer._seed_control_state_for_spec = lambda spec: None
-        current = SimpleNamespace(
-            page_id="ti-1",
-            page_kind="time_integral",
-            params={"t_low": 1, "t_up": 3},
-        )
-        analyzer.left_workspace = SimpleNamespace(current_spec=lambda: current)
-        analyzer.timeline_bar = SimpleNamespace(
-            slider_time=SimpleNamespace(value=lambda: 2)
+    def test_energy_dos_export_uses_the_same_range(self):
+        analyzer = _analyzer()
+        _title, _name, payload = analyzer._build_energy_dos_export_payload(
+            _spec(1, 2), analyzer.core.raw_data, analyzer.core.coords
         )
 
-        spec = analyzer._build_energy_dos_spec()
-
-        self.assertEqual(spec.page_kind, "energy_dos")
-        self.assertEqual(spec.source_page_id, "ti-1")
-        self.assertEqual(spec.params["source_page_kind"], "time_integral")
-        self.assertEqual(spec.params["source_t_low"], 1)
-        self.assertEqual(spec.params["source_t_up"], 3)
-        self.assertIn("Time-integrated", spec.title)
+        np.testing.assert_allclose(payload["time_range"], [1.0, 2.0])
+        np.testing.assert_allclose(payload["intensity"], [8.0, 8.0, 8.0])
 
 
 if __name__ == "__main__":

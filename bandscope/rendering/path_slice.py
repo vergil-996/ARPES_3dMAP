@@ -17,7 +17,10 @@ from bandscope.rendering.render_core import VisualEngine
 
 def segment_level_info(values, style: PathSegmentStyle, *, locked_range=None) -> Dict[str, float]:
     data_range = locked_range or display_transfer.finite_minmax(values) or (0.0, 1.0)
-    return display_transfer.level_info(data_range, style.levels)
+    return display_transfer.level_info(
+        data_range, style.levels,
+        colormap_range=(style.colormap_start, style.colormap_end),
+    )
 
 
 def _mapped_colors(info, intensity_map: str, count: int = 256) -> np.ndarray:
@@ -26,7 +29,8 @@ def _mapped_colors(info, intensity_map: str, count: int = 256) -> np.ndarray:
     ramp = display_transfer.OPACITY_MAPS.get(
         str(intensity_map), display_transfer.OPACITY_MAPS["linear"]
     )
-    return np.interp(mapped, np.linspace(0.0, 1.0, len(ramp)), ramp)
+    colors = np.interp(mapped, np.linspace(0.0, 1.0, len(ramp)), ramp)
+    return display_transfer.colormap_positions(info, colors)
 
 
 def display_cmap(cmap, info, intensity_map: str) -> ListedColormap:
@@ -50,6 +54,7 @@ def segment_rgba(
         str(style.intensity_map), display_transfer.OPACITY_MAPS["linear"]
     )
     mapped = np.interp(positions, np.linspace(0.0, 1.0, len(ramp)), ramp)
+    mapped = display_transfer.colormap_positions(info, mapped)
     base = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
     rgba = base(mapped)
     rgba[~np.isfinite(source)] = (0.0, 0.0, 0.0, 0.0)
@@ -125,7 +130,8 @@ def matching_colorbar(model: PathSliceModel, sample: PathSample, locked_range=No
         style = model.segments[index]
         info = segment_level_info(item.intensity, style, locked_range=locked_range)
         signature = (style.intensity_map, tuple(round(float(info[key]), 12) for key in (
-            "black_value", "gray_value", "white_value", "gamma_power"
+            "black_value", "gray_value", "white_value", "gamma_power",
+            "colormap_start", "colormap_end",
         )))
         if reference is None:
             reference = (signature, info, style)

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""API 3 端到端：构建并安装 EDC 瀑布图插件 → 下拉动作 → 冻结来源 → 结果页 → 展示/导出。
+"""API 3 端到端：构建并安装 EDC 瀑布图插件 → 创建动作 → 冻结来源 → 结果页 → 展示/导出。
 
 插件走真实的构建与安装事务（``build_plugin.py`` + ``install_package``），主窗口
-只替换渲染部件；冻结来源、二维基础上下文、页面创建、下拉分派、参数提交、自动
-标题、数值导出与 E 翻转都走真实代码路径。不需要 OpenGL。
+只替换渲染部件；冻结来源、二维基础上下文、页面创建、创建动作分派、参数提交、
+自动标题、数值导出与 E 翻转都走真实代码路径。不需要 OpenGL。
 """
 from __future__ import annotations
 
@@ -17,13 +17,14 @@ import numpy as np
 from bandscope.app_metadata import APP_VERSION
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.analyzer_core import AnalyzerCore
+from bandscope.core.axis_interval import AxisInterval
+from bandscope.extensions.api import DerivedSourceUnavailable
 from bandscope.extensions.derived_host import (
     DERIVED_PARAMS_KEY,
     DERIVED_SOURCE_KEY,
 )
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.extensions.plugin_manager import PluginManager, install_package
-from bandscope.ui.page_data_process_v2 import DataProcessPage
 from scripts.release.build_plugin import build as build_package
 from tests.support.pages import make_workspace, page_spec
 from tests.support.plugins import synthetic_source
@@ -132,8 +133,6 @@ class PluginDerivedFlowTests(unittest.TestCase):
             slider_time=SimpleNamespace(value=lambda: 0),
             switch_flip=_Switch(switch_flip),
         )
-        analyzer.page_data = DataProcessPage()
-        analyzer.axis_source_mode = "frame"
         analyzer.axis_interval = None
         analyzer.axis_space = None
         analyzer._seed_control_state_for_spec = lambda spec: None
@@ -159,14 +158,8 @@ class PluginDerivedFlowTests(unittest.TestCase):
             if spec.page_kind == "plugin_derived"
         ]
 
-    def select_other_action(self, key):
-        self.analyzer._sync_integration_actions()
-        combo = self.analyzer.page_data.combo_other
-        for index in range(combo.count()):
-            if self.analyzer.page_data._other_keys[index] == key:
-                combo.setCurrentIndex(index)
-                return
-        self.fail(f"下拉里没有动作 {key}")
+    def create_derived_page(self):
+        self.analyzer._on_page_create_requested(SOURCE_PAGE_ID, "edc_waterfall:create")
 
     def expected_x_integral(self, axis_index=0, low=1, up=3, k_step=None, crop=None):
         """独立复算：积分 → 裁剪 → 最近邻采样 → 逐曲线归一化。"""
@@ -211,13 +204,15 @@ class PluginDerivedFlowTests(unittest.TestCase):
 
     # ------------------------------------------------------------------ 用例
     def test_action_registration_and_page_creation(self):
-        self.analyzer._sync_integration_actions()
-        combo = self.analyzer.page_data.combo_other
-        texts = [combo.itemText(i) for i in range(combo.count())]
-        self.assertEqual(texts, ["切片内强度积分", "能级态密度", "EDC瀑布图", "单条 EDC 曲线", "二阶导"])
+        actions = list(self.analyzer._integration_actions_for_parent(SOURCE_PAGE_ID))
+        self.assertEqual(actions, [
+            ("builtin:slice_dos", "切片内强度积分", 0.0),
+            ("builtin:energy_dos", "能级态密度", 10.0),
+            ("edc_waterfall:create", "EDC瀑布图", 20.0),
+            ("builtin:second_derivative", "二阶导", 40.0),
+        ])
 
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
 
         specs = self.derived_specs()
         self.assertEqual(len(specs), 1)
@@ -238,8 +233,7 @@ class PluginDerivedFlowTests(unittest.TestCase):
         self.assertIsNone(source["crop_rect"])
 
     def test_rendered_context_matches_independent_computation(self):
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
         context = self.analyzer._compute_render_context(spec)
         expected = self.expected_x_integral()
@@ -260,11 +254,10 @@ class PluginDerivedFlowTests(unittest.TestCase):
     def test_y_integral_source_uses_the_x_axis_and_manual_step(self):
         self.workspace.page_specs[SOURCE_PAGE_ID].params["axis_index"] = 1
         self.workspace.page_specs[SOURCE_PAGE_ID].params["axis_name"] = "Y轴"
-        self.select_other_action("edc_waterfall:create")
         self.session.save_derived_defaults(
             "edc_waterfall", {"k_step_mode": "manual", "k_step": 0.3}
         )
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
         self.assertEqual(spec.params[DERIVED_PARAMS_KEY]["k_step_mode"], "manual")
         context = self.analyzer._compute_render_context(spec)
@@ -277,8 +270,7 @@ class PluginDerivedFlowTests(unittest.TestCase):
     def test_crop_chain_limits_the_source(self):
         spec_page = self.workspace.page_specs[SOURCE_PAGE_ID]
         spec_page.params.update({"crop_k_low": 2, "crop_k_up": 5, "crop_e_low": 1, "crop_e_up": 4})
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
         self.assertEqual(spec.params[DERIVED_SOURCE_KEY]["crop_rect"], [2, 5, 1, 4])
         context = self.analyzer._compute_render_context(spec)
@@ -290,22 +282,27 @@ class PluginDerivedFlowTests(unittest.TestCase):
         self.assertIn("E -0.78~-0.1", context["title"])
         self.assertEqual(context["crop_rect"], {"x_low": 2, "x_up": 5, "y_low": 1, "y_up": 4})
 
-    def test_erase_source_is_rejected(self):
+    def test_erase_source_has_no_menu_action_and_is_rejected(self):
         spec_page = self.workspace.page_specs[SOURCE_PAGE_ID]
         spec_page.params["crop_regions"] = [
             {"view": "2d", "axes": ("Y", "E"), "bounds": (0.0, 0.2, 0.0, 0.5), "operation": "erase"}
         ]
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        actions = list(self.analyzer._integration_actions_for_parent(SOURCE_PAGE_ID))
+        self.assertNotIn("edc_waterfall:create", [key for key, _label, _order in actions])
+
+        self.create_derived_page()
+
         self.assertEqual(self.derived_specs(), [])
-        self.assertTrue(self.messages)
-        self.assertIn("擦除", self.messages[-1][1])
+        self.assertEqual(self.workspace.current_spec().page_id, SOURCE_PAGE_ID)
+        # 菜单只做轻量过滤；完整冻结仍保留原来的擦除来源错误。
+        with self.assertRaises(DerivedSourceUnavailable) as error:
+            self.session._derived.freeze_source(spec_page, "edc_waterfall", "create")
+        self.assertIn("擦除", str(error.exception))
 
     def test_e_flip_keeps_screen_publication_and_export_consistent(self):
         from bandscope.exporting.publication_export import PublicationSnapshot, _freeze_waterfall
 
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
 
         context = self.analyzer._compute_render_context(spec)
@@ -373,15 +370,13 @@ class PluginDerivedFlowTests(unittest.TestCase):
         np.testing.assert_allclose(export_again["intensity"], export["intensity"])
 
     def test_apply_settings_touches_only_the_current_page_and_keeps_rename(self):
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         first = self.derived_specs()[0]
         self.workspace.apply_page_rename(first.page_id, "我的瀑布")
 
         # 第二页用默认值创建；两页参数互相独立（创建前回到积分来源页）。
         self.workspace.activate_page(SOURCE_PAGE_ID)
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         second = self.derived_specs()[1]
         self.assertNotEqual(first.page_id, second.page_id)
 
@@ -401,8 +396,7 @@ class PluginDerivedFlowTests(unittest.TestCase):
         self.assertGreater(self.refreshes, 0)
 
     def test_failed_apply_keeps_previous_params_and_result(self):
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
         before = dict(spec.params[DERIVED_PARAMS_KEY])
         ok, message = self.session._derived.apply_params_to_current_page(
@@ -417,8 +411,7 @@ class PluginDerivedFlowTests(unittest.TestCase):
         self.assertNotIn("stale_error", context)
 
     def test_frozen_source_is_independent_of_the_source_page(self):
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
         before = self.analyzer._compute_render_context(spec)
         # 改来源页：积分区间与裁剪都变了，但瀑布页仍按冻结来源重算。
@@ -427,47 +420,46 @@ class PluginDerivedFlowTests(unittest.TestCase):
         after = self.analyzer._compute_render_context(spec)
         np.testing.assert_allclose(after["raw_curves"], before["raw_curves"])
 
-    def test_time_integral_source_freezes_the_time_range(self):
+    def test_derived_page_recomputes_with_its_own_time_interval(self):
         spec_page = self.workspace.page_specs[SOURCE_PAGE_ID]
-        spec_page.params.update(
-            {"source_mode": "time_integral", "source_t_low": 1, "source_t_up": 1}
-        )
-        self.select_other_action("edc_waterfall:create")
-        self.analyzer.on_apply_other_integral()
+        delay = self.analyzer.core.coords["delay"]
+        spec_page.params["time_interval"] = AxisInterval.from_indices(
+            delay, 1, 1, locked=True, axis_key="delay"
+        ).as_dict()
+        self.create_derived_page()
         spec = self.derived_specs()[0]
 
         source = spec.params[DERIVED_SOURCE_KEY]
-        self.assertEqual(source["source_mode"], "time_integral")
         self.assertEqual((source["time_low"], source["time_up"]), (1, 1))
-        self.assertEqual(spec.params["source_mode"], "time_integral")
-        # 时间积分的来源页会锁住时间轴控件。
-        self.assertTrue(self.analyzer._is_time_locked_page(spec))
-        self.assertEqual(self.analyzer._page_axis_source_mode(spec), "time_integral")
-
+        self.assertEqual(source["time_interval"]["axis_key"], "delay")
         context = self.analyzer._compute_render_context(spec)
-        # 时间积分取第 1 帧（帧号 1 的 RAW 切片），口径与源页一致。
         expected_plane = np.sum(RAW[:, :, :, 1][1:4, :, :], axis=0)
-        np.testing.assert_allclose(context["raw_curves"][: len(expected_plane), :].sum(), expected_plane.sum(), rtol=1e-6)
+        np.testing.assert_allclose(
+            context["raw_curves"][: len(expected_plane), :].sum(), expected_plane.sum(), rtol=1e-6
+        )
 
-    def test_dropdown_state_falls_back_when_plugin_action_is_missing(self):
-        page = DataProcessPage()
-        page.set_integration_actions([("edc_waterfall:create", "EDC瀑布图", 20.0)])
-        page.combo_other.setCurrentIndex(page._other_keys.index("edc_waterfall:create"))
-        saved = page.export_state()["combo_other"]
-        self.assertEqual(saved["key"], "edc_waterfall:create")
+        spec.params["time_interval"] = AxisInterval.from_indices(
+            delay, 0, 1, axis_key="delay"
+        ).as_dict()
+        context = self.analyzer._compute_render_context(spec)
+        expected_plane = np.sum(np.sum(RAW[..., 0:2], axis=3)[1:4, :, :], axis=0)
+        np.testing.assert_allclose(
+            context["raw_curves"][: len(expected_plane), :].sum(), expected_plane.sum(), rtol=1e-6
+        )
+        source = spec.params[DERIVED_SOURCE_KEY]
+        self.assertEqual((source["time_low"], source["time_up"]), (0, 1))
+        self.assertEqual(source["time_interval"]["axis_key"], "delay")
 
-        # 插件未加载：同一份状态恢复时回退到可用内置项，不按旧下标乱选。
-        bare = DataProcessPage()
-        bare.restore_state({"combo_other": saved})
-        self.assertEqual(bare.current_other_key(), "builtin:slice_dos")
+    def test_menu_omits_plugin_action_when_plugin_is_missing(self):
+        analyzer = self._make_analyzer(install_plugin=False)
+        actions = list(analyzer._integration_actions_for_parent(SOURCE_PAGE_ID))
+        self.assertNotIn("edc_waterfall:create", [key for key, _label, _order in actions])
+        pages_before = set(self.workspace.page_specs)
 
-        # 旧状态（仅文本）：能按文本恢复；文本也缺失时同样回退。
-        legacy = DataProcessPage()
-        legacy.restore_state({"combo_other": {"index": 2, "text": "单条 EDC 曲线"}})
-        self.assertEqual(legacy.current_other_key(), "builtin:edc_curve")
-        stale = DataProcessPage()
-        stale.restore_state({"combo_other": {"index": 2, "text": "EDC瀑布图"}})
-        self.assertEqual(stale.current_other_key(), "builtin:slice_dos")
+        analyzer._on_page_create_requested(SOURCE_PAGE_ID, "edc_waterfall:create")
+
+        self.assertEqual(set(self.workspace.page_specs), pages_before)
+        self.assertEqual(self.derived_specs(), [])
 
 
 if __name__ == "__main__":

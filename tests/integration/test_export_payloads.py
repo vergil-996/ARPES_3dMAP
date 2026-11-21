@@ -48,6 +48,8 @@ class ExportPayloadTests(unittest.TestCase):
             "source_mode": "frame",
             "source_t_index": 2,
             "source_t_value": 0.25,
+            "source_t_indices": (2, 2),
+            "source_t_range": (0.25, 0.25),
             "crop_rect": {"x_low": 3, "x_up": 8, "y_low": 4, "y_up": 9},
         }
         spec = AnalysisPageSpec("edc", "EDC", "edc_curve", "test")
@@ -69,8 +71,8 @@ class ExportPayloadTests(unittest.TestCase):
         context = {
             "data": np.ones((2, 3, 4), dtype=np.float32),
             "derivative_axis": 2,
-            "source_mode": "frame",
             "source_t_index": 1,
+            "source_t_indices": (1, 1),
         }
 
         title, default_name, payload = (

@@ -191,6 +191,42 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertTrue(self.window.activate_source(second_id))
         self.assertEqual(self.window.timeline_bar.slider_time.value(), 2)
 
+    def test_switching_sources_commits_old_rotation_and_restores_overlay_state(self):
+        window = self.window
+        first_id = self.load_first()
+        overlay = window.canvas_tool_overlay
+        overlay.switch_axes.click()
+        overlay.switch_flip.click()
+        overlay.show_rotation_panel()
+        overlay.edit_rotation.lineEdit().setText("-7.5")
+        self.assertTrue(overlay.rotation_panel.isVisible())
+
+        self.assertTrue(window.load_data(str(self.second_path)))
+        second_id = window.source_manager.active_id
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), 0.0)
+        self.assertFalse(overlay.switch_axes.isChecked())
+        self.assertFalse(overlay.switch_flip.isChecked())
+
+        overlay.show_rotation_panel()
+        overlay.edit_rotation.lineEdit().setText("12.25")
+        self.assertTrue(window.activate_source(first_id))
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), -7.5)
+        self.assertEqual(overlay.rotation_panel.dial.angle(), -7.5)
+        self.assertIn("−7.5°", overlay.rotation_button.toolTip())
+        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertTrue(overlay.switch_axes.isChecked())
+        self.assertTrue(overlay.switch_flip.isChecked())
+
+        overlay.show_rotation_panel()
+        self.assertEqual(overlay.edit_rotation.text(), "-7.5")
+        self.assertTrue(window.activate_source(second_id))
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), 12.25)
+        self.assertEqual(overlay.rotation_panel.dial.angle(), 12.25)
+        self.assertFalse(overlay.switch_axes.isChecked())
+        self.assertFalse(overlay.switch_flip.isChecked())
+
     def test_levels_are_isolated_by_source_and_page_with_synchronized_labels(self):
         first_id = self.load_first()
         window = self.window
@@ -201,21 +237,27 @@ class _WorkspaceFixture(unittest.TestCase):
         def set_levels(levels):
             for slider, value in zip(sliders, levels):
                 slider.setValue(value)
+            window.page_render.s_cmap_low.setValue(levels[0] * 10)
+            window.page_render.s_cmap_high.setValue(levels[2] * 10)
 
         def assert_levels(expected):
             self.assertEqual(window._get_display_levels(), tuple(float(value) for value in expected))
             self.assertEqual([slider.value() for slider in sliders], list(expected))
+            self.assertEqual(
+                window.page_render.get_display_style()["colormap_range"],
+                (expected[0] / 100.0, expected[2] / 100.0),
+            )
             self.assertEqual(
                 [slider._value_label.text() for slider in sliders],
                 [str(value) for value in expected],
             )
 
         set_levels((11, 61, 81))
-        first_result = window._build_time_integral_spec()
+        first_result = window._build_axis_integral_spec()
         workspace.add_page(first_result)
         set_levels((21, 71, 91))
 
-        second_result = window._build_time_integral_spec()
+        second_result = window._build_axis_integral_spec()
         workspace.add_page(second_result)
         set_levels((31, 66, 86))
         assert_levels((31, 66, 86))

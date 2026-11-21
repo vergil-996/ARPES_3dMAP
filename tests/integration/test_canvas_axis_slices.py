@@ -109,19 +109,20 @@ class CanvasAxisSliceTests(unittest.TestCase):
         self.window.on_return_to_3d_source()
         self.assertEqual(self.window.left_workspace.current_spec().page_id, self.source.page_id)
 
-    def test_frame_is_frozen_when_the_source_changes(self):
+    def test_new_slice_keeps_its_own_time_interval_when_source_changes(self):
         spec = self._build(0)
         expected = self._context(spec)["data"].copy()
         self.window.timeline_bar.slider_time.setValue(2)
         assert_close(self._context(spec)["data"], expected)
-        self.assertEqual(spec.params["source_3d"]["params"]["source_t_index"], 0)
+        interval = AxisInterval.from_dict(spec.params["source_3d"]["params"]["time_interval"])
+        self.assertEqual(interval.single_index(self.window.core.coords["delay"]), 0)
 
-    def test_time_integral_volume_is_the_actual_source(self):
-        self.window.page_data.s_t_low.setValue(0)
-        self.window.page_data.s_t_up.setValue(1)
-        time_source = self.window._build_time_integral_spec()
-        self.window.left_workspace.add_page(time_source)
-        spec = self._build(2, source=time_source)
+    def test_slice_inherits_and_owns_the_source_time_interval(self):
+        source = self.window.left_workspace.current_spec()
+        source.params["time_interval"] = AxisInterval.from_indices(
+            self.window.core.coords["delay"], 0, 1, axis_key="delay"
+        ).as_dict()
+        spec = self._build(2, source=source)
         interval = AxisInterval.from_dict(spec.params["axis_interval"])
         low, up = interval.to_indices(self.window.core.coords["E"])
         volume = np.sum(self.data[..., 0:2], axis=3)
@@ -204,6 +205,32 @@ class CanvasAxisSliceTests(unittest.TestCase):
                            spec.params["home_slice_info"]["range"][0])
         self.assertEqual(spec.params["crop_regions"][1:], regions[1:])
 
+    def test_view_controls_follow_3d_and_slice_pages_without_stale_edits(self):
+        window = self.window
+        overlay = window.canvas_tool_overlay
+        overlay.show_rotation_panel()
+        overlay.edit_rotation.lineEdit().setText("-7.5")
+        spec = self._build(2, activate=True)
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), -7.5)
+
+        overlay.show_rotation_panel()
+        overlay.edit_rotation.lineEdit().setText("12.25")
+        overlay.switch_flip.click()
+        window.left_workspace.activate_page(self.source.page_id)
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), -7.5)
+        self.assertFalse(overlay.switch_flip.isChecked())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+        overlay.show_rotation_panel()
+        self.assertEqual(overlay.edit_rotation.text(), "-7.5")
+        window.left_workspace.activate_page(spec.page_id)
+        self.assertEqual(window.timeline_bar.get_rotation_angle(), 12.25)
+        self.assertEqual(overlay.rotation_panel.dial.angle(), 12.25)
+        self.assertTrue(overlay.switch_flip.isChecked())
+        self.assertIn("12.25°", overlay.rotation_button.toolTip())
+
     def test_recipe_restores_the_same_frozen_source_and_interval(self):
         spec = self._build(1, activate=True)
         expected = self._context(spec)["data"].copy()
@@ -219,8 +246,8 @@ class CanvasAxisSliceTests(unittest.TestCase):
         self.assertEqual(restored.params["axis_interval"], spec.params["axis_interval"])
         self.assertEqual(restored.params["source_3d"]["page_kind"], "home")
         self.assertEqual(
-            restored.params["source_3d"]["params"]["source_t_index"],
-            spec.params["source_3d"]["params"]["source_t_index"],
+            restored.params["source_3d"]["params"]["time_interval"],
+            spec.params["source_3d"]["params"]["time_interval"],
         )
         self.assertEqual(restored.params["source_3d"]["rotation_angle"], 0.0)
         assert_close(self._context(restored)["data"], expected)

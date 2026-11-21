@@ -24,6 +24,7 @@ from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.app_metadata import APP_VERSION
 from bandscope.extensions.plugin_host import PluginSession
 from bandscope.extensions.plugin_manager import PluginManager, install_package
+from bandscope.ui.page_render_control import RenderControlPage
 from scripts.release.build_plugin import build as build_package
 from tests.support.pages import make_workspace, page_spec
 from tests.support.plugins import synthetic_source
@@ -116,14 +117,40 @@ class PluginAnalysisFlowTests(unittest.TestCase):
         ]
 
     def mount_panels(self):
-        """挂载分析面板，返回 ``plugin_id -> panel``。"""
+        """通过真实外观页挂载，返回 ``plugin_id -> panel`` 并记录显隐调用。"""
         panels = []
-        page = SimpleNamespace(
-            mount_analysis_card=lambda pid, title, panel: panels.append((pid, panel)) or panel,
-            set_analysis_card_visible=lambda pid, visible, animate=True: None,
-        )
+        self.card_visibility = []
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        mount = page.mount_extension_card
+        set_visible = page.set_extension_card_visible
+
+        def mount_and_capture(plugin_id, title, panel):
+            panels.append((plugin_id, panel))
+            return mount(plugin_id, title, panel)
+
+        def set_visible_and_capture(plugin_id, visible, animate=True):
+            self.card_visibility.append((plugin_id, visible, animate))
+            set_visible(plugin_id, visible, animate=animate)
+
+        page.mount_extension_card = mount_and_capture
+        page.set_extension_card_visible = set_visible_and_capture
+        self.analyzer.page_render = page
         self.session.mount_analysis_cards(page)
         return dict(panels)
+
+    def test_analysis_cards_start_hidden_and_follow_2d_visibility(self):
+        self.assertIn("integral_demo", self.mount_panels())
+        self.assertEqual(
+            self.card_visibility, [("integral_demo", False, False)]
+        )
+        self.assertTrue(self.session._analysis_cards["integral_demo"].isHidden())
+        self.session.set_analysis_cards_visible(True)
+        self.session.set_analysis_cards_visible(False, animate=False)
+        self.assertEqual(
+            self.card_visibility[1:],
+            [("integral_demo", True, True), ("integral_demo", False, False)],
+        )
 
     def test_demo_plugin_runs_end_to_end(self):
         panels = self.mount_panels()
@@ -143,7 +170,7 @@ class PluginAnalysisFlowTests(unittest.TestCase):
 
         analysis = spec.params["plugin_analysis"]
         self.assertEqual(analysis["plugin_id"], "integral_demo")
-        self.assertEqual(analysis["plugin_version"], "1.0.0")
+        self.assertEqual(analysis["plugin_version"], "1.0.1")
         self.assertEqual(analysis["source_page_id"], SOURCE_PAGE_ID)
         self.assertEqual(analysis["params"]["axis"], "x")
         # 插件返回的参数原样登记，便于复现与对照。
@@ -190,8 +217,8 @@ class PluginAnalysisFlowTests(unittest.TestCase):
         self.assertTrue(self.wait_for_result())
         self.assertEqual(analyzer_data_bytes(self.analyzer), before)
 
-    def test_v1_and_v2_panels_go_to_different_slots(self):
-        # 只安装演示插件（v2）时，3D 卡片槽为空、分析槽有面板。
+    def test_v1_and_v2_panels_have_independent_registration(self):
+        # 只安装演示插件（v2）时，3D 卡片登记为空、分析卡片登记有面板。
         mounted = []
         page_render = SimpleNamespace(
             mount_extension_card=lambda pid, title, panel: mounted.append(pid) or panel

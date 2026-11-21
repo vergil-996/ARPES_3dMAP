@@ -3,7 +3,27 @@
 任务目标：按[当前计划](../plans/edc-waterfall-plugin.md)把 EDC 瀑布图及步长设置迁入
 `edc_waterfall` 插件，新增 API 3，并把默认值与“应用当前页”移入插件管理。
 
-## 改了什么
+## 当前状态：创建入口再次迁移（2026-11-20）
+
+- 原「处理分析」页及「其他积分」下拉已移除。插件就绪时，`edc_waterfall:create` 以「EDC瀑布图」显示在无擦除区域的 X/Y 轴积分或其矩形裁剪页的「右键 → 创建结果页」子菜单中；主页、E 积分、其他页型和多选不显示，未安装、未启用或加载失败时也不显示。
+- 来源树与「我的分组」中的页面副本使用同一动作过滤和创建链路。点击后先激活目标父页并重新校验，再冻结空间来源、继承时间区间并调用插件；打开菜单只做轻量检查，取消或失败不建页。
+- API 2 分析插件卡片同时迁到保留的「外观」页，仍只在二维结果页显示。新状态不再保存旧下拉选择，恢复旧复现文件时忽略 `combo_other`，不会自动创建结果；已有瀑布页、逐页参数和插件设置继续保留。
+
+### 新入口实测结果（2026-11-20）
+
+- `verify_integration_context_menu.py` 使用合成 **6×7×8×3 动态 NPZ** 在真实 Windows 窗口运行，**22/22 通过**；报告与 14 张截图位于 `.local/outputs/integration-context-menu/`。
+- `verify_derived_waterfall.py` **23/23 通过**，输出位于 `.local/outputs/derived-waterfall/`。
+- 动态与静态数据的 `verify_time_axis_visibility.py` 均全部通过，输出位于 `.local/outputs/time_axis/`。退出后出现临时扩展 lease 锁文件清理的 **WinError 32** 警告；该清理警告仍需后续排查，不能写成无警告通过。
+- 默认 WSe₂ 数据的两个约定路径 `.local/data/WSe2_step.npz` 与 `D:\ARPES数据\npz_files\WSe2_step.npz` 均不存在。因此上述结果不是 WSe₂ 真实实验数据验收，不能替代默认真实数据检查。
+- 通用 `smoke_test.py` 在合成数据上完成外观截图后遇到既有 WSe₂ 专用尺寸断言，**不计为通过**。
+- 视觉检查仅完成脚本截图抽查；维护者人工视觉验收仍未执行，不能记为通过。
+- 全量回归原始结果为 `Ran 1827 tests in 892.646s`，**FAILED (failures=5, errors=3, skipped=4)**；日志为 `.local/logs/integration-context-menu-full-tests.log`（另有 UTF-8 转换副本），独立复跑不改写该原始结果。
+  - `tests.core.test_data_trans` 的 3 个 error 均为 GBK 控制台 `UnicodeEncodeError`；设置 `PYTHONIOENCODING=utf-8` 后单独复跑 **3/3 OK**。
+  - 全量中的 `tests.rendering.test_refresh_pipeline` `interactive_pair` 与 `tests.ui.test_page_tree` `delete_directly` 两项失败独立复跑均 OK，两个模块合计 **95/95 OK**，属于全量状态／定时波动。
+  - 持续剩余 3 项为 `tests.exporting.test_orientation_preview.test_hover_cursor_and_disabled_interaction`，以及 `tests.integration.test_crop_controls` 的 `range_window` / `toggle_buttons` 两个几何断言；涉及文件均不在本改造范围。裁剪两项在本机 `QT_SCALE_FACTOR=2.0` 下已有 [v1.13.0 既有失败记录](v1.13.0-release.md)；方向标一项仅确认独立复跑仍失败，原因尚未完全查明，不归入既有已证实问题。
+- `compileall`、`git diff --check`，以及 `edc_waterfall` / `integral_demo` 两个插件的 **1.0.1** 构建均通过。
+
+## 2026-10-12 原始迁移记录
 
 宿主与协议：
 

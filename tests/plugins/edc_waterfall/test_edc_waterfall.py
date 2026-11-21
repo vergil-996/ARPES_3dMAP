@@ -220,6 +220,17 @@ class ResultShapeTests(unittest.TestCase):
 
 
 class PluginEntryTests(unittest.TestCase):
+    def test_manifest_version(self):
+        import json
+        from pathlib import Path
+
+        manifest = json.loads(
+            (Path(__file__).resolve().parents[3] / "plugins" / "edc_waterfall" / "plugin.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(manifest["version"], "1.0.1")
+
     def test_action_registration_and_compute_delegation(self):
         plugin = EdcWaterfallPlugin()
         actions = plugin.integration_actions()

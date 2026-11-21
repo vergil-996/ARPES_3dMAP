@@ -73,7 +73,7 @@ def wait_for(desc, predicate, next_step, timeout_ms=45000):
 
 
 def install_edc_waterfall_plugin():
-    """把真实构建的 EDC 瀑布图插件装进隔离扩展根：下拉动作由插件注册。
+    """把真实构建的 EDC 瀑布图插件装进隔离扩展根：右键动作由插件注册。
 
     「EDC瀑布图」在迁移后不再是内置项；未安装插件时该验收项按 UNTESTED 记录。
     """
@@ -131,6 +131,7 @@ def main():
         OutputOptions, load_overrides, load_style_id, resolve_style,
     )
     from bandscope.rendering.render_core import VisualEngine
+    from scripts.validation.verify_integration_context_menu import create_from_page_menu
 
     RESULTS.clear()
     TIMINGS.clear()
@@ -201,6 +202,7 @@ def main():
 
     def step_2d_slice():
         window.home_slice_info = {"axis": 2, "index": int(window.core.raw_data.shape[2] // 2)}
+        window._persist_home_page_state(window.left_workspace.current_spec())
         window.global_refresh()
         wait_for(
             "主页单层切片 2D 渲染",
@@ -220,6 +222,7 @@ def main():
         check_state_unchanged("2D 三样式 + PDF 导出", before)
         # 还原 3D 主页
         window.home_slice_info = None
+        window._persist_home_page_state(window.left_workspace.current_spec())
         window.global_refresh()
         QTimer.singleShot(1500, step_axis_integral)
 
@@ -248,34 +251,30 @@ def main():
             timeout_ms=30000,
         )
 
-    def _select_other(text):
-        combo = window.page_data.combo_other
-        index = combo.findText(text)
-        if index < 0:
-            return False
-        # 非可编辑下拉框的 setCurrentText 在 Qt5 会改写当前项文本而不是选择
-        # （宿主按稳定键读的是下标映射），这里必须显式按下标切换。
-        combo.setCurrentIndex(index)
-        return True
-
     def step_energy_dos():
-        if not _select_other("能级态密度"):
-            record("energy_dos 页创建", "UNTESTED", "下拉项不存在")
+        parent = window.left_workspace.current_spec()
+        if parent is None:
+            record("energy_dos 页创建", "FAIL", "右键父页不可用")
             step_waterfall()
             return
-        try:
-            window.on_apply_other_integral()
-        except Exception as exc:  # noqa: BLE001
-            record("energy_dos 页创建", "FAIL", str(exc))
-            step_waterfall()
-            return
-        wait_for(
-            "energy_dos 页渲染",
-            lambda: window.current_render_context is not None
-            and window.current_render_context.get("view") == "1d"
-            and window.left_workspace.current_spec() is not None
-            and window.left_workspace.current_spec().page_kind == "energy_dos",
-            step_energy_dos_export, timeout_ms=30000,
+
+        def after_menu(report):
+            if not report["triggered"]:
+                record("energy_dos 页创建", "FAIL", report["error"] or "右键动作未触发")
+                step_waterfall()
+                return
+            wait_for(
+                "energy_dos 页渲染",
+                lambda: window.current_render_context is not None
+                and window.current_render_context.get("view") == "1d"
+                and window.left_workspace.current_spec() is not None
+                and window.left_workspace.current_spec().page_kind == "energy_dos",
+                step_energy_dos_export, timeout_ms=30000,
+            )
+
+        create_from_page_menu(
+            window, parent.page_id, "builtin:energy_dos", after_menu,
+            output_dir=OUT_DIR,
         )
 
     def step_energy_dos_export():
@@ -302,11 +301,6 @@ def main():
         window.left_workspace.activate_page(axis_page)
 
         def _apply():
-            if not window.page_data.current_other_key().startswith("edc_waterfall:"):
-                if not _select_other("EDC瀑布图"):
-                    record("plugin_derived 瀑布页创建", "UNTESTED", "下拉项不存在")
-                    step_edc()
-                    return
             # 用可读步长（约 20 条曲线）；默认自动步长对该数据过密。
             # 步长与模式由插件设置提供，保存后立即对新建页生效。
             session = window.plugin_session
@@ -314,22 +308,32 @@ def main():
                 session.save_derived_defaults(
                     "edc_waterfall", {"k_step_mode": "manual", "k_step": 0.1}
                 )
-            try:
-                window.on_apply_other_integral()
-            except Exception as exc:  # noqa: BLE001
-                record("plugin_derived 瀑布页创建", "FAIL", str(exc))
-                step_edc()
-                return
-            wait_for(
-                "plugin_derived 瀑布页渲染",
-                lambda: window.current_render_context is not None
-                and window.current_render_context.get("view") == "waterfall"
-                and window.left_workspace.current_spec() is not None
-                and window.left_workspace.current_spec().page_kind == "plugin_derived",
-                lambda: (do_export("plugin_derived 瀑布页导出", "1d_open", "png",
-                                   "page_waterfall.png", expect_family="1d"),
-                         QTimer.singleShot(300, step_edc))[1],
-                timeout_ms=30000,
+
+            def after_menu(report):
+                if not report["triggered"]:
+                    available = report["create_present"] and "edc_waterfall:create" in report["keys"]
+                    record(
+                        "plugin_derived 瀑布页创建",
+                        "FAIL" if available else "UNTESTED",
+                        report["error"] or "右键动作不存在",
+                    )
+                    step_edc()
+                    return
+                wait_for(
+                    "plugin_derived 瀑布页渲染",
+                    lambda: window.current_render_context is not None
+                    and window.current_render_context.get("view") == "waterfall"
+                    and window.left_workspace.current_spec() is not None
+                    and window.left_workspace.current_spec().page_kind == "plugin_derived",
+                    lambda: (do_export("plugin_derived 瀑布页导出", "1d_open", "png",
+                                       "page_waterfall.png", expect_family="1d"),
+                             QTimer.singleShot(300, step_edc))[1],
+                    timeout_ms=30000,
+                )
+
+            create_from_page_menu(
+                window, axis_page, "edc_waterfall:create", after_menu,
+                output_dir=OUT_DIR,
             )
 
         wait_for(

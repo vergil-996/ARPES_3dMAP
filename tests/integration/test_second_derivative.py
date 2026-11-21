@@ -6,6 +6,7 @@ import numpy as np
 
 import bandscope.ui.theme as theme
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.ui.axis_interval_controller import IntervalEditMode
 
 
@@ -122,7 +123,7 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
 
         np.testing.assert_allclose(actual, 0.0, atol=1e-12)
 
-    def test_home_and_time_integral_sources_build_3d_contexts(self):
+    def test_home_frame_and_time_range_build_3d_contexts(self):
         analyzer = self._bare_analyzer()
         coordinates = {
             "X": np.linspace(-1.0, 1.0, 5),
@@ -133,6 +134,14 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
         energy_profile = -(coordinates["E"][None, None, :] ** 2)
         frame = np.broadcast_to(energy_profile, (5, 6, 7)).astype(np.float32)
         raw_data = np.stack([frame, frame], axis=3)
+        analyzer.core = SimpleNamespace(
+            raw_data=raw_data,
+            coords=coordinates,
+            coord_units={},
+            coord_sources={},
+            has_time_axis=True,
+        )
+        analyzer._computed_volume_cache = None
 
         home_context = analyzer._build_second_derivative_context_from_params(
             raw_data,
@@ -141,26 +150,29 @@ class VolumeSecondDerivativeTests(unittest.TestCase):
                 "source_page_kind": "home",
                 "source_view": "3d",
                 "derivative_axis": 2,
-                "source_t_index": 0,
+                "time_interval": AxisInterval.from_indices(
+                    coordinates["delay"], 0, 0, locked=True, axis_key="delay"
+                ).as_dict(),
             },
         )
         integral_context = analyzer._build_second_derivative_context_from_params(
             raw_data,
             coordinates,
             {
-                "source_page_kind": "time_integral",
+                "source_page_kind": "home",
                 "source_view": "3d",
                 "derivative_axis": 2,
-                "source_t_low": 0,
-                "source_t_up": 1,
+                "time_interval": AxisInterval.from_indices(
+                    coordinates["delay"], 0, 1, axis_key="delay"
+                ).as_dict(),
             },
         )
 
         self.assertEqual(home_context["view"], "3d")
         self.assertEqual(home_context["data"].shape, frame.shape)
-        self.assertEqual(home_context["source_mode"], "frame")
+        self.assertEqual(home_context["source_t_indices"], (0, 0))
         self.assertEqual(integral_context["view"], "3d")
-        self.assertEqual(integral_context["source_mode"], "time_integral")
+        self.assertEqual(integral_context["source_t_indices"], (0, 1))
         np.testing.assert_allclose(integral_context["data"], home_context["data"] * 2)
 
 
@@ -251,7 +263,7 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
 
     def test_new_slice_result_seeds_a_zero_length_interval(self):
         analyzer = self._analyzer_with_axis_interval()
-        analyzer._capture_control_state = lambda: {"data_process": {}}
+        analyzer._capture_control_state = lambda: {"active_control_tab": 0}
         spec = SimpleNamespace(
             page_kind="second_derivative",
             params={
@@ -269,11 +281,11 @@ class SecondDerivativeSliderControlTests(unittest.TestCase):
         self.assertEqual(interval["low"], interval["up"])
         self.assertEqual((spec.params["low"], spec.params["up"], spec.params["mid"]), (4, 4, 4))
         self.assertEqual(spec.params["axis_interval"]["axis_key"], "Y")
-        self.assertNotIn("combo_ax", spec.params["control_state"]["data_process"])
+        self.assertNotIn("data_process", spec.params["control_state"])
 
     def test_new_integral_result_seeds_the_integral_window(self):
         analyzer = self._analyzer_with_axis_interval()
-        analyzer._capture_control_state = lambda: {"data_process": {}}
+        analyzer._capture_control_state = lambda: {"active_control_tab": 0}
         spec = SimpleNamespace(
             page_kind="second_derivative",
             params={

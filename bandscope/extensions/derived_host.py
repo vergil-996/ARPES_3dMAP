@@ -3,9 +3,8 @@
 
 API 3 的宿主侧实现，与 ``analysis_host`` 各管一类任务：
 
-- **冻结来源**：用户执行下拉动作时，把当前 X/Y 积分页及其矩形裁剪结果冻结成
-  :class:`DerivedSource2D`，连同数据域、时间帧或时间积分区间一起存进结果页
-  参数；此后来源页怎么变都不影响已有结果。
+- **空间来源**：用户执行创建动作时，把当前 X/Y 积分页及其矩形裁剪结果冻结成
+  :class:`DerivedSource2D`；时间区间由新派生页独立持有，可在本页编辑并重算。
 - **同步计算**：体数据准备仍走既有后台刷新管线，二维采样与归一化在数据就绪后
   同步执行；结果按（来源、数据修订、旋转、逐页参数）缓存，其他页激活后回来
   重算。
@@ -20,6 +19,7 @@ API 3 的宿主侧实现，与 ``analysis_host`` 各管一类任务：
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
@@ -60,6 +60,35 @@ def _region_operation(region) -> str:
     if isinstance(region, Mapping):
         return str(region.get("operation") or "")
     return str(getattr(region, "operation", "") or "")
+
+
+def _freeze_source_axis(spec) -> int:
+    """只读校验派生来源并返回积分轴，供菜单过滤与完整冻结共用。"""
+    if spec is None:
+        raise DerivedSourceUnavailable("当前没有可用的来源页。")
+    if getattr(spec, "page_kind", None) not in {"axis_integral", "axis_integral_crop"}:
+        raise DerivedSourceUnavailable(
+            "该动作只支持从 X 积分 / Y 积分结果页创建，请先得到二维积分结果。"
+        )
+    params = getattr(spec, "params", None)
+    if not isinstance(params, Mapping):
+        raise DerivedSourceUnavailable("无法读取来源页的积分参数。")
+    try:
+        for region in params.get("crop_regions") or ():
+            if _region_operation(region) == "erase":
+                raise DerivedSourceUnavailable(
+                    "带擦除区域的来源不能创建派生结果，请改用矩形裁剪后的二维结果。"
+                )
+        axis_index = int(params.get("axis_index", 0))
+    except DerivedSourceUnavailable:
+        raise
+    except (AttributeError, TypeError, ValueError):
+        raise DerivedSourceUnavailable("无法读取来源页的积分参数。") from None
+    if axis_index not in (0, 1):
+        raise DerivedSourceUnavailable(
+            "该动作只支持从 X 积分 / Y 积分结果页创建。"
+        )
+    return axis_index
 
 
 def window_attr(window, name, default=None):
@@ -126,7 +155,7 @@ class _SourceSpec:
     也让 ``_axis_prefix_cache_key`` 在准备路径与渲染路径之间保持一致。
     """
 
-    def __init__(self, source: DerivedSource2D):
+    def __init__(self, source: DerivedSource2D, time_interval=None):
         self.page_id = DERIVED_SOURCE_PAGE_ID
         self.page_kind = "axis_integral"
         self.title = source.source_title or DERIVED_SOURCE_PAGE_ID
@@ -142,6 +171,9 @@ class _SourceSpec:
             "source_t_low": int(source.time_low),
             "source_t_up": int(source.time_up),
         }
+        interval = time_interval if time_interval is not None else source.time_interval
+        if isinstance(interval, Mapping):
+            self.params["time_interval"] = dict(interval)
 
 def synthetic_source_spec_from_params(params: Mapping[str, Any]) -> Optional[_SourceSpec]:
     """从结果页参数构造合成来源规格；缺冻结来源时返回 None。"""
@@ -152,7 +184,7 @@ def synthetic_source_spec_from_params(params: Mapping[str, Any]) -> Optional[_So
         source = DerivedSource2D.from_mapping(payload)
     except (TypeError, ValueError):
         return None
-    return _SourceSpec(source)
+    return _SourceSpec(source, params.get("time_interval"))
 
 
 class DerivedPageController:
@@ -202,7 +234,7 @@ class DerivedPageController:
         return instance
 
     # ------------------------------------------------------------------
-    # 「其他积分」下拉动作
+    # 来源页「创建结果页」菜单动作
     # ------------------------------------------------------------------
     def integration_actions(self) -> List[Tuple[str, str, float]]:
         """收集已加载插件注册的动作：``(稳定键, 展示文本, 排序权重)``。"""
@@ -234,7 +266,7 @@ class DerivedPageController:
         return any(item[0] == str(key) for item in self._actions_cache or ())
 
     def invoke_action(self, plugin_id: str, action_id: str) -> Optional[str]:
-        """执行一次下拉动作：冻结来源 → 插件计算 → 宿主建页（失败不建页）。"""
+        """执行一次创建动作：冻结来源 → 插件计算 → 宿主建页（失败不建页）。"""
         window = self.window
         plugin_id = str(plugin_id)
         action_id = str(action_id)
@@ -273,27 +305,22 @@ class DerivedPageController:
     # ------------------------------------------------------------------
     # 冻结来源
     # ------------------------------------------------------------------
+    def can_freeze_source(self, spec) -> bool:
+        """按已保存页面参数轻量检查来源，不持久化控件状态或试算数据。"""
+        try:
+            _freeze_source_axis(spec)
+        except (DerivedSourceUnavailable, AttributeError, TypeError, ValueError):
+            return False
+        return True
+
     def freeze_source(self, spec, plugin_id: str, action_id: str) -> DerivedSource2D:
+        _freeze_source_axis(spec)
         window = self.window
-        if spec is None:
-            raise DerivedSourceUnavailable("当前没有可用的来源页。")
-        if spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
-            raise DerivedSourceUnavailable(
-                "该动作只支持从 X 积分 / Y 积分结果页创建，请先得到二维积分结果。"
-            )
-        for region in spec.params.get("crop_regions") or ():
-            if _region_operation(region) == "erase":
-                raise DerivedSourceUnavailable(
-                    "带擦除区域的来源不能创建派生结果，请改用矩形裁剪后的二维结果。"
-                )
         params = window._resolved_axis_integral_params(spec)
         if params is None:
             raise DerivedSourceUnavailable("无法读取来源页的积分参数。")
-        axis_index = int(params["axis_index"])
-        if axis_index not in (0, 1):
-            raise DerivedSourceUnavailable(
-                "该动作只支持从 X 积分 / Y 积分结果页创建。"
-            )
+        # 解析当前页可能先回写控件状态，冻结必须以更新后的积分轴再校验一次。
+        axis_index = _freeze_source_axis(spec)
         crop_rect = window._axis_crop_rect_from_params(spec.params)
         crop_tuple = None
         if crop_rect is not None:
@@ -316,6 +343,7 @@ class DerivedPageController:
             frame_index=int(params.get("source_t_index", 0)),
             time_low=int(params.get("source_t_low", 0)),
             time_up=int(params.get("source_t_up", 0)),
+            time_interval=params.get("time_interval"),
             scope_id=str(getattr(spec, "data_scope_id", "full") or "full"),
             crop_rect=crop_tuple,
             source_title=str(getattr(spec, "title", "") or ""),
@@ -391,11 +419,19 @@ class DerivedPageController:
 
         k_label = {"X": "kx", "Y": "ky"}.get(k_key, k_key)
         frame_label = ""
+        assignment = getattr(window.core, "axis_assignment", None)
+        non_time_scan = assignment is not None and assignment.has_scan and not assignment.is_time
         if source.source_mode == "time_integral":
-            frame_label = f"时间积分 {int(source.time_low)}~{int(source.time_up)}"
+            if non_time_scan:
+                frame_label = window._scan_interval_description(source.time_low, source.time_up)
+            else:
+                frame_label = f"时间积分 {int(source.time_low)}~{int(source.time_up)}"
         else:
             try:
-                frame_label = "帧 " + str(window._current_delay_text(int(source.frame_index)))
+                if non_time_scan:
+                    frame_label = "帧 " + str(window._scan_frame_description(int(source.frame_index)))
+                else:
+                    frame_label = "帧 " + str(window._current_delay_text(int(source.frame_index)))
             except Exception:
                 frame_label = f"帧 {int(source.frame_index)}"
         slice_info = dict(base.get("slice_info") or {})
@@ -417,11 +453,45 @@ class DerivedPageController:
             frame_label=frame_label,
             roi_label=roi_label,
             data_generation=int(window_attr(window, "shared_denoise_version", 0) or 0),
+            scan_axis=(
+                window._scan_axis_spec(
+                    int(source.frame_index),
+                    interval=(source.time_low, source.time_up),
+                    interval_bounds=(
+                        (source.time_interval.get("low"), source.time_interval.get("up"))
+                        if isinstance(source.time_interval, Mapping)
+                        and source.time_interval.get("low") is not None
+                        and source.time_interval.get("up") is not None
+                        else None
+                    ),
+                )
+                if hasattr(window, "_scan_axis_spec") else None
+            ),
         )
 
     # ------------------------------------------------------------------
     # 渲染上下文与缓存
     # ------------------------------------------------------------------
+    def _source_with_page_time(self, spec, source):
+        window = self.window
+        if "time_interval" not in spec.params and source.time_interval is not None:
+            return source
+        interval_getter = window_attr(window, "_time_interval_params_for_spec", None)
+        indices_getter = window_attr(window, "_time_indices_for_spec", None)
+        if not callable(interval_getter) or not callable(indices_getter):
+            interval = spec.params.get("time_interval", source.time_interval)
+            return replace(source, time_interval=interval)
+        interval = interval_getter(spec).get("time_interval")
+        low, up = indices_getter(spec)
+        return replace(
+            source,
+            source_mode="time_integral" if up > low else "frame",
+            frame_index=low,
+            time_low=low,
+            time_up=up,
+            time_interval=interval,
+        )
+
     def _cache_key(self, page_id: str, source: DerivedSource2D, params: Mapping[str, Any]) -> tuple:
         window = self.window
         return (
@@ -439,7 +509,8 @@ class DerivedPageController:
             raise ValueError("该派生结果页缺少冻结来源信息，无法重算。")
         plugin_id = str(spec.params.get(DERIVED_PLUGIN_KEY) or "")
         params = dict(spec.params.get(DERIVED_PARAMS_KEY) or {})
-        source = DerivedSource2D.from_mapping(payload)
+        source = self._source_with_page_time(spec, DerivedSource2D.from_mapping(payload))
+        spec.params[DERIVED_SOURCE_KEY] = source.to_mapping()
         key = self._cache_key(spec.page_id, source, params)
         entry = self._cache.get(str(spec.page_id))
         if entry is not None and entry.get("key") == key and entry.get("context") is not None:
@@ -540,7 +611,9 @@ class DerivedPageController:
         spec = self._current_derived_spec(plugin_id)
         if spec is None:
             return None
-        source = DerivedSource2D.from_mapping(spec.params.get(DERIVED_SOURCE_KEY))
+        source = self._source_with_page_time(
+            spec, DerivedSource2D.from_mapping(spec.params.get(DERIVED_SOURCE_KEY))
+        )
         return DerivedPage(
             plugin_id=str(plugin_id),
             action_id=str(spec.params.get(DERIVED_ACTION_KEY) or ""),
@@ -559,7 +632,9 @@ class DerivedPageController:
             return False, "当前页不是该插件的派生结果页，已保留各页原有参数。"
         if spec.params.get("_restored_result"):
             return False, "此页为保存的结果快照；请从来源页新建派生结果后修改参数。"
-        source = DerivedSource2D.from_mapping(spec.params.get(DERIVED_SOURCE_KEY))
+        source = self._source_with_page_time(
+            spec, DerivedSource2D.from_mapping(spec.params.get(DERIVED_SOURCE_KEY))
+        )
         try:
             instance = self._instance(plugin_id)
             input2d = self.build_input(source, params, plugin_id)

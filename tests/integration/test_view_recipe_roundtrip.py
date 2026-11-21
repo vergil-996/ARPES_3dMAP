@@ -44,6 +44,8 @@ class RecipeRoundtripTests(unittest.TestCase):
     def test_home_roundtrip_controls_camera_titles_and_relocation(self):
         w = self.window
         w.timeline_bar.slider_time.setValue(2)
+        w.timeline_bar.set_rotation_angle(-7.5)
+        w.on_rotation_angle_changed()
         w.page_render.s_low.setValue(13)
         w.page_render.s_gamma.setValue(62)
         w.page_render.s_up.setValue(91)
@@ -63,6 +65,10 @@ class RecipeRoundtripTests(unittest.TestCase):
             path, confirm=False, relocate=lambda _: str(moved)
         ))
         self.assertEqual(other.timeline_bar.slider_time.value(), 2)
+        self.assertEqual(other.timeline_bar.get_rotation_angle(), -7.5)
+        self.assertEqual(other.canvas_tool_overlay.rotation_panel.dial.angle(), -7.5)
+        self.assertTrue(other.canvas_tool_overlay.rotation_button.isChecked())
+        self.assertIn("−7.5°", other.canvas_tool_overlay.rotation_button.toolTip())
         self.assertEqual(other._get_display_levels(), w._get_display_levels())
         restored_key = axis_title_key(other.left_workspace.home_page_id, "3d", ("X", "Y", "E"))
         self.assertEqual(other._axis_titles().text(restored_key, "X"), "Custom momentum")
@@ -70,6 +76,54 @@ class RecipeRoundtripTests(unittest.TestCase):
         np.testing.assert_allclose(other.plotter.camera.position, snapshot.camera["position"])
         np.testing.assert_allclose(other.plotter.camera.focal_point, snapshot.camera["focal_point"])
         np.testing.assert_array_equal(other.current_render_context["data"], snapshot.payload["volume"])
+
+    def test_old_restricted_lock_is_rebuilt_on_restored_frame_and_survives_scrubbing(self):
+        path, snapshot = self.save()
+        from bandscope.core.display_style import create_display_state, new_display_style
+        from bandscope.core.local_enhancement import STATE_KEY
+        from bandscope.core.view_recipe import digest
+        from bandscope.rendering.render_core import VisualEngine
+
+        document = copy.deepcopy(snapshot.view_recipe)
+        style = new_display_style()
+        style["normalization"] = {"mode": "manual", "manual_range": (0.0, 0.5)}
+        page = document["pages"][0]
+        page["params"][STATE_KEY] = create_display_state(style)
+        node = document["recipes"].pop(page["recipe_id"])
+        node["params"] = copy.deepcopy(page["params"])
+        key = digest(node)
+        document["recipes"][key] = node
+        page["recipe_id"] = key
+        document["view_state"].update(
+            locked_range=(0.0, 0.5),
+            display={"background_style": copy.deepcopy(style), "resolved_range": (0.0, 0.5)},
+        )
+        document["schema_version"] = 3
+        document["state_digest"] = state_digest(document)
+        path.write_text(json.dumps(plain(document), allow_nan=False), encoding="utf-8")
+
+        other = control_window()
+        self.addCleanup(other.close)
+        self.addCleanup(VisualEngine.unlock_data_range)
+        self.assertTrue(other._load_view_recipe(
+            path, confirm=False, relocate=lambda _: str(self.path),
+        ))
+        fields = other._enhancement_display(other.current_render_context, other.active_page_spec)
+        finite = other.current_render_context["data"][np.isfinite(other.current_render_context["data"])]
+        expected = (float(finite.min()), float(finite.max()))
+        self.assertEqual(fields["background_range"], expected)
+        self.assertEqual(VisualEngine.locked_data_range(), expected)
+        restored_view = other._restored_recipe_views[other.active_page_spec.page_id]
+        self.assertNotIn("relock_full_range", restored_view)
+        self.assertEqual(restored_view["locked_range"], expected)
+
+        other.timeline_bar.slider_time.setValue(1)
+        other._enhancement_display(other.current_render_context, other.active_page_spec)
+        self.assertEqual(VisualEngine.locked_data_range(), expected)
+        VisualEngine.unlock_data_range()
+        unlocked = other._enhancement_display(other.current_render_context, other.active_page_spec)
+        finite = other.current_render_context["data"][np.isfinite(other.current_render_context["data"])]
+        self.assertEqual(unlocked["background_range"], (float(finite.min()), float(finite.max())))
 
     def test_only_target_ancestors_restored_and_recomputed(self):
         w = self.window
@@ -281,8 +335,10 @@ class RecipeRoundtripTests(unittest.TestCase):
         self.assertTrue(record.ready, record.load_error)
         axis_spec = w._build_canvas_axis_slice_spec(w.left_workspace.current_spec(), 0)
         w.left_workspace.add_page(axis_spec)
-        pid = w.plugin_session.invoke_integration_action("edc_waterfall", "create")
-        self.assertIsNotNone(pid)
+        w._on_page_create_requested(axis_spec.page_id, "edc_waterfall:create")
+        derived = w.left_workspace.current_spec()
+        self.assertEqual(derived.page_kind, "plugin_derived")
+        self.assertEqual(derived.source_page_id, axis_spec.page_id)
         path, _ = self.save()
         with patch.object(record.instance, "compute_derived_result", wraps=record.instance.compute_derived_result) as compute:
             w._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))

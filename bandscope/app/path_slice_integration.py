@@ -22,6 +22,7 @@ from bandscope.core.path_slice import (
     draft_nodes,
     write_draft,
 )
+from bandscope.processing.local_enhancement import cached_cumulative_histogram
 from bandscope.processing.path_slice import MomentumCalibration, PathSliceSampler
 from bandscope.rendering.path_slice import (
     clamp_viewport,
@@ -391,6 +392,8 @@ class PathSliceController:
     def _freeze_source(self, spec) -> Dict[str, Any]:
         if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             params = dict(self.window._resolved_axis_integral_params(spec))
+            for key in ("source_mode", "source_t_index", "source_t_low", "source_t_up"):
+                params.pop(key, None)
             params["crop_regions"] = copy.deepcopy(spec.params.get("crop_regions") or [])
             crop_rect = self.window._axis_crop_rect_from_params(spec.params)
             if crop_rect is not None:
@@ -405,8 +408,6 @@ class PathSliceController:
         info = copy.deepcopy(spec.params.get("home_slice_info") or self.window.home_slice_info)
         return {
             "source_page_kind": "home",
-            "source_mode": "frame",
-            "source_t_index": int(self.window.timeline_bar.slider_time.value()),
             "home_slice_info": info,
         }
 
@@ -424,14 +425,17 @@ class PathSliceController:
             self.window.page_render.s_up,
         ))
         intensity_map = str(self.window.page_render.combo_map.currentText())
-        styles = [PathSegmentStyle(0.0, *levels, intensity_map) for _ in range(len(nodes) - 1)]
+        colormap_range = self.window.page_render.get_display_style().get("colormap_range", (0.0, 1.0))
+        styles = [
+            PathSegmentStyle(0.0, *levels, intensity_map, *colormap_range)
+            for _ in range(len(nodes) - 1)
+        ]
         model = PathSliceModel(nodes=copy.deepcopy(nodes), segments=styles)
         title = self.window._make_unique_page_title(f"路径切片 {model.path_name()}")
         params = {
             PATH_SOURCE_KEY: self._freeze_source(source),
-            "source_mode": self._page_source_mode(source),
+            **self.window._time_interval_params_for_spec(source),
         }
-        params.update(self._time_fields(source))
         model.write_params(params)
         spec = AnalysisPageSpec(
             page_id=self.window._make_page_id(),
@@ -449,43 +453,24 @@ class PathSliceController:
         self.window.left_workspace.add_page(spec)
         return spec.page_id
 
-    def _page_source_mode(self, spec) -> str:
-        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            return self.window._normalize_axis_source_mode(spec.params.get("source_mode"))
-        return "frame"
-
-    def _time_fields(self, spec) -> Dict[str, int]:
-        if spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            return dict(self.window._source_time_params(spec.params))
-        return {"source_t_index": int(self.window.timeline_bar.slider_time.value())}
-
-    def persist_time(self, spec) -> None:
-        if not self.is_path_page(spec):
-            return
-        if self.window._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral":
-            return
-        index = int(self.window.timeline_bar.slider_time.value())
-        spec.params["source_t_index"] = index
-        source = spec.params.get(PATH_SOURCE_KEY)
-        if isinstance(source, dict):
-            source["source_t_index"] = index
-
     def _source_spec(self, spec, source: Mapping[str, Any]):
         kind = str(source.get("source_page_kind") or "")
         if kind in {"axis_integral", "axis_integral_crop"}:
-            return self.window._build_axis_source_spec_from_params(
+            source_spec = self.window._build_axis_source_spec_from_params(
                 source, page_id="__path_slice_source__", title="路径来源"
             )
-        return AnalysisPageSpec(
-            page_id="__path_slice_source__",
-            title="路径来源",
-            page_kind="home",
-            source_module="path_slice",
-            params={
-                "source_t_index": int(source.get("source_t_index", spec.params.get("source_t_index", 0))),
-                "home_slice_info": copy.deepcopy(source.get("home_slice_info")),
-            },
-        )
+        else:
+            source_spec = AnalysisPageSpec(
+                page_id="__path_slice_source__",
+                title="路径来源",
+                page_kind="home",
+                source_module="path_slice",
+                params={
+                    "home_slice_info": copy.deepcopy(source.get("home_slice_info")),
+                },
+            )
+        source_spec.params.update(self.window._time_interval_params_for_spec(spec))
+        return source_spec
 
     def _valid_mask(self, source_volume, raw_data, source: Mapping[str, Any], angle: float):
         descriptor = scoped_descriptor_from_array(source_volume)
@@ -563,8 +548,10 @@ class PathSliceController:
             y_source=core.coord_sources.get("Y", "index"),
             x_unit=core.coord_units.get("X"), y_unit=core.coord_units.get("Y"),
         )
+        t_low, t_up = self.window._time_indices_for_spec(spec)
         source_key = (
             repr(dict(source)),
+            (t_low, t_up),
             self.window._raw_data_identity(raw_data),
             int(getattr(self.window, "shared_denoise_version", 0) or 0),
             round(angle, 2),
@@ -583,10 +570,8 @@ class PathSliceController:
             "k": sample.k,
             "energy_axis": sample.energy,
             "raw_intensity": sample.intensity,
-            "source_mode": self.window._normalize_axis_source_mode(spec.params.get("source_mode")),
-            "source_t_index": int(spec.params.get("source_t_index", 0)),
-            "source_t_low": int(spec.params.get("source_t_low", 0)),
-            "source_t_up": int(spec.params.get("source_t_up", 0)),
+            "source_t_index": t_low,
+            "source_t_indices": (t_low, t_up),
             "coords": coords,
         }
 
@@ -695,11 +680,33 @@ class PathSliceController:
         model.write_params(spec.params)
         self.render(spec, context)
 
+    def statistics_values(self, spec, context=None):
+        context = context or self.window.current_render_context or {}
+        sample = context.get("path_sample")
+        model = self.model_for(spec)
+        if sample is None or model is None:
+            return self.__dict__.setdefault(
+                "_empty_levels_statistics", np.asarray([], dtype=np.float64),
+            )
+        if (self.__dict__.get("_levels_statistics_sample") is not sample
+                or self.__dict__.get("_levels_statistics_selected") != tuple(model.selected)):
+            arrays = [np.asarray(sample.segments[index].intensity)
+                      for index in model.selected if 0 <= index < len(sample.segments)]
+            self._levels_statistics_values = (
+                np.concatenate([value.ravel() for value in arrays]) if arrays
+                else np.asarray([], dtype=np.float64)
+            )
+            self._levels_statistics_sample = sample
+            self._levels_statistics_selected = tuple(model.selected)
+        return self._levels_statistics_values
+
     def sync_display_controls(self, spec) -> None:
         page = self.window.page_render
         if not self.is_path_page(spec):
             if self._path_controls_active:
-                for control in (page.s_low, page.s_gamma, page.s_up, page.combo_map, page.btn_apply_map):
+                for control in (page.s_low, page.s_gamma, page.s_up,
+                                page.s_cmap_low, page.s_cmap_high,
+                                page.combo_map, page.btn_apply_map):
                     control.setEnabled(True)
                 page.combo_map.setEditable(False)
                 page.combo_display_mode.setEnabled(True)
@@ -720,6 +727,15 @@ class PathSliceController:
             if label is not None:
                 label.setText("多值" if common.get(key) is None else str(int(common[key])))
             slider.setToolTip("多值：调整后写入全部选中段" if common.get(key) is None else "当前选中段的共同值")
+        for key, slider in (("colormap_start", page.s_cmap_low),
+                            ("colormap_end", page.s_cmap_high)):
+            slider.setEnabled(enabled)
+            with QSignalBlocker(slider):
+                if common.get(key) is not None:
+                    slider.setValue(round(common[key] * 1000.0))
+            slider.setToolTip("多值：调整后写入全部选中段" if common.get(key) is None else "当前选中段的共同值")
+        page.levels_editor.update()
+        page.colormap_range_editor.sync_from_proxies()
         page.combo_map.setEnabled(enabled)
         page.btn_apply_map.setEnabled(enabled)
         page.combo_map.setEditable(True)
@@ -734,6 +750,9 @@ class PathSliceController:
         page.region_combo.hide()
         page._display_view = PATH_SLICE_PAGE_KIND
         page._sync_display_visibility()
+        values = self.statistics_values(spec)
+        hit, histogram = cached_cumulative_histogram(values)
+        page.set_levels_statistics(histogram if hit else None, self._locked_range())
 
     def _display_change_field(self):
         try:
@@ -741,8 +760,10 @@ class PathSliceController:
         except Exception:
             sender = None
         page = self.window.page_render
-        for name, slider in (("black", page.s_low), ("gray", page.s_gamma), ("white", page.s_up)):
-            if sender is slider:
+        for name, slider in (("black", page.s_low), ("gray", page.s_gamma), ("white", page.s_up),
+                             ("colormap_start", getattr(page, "s_cmap_low", None)),
+                             ("colormap_end", getattr(page, "s_cmap_high", None))):
+            if slider is not None and sender is slider:
                 return name
         if sender is page.btn_apply_map:
             return "intensity_map"
@@ -769,6 +790,14 @@ class PathSliceController:
         if not model.selected:
             return
         page = self.window.page_render
+        if field in {"colormap_start", "colormap_end"}:
+            slider = page.s_cmap_low if field == "colormap_start" else page.s_cmap_high
+            model.update_selected(**{field: slider.value() / 1000.0})
+            model.write_params(spec.params)
+            from bandscope.rendering.refresh_pipeline import RenderQuality, RefreshCause
+
+            self.window.request_refresh(RefreshCause.DISPLAY_MAPPING, RenderQuality.EXACT, immediate=True)
+            return
         if field in {"black", "gray", "white"}:
             slider = {"black": page.s_low, "gray": page.s_gamma, "white": page.s_up}[field]
             model.update_selected(**{field: float(slider.value())})
@@ -804,5 +833,6 @@ class PathSliceController:
             "path_coordinate_mode": np.asarray(["physical" if sample.calibration.calibrated else "index"]),
             "path_k_unit": np.asarray([sample.calibration.unit]),
         }
+        arrays.update(self.window._time_interval_export_metadata(spec, context.get("coords") or self.window.core.coords))
         name = self.window._sanitize_filename_component(spec.title) + ".mat"
         return "导出路径切片", name, arrays

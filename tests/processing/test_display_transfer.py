@@ -3,7 +3,12 @@ import unittest
 
 import numpy as np
 
-from bandscope.processing.display_transfer import OPACITY_MAPS, channels, level_info
+from bandscope.processing.display_transfer import (
+    OPACITY_MAPS,
+    channels,
+    gamma_for_gray_position,
+    level_info,
+)
 
 
 class DisplayTransferTests(unittest.TestCase):
@@ -43,6 +48,23 @@ class DisplayTransferTests(unittest.TestCase):
                 expected = np.interp(positions, np.linspace(0., 1., len(values)), values)
                 _, alpha = channels(source, info, mode)
                 np.testing.assert_allclose(alpha, expected, rtol=1e-6, atol=1e-8)
+
+    def test_colormap_range_changes_only_color_not_opacity(self):
+        source = np.array([0.0, 0.5, 1.0])
+        full = level_info((0.0, 1.0), (0, 50, 100))
+        truncated = level_info((0.0, 1.0), (0, 50, 100), colormap_range=(0.2, 0.8))
+        color, alpha = channels(source, truncated, "linear")
+        _full_color, full_alpha = channels(source, full, "linear")
+        np.testing.assert_allclose(color, [0.2, 0.5, 0.8])
+        np.testing.assert_array_equal(alpha, full_alpha)
+
+    def test_gray_position_left_brightens_and_roundtrips_gamma(self):
+        gamma = gamma_for_gray_position(20.0, 80.0, 30.0)
+        info = level_info((0.0, 1.0), (20, gamma, 80))
+        self.assertGreater(gamma, 50.0)
+        self.assertLess(info["gamma_power"], 1.0)
+        self.assertAlmostEqual(info["gray_pos"] * 100.0, 30.0, places=6)
+        self.assertGreater(0.5 ** info["gamma_power"], 0.5)
 
     def test_nonfinite_values_are_hidden_without_changing_source(self):
         source = np.array([-5., 0., 5., 10., np.nan, np.inf, -np.inf], dtype=np.float32)

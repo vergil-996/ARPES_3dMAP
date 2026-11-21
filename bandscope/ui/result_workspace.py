@@ -41,7 +41,6 @@ CANVAS_MIN_WIDTH = 320
 
 VIEW_KIND_LABELS = {
     "home": "3D VOLUME",
-    "time_integral": "3D VOLUME",
     "axis_integral": "2D MAP",
     "axis_integral_crop": "2D MAP",
     "path_slice": "E–k PATH",
@@ -187,6 +186,10 @@ class AnalysisPageSpec:
     #: 仅分组副本有值；普通页面仍按来源关系显示在原树中。
     group_id: Optional[str] = None
 
+    def __post_init__(self):
+        if self.page_kind == "time_integral":
+            self.page_kind = "home"
+
 
 class ResultWorkspace(QWidget):
     page_added = pyqtSignal(str)
@@ -201,6 +204,7 @@ class ResultWorkspace(QWidget):
     #: 用户要求改名 / 恢复自动名称；应用层负责弹窗、去重与落地。
     page_rename_requested = pyqtSignal(str)
     page_restore_name_requested = pyqtSignal(str)
+    page_create_requested = pyqtSignal(str, str)
 
     def __init__(self, display_widget: QWidget, parent=None):
         super().__init__(parent)
@@ -307,6 +311,7 @@ class ResultWorkspace(QWidget):
         self.page_tree.group_rename_requested.connect(self.request_rename_group)
         self.page_tree.group_delete_requested.connect(self.delete_group)
         self.page_tree.group_copy_page_requested.connect(self.copy_page_to_group)
+        self.page_tree.page_create_requested.connect(self.page_create_requested)
 
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.setObjectName("result_splitter")
@@ -392,6 +397,9 @@ class ResultWorkspace(QWidget):
     # ------------------------------------------------------------------
     # 页面登记
     # ------------------------------------------------------------------
+    def set_page_create_action_provider(self, provider):
+        self.page_tree.set_page_create_action_provider(provider)
+
     def set_footer_widget(self, widget: QWidget):
         """在画布正下方挂一个常驻底部条（如时间轴横条），随所有显示页共现。"""
         self.footer_widget = widget

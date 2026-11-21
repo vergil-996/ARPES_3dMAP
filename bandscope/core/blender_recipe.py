@@ -7,14 +7,20 @@ from datetime import datetime, timezone
 import json
 import re
 
-from bandscope.core.view_recipe import RecipeError, ViewRecipeDocument, digest, plain
+from bandscope.core.view_recipe import (
+    RecipeError,
+    ViewRecipeDocument,
+    digest,
+    full_range_display_override,
+    plain,
+)
 
 BLENDER_RECIPE_FORMAT = "bandscope.blender-recipe"
 BLENDER_RECIPE_SCHEMA_VERSION = 1
 OVERRIDE_KEYS = frozenset({
     "levels", "levels_controls", "locked_range", "cmap", "level_info", "display",
     "render_quality", "include_zero", "opacity_mode", "opacity_multiplier",
-    "removed_effects",
+    "removed_effects", "relock_full_range",
 })
 REMOVED_EFFECTS = frozenset({"local_enhancement", "opacity_multiplier"})
 
@@ -146,6 +152,7 @@ class BlenderRecipeDocument:
             by_group[group_id] = group
         by_entry = {}
         primary_by_group = {}
+        validated_recipes = {}
         for entry in entries:
             _object(entry, "Blender 条目")
             entry_id = entry.get("entry_id")
@@ -173,7 +180,7 @@ class BlenderRecipeDocument:
                 if (not isinstance(removed, list) or len(set(removed)) != len(removed)
                         or not set(removed).issubset(REMOVED_EFFECTS)):
                     raise RecipeError(f"条目 {entry_id} 的已移除效果记录无效。")
-            entry["recipe"] = recipe
+            validated_recipes[entry_id] = recipe
             by_entry[entry_id] = entry
         if set(by_entry) != {entry_id for group in groups for entry_id in group["entry_ids"]}:
             raise RecipeError("Blender 来源分组与条目集合不一致。")
@@ -184,6 +191,11 @@ class BlenderRecipeDocument:
         _object(document.get("export_settings"), "Blender 导出设置")
         if document.get("state_digest") != blender_recipe_digest(document):
             raise RecipeError("Blender 复现配置已被编辑；请重新冻结导出。")
+        for entry_id, entry in by_entry.items():
+            entry["recipe"] = validated_recipes[entry_id]
+            if entry.get("display_override") is not None:
+                entry["display_override"] = full_range_display_override(entry["display_override"])
+        document["state_digest"] = blender_recipe_digest(document)
         plain(document)
         return self
 

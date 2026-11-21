@@ -481,8 +481,10 @@ def prepare_blender_scene(snapshot) -> BlenderSceneData:
         snapshot.levels_params, payload.get("opacity_mode", "linear"),
     )
     display_style = resolved_display_style(display_style)
-    resolved_range = display.get("resolved_range")
-    level_info = dict(payload.get("level_info") or compute_level_info(
+    independent = is_independent(display_style)
+    resolved_range = None if independent else display.get("resolved_range")
+    saved_level_info = None if independent else payload.get("level_info")
+    level_info = dict(saved_level_info or compute_level_info(
         volume, snapshot.levels_params, include_zero=bool(payload.get("include_zero", False)),
         locked_range=snapshot.locked_range, style=display_style, resolved_range=resolved_range,
     ))

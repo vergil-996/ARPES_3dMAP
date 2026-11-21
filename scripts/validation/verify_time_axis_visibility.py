@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-"""时间轴相关 UI 显隐验证：静态数据隐藏 / 动态数据平滑展开。
+"""时间双端区间条验收：动态展开、静态隐藏、解锁积分不建页。
 
-流程：启动窗口 → 断言初始隐藏 → 下拉过滤/选中保持单元级断言 →
-加载动态数据（高频采样时间轴分组高度验证动画平滑）→ 断言全部可见 →
-加载静态数据 → 断言全部隐藏 → 再加载动态数据断言恢复。
-底条本身常驻可见（右侧显示坐标 / E轴翻转 / Z轴旋转与时间轴无关），
-收放的只是底条左侧的时间轴分组。
+流程：启动窗口 → 初始隐藏 → 动态数据展开、普通 3D 主页无切片积分动作 →
+持久化含能量轴的 2D 主页后动作可用并操作双端区间 → 静态主页动作不可用 →
+再次加载动态数据并以同样的 2D 主页验证恢复。悬浮视图控件常驻，底栏按区间组显隐。
 全程 QTimer 链驱动，不手动 processEvents。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_time_axis_visibility.py <动态npz> <静态npz>
@@ -49,8 +47,25 @@ class _NullUpdateController:
         pass
 
 
-def combo_items(combo):
-    return [combo.itemText(i) for i in range(combo.count())]
+def create_action_keys(window):
+    spec = window.left_workspace.current_spec()
+    if spec is None:
+        return set()
+    actions = window._integration_actions_for_parent(spec.page_id)
+    return {key for key, _label, _order in actions}
+
+
+def prepare_energy_home_slice(window):
+    spec = window.left_workspace.current_spec()
+    axis_index = 0
+    window.home_slice_info = {
+        "axis": axis_index,
+        "index": int(window.core.raw_data.shape[axis_index] // 2),
+    }
+    # 沿 X 轴取单层，保留 Y-E 平面；动作查询读取持久化后的主页参数。
+    window._persist_home_page_state(spec)
+    window.global_refresh()
+    return spec
 
 
 def main():
@@ -69,8 +84,7 @@ def main():
 
     bar = window.timeline_bar
     group = bar.timeline_group
-    page_data = window.page_data
-    combo = page_data.combo_other
+    overlay = window.canvas_tool_overlay
 
     # 高频采样时间轴分组高度：展开动画（220ms）期间应出现 0 < h < 终值的中间帧。
     sampler = QTimer(window)
@@ -79,29 +93,14 @@ def main():
 
     def step_initial():
         check("启动时时间轴分组隐藏", group.isHidden())
-        check("启动时底条仍可见（视图控件常驻）", bar.isVisible())
-        # page_data 位于未激活标签页，祖先不可见，用 isHidden() 判断自身显隐标志。
-        check("启动时“对时间轴积分”卡片隐藏", page_data.grp_t.isHidden())
-        check("启动时“其他积分”无时间相关项", "切片内强度积分" not in combo_items(combo))
+        check("启动时无区间组，底条折叠", bar.isHidden())
+        check("启动时悬浮视图控件仍可见", all(
+            button.isVisible()
+            for button in (overlay.switch_axes, overlay.switch_flip, overlay.rotation_button)
+        ))
+        check("启动时无来源页，时间创建动作不可用",
+              "builtin:slice_dos" not in create_action_keys(window))
 
-        # —— 单元级：过滤不丢普通选中项（EDC 瀑布图迁移后是插件动作，这里用内置项） ——
-        page_data.set_time_axis_available(True, animate=False)
-        combo.setCurrentIndex(combo_items(combo).index("单条 EDC 曲线"))
-        page_data.set_time_axis_available(False, animate=False)
-        check("过滤后普通选中项保留（单条 EDC 曲线）", combo.currentText() == "单条 EDC 曲线")
-        check("过滤后下拉剩 3 项", combo.count() == 3)
-
-        # —— 单元级：被过滤掉的选中项恢复后能选回 ——
-        page_data.set_time_axis_available(True, animate=False)
-        combo.setCurrentIndex(0)  # 切片内强度积分
-        page_data.set_time_axis_available(False, animate=False)
-        check("选中项被过滤时回退到就近项", combo.currentText() == "能级态密度")
-        page_data.set_time_axis_available(True, animate=False)
-        check("恢复后选回被过滤的选中项", combo.currentText() == "切片内强度积分")
-        check("恢复后下拉回到 4 项", combo.count() == 4)
-        page_data.set_time_axis_available(False, animate=False)
-
-        # —— 真实加载：动态数据 ——
         bar_height_samples.clear()
         sampler.start()
         window.load_data(DYNAMIC_NPZ)
@@ -116,28 +115,54 @@ def main():
         )
         check("动态数据加载后时间轴分组可见", not group.isHidden())
         check(f"动态数据加载后分组回到自然高度（{settled}px）", settled > 0)
-        check("动态数据加载后底条保持固定高度 56", bar.height() == 56)
-        check("动态数据加载后“对时间轴积分”卡片不再隐藏", not page_data.grp_t.isHidden())
-        check("动态数据加载后“其他积分”含时间相关项", "切片内强度积分" in combo_items(combo))
-        check("时间积分控件可用", page_data.btn_t_apply.isEnabled())
+        check("动态数据加载后底条保持单行高度", bar.height() == bar.HEIGHT)
+        check("普通动态 3D 主页不提供“切片内强度积分”",
+              "builtin:slice_dos" not in create_action_keys(window))
+        control = bar.time_interval_control
+        check("时间轴使用双端区间控件", control.title_label.text() == "时间延迟")
+        check("动态数据初始为合拢单帧", window.time_interval.locked and window.time_interval.length == 0.0)
+
+        spec = prepare_energy_home_slice(window)
+        check("含能量轴的 2D 主页切片状态已持久化",
+              (spec.params.get("home_slice_info") or {}).get("axis") == 0)
+        check("动态 Y-E 主页右键提供“切片内强度积分”",
+              "builtin:slice_dos" in create_action_keys(window))
+        page_count = len(window.left_workspace.page_specs)
+        control.range_slider.lock_badge.click()
+        control.input_length.setValue(control.input_length.maximum() * 0.25)
+        control.input_length.editingFinished.emit()
+        check("解锁分离后形成非零时间区间", window.time_interval.length > 0.0)
+        check("时间积分只更新当前页", window.left_workspace.current_spec() is spec
+              and len(window.left_workspace.page_specs) == page_count)
+        window.grab().save(str(args.output_dir / "time-interval-expanded.png"))
+        control.input_length.setValue(0.0)
+        control.input_length.editingFinished.emit()
+        check("长度归零后恢复合拢单帧", window.time_interval.locked
+              and window.time_interval.length == 0.0)
         window.load_data(STATIC_NPZ)
 
     def step_static_loaded():
         check("静态数据加载后时间轴分组隐藏", group.isHidden())
-        check("静态数据加载后底条与视图控件仍在", bar.isVisible() and bar.view_controls.isVisible())
-        check("静态数据加载后“对时间轴积分”卡片隐藏", page_data.grp_t.isHidden())
-        items = combo_items(combo)
-        # 未安装 EDC 瀑布图插件时“其他积分”只有 4 个内置项，静态数据再过滤掉一项。
-        check("静态数据加载后“其他积分”剩余 3 项", len(items) == 3)
-        check("静态数据加载后“切片内强度积分”已移除", "切片内强度积分" not in items)
-        check("静态数据加载后时间积分控件禁用", not page_data.btn_t_apply.isEnabled())
+        check("静态 3D 主页无区间组，底条折叠", bar.isHidden())
+        check("静态数据加载后悬浮视图控件仍在", all(
+            button.isVisible()
+            for button in (overlay.switch_axes, overlay.switch_flip, overlay.rotation_button)
+        ))
+        check("静态主页右键不提供“切片内强度积分”",
+              "builtin:slice_dos" not in create_action_keys(window))
+        check("静态数据下时间区间模型已清空", window.time_interval is None)
+        window.grab().save(str(args.output_dir / "time-axis-static.png"))
         window.load_data(DYNAMIC_NPZ)
 
     def step_dynamic_reloaded():
         check("再次加载动态数据后时间轴分组重新可见", not group.isHidden())
-        check("再次加载动态数据后卡片重新可见", not page_data.grp_t.isHidden())
-        check("再次加载动态数据后时间相关项恢复", "切片内强度积分" in combo_items(combo))
-        QTimer.singleShot(100, finish)
+        spec = prepare_energy_home_slice(window)
+        check("再次加载后含能量轴的 2D 主页切片状态已持久化",
+              (spec.params.get("home_slice_info") or {}).get("axis") == 0)
+        check("再次加载动态数据后 Y-E 主页时间创建动作恢复",
+              "builtin:slice_dos" in create_action_keys(window))
+        window.grab().save(str(args.output_dir / "time-axis-restored.png"))
+        QTimer.singleShot(500, finish)
 
     def finish():
         if failures:

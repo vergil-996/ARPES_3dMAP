@@ -1,12 +1,14 @@
+import json
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+from matplotlib import colormaps
 from PyQt5.QtWidgets import QApplication
 
-from bandscope.core.display_style import new_display_style, new_render_quality
+from bandscope.core.display_style import legacy_display_style, new_display_style, new_render_quality
 from bandscope.exporting.blender_project import (
     BlenderProjectError,
     load_blender_project,
@@ -26,9 +28,9 @@ from tests.support.blender import make_blender_snapshot, write_fake_blender_proj
 def independent_snapshot():
     snapshot = make_blender_snapshot()
     style = new_display_style()
-    style["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
     style["opacity"].update(threshold=10.0, transition=20.0, gamma=1.7, density=30.0, preset="custom")
     volume = snapshot.payload["volume"]
+    volume.flat[0] = 100.0
     info = display_level_info(volume, style)
     snapshot.levels_params = style["levels"]
     snapshot.payload.update(
@@ -58,9 +60,28 @@ class IndependentBlenderSceneTests(unittest.TestCase):
         self.assertEqual(metadata["bandscope_edit"]["format_version"], 2)
         self.assertEqual(metadata["bandscope_edit"]["display_style"]["opacity"]["density"], 30.0)
         self.assertEqual(metadata["bandscope_edit"]["render_quality"]["interpolation"], "linear")
-        self.assertEqual(metadata["bandscope_edit"]["resolved_range"], [0.0, 1.0])
+        self.assertEqual(metadata["bandscope_edit"]["resolved_range"], [
+            snapshot.payload["level_info"]["data_min"], snapshot.payload["level_info"]["data_max"],
+        ])
         self.assertEqual(metadata["opacity"]["unit_distance_display"], unit)
         np.testing.assert_array_equal(volume, original)
+
+    def test_blender_colors_use_selected_palette_interval_without_changing_alpha(self):
+        volume = np.array([[[0.0]], [[0.5]], [[1.0]]], dtype=np.float32)
+        snapshot = make_blender_snapshot(volume=volume, cmap_name="gray")
+        style = legacy_display_style((0, 50, 100), "linear", (0.2, 0.8))
+        info = display_level_info(volume, style)
+        snapshot.payload.update(
+            level_info=info,
+            display={"background_style": style, "resolved_range": (0.0, 1.0), "state": None},
+        )
+        scene = prepare_blender_scene(snapshot)
+        srgb = colormaps["gray"]([0.2, 0.5, 0.8])[:, :3]
+        expected = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+        np.testing.assert_allclose(scene.display_color.reshape(3, 3), expected, rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(scene.alpha.reshape(-1), [0.0, 0.5, 1.0], rtol=1e-6, atol=1e-7)
+        metadata = scene.metadata()
+        self.assertEqual(tuple(metadata["bandscope_edit"]["display_style"]["colormap_range"]), (0.2, 0.8))
 
     def test_schema_11_roundtrip_and_editor_restore_independent_controls(self):
         with tempfile.TemporaryDirectory() as root:
@@ -76,7 +97,9 @@ class IndependentBlenderSceneTests(unittest.TestCase):
                 display_style=snapshot.payload["display"]["background_style"],
                 render_quality=snapshot.payload["render_quality"],
             )
-            self.assertEqual(snapshot.payload["display"]["resolved_range"], (0.0, 1.0))
+            self.assertEqual(snapshot.payload["display"]["resolved_range"], (
+                snapshot.payload["level_info"]["data_min"], snapshot.payload["level_info"]["data_max"],
+            ))
             self.assertIsNotNone(prepare_blender_scene(snapshot))
 
             app = QApplication.instance() or QApplication([])
@@ -88,11 +111,36 @@ class IndependentBlenderSceneTests(unittest.TestCase):
                 app.processEvents()
             self.addCleanup(dispose)
             editor.load_project(blend)
-            self.assertFalse(editor.normalization_combo.isHidden())
+            self.assertFalse(hasattr(editor, "normalization_combo"))
+            self.assertFalse(hasattr(editor, "manual_low"))
+            self.assertFalse(hasattr(editor, "manual_high"))
             self.assertAlmostEqual(editor.opacity_spins["density"].value(), 30.0)
             editor.opacity_spins["density"].setValue(33.0)
             self.assertEqual(editor.current_snapshot.payload["display"]["background_style"]["opacity"]["density"], 33.0)
             self.assertIn("entry-001", editor._dirty_ids)
+
+    def test_old_restricted_project_relocks_to_frozen_full_range(self):
+        snapshot = independent_snapshot()
+        snapshot.locked_range = (0.0, 1.0)
+        with tempfile.TemporaryDirectory() as root:
+            blend, _metadata = write_fake_blender_project(root, [snapshot])
+            metadata_path = blend.parent / f"{blend.stem}.assets" / "scene.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            edit = metadata["entries"][0]["bandscope_edit"]
+            edit["display_style"]["normalization"] = {
+                "mode": "manual", "percentiles": (0.0, 99.5), "manual_range": (0.0, 1.0),
+            }
+            edit["resolved_range"] = [0.0, 1.0]
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            restored = load_blender_project(blend).entries[0].snapshot
+            finite = restored.payload["volume"][np.isfinite(restored.payload["volume"])]
+            expected = (float(finite.min()), float(finite.max()))
+            self.assertEqual(restored.locked_range, expected)
+            self.assertEqual(restored.payload["display"]["resolved_range"], expected)
+            self.assertEqual(restored.payload["display"]["background_style"]["normalization"], {"mode": "full"})
+            self.assertEqual(restored.payload["level_info"]["data_min"], expected[0])
+            self.assertEqual(restored.payload["level_info"]["data_max"], expected[1])
 
     def test_legacy_update_cannot_enable_independent_display(self):
         snapshot = make_blender_snapshot()

@@ -297,7 +297,8 @@ def main():
             slider.setValue((slider.minimum() + slider.maximum()) // 2)
         wait_for(
             "路径时间切帧",
-            lambda: window.active_page_spec.params.get("source_t_index") == slider.value()
+            lambda: window.active_page_spec.params.get("time_interval", {}).get("low")
+            == window.core.coords["delay"][slider.value()]
             and window._render_exact_ready,
             step_narrow,
         )

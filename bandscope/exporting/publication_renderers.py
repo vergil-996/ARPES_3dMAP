@@ -84,15 +84,18 @@ def compute_level_info(
 ) -> Dict[str, float]:
     """与 VisualEngine._level_info 数值一致，但不读写任何类级共享状态。"""
     if style is not None or resolved_range is not None:
-        from bandscope.core.display_style import legacy_display_style
+        from bandscope.core.display_style import is_independent, legacy_display_style
         from bandscope.processing.display_transfer import display_level_info, level_info
 
         selected = legacy_display_style(levels_params) if style is None else style
-        if resolved_range is None:
+        if resolved_range is None or is_independent(selected):
             return display_level_info(
                 data, selected, locked_range=locked_range, include_zero=include_zero,
             )
-        return level_info(resolved_range, selected["levels"])
+        return level_info(
+            resolved_range, selected["levels"],
+            colormap_range=selected.get("colormap_range", (0.0, 1.0)),
+        )
     black, gamma, white = (float(v) for v in levels_params)
     if locked_range is not None:
         d_min, d_max = float(locked_range[0]), float(locked_range[1])

@@ -3,7 +3,7 @@
 
 这一层是主程序与插件之间**唯一**的约定面，刻意保持窄：
 
-1. **上下文**：当前视图、能量坐标与单位、ROI、时间帧、显示方向。只读，插件
+1. **上下文**：当前视图、能量坐标与单位、ROI、扫描帧、显示方向。只读，插件
    从这里读参数即可，不复制整块强度数据。
 2. **面板注册**：插件交出一个参数面板，宿主负责挂载、显隐和生命周期。
 3. **效果提交**：插件输出与当前能量轴等长的一维倍率向量，宿主负责校验、缓存
@@ -278,6 +278,28 @@ def align_multiplier_to_voxels(multiplier, *, flipped, e_bounds, stride=1):
 
 
 @dataclass(frozen=True)
+class ScanAxisSpec:
+    values: np.ndarray
+    scan_type: str = "time"
+    name: str = "时间"
+    unit: str = ""
+    source: str = SOURCE_INDEX
+    frame_index: Optional[int] = None
+    value: Optional[float] = None
+    interval: Optional[Tuple[float, float]] = None
+
+    @property
+    def label(self) -> str:
+        if self.source == SOURCE_INDEX:
+            return f"{self.name} (index)"
+        return f"{self.name} ({self.unit})" if self.unit else self.name
+
+    @property
+    def scan_range(self) -> Optional[Tuple[float, float]]:
+        return self.interval
+
+
+@dataclass(frozen=True)
 class PluginContext:
     """插件在每个渲染周期看到的只读上下文快照。"""
 
@@ -289,6 +311,27 @@ class PluginContext:
     frame_label: str = ""
     display_e_flip: bool = False
     roi_label: str = ""
+    scan_axis: Optional[ScanAxisSpec] = None
+
+    @property
+    def scan_type(self) -> Optional[str]:
+        return self.scan_axis.scan_type if self.scan_axis is not None else None
+
+    @property
+    def scan_name(self) -> Optional[str]:
+        return self.scan_axis.name if self.scan_axis is not None else None
+
+    @property
+    def scan_unit(self) -> Optional[str]:
+        return self.scan_axis.unit if self.scan_axis is not None else None
+
+    @property
+    def scan_value(self) -> Optional[float]:
+        return self.scan_axis.value if self.scan_axis is not None else None
+
+    @property
+    def scan_range(self) -> Optional[Tuple[float, float]]:
+        return self.scan_axis.interval if self.scan_axis is not None else None
 
     @property
     def renders_volume(self) -> bool:
@@ -357,10 +400,10 @@ class Plugin(abc.ABC):
 
     # -- API 3：集成动作与派生结果（默认空实现） ---------------------------
     def integration_actions(self) -> Sequence["IntegrationAction"]:
-        """向「其他积分」下拉注册动作；默认不注册。
+        """向合法来源页的「创建结果页」菜单注册动作；默认不注册。
 
-        只对声明了派生能力（``DERIVED_CAPABILITIES``）的插件生效。动作键会以
-        ``插件 ID:动作 ID`` 存进下拉状态，动作 ID 必须跨版本稳定。
+        只对声明了派生能力（``DERIVED_CAPABILITIES``）的插件生效。宿主以
+        ``插件 ID:动作 ID`` 稳定分派，动作 ID 必须跨版本稳定。
         """
         return ()
 
@@ -511,6 +554,7 @@ class AnalysisInput2D:
     roi_label: str = ""
     scope_id: str = "full"
     source: Mapping[str, Any] = field(default_factory=dict)
+    scan_axis: Optional[ScanAxisSpec] = None
 
     @property
     def shape(self) -> Tuple[int, int]:
@@ -684,14 +728,14 @@ class PluginHostV2(PluginHost):
 # 派生结果与集成动作（API 3）
 # ---------------------------------------------------------------------------
 #
-# 这一类插件把「其他积分」下拉里的一项换成宿主托管的派生结果页（当前用于
-# EDC 瀑布图）：
+# 这一类插件把来源页「创建结果页」菜单中的一项换成宿主托管的派生结果页（当前
+# 用于 EDC 瀑布图）：
 #
 # 1. **注册动作**：插件用 :meth:`Plugin.integration_actions` 报出动作键与展示
-#    文本，宿主把它们并入下拉，以 ``插件 ID:动作 ID`` 稳定分派。
-# 2. **冻结来源**：用户执行动作时，宿主把当前 X/Y 积分页及其矩形裁剪结果冻结
-#    成 :class:`DerivedSource2D`（时间帧或时间积分区间、积分范围、裁剪范围与
-#    数据域都在创建时固定），存进结果页参数。
+#    文本，宿主把它们并入创建菜单，以 ``插件 ID:动作 ID`` 稳定分派。
+# 2. **空间来源**：用户执行动作时，宿主把当前 X/Y 积分页及其矩形裁剪结果冻结
+#    成 :class:`DerivedSource2D`（积分范围、裁剪范围与数据域固定）；时间区间由
+#    新派生页独立持有，可在本页继续编辑并重算。
 # 3. **插件计算**：宿主把冻结来源还原成只读的 :class:`DerivedInput2D`，调用
 #    :meth:`Plugin.compute_derived_result`；采样、归一化、参数校验与自动标题都
 #    由插件负责。V3 输入与结果一律使用**原始坐标排列**，E 翻转只由宿主在显示、
@@ -705,7 +749,7 @@ class PluginHostV2(PluginHost):
 #: 派生结果中的曲线偏移步长默认值，与旧瀑布图行为一致。
 DEFAULT_WATERFALL_OFFSET_STEP = 1.2
 
-#: 「其他积分」下拉里插件动作的默认排序权重；内置项按 0/10/20/30/40 排布。
+#: 「创建结果页」菜单里插件动作的默认排序权重；内置项按 0/10/20/30/40 排布。
 INTEGRATION_ACTION_DEFAULT_ORDER = 50.0
 
 
@@ -723,10 +767,10 @@ class DerivedResultError(PluginError):
 
 @dataclass(frozen=True)
 class IntegrationAction:
-    """插件注册到「其他积分」下拉的一个动作。
+    """插件注册到来源页「创建结果页」菜单的一个动作。
 
-    ``action_id`` 是稳定键：跨版本保持不变，下拉状态按 ``插件 ID:动作 ID``
-    保存与恢复；``label`` 只用于展示，可以随版本改写。
+    ``action_id`` 是稳定键：跨版本保持不变，宿主按 ``插件 ID:动作 ID``
+    分派；``label`` 只用于展示，可以随版本改写。
     """
 
     action_id: str
@@ -779,10 +823,11 @@ class DerivedAxis:
 
 @dataclass(frozen=True)
 class DerivedSource2D:
-    """宿主在创建时冻结的派生来源（可序列化，随结果页参数保存）。
+    """派生页的空间来源与当前扫描区间（可序列化，随结果页参数保存）。
 
-    冻结之后页面只依赖这份记录重算：之后切换时间帧、改动积分区间或重新裁剪
-    来源页都不会影响已有结果页。
+    空间积分范围、裁剪和数据域在创建时冻结；``time_interval`` 由派生页独立
+    持有并可继续编辑，旧帧号和上下限字段只是该区间的派生元数据。字段名沿用
+    时间接口以兼容旧插件，实际物理量由可选 ``scan_axis`` 描述。
     """
 
     plugin_id: str
@@ -797,6 +842,7 @@ class DerivedSource2D:
     frame_index: int = 0
     time_low: int = 0
     time_up: int = 0
+    time_interval: Optional[Mapping[str, Any]] = None
     scope_id: str = "full"
     crop_rect: Optional[Tuple[int, int, int, int]] = None
     source_title: str = ""
@@ -816,6 +862,9 @@ class DerivedSource2D:
             "frame_index": int(self.frame_index),
             "time_low": int(self.time_low),
             "time_up": int(self.time_up),
+            "time_interval": (
+                None if self.time_interval is None else dict(self.time_interval)
+            ),
             "scope_id": str(self.scope_id),
             "crop_rect": None if self.crop_rect is None else [int(v) for v in self.crop_rect],
             "source_title": str(self.source_title),
@@ -839,6 +888,11 @@ class DerivedSource2D:
             frame_index=int(value.get("frame_index") or 0),
             time_low=int(value.get("time_low") or 0),
             time_up=int(value.get("time_up") or 0),
+            time_interval=(
+                dict(value["time_interval"])
+                if isinstance(value.get("time_interval"), Mapping)
+                else None
+            ),
             scope_id=str(value.get("scope_id") or "full"),
             crop_rect=None if crop is None else tuple(int(v) for v in crop),
             source_title=str(value.get("source_title") or ""),
@@ -883,6 +937,7 @@ class DerivedInput2D:
     frame_label: str = ""
     roi_label: str = ""
     data_generation: int = 0
+    scan_axis: Optional[ScanAxisSpec] = None
 
     @property
     def shape(self) -> Tuple[int, int]:

@@ -8,8 +8,9 @@
 - 共享文件：主窗口、`bandscope/extensions/api.py`、更新控制器、依赖列表、两套 PyInstaller spec 和发布 CI 由集成任务统一协调。业务模块分别放入 `bandscope/extensions/`、`bandscope/updates/`；测试按责任放入 `tests/extensions/`、`tests/updates/` 和 `tests/integration/`。
 - 接手前阅读根目录及责任目录的 `AGENTS.md`，以及[目录地图](../architecture/repository-map.md)、[开发与测试](../development/testing.md)、[插件开发](../development/plugins.md)、[构建与发布](../development/releasing.md)、[当前交接](../handoffs/README.md)。重新检查工作区，按当前代码定位接入点。
 - 验收结果：统一回归套件 `python -m unittest discover -s tests -t . -v` → **979 项全部通过**（v1.12.2 发布前复跑同样全部通过）；发布链路端到端脚本 `scripts/validation/verify_plugin_release_flow.py` 全部通过（临时测试密钥，不联网）；阶段 A、B 的真实窗口验收见上一轮记录；v1.12.2 的正式签名密钥、内置公钥、签名插件包与签名目录随 Release 发布，发布门禁按设计生效。**未执行**：真实窗口的人工复核、CPU/NVIDIA 冻结包重建与冻结链路复验、线上在线安装的端到端人工验证。
-- 下一步：重建两套冻结包并复跑 `verify_frozen_plugin_flow.py` → 按[测试指南](../development/testing.md)做一轮真实窗口人工复核（含分析插件面板在二维页的显隐）→ 用 v1.12.2 客户端在官方插件页做一次真实的取目录、下载、安装与验签确认。全部完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
+- 下一步：重建两套冻结包并复跑 `verify_frozen_plugin_flow.py` → 按[测试指南](../development/testing.md)做一轮真实窗口人工复核（含「外观」页中的 API 2 分析卡片在二维页的显隐，以及 API 3 动作在合法父页右键菜单中的过滤与创建）→ 用 v1.12.2 客户端在官方插件页做一次真实的取目录、下载、安装与验签确认。全部完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
 - 交付物：功能代码、相关回归测试、视觉验收记录。本文件为本功能唯一当前计划；实施期间更新状态，完成后连同验收材料归档到 `docs/archive/`，同步计划索引。
+- 后续入口迁移（2026-11-20）：现行宿主移除「处理分析」页与「其他积分」下拉。API 2 分析卡片改挂「外观」页并仍只在二维结果页显示；API 3 动作改从合法父页的「右键 → 创建结果页」进入，旧下拉选择不再持久化或恢复为创建命令。下文关于旧面板和下拉的描述保留为阶段 A–F 的历史实施记录；后续人工验收按[测试指南](../development/testing.md)中的新入口执行，新入口的真实桌面验收尚未完成。
 
 ## 实施顺序与默认约定
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pyvista as pv
 
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.data_scope import DataScopeDescriptor, ScopedDataVolume, ScopedSpatialArray
 from bandscope.processing.denoise_engines import DenoiseEngines
 from bandscope.processing.compute_backends import ArrayLRUCache, CpuComputeBackend
@@ -133,8 +134,8 @@ class DataScopeNumericsTests(unittest.TestCase):
         angle = 17.0
         actual = backend.prepare_volume(
             self.scoped.values,
-            source_mode="frame",
-            frame_index=1,
+            t_low=1,
+            t_up=1,
             angle=angle,
             scope_bounds=self.descriptor.spatial_bounds,
             full_shape=self.descriptor.full_shape,
@@ -176,11 +177,22 @@ class DataScopeNumericsTests(unittest.TestCase):
             "delay": np.arange(self.full.shape[3]),
         }
 
-        context = analyzer._get_home_render_context(
-            AnalysisPageSpec("home", "Home", "home", "test", data_scope_id="roi-1"),
-            self.scoped,
-            coords,
+        spec = AnalysisPageSpec(
+            "home", "Home", "home", "test", data_scope_id="roi-1",
+            params={
+                "time_interval": AxisInterval.from_indices(
+                    coords["delay"], 1, 1, locked=True, axis_key="delay"
+                ).as_dict()
+            },
         )
+        analyzer.core = SimpleNamespace(
+            raw_data=self.scoped,
+            coords=coords,
+            coord_units={},
+            coord_sources={},
+            has_time_axis=True,
+        )
+        context = analyzer._get_home_render_context(spec, self.scoped, coords)
 
         np.testing.assert_array_equal(
             context["data"],

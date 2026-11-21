@@ -3,10 +3,11 @@
 
 验证点：
 1. 光标在左侧视图上，单击 `Shift` / `Ctrl` 不再切换结果页；
-2. 光标在右侧控件面板上，单击 `Shift` / `Ctrl` 不再切换控件页；
-3. 按住 `Ctrl` 在视图里拖动（原冲突场景）后松开，页面不跳；
-4. 数字键 `1`–`4` 只切换左侧结果页；光标在右侧控件面板时不切控件页；
-5. `Shift + ←` / `Shift + →` 的十帧步进不受影响（动态数据）。
+2. 光标在右侧控件面板上，单击 `Shift` / `Ctrl` 或按 `Ctrl + 2` 不切换控件页；
+3. `Ctrl + 1` 仍指向唯一的外观控制页；
+4. 按住 `Ctrl` 在视图里拖动（原冲突场景）后松开，页面不跳；
+5. 数字键 `1`–`4` 只切换左侧结果页；光标在右侧控件面板时不切控件页；
+6. `Shift + ←` / `Shift + →` 的十帧步进不受影响（动态数据）。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_page_shortcuts.py <npz路径> [--dynamic]
 """
@@ -116,11 +117,11 @@ def main():
 
         # —— 光标在右侧控件面板：同样不应翻页 ——
         park_cursor(window.page_container)
-        control_before = window.page_container.currentIndex()
+        control_before = window.page_container.currentWidget()
         for key in (Qt.Key_Shift, Qt.Key_Control):
             QTest.keyClick(window, key)
         check("光标在右侧面板时 Shift / Ctrl 单击不切控件页",
-              window.page_container.currentIndex() == control_before)
+              window.page_container.currentWidget() is control_before)
 
         # —— 原冲突场景：按住 Ctrl 拖视图后松开 ——
         park_cursor(window.left_workspace)
@@ -142,13 +143,19 @@ def main():
               window.left_workspace.current_page_id == page_ids[1])
 
         park_cursor(window.page_container)
-        control_before = window.page_container.currentIndex()
+        control_before = window.page_container.currentWidget()
+        QTest.keyClick(window, Qt.Key_2, Qt.ControlModifier)
+        check("Ctrl + 2 不再切换右侧控件页",
+              window.page_container.currentWidget() is control_before)
+        QTest.keyClick(window, Qt.Key_1, Qt.ControlModifier)
+        check("Ctrl + 1 保留唯一的外观控制页",
+              window.page_container.currentWidget() is window.page_render)
         QTest.keyClick(window, Qt.Key_2)
         check("数字键 2 不再切换右侧控件页",
-              window.page_container.currentIndex() == control_before)
+              window.page_container.currentWidget() is control_before)
         QTest.keyClick(window, Qt.Key_1)
         check("数字键 1 不再切换右侧控件页",
-              window.page_container.currentIndex() == control_before)
+              window.page_container.currentWidget() is control_before)
         QTimer.singleShot(300, guarded(step_shift_arrows))
 
     def step_shift_arrows():

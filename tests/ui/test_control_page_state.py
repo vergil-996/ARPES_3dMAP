@@ -1,8 +1,11 @@
+import copy
 import os
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.ui.blank_control_page import BlankControlPage
@@ -14,7 +17,6 @@ from bandscope.processing.denoise_config import (
     THRESHOLD_RULE_OPTIONS,
     WAVELET_OPTIONS,
 )
-from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.ui.settings_popups import DenoiseSettingsPopup
@@ -49,31 +51,14 @@ class ControlPageStateTests(unittest.TestCase):
             ["13", "47", "91"],
         )
 
-    def test_canvas_bar_and_data_state_round_trip_preserves_values(self):
+    def test_canvas_bar_state_round_trip_preserves_values(self):
         bar = TimelineBar()
-        bar.slider_time.setRange(0, 12)
-        bar.slider_time.setValue(7)
         bar.switch_axes.setChecked(False)
         bar_state = bar.export_state()
 
-        bar.slider_time.setValue(0)
         bar.switch_axes.setChecked(True)
         bar.restore_state(bar_state)
         self.assertEqual(bar.export_state(), bar_state)
-
-        data_page = DataProcessPage()
-        data_page.s_t_low.setRange(0, 12)
-        data_page.s_t_up.setRange(0, 12)
-        data_page.s_t_low.setValue(2)
-        data_page.s_t_up.setValue(9)
-        data_page.combo_other.setCurrentIndex(2)
-        data_state = data_page.export_state()
-
-        data_page.s_t_low.setValue(0)
-        data_page.s_t_up.setValue(0)
-        data_page.combo_other.setCurrentIndex(0)
-        data_page.restore_state(data_state)
-        self.assertEqual(data_page.export_state(), data_state)
 
     def test_canvas_bar_switch_restore_moves_painted_thumb(self):
         bar = TimelineBar()
@@ -91,19 +76,61 @@ class ControlPageStateTests(unittest.TestCase):
         self.assertTrue(bar.switch_axes.isChecked())
         self.assertEqual(bar.switch_axes.progress, 1.0)
 
-    def test_rotation_input_preserves_precision_and_live_preview_text(self):
+    def test_rotation_input_preserves_two_decimals_and_live_preview_text(self):
         bar = TimelineBar()
         observed = []
         bar.edit_rotation.textChanged.connect(observed.append)
-        angle = 12.3456789012
+        angle = 12.34
         bar.set_rotation_angle(angle)
-        self.assertAlmostEqual(bar.get_rotation_angle(), angle, places=10)
-        self.assertEqual(observed[-1], "12.3456789012")
+        self.assertAlmostEqual(bar.get_rotation_angle(), angle, places=2)
+        self.assertEqual(observed[-1], "12.34")
         saved = bar.export_state()
         bar.set_rotation_angle(0)
         self.assertEqual(bar.edit_rotation.text(), "0.0")
         bar.restore_state(saved)
-        self.assertAlmostEqual(bar.get_rotation_angle(), angle, places=10)
+        self.assertAlmostEqual(bar.get_rotation_angle(), angle, places=2)
+
+    def test_legacy_processing_state_restores_single_render_page(self):
+        from tests.support.view_recipe import control_window
+
+        window = control_window()
+        self.addCleanup(window.close)
+        legacy = copy.deepcopy(window._capture_control_state())
+        legacy["active_control_tab"] = 1
+        legacy["data_process"] = {
+            "combo_other": {"index": 2, "key": "builtin:edc_curve", "text": "单条 EDC 曲线"}
+        }
+        pages_before = list(window.left_workspace.page_specs)
+
+        window.initial_control_state = legacy
+        window._restore_initial_controls_after_load()
+
+        self.assertEqual(window.page_container.count(), 1)
+        self.assertEqual(window.page_container.currentIndex(), 0)
+        self.assertIs(window.page_container.widget(0), window.page_render)
+        self.assertFalse(hasattr(window, "btn_page2"))
+        self.assertFalse(hasattr(window, "button_group"))
+        self.assertFalse(hasattr(window, "_control_page_buttons"))
+        self.assertFalse(hasattr(window, "page_data"))
+        self.assertNotIn("data_process", window._capture_control_state())
+        self.assertEqual(list(window.left_workspace.page_specs), pages_before)
+
+    def test_ctrl_2_shortcut_is_removed(self):
+        from tests.support.view_recipe import control_window
+
+        window = control_window()
+        self.addCleanup(window.close)
+        shortcuts = {shortcut.key().toString() for shortcut in window._global_shortcuts}
+        self.assertIn("Ctrl+1", shortcuts)
+        self.assertNotIn("Ctrl+2", shortcuts)
+        current_index = window.page_container.currentIndex()
+        pages_before = list(window.left_workspace.page_specs)
+
+        QTest.keyClick(window, Qt.Key_2, Qt.ControlModifier)
+        QApplication.processEvents()
+
+        self.assertEqual(window.page_container.currentIndex(), current_index)
+        self.assertEqual(list(window.left_workspace.page_specs), pages_before)
 
     def test_waterfall_step_controls_moved_out_of_the_shared_page(self):
         # 瀑布图步长已随插件迁移：空白控制页不再保留步长控件与状态，
@@ -113,27 +140,23 @@ class ControlPageStateTests(unittest.TestCase):
         self.assertNotIn("waterfall", blank.export_state())
 
     def test_compact_combo_boxes_leave_room_for_current_text(self):
-        pages = [RenderControlPage(), DataProcessPage()]
-        for page in pages:
-            self.addCleanup(page.deleteLater)
-            page.resize(336, 900)
-            page.show()
-            combos = (page.combo_cmap,) if isinstance(page, RenderControlPage) else (
-                page.combo_other,
-            )
-            for combo in combos:
-                editor = combo._line_edit
-                available = (
-                    editor._calcTextRect().width()
-                    - editor._calcContainerMargins().right()
-                    - 16
-                )
-                required = editor.fontMetrics().horizontalAdvance(combo.currentText()) + 8
-                self.assertGreaterEqual(
-                    available,
-                    required,
-                    f"{combo._title} 的当前值空间不足：{combo.currentText()}",
-                )
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        page.resize(336, 900)
+        page.show()
+        combo = page.combo_cmap
+        editor = combo._line_edit
+        available = (
+            editor._calcTextRect().width()
+            - editor._calcContainerMargins().right()
+            - 16
+        )
+        required = editor.fontMetrics().horizontalAdvance(combo.currentText()) + 8
+        self.assertGreaterEqual(
+            available,
+            required,
+            f"{combo._title} 的当前值空间不足：{combo.currentText()}",
+        )
 
     def test_denoise_pages_share_defaults_and_options(self):
         blank = BlankControlPage()

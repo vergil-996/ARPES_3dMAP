@@ -116,14 +116,16 @@ class RegionControlTests(unittest.TestCase):
         host.page_render.s_up.setValue(88)
         host.page_render.combo_map.setCurrentText("sigmoid")
         host._select_enhancement_target("2")
-        self.assertEqual(host._enhancement_ui_style(), original_background)
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(original_background, colormap_range=(0., 1.)),
+        )
         host.page_render.s_low.setValue(7)
         host.page_render.s_gamma.setValue(41)
         host.page_render.s_up.setValue(74)
         host.page_render.combo_map.setCurrentText("对数")
         host._select_enhancement_target("1")
-        first_style = dict(levels=(17., 63., 88.), opacity_mode="sigmoid")
-        second_style = dict(levels=(7., 41., 74.), opacity_mode="对数")
+        first_style = dict(levels=(17., 63., 88.), opacity_mode="sigmoid", colormap_range=(0., 1.))
+        second_style = dict(levels=(7., 41., 74.), opacity_mode="对数", colormap_range=(0., 1.))
         self.assertEqual(host._enhancement_ui_style(), first_style)
         self.assertEqual(host.page_render.s_low._value_label.text(), "17")
         self.assertEqual(host.page_render.s_gamma._value_label.text(), "63")
@@ -131,7 +133,9 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual([r["style"] for r in state["regions"]], [first_style, second_style])
         self.assertEqual(state["background"], original_background)
         host._select_enhancement_target("")
-        self.assertEqual(host._enhancement_ui_style(), original_background)
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(original_background, colormap_range=(0., 1.)),
+        )
         host._select_enhancement_target("2")
         self.assertEqual(host._enhancement_ui_style(), second_style)
 
@@ -181,10 +185,13 @@ class RegionControlTests(unittest.TestCase):
         host.page_render.s_up.setValue(96)
         host.page_render.combo_map.setCurrentText("幂函数")
         host._commit_enhancement_controls()
-        self.assertEqual(state["background"], dict(levels=(6., 54., 96.), opacity_mode="幂函数"))
+        self.assertEqual(state["background"], dict(levels=(6., 54., 96.), opacity_mode="幂函数", colormap_range=(0., 1.)))
         self.assertEqual(state["regions"], original_regions)
         host._select_enhancement_target("1")
-        self.assertEqual(host._enhancement_ui_style(), original_regions[0]["style"])
+        self.assertEqual(
+            host._enhancement_ui_style(),
+            dict(original_regions[0]["style"], colormap_range=(0., 1.)),
+        )
 
     def test_page_capture_stores_background_controls_and_selected_region_separately(self):
         host = self.host
@@ -200,9 +207,9 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual([saved[key]["value"] for key in ("s_low", "s_gamma", "s_up")], [6, 54, 96])
         self.assertEqual(saved["combo_map"], "幂函数")
         state = host._enhancement_state()
-        self.assertEqual(state["regions"][0]["style"], dict(levels=(22., 50., 100.), opacity_mode="sigmoid"))
+        self.assertEqual(state["regions"][0]["style"], dict(levels=(22., 50., 100.), opacity_mode="sigmoid", colormap_range=(0., 1.)))
         self.assertEqual(state["regions"][1]["style"], dict(levels=(0., 50., 100.), opacity_mode="线性"))
-        self.assertEqual(state["background"], dict(levels=(6., 54., 96.), opacity_mode="幂函数"))
+        self.assertEqual(state["background"], dict(levels=(6., 54., 96.), opacity_mode="幂函数", colormap_range=(0., 1.)))
 
     def test_deletion_restores_next_regions_controls_and_keeps_background_mapping(self):
         host = self.host
@@ -427,7 +434,9 @@ class RegionControlTests(unittest.TestCase):
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         state = host._enhancement_state()
         self.assertIsNone(state["selected_id"])
-        self.assertEqual(host._enhancement_ui_style(), state["background"])
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(state["background"], colormap_range=(0., 1.)),
+        )
         self.assertEqual(state["regions"][0]["style"]["levels"][0], 21)
         self.assertEqual(state["regions"][0]["style"]["opacity_mode"], "sigmoid")
 
@@ -445,14 +454,24 @@ class RegionControlTests(unittest.TestCase):
         state = self._set_distinct_styles()
         before = copy.deepcopy(state)
         host._select_enhancement_target(SHOW_ALL_REGIONS_ID)
-        self.assertEqual(host._enhancement_ui_style(), before["background"])
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(before["background"], colormap_range=(0., 1.)),
+        )
         host._enhancement_export_render_state(host.page_render.export_state())
         host._select_enhancement_target("2")
-        self.assertEqual(host._enhancement_ui_style(), before["regions"][1]["style"])
+        self.assertEqual(
+            host._enhancement_ui_style(),
+            dict(before["regions"][1]["style"], colormap_range=(0., 1.)),
+        )
         host._set_enhancement_show_all(True)
-        self.assertEqual(host._enhancement_ui_style(), before["background"])
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(before["background"], colormap_range=(0., 1.)),
+        )
         host._set_enhancement_show_all(False)
-        self.assertEqual(host._enhancement_ui_style(), before["regions"][1]["style"])
+        self.assertEqual(
+            host._enhancement_ui_style(),
+            dict(before["regions"][1]["style"], colormap_range=(0., 1.)),
+        )
         self.assertEqual(state["background"], before["background"])
         self.assertEqual(state["regions"], before["regions"])
         self.assertEqual(state["revision"], before["revision"])
@@ -466,7 +485,9 @@ class RegionControlTests(unittest.TestCase):
         host._sync_enhancement_controls(host.active_page_spec, host.current_render_context)
         self.assertIsNone(state["selected_id"])
         self.assertFalse(state["show_all_regions"])
-        self.assertEqual(host._enhancement_ui_style(), state["background"])
+        self.assertEqual(
+            host._enhancement_ui_style(), dict(state["background"], colormap_range=(0., 1.)),
+        )
         self.assertEqual(state["regions"], before)
         combo = host.page_render.region_combo
         self.assertEqual(combo.itemData(combo.currentIndex()), "")
@@ -480,7 +501,7 @@ class RegionControlTests(unittest.TestCase):
         host.page_render.s_gamma.setValue(68)
         host.page_render.s_up.setValue(92)
         My3DAnalyzer.schedule_render_levels_refresh(host, 92)
-        expected = dict(levels=(16., 68., 92.), opacity_mode="幂函数")
+        expected = dict(levels=(16., 68., 92.), opacity_mode="幂函数", colormap_range=(0., 1.))
         self.assertEqual(state["background"], expected)
         self.assertTrue(all(r["style"] == expected for r in state["regions"]))
         host._select_enhancement_target("1")
@@ -514,7 +535,7 @@ class RegionControlTests(unittest.TestCase):
         host._select_enhancement_target(SHOW_ALL_REGIONS_ID)
         host.page_render.combo_map.setCurrentText("线性")
         My3DAnalyzer.flush_render_levels_refresh(host)
-        expected = dict(levels=(4., 56., 96.), opacity_mode="线性")
+        expected = dict(levels=(4., 56., 96.), opacity_mode="线性", colormap_range=(0., 1.))
         self.assertTrue(state["common"])
         self.assertEqual(state["common_style"], expected)
         self.assertEqual(state["background"], expected)
@@ -558,6 +579,7 @@ class RegionControlTests(unittest.TestCase):
         host._capture_control_state = lambda: {}
         host._page_axis_source_mode = lambda _spec: "frame"
         host._store_control_state = lambda spec, state: spec.params.update(control_state=state)
+        host._seed_time_interval_for_spec = lambda spec: None
         host._seed_control_state_for_spec = lambda spec: My3DAnalyzer._seed_control_state_for_spec(host, spec)
         host._integral_length = lambda low, up: up-low+1
         derived = My3DAnalyzer._build_axis_integral_spec(host)
@@ -679,7 +701,10 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(host._enhancement_state()["selected_id"], "1")
         self.assertFalse(host._enhancement_state()["show_all_regions"])
         self.assertEqual(combo.itemData(combo.currentIndex()), "1")
-        self.assertEqual(host._enhancement_ui_style(), host._enhancement_selected()["style"])
+        self.assertEqual(
+            host._enhancement_ui_style(),
+            dict(host._enhancement_selected()["style"], colormap_range=(0., 1.)),
+        )
         host._set_enhancement_show_all(True)
         host._pick_enhancement_region(hidden_click)
         self.app.processEvents()
@@ -800,7 +825,7 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(VisualEngine.locked_data_range(), (0., 35.))
         self.assertEqual(host._enhancement_selected()["name"], "R1")
         self.assertEqual(host._enhancement_selected()["style"], host._enhancement_state()["background"])
-        self.assertEqual(host._enhancement_selected()["style"], dict(levels=(14., 67., 83.), opacity_mode="sigmoid"))
+        self.assertEqual(host._enhancement_selected()["style"], dict(levels=(14., 67., 83.), opacity_mode="sigmoid", colormap_range=(0., 1.)))
         background = copy.deepcopy(host._enhancement_state()["background"])
         first_id = host._enhancement_selected()["region_id"]
         host.page_render.s_low.setValue(31)
@@ -809,7 +834,7 @@ class RegionControlTests(unittest.TestCase):
         self.assertEqual(VisualEngine.locked_data_range(), (0., 35.))
         self.assertEqual(len(host._enhancement_state()["regions"]), 2)
         self.assertNotEqual(host._enhancement_selected()["region_id"], first_id)
-        self.assertEqual(host._enhancement_ui_style(), dict(levels=(31., 67., 83.), opacity_mode="对数"))
+        self.assertEqual(host._enhancement_ui_style(), dict(levels=(31., 67., 83.), opacity_mode="对数", colormap_range=(0., 1.)))
         self.assertEqual(host._enhancement_selected()["style"], host._enhancement_ui_style())
         self.assertEqual(host._enhancement_state()["background"], background)
 

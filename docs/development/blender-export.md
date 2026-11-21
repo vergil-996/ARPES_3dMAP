@@ -123,7 +123,7 @@ BandScope 可以把一个或多个冻结的 3D 页面转换为可继续创作的
 
 schema 6 及更早工程只做有限恢复：可读取强度、坐标和已有色阶换算信息；未保存的 colormap 必须重新选择，并显示无法判断烘焙内容的通用警告。完整局部增强规则、插件参数、原始处理链和时间轴恢复不在当前范围内。
 
-schema 7–10 工程仍可打开和原位更新：缺少数据体外观时按自发光解释，宿主保留原版本号、原预设、材质、灯光和布局，不升级 schema，也不补柔和受光灯组。需要独立透明度、归一化、新薄板／文本预设或柔和受光时请重新导出，或继续在 Blender 中编辑已有对象。
+schema 7–10 工程仍可打开和原位更新：缺少数据体外观时按自发光解释，宿主保留原版本号、原预设、材质、灯光和布局，不升级 schema，也不补柔和受光灯组。需要独立不透明度、新薄板／文本预设或柔和受光时请重新导出，或继续在 Blender 中编辑已有对象。
 
 新工程为 **schema 11、显示编辑格式 2**。`bandscope_edit` 除原色带、三点色阶、锁定范围和旧映射曲线外，还保存独立显示样式、已解析强度范围及渲染质量。schema 10 起支持独立显示编辑；schema 7–9 不接受原位启用独立显示或显式质量配置。
 
@@ -157,7 +157,7 @@ schema 7–10 工程仍可打开和原位更新：缺少数据体外观时按自
 - 工程级 `project.presets` 只记录五项用户预设，其中 `thin_boxes` 控制全部八块薄板，`text_presets` 控制全部十种文本；`project.layout.preset_owner` 记录唯一持有共享预设对象的首个条目，后续条目的预设配置仅用于兼容回读与原位更新，不对应额外对象；`project.box_layout` 记录布局 ID；`project.box_materials` 以八种材质 ID 为键记录标签、默认参数、所需灯光和推荐采样；`project.text_styles` 与 `project.text_fonts` 记录文本注册表和字体资产；`project.display_edit_format=2` 标记当前显示编辑契约。
 - `project.volume_shading` 保存 `emission`／`hybrid_lit` 模式及生成时解析后的材质参数；`project.render.volume_bounces` 和采样设置记录对应渲染要求。
 - 每个条目的 `volume_lighting` 保存灯组、专用接收者、灯对象及生成时的实际局部位置、尺寸、颜色和功率。用户随后在 Blender 中手调节点或灯光不会回写到这些字段，原位更新会原样保留它们。
-- 每个条目的 `bandscope_edit.display_style` 保存独立／兼容模式、归一化策略及透明度参数，`render_quality` 保存插值与静止质量，`resolved_range` 保存实际已解析强度范围。schema 10 及以上工程可调整这些设置，但不允许把旧工程原位升级成独立显示。
+- 每个条目的 `bandscope_edit.display_style` 保存独立／兼容模式、完整范围策略及透明度参数，`render_quality` 保存插值与静止质量，`resolved_range` 保存实际已解析强度范围。schema 10 及以上工程可调整这些设置，但不允许把旧工程原位升级成独立显示。编辑器不再提供百分位或手动范围选项；读取旧独立显示时忽略受限范围快照并按冻结体完整范围重算，旧锁定也按该完整范围重建。
 - 每个条目的 `box_presets` 包含八条记录，分别记录 `preset_group=thin_boxes`、`layout_slot=right/front`、`group_height_offset`（右侧 0、前侧 0.175）、实际中心、尺寸、厚度、层间距、统一橙色、是否与数据体相交以及材质参数；`box_lighting` 记录灯组、接收者 Collection 和灯光对象名。
 - 每个条目的 `text_presets` 包含十条记录，统一 `body=A`、`preset_group=text_presets`，并记录样式、字体、材质、两行五列的位置和实际中心；`text_layout` 记录下方布局、相机朝向和 0.12 字高，`text_lighting` 记录独立文本灯组和接收者。
 - `arrays.npz` 保存处理后强度、显示颜色、alpha 和体密度，供复核与重新转换。重新调色以强度数组和编辑参数为准，不从最终 RGB 或 Blender 材质反推科学强度。

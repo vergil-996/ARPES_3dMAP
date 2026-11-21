@@ -225,6 +225,8 @@ class BlenderRecipeMixin:
             view_state["opacity_multiplier"] = copy.deepcopy(override["opacity_multiplier"])
         if display:
             view_state["display"] = display
+        if override.get("relock_full_range"):
+            view_state["relock_full_range"] = True
         view_state["render_quality"] = copy.deepcopy(override.get("render_quality"))
 
     def _apply_blender_group_workspace(self, prepared):

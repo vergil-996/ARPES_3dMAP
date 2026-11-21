@@ -1,10 +1,24 @@
 """画布右侧的视角预设与常用操作工具条。"""
-from PyQt5.QtCore import QRectF, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen, QRegion
-from PyQt5.QtWidgets import QFrame, QVBoxLayout
+from PyQt5.QtCore import QPoint, QRectF, QSize, Qt, QSignalBlocker, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QRegion
+from PyQt5.QtWidgets import QApplication, QFrame, QVBoxLayout
 
 from bandscope.ui import theme
+from bandscope.ui.rotation_dial import RotationDialPanel
 from bandscope.ui.ui_controls import ActionButton
+
+
+class _RotationActionButton(ActionButton):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        painter.setPen(QColor(theme.ACCENT_ON if self.isChecked() else theme.TEXT_2))
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(9)
+        painter.setFont(font)
+        painter.drawText(self.rect().adjusted(12, 10, -2, -1), Qt.AlignRight | Qt.AlignBottom, "Z")
 
 
 class CanvasToolOverlay(QFrame):
@@ -15,6 +29,8 @@ class CanvasToolOverlay(QFrame):
     view_preset_requested = pyqtSignal(str)
     slice_requested = pyqtSignal(str)
     return_3d_requested = pyqtSignal()
+    rotation_preview = pyqtSignal(float)
+    rotation_committed = pyqtSignal(float)
 
     def __init__(self, parent, crop_button, erase_button, export_button):
         super().__init__(parent)
@@ -29,6 +45,7 @@ class CanvasToolOverlay(QFrame):
         layout.setSpacing(4)
         self._3d_active = False
         self._return_active = False
+        self._separators = []
 
         self.preset_container = QFrame(self)
         preset_layout = QVBoxLayout(self.preset_container)
@@ -59,6 +76,39 @@ class CanvasToolOverlay(QFrame):
         layout.addWidget(self.reset_button, 0, Qt.AlignHCenter)
         layout.addWidget(self._separator(), 0, Qt.AlignHCenter)
 
+        self.view_container = QFrame(self)
+        view_layout = QVBoxLayout(self.view_container)
+        self._view_layout = view_layout
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(4)
+        self.switch_axes = ActionButton(self.view_container)
+        self.switch_axes.setCheckable(True)
+        self._configure_button(self.switch_axes, "显示坐标", "ic_fluent_grid_regular")
+        self.switch_axes.setToolTip("显示坐标")
+        self.switch_flip = ActionButton(self.view_container)
+        self.switch_flip.setCheckable(True)
+        self._configure_button(self.switch_flip, "图像翻转", "ic_fluent_flip_horizontal_regular")
+        self.switch_flip.setToolTip("图像翻转")
+        self.rotation_button = _RotationActionButton(self.view_container)
+        self.rotation_button.setCheckable(True)
+        self._configure_button(
+            self.rotation_button, "Z 轴旋转", "ic_fluent_arrow_rotate_clockwise_regular"
+        )
+        for button in (self.switch_axes, self.switch_flip, self.rotation_button):
+            view_layout.addWidget(button, 0, Qt.AlignHCenter)
+        layout.addWidget(self.view_container, 0, Qt.AlignHCenter)
+        layout.addWidget(self._separator(), 0, Qt.AlignHCenter)
+
+        self.rotation_panel = RotationDialPanel(self)
+        self.edit_rotation = self.rotation_panel.edit_rotation
+        self._suppress_rotation_click = False
+        self.rotation_button.clicked.connect(self.toggle_rotation_panel)
+        self.rotation_panel.rotation_preview.connect(self.rotation_preview)
+        self.rotation_panel.rotation_committed.connect(self.rotation_committed)
+        self.rotation_panel.angle_presented.connect(self._on_rotation_angle_presented)
+        self.rotation_panel.closed.connect(self._on_rotation_panel_closed)
+        self._on_rotation_angle_presented(0.0)
+
         self.crop_button = crop_button
         self.erase_button = erase_button
         self.export_button = export_button
@@ -87,7 +137,7 @@ class CanvasToolOverlay(QFrame):
         button.setCheckable(True)
         button.setToolTip("折线路径切片：左键加点，双击节点改名，右键生成")
         layout = self.layout()
-        layout.insertWidget(3, button, 0, Qt.AlignHCenter)
+        layout.insertWidget(max(0, layout.indexOf(self.crop_button)), button, 0, Qt.AlignHCenter)
         button.hide()
         self.adjustSize()
         self.reposition()
@@ -98,6 +148,71 @@ class CanvasToolOverlay(QFrame):
             button.setVisible(bool(available))
             self.adjustSize()
             self.reposition()
+
+    def rotation_angle(self):
+        return self.rotation_panel.current_angle()
+
+    def set_rotation_angle(self, angle):
+        self.rotation_panel.set_angle(angle)
+
+    def toggle_rotation_panel(self):
+        if self._suppress_rotation_click:
+            self._suppress_rotation_click = False
+            return
+        if self.rotation_panel.isVisible():
+            self.close_rotation_panel()
+        else:
+            self.show_rotation_panel()
+
+    def show_rotation_panel(self):
+        self._suppress_rotation_click = False
+        self._position_rotation_panel()
+        self.rotation_panel.show()
+        self.rotation_panel.raise_()
+        self._sync_rotation_button()
+
+    def close_rotation_panel(self, *, commit=True):
+        if not self.rotation_panel.isVisible():
+            self._sync_rotation_button()
+            return
+        if commit:
+            self.rotation_panel.finish_editing()
+            self.rotation_panel.hide()
+        else:
+            self.rotation_panel.dismiss()
+        self._sync_rotation_button()
+
+    def _position_rotation_panel(self):
+        panel = self.rotation_panel
+        panel.adjustSize()
+        anchor = self.rotation_button.mapToGlobal(QPoint(0, 0))
+        x = anchor.x() - panel.width() - 8
+        y = anchor.y() + (self.rotation_button.height() - panel.height()) // 2
+        screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            x = max(available.left(), min(x, available.right() - panel.width() + 1))
+            y = max(available.top(), min(y, available.bottom() - panel.height() + 1))
+        panel.move(x, y)
+
+    def _on_rotation_angle_presented(self, angle):
+        text = f"{float(angle):.2f}".rstrip("0").rstrip(".")
+        text = text.replace("-", "−")
+        self.rotation_button.setToolTip(f"Kx–Ky 平面旋转 {text}°")
+        self._sync_rotation_button()
+
+    def _sync_rotation_button(self):
+        blocker = QSignalBlocker(self.rotation_button)
+        self.rotation_button.setChecked(abs(self.rotation_angle()) >= 0.005)
+        del blocker
+
+    def _on_rotation_panel_closed(self):
+        self._sync_rotation_button()
+        if not QApplication.mouseButtons() & Qt.LeftButton:
+            return
+        local = self.rotation_button.mapFromGlobal(QCursor.pos())
+        if self.rotation_button.rect().contains(local):
+            self._suppress_rotation_click = True
 
     def _rounded_rect_path(self, pen_inset=0):
         inset = self._MASK_INSET + pen_inset
@@ -136,6 +251,10 @@ class CanvasToolOverlay(QFrame):
         super().showEvent(event)
         self._update_corner_mask()
 
+    def hideEvent(self, event):
+        self.close_rotation_panel(commit=False)
+        super().hideEvent(event)
+
     @staticmethod
     def _configure_button(button, name, icon):
         button.setProperty("compactIconButton", True)
@@ -146,13 +265,14 @@ class CanvasToolOverlay(QFrame):
         button.setIconSize(QSize(16, 16))
         button.setFixedSize(28, 26)
         button.setCursor(Qt.PointingHandCursor)
+        button.setFocusPolicy(Qt.StrongFocus)
         theme.style_push_button(button, "quiet")
 
-    @staticmethod
-    def _separator():
+    def _separator(self):
         line = QFrame()
         line.setFixedSize(18, 1)
         line.setStyleSheet(f"background-color: {theme.BORDER_HEX}; border: none;")
+        self._separators.append(line)
         return line
 
     def _select_preset(self, preset):
@@ -196,8 +316,33 @@ class CanvasToolOverlay(QFrame):
             return
         for key, button in self.preset_buttons.items():
             button.setVisible(self._3d_active or (key == "3d" and self._return_active))
-        show_presets = (self._3d_active and parent.height() >= 320) or self._return_active
-        self.preset_container.setVisible(show_presets)
-        self.adjustSize()
-        self.move(max(0, parent.width() - self.width() - 12), 12)
+        available_height = max(0, parent.height() - 24)
+        padding = 4 + self._MASK_INSET
+        layout = self.layout()
+        layout.setSpacing(4)
+        self._view_layout.setSpacing(4)
+        layout.setContentsMargins(padding, padding, padding, padding)
+        for separator in self._separators:
+            separator.show()
+
+        presets_allowed = self._3d_active or self._return_active
+        self.preset_container.setVisible(presets_allowed)
+        layout.activate()
+        full_height = layout.sizeHint().height()
+        self.preset_container.setVisible(presets_allowed and full_height <= available_height)
+        layout.activate()
+        compact = layout.sizeHint().height() > available_height
+
+        layout.setSpacing(0 if compact else 4)
+        self._view_layout.setSpacing(0 if compact else 4)
+        layout.setContentsMargins(
+            padding, 2 if compact else padding, padding, 2 if compact else padding
+        )
+        for separator in self._separators:
+            separator.setVisible(not compact)
+        layout.activate()
+        self.resize(layout.sizeHint())
+        self.move(max(0, parent.width() - self.width() - 12), 2 if compact else 12)
         self.raise_()
+        if self.rotation_panel.isVisible():
+            self._position_rotation_panel()

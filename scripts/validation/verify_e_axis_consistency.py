@@ -154,7 +154,6 @@ def main():
               sorted((axis_values(rendered, 2)[0], axis_values(rendered, 2)[-1])))
         screenshot("roi_flipped")
         window.btn_tb_crop.setChecked(False)
-        window._select_control_page(1)
         from scripts.validation._common import create_axis_slice
         create_axis_slice(window, 0)
         QTimer.singleShot(1000, lambda: ready("2d", analysis))
@@ -165,10 +164,19 @@ def main():
         check("2D picture snapshot matches visible image", snapshot.payload["image"], window.ax_2d.images[0].get_array())
         check("2D plugin data matches visible E orientation", plugin.data, snapshot.payload["image"].T)
         screenshot("2d_flipped")
-        spec = window._build_energy_dos_spec()
-        if spec is None:
-            raise RuntimeError("Could not create Energy DOS")
-        window.left_workspace.add_page(spec)
+        parent = window.left_workspace.current_spec()
+        page_count = len(window.left_workspace.page_specs)
+        window._on_page_create_requested(parent.page_id, "builtin:energy_dos")
+        created = window.left_workspace.current_spec()
+        passed = (
+            created is not None
+            and created is not parent
+            and created.source_page_id == parent.page_id
+            and len(window.left_workspace.page_specs) == page_count + 1
+        )
+        check("Energy DOS context action creates a child page", [passed], [True])
+        if not passed:
+            raise RuntimeError("Could not create Energy DOS from the context action")
         QTimer.singleShot(1000, lambda: ready("1d", curve))
 
     def curve():

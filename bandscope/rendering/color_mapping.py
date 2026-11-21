@@ -6,7 +6,7 @@ from matplotlib.colors import Colormap, to_rgba
 
 
 class LeveledColormap(Colormap):
-    """Apply Gamma to floating-point coordinates, then sample the full palette.
+    """Apply Gamma, then sample the selected interval of the base palette.
 
     A sampled Gamma palette quantizes the input before applying the curve.
     In particular, all inputs below 1/256 otherwise share the first color,
@@ -25,6 +25,10 @@ class LeveledColormap(Colormap):
         self.base_cmap = palette.copy()
         self.level_info = dict(level_info)
         self.gamma_power = power
+        self.colormap_range = (
+            float(level_info.get("colormap_start", 0.0)),
+            float(level_info.get("colormap_end", 1.0)),
+        )
         self._reverse = False
         self._rgba_bad = tuple(palette.get_bad())
         self._rgba_under = tuple(palette.get_under())
@@ -35,7 +39,9 @@ class LeveledColormap(Colormap):
         clipped = np.clip(values, 0.0, 1.0)
         if self._reverse:
             clipped = 1.0 - clipped
-        return np.power(clipped, self.gamma_power)
+        mapped = np.power(clipped, self.gamma_power)
+        low, high = self.colormap_range
+        return low + (high - low) * mapped
 
     def _init(self):
         # Matplotlib also uses the LUT for inspection and colorbar metadata.

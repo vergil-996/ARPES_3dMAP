@@ -13,14 +13,14 @@
 
 ## 在另一台电脑使用
 
-复现文件是带缩进的 UTF-8 JSON，不保存原始数据源路径。每次加载都必须自行选择主原始 NPZ，即使 JSON 与本机原始数据仍在原位置也不例外。程序仍会核对所选文件的 SHA-256 和 NPZ 的数组、轴映射及坐标信息；同名但内容不同的数据不会被当作完整复现。旧版 JSON 中即使保留了路径，也不会用于自动定位数据源。
+复现文件是带缩进的 UTF-8 JSON，不保存原始数据源路径。每次加载都必须自行选择主原始 NPZ，即使 JSON 与本机原始数据仍在原位置也不例外。程序仍会核对所选文件的 SHA-256 和 NPZ 的数组、轴映射及坐标信息；同名但内容不同的数据不会被当作完整复现。新来源 ID 由文件 SHA-256 与轴分配共同确定，因此同一文件的两种分配是两种独立来源；旧记录的来源 ID 与时间含义保持兼容。旧版 JSON 中即使保留了路径，也不会用于自动定位数据源。
 
 不必复制导出的图片才能加载 JSON，但通常应将二者一起分享。JSON 不包含原始三维或四维数据，需要另行提供主原始 NPZ；从 MAT 转换加载时，记录的是转换后的 NPZ。
 
 ## 保存范围与恢复能力
 
-- 保存生成目标结果所需的有效处理配方和输入依赖，包括帧、积分、旋转、去噪、二阶导、ROI、裁剪/裁空，以及显示与出版设置；画布 XY／XZ／YZ 切片还保存冻结的三维来源参数、有效法向范围和精确物理端点。不记录每次拖动滑块的过程，也不保存无关工作区分支。
-- 黑白灰场既保存控件值，也保存导出时解析出的强度值和 gamma。局部增强保存背景与各区域的独立范围和样式。
+- 保存生成目标结果所需的有效处理配方和输入依赖，包括原始维度与坐标变量分配、扫描类型／名称／单位、逐页物理扫描区间、空间积分、旋转、去噪、二阶导、ROI、裁剪/裁空，以及显示与出版设置；画布 XY／XZ／YZ 切片还保存空间来源参数、有效法向范围和精确物理端点。旧独立时间积分页在导入时迁移为普通主页及其时间区间，新记录不再写出该页型。不记录每次拖动滑块的过程，也不保存无关工作区分支。
+- 黑白灰场既保存控件值，也保存导出时解析出的强度值和 gamma。局部增强保存背景与各区域的独立范围和样式。当前文件为 schema 4；读取 schema 1–3 时先校验原始摘要，再迁移并重写关联配方 ID。旧独立模式的百分位、手动和缺省归一化策略统一转为完整范围，相关区域锁定在恢复帧上重算；旧背景锁定也会按恢复帧的完整范围重新建立。
 - 相机保存方位角、仰角、滚转角、距离，并保存观察中心、完整向量、投影和缩放等参数；鼠标平移后的构图也可恢复。
 - 导出面板使用冻结预览。打开面板后切页或改变帧，当前导出的图片与 JSON 仍对应原预览；点击“更新预览”才同时重新捕获。
 - 内置处理可重新计算。旧式插件分析、缺失或版本不匹配的派生插件使用必要的曲线/派生结果快照，页眉标注“已保存结果（无法重新计算）”；需要插件重新计算的参数编辑被禁用。
@@ -53,6 +53,7 @@ Blender 导出面板的“同时保存复现文件”同样默认开启并只在
 
 ```powershell
 python -m unittest tests.core.test_view_recipe tests.core.test_blender_recipe tests.exporting.test_recipe_export tests.exporting.test_recipe_export_ui tests.integration.test_view_recipe_roundtrip tests.integration.test_blender_recipe_roundtrip -v
+python -m unittest tests.integration.test_axis_assignment -v
 python -m unittest discover -s tests -t . -v
 python scripts/validation/verify_view_recipe.py
 python scripts/validation/blender_recipe_acceptance.py --blender D:/blender/blender.exe

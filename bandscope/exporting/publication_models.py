@@ -464,7 +464,14 @@ _AXIS_BASE_NAMES = {
 }
 
 
-def axis_label(axis_key: str, source: str, unit: Optional[str] = None) -> str:
+def axis_label(
+    axis_key: str,
+    source: str,
+    unit: Optional[str] = None,
+    *,
+    name: Optional[str] = None,
+    use_time_default: bool = True,
+) -> str:
     """按坐标来源生成轴标签。
 
     - source == "file" 且有显式单位元数据 → "kx (Å⁻¹)" 形式；
@@ -472,9 +479,12 @@ def axis_label(axis_key: str, source: str, unit: Optional[str] = None) -> str:
     - 其它（索引回退）→ 中性 index 标签，绝不编造 eV/Å⁻¹/fs。
     """
     base, index_name = _AXIS_BASE_NAMES.get(axis_key, (str(axis_key), f"{axis_key} (index)"))
+    if name is not None and str(name).strip():
+        base = str(name).strip()
+        index_name = f"{base} (index)"
     if source != "file":
         return index_name
-    unit = resolve_axis_unit(axis_key, unit)
+    unit = resolve_axis_unit(axis_key if use_time_default else "scan", unit)
     if unit:
         return f"{base} ({unit})"
     return base

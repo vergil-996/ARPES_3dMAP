@@ -279,6 +279,44 @@ class FreezeSourceTests(unittest.TestCase):
         with self.assertRaises(DerivedSourceUnavailable):
             controller.freeze_source(spec, "edc_test", "create")
 
+    def test_freeze_rechecks_axis_after_current_controls_are_resolved(self):
+        spec = source_page()
+        window, _plugin, controller = make_controller([spec])
+        resolve = window._resolved_axis_integral_params
+
+        def resolve_current_axis(current_spec):
+            current_spec.params["axis_index"] = 2
+            return resolve(current_spec)
+
+        window._resolved_axis_integral_params = resolve_current_axis
+        with self.assertRaises(DerivedSourceUnavailable):
+            controller.freeze_source(spec, "edc_test", "create")
+
+    def test_can_freeze_source_is_lightweight_and_uses_the_same_rules(self):
+        window, _plugin, controller = make_controller()
+
+        def unexpected_resolve(_spec):
+            raise AssertionError("轻量检查不应解析或持久化页面参数")
+
+        window._resolved_axis_integral_params = unexpected_resolve
+        self.assertTrue(controller.can_freeze_source(window.left_workspace.current))
+        self.assertTrue(
+            controller.can_freeze_source(source_page(page_kind="axis_integral_crop"))
+        )
+        self.assertFalse(controller.can_freeze_source(None))
+        self.assertFalse(controller.can_freeze_source(source_page(page_kind="home")))
+        self.assertFalse(
+            controller.can_freeze_source(source_page(params={"axis_index": 2}))
+        )
+        self.assertFalse(
+            controller.can_freeze_source(
+                source_page(params={"crop_regions": [{"operation": "erase"}]})
+            )
+        )
+        self.assertFalse(
+            controller.can_freeze_source(source_page(params={"axis_index": "invalid"}))
+        )
+
 
 class BuildInputTests(unittest.TestCase):
     def test_input_axes_units_and_readonly(self):

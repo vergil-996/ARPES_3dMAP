@@ -29,8 +29,8 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 | `data_snapshot_2d` | 抓取已完成二维结果的只读快照（API 2） |
 | `analysis_task` | 提交后台分析任务（API 2） |
 | `result_curve_1d` | 交回一维曲线，由宿主建结果页（API 2） |
-| `integration_action` | 向「其他积分」下拉注册动作（API 3） |
-| `derived_result` | 基于宿主冻结的来源做派生计算（API 3） |
+| `integration_action` | 向合法父页右键菜单的「创建结果页」子菜单注册动作（API 3） |
+| `derived_result` | 基于宿主冻结的空间来源与逐页时间区间做派生计算（API 3） |
 | `plugin_settings` | 在插件管理里提供设置界面与默认值（API 3） |
 
 安装、启动加载、构建脚本、官方目录筛选与主程序升级评估共用同一套判定函数（`bandscope.extensions.compat`），同一份声明到哪儿都是同一个结论和同一句原因。构建脚本会在打包前用当前宿主核对一遍：不通过就不出包。
@@ -41,7 +41,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 
 ### 渲染效果（API 1）
 
-上下文、面板注册、刷新请求、页面状态与不透明度倍率。面板挂到 3D 场景的「渲染控制」页，只在三维视图显示。
+上下文、面板注册、刷新请求、页面状态与不透明度倍率。面板挂到 3D 场景的「外观」页，只在三维视图显示。
 
 ### 分析任务（API 2）
 
@@ -50,7 +50,7 @@ from bandscope.extensions.ui import theme, ActionButton, SyncedSlider, SyncedSwi
 ```python
 class Plugin(Plugin):
     def create_panel(self, host: PluginHostV2):
-        panel = MyPanel(host)          # 面板挂在「处理分析」页，只在 2D 结果页显示
+        panel = MyPanel(host)          # 面板挂在「外观」页，只在 2D 结果页显示
         return panel
 
 def run_job(snapshot, params, cancel):        # 纯数值，工作线程里执行
@@ -72,10 +72,13 @@ host.cancel_analysis(handle)
 - 结果由宿主校验：x/y 必须一维、非空、等长，x 必须有限，y 允许 `NaN` 表示缺测但拒绝无穷值（缺测不会被伪造成 0）。通过后宿主按来源关系建 `plugin_curve` 结果页，记录插件 id/版本、参数与快照修订号，**不强制切页**，也不会在插件停用后删除已生成的结果。
 - `Plugin.on_analysis_finished(handle, status, detail)` 是可选回调（`succeeded` / `failed` / `cancelled`），默认什么都不做；API 1 插件不会因为这个钩子被迫实现新方法。
 - 加载新数据、关闭来源页、用户取消或退出应用都会请求取消；完成回调会再核对数据代次，过期结果直接丢弃。
+- API 2 卡片与普通 3D 渲染插件卡片分开登记，但都挂载到「外观」页（`page_render`），仍只在二维结果页显示。主窗口通过 `session.mount_analysis_cards(self.page_render)` 挂载，插件宿主内部适配卡片接口；插件的 `create_panel()`、提交和取消接口不变。
+
+扫描轴通过可选 `scan_axis` 字段补充，不改变既有调用：`PluginContext`、`AnalysisInput2D` 与 `DerivedInput2D` 均可携带 `ScanAxisSpec`。其中 `values` 是完整原始顺序的只读坐标，`scan_type` 为 `time / angle / temperature / custom / unknown`，`name` 与 `unit` 是实际显示名和单位，`frame_index` / `value` 指向当前帧，`interval` 是当前页选择的物理上下限。`PluginContext` 另提供 `scan_type / scan_name / scan_unit / scan_value / scan_range` 便捷属性；无扫描轴时这些字段为 `None`。只有时间类型在缺单位时按 `fs` 转述，其他类型不补猜单位。
 
 ### 派生结果与集成动作（API 3）
 
-最小能力范围固定为「下拉动作 → 宿主冻结来源 → 插件同步计算 → 宿主建派生结果页」，
+最小能力范围固定为「合法父页的右键创建动作 → 宿主冻结空间来源并继承时间区间 → 插件同步计算 → 宿主建派生结果页」，
 当前用于把 EDC 瀑布图这类「来源页 + 参数 → 曲线族」的功能移出主程序：
 
 ```python
@@ -98,14 +101,18 @@ class Plugin(Plugin):
 
 约定：
 
-- `integration_actions()` 报出的动作键以 `插件ID:动作ID` 进入「其他积分」下拉并随页面状态保存；动作 ID 必须跨版本稳定，展示文本可以改。`order` 决定与内置项的排序（内置项按 0/10/30/40 排布）。
-- 执行动作时宿主冻结当前 **X/Y 积分页**（或其矩形裁剪结果）为 `DerivedSource2D`：时间帧或时间积分区间、积分范围、裁剪范围与数据域在创建时固定，之后来源页怎么变都不影响已有结果。带**擦除区域**的来源按分析插件同样的契约拒绝。
+- `integration_actions()` 报出的动作键以 `插件ID:动作ID` 进入合法父页右键菜单的「创建结果页」子菜单；动作 ID 必须跨版本稳定，展示文本可以改。`order` 决定与内置项的排序（内置项按 0/10/30/40 排布，EDC 瀑布图示例为 20）。菜单每次打开都重新查询，不用菜单下标或显示文本分派。
+- 宿主内部通过 `PageTreePanel.set_page_create_action_provider(provider)` 及 `ResultWorkspace` 的同名转发设置 `provider(page_id)`，后者返回 `(key, label, order)` 可迭代对象；页树与结果工作区以 `page_create_requested(parent_page_id, action_key)` 转发选择。主窗口 `_integration_actions_for_parent()` 负责过滤排序，`_on_page_create_requested()` 负责激活、复核与分派，插件公开协议不变。
+- 只有插件处于 ready，且目标为无擦除区域的 **X/Y 积分页**（或其矩形裁剪结果）时才显示动作；主页、E 积分、其他结果页和多选都不显示。来源树与「我的分组」中的页面副本使用同一规则。
+- 宿主内部以 `PluginSession.can_freeze_source(spec)` 转发 `DerivedPageController.can_freeze_source(spec)` 做页型、积分轴和擦除区域的轻量过滤；打开菜单不冻结数据、不弹窗也不试算。点击后先激活目标父页并重新校验，再走 `PluginSession.invoke_integration_action()` 与 `DerivedPageController.invoke_action()` 的完整创建链路，`invoke_action` 签名不变。
+- 执行动作时宿主冻结该 **目标父页**为 `DerivedSource2D`：空间积分范围、裁剪范围与数据域在创建时固定；新派生页继承来源页当前时间区间，之后在本页独立编辑并重算。带**擦除区域**的来源按分析插件同样的契约拒绝。
+- 新捕获的 `control_state` 不再写入 `data_process` / `combo_other`；恢复旧复现文件时忽略旧下拉选择，绝不把它当作一次创建命令。已有派生结果页、科学参数和 `source_module="data_process"` 来源标识继续兼容。
 - `DerivedInput2D` 给出只读的二维数组 `[采样轴, 曲线轴]`、坐标、单位、完整未裁剪轴（自动步长与裁剪后缀的依据）与来源元数据。**V3 的输入与结果一律使用原始坐标排列**：E 轴翻转只是显示镜像，由宿主在渲染与出版出口应用一次；数值导出与插件看到的数据始终是原始排列。
 - 结果由宿主校验：`k` / `sample_indices` / `energy` 一维等长且有限，曲线形状与坐标一致，采样身份必须落在完整动量轴内，曲线允许 `NaN` 但拒绝无穷值。`curves` 是显示用归一化曲线，`raw_curves` 是导出用原始强度，`title` 用于页面名，`plot_title` 是绘图/出版用的 ASCII 安全标题（为空时回退 `title`）。
 - 创建与参数更新都**先验证计算结果再提交页面状态**：失败时创建不建页、更新保留上次成功结果并在图上标注；自动标题只更新底层默认名，用户改过名时保留显示名。
-- 二维采样与归一化在体数据就绪后同步执行，结果按（来源、数据修订、旋转、逐页参数）缓存；其他页激活后回来重算。
+- 二维采样与归一化在体数据就绪后同步执行，结果按（空间来源、本页时间区间、数据修订、旋转、逐页参数）缓存；其他页激活后回来重算。
 - `host.defaults()` / `host.set_defaults(values)` 读写按插件 ID 保存的「新建默认值」，与逐页参数分离，保存立即对之后新建的页面生效；`host.current_derived_page()` / `host.update_current_derived_page(params)` 供插件查询与更新当前派生页。
-- 插件无法创建页面、不绘图、不导出：绘图、裁剪、出版与数值导出都由宿主按自己的路径产生。
+- 插件不直接创建页面、不绘图、不导出：结果页由宿主登记，绘图、裁剪、出版与数值导出都由宿主按自己的路径产生。
 
 ## 构建和验证
 
@@ -115,7 +122,7 @@ python scripts/release/build_plugin.py integral_demo --output-dir release
 python scripts/release/build_plugin.py edc_waterfall --output-dir release
 python -m unittest discover -s tests/extensions -t . -v
 python -m unittest discover -s tests/plugins -t . -v
-python -m unittest tests.integration.test_plugin_derived_flow -v
+python -m unittest tests.integration.test_integration_context_menu tests.integration.test_plugin_derived_flow tests.integration.test_plugin_analysis_flow -v
 ```
 
 `.bsplugin` 单独发布；基础安装包不得包含具体插件源码（两套 spec 都检查 `plugins` 模块名与源目录泄漏），宿主依赖也不重复打入插件包。

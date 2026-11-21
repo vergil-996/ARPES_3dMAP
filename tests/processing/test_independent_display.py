@@ -12,7 +12,8 @@ from bandscope.processing.display_transfer import (
     normalization_range,
     volume_display_unit_distance,
 )
-from bandscope.processing.local_enhancement import clear_range_cache, finite_range
+from bandscope.processing.local_enhancement import clear_range_cache, finite_range, resolve_display
+from tests.support.enhancement import context_2d, region
 
 
 class IndependentDisplayTests(unittest.TestCase):
@@ -32,15 +33,15 @@ class IndependentDisplayTests(unittest.TestCase):
             "density": 40.0, "preset": "custom",
         }
         actual = independent_opacity_values(self.data, self.info, self.style, 2.0)
-        q = np.asarray(self.data, dtype=float)
+        q = (np.asarray(self.data, dtype=float) - self.info["data_min"]) / self.info["span"]
         signal = np.maximum(q - 0.25, 0.0)
         position = np.clip((q - 0.25) / 0.25, 0.0, 1.0)
         gate = position * position * (3.0 - 2.0 * position)
         expected = 1.0 - np.exp(-(0.2 * signal ** 2 * gate) * 2.0)
         finite = np.isfinite(self.data)
         np.testing.assert_allclose(actual[finite], expected[finite], rtol=1e-12, atol=1e-12)
-        self.assertTrue(np.all(actual[:2] == 0.0))
-        self.assertGreater(actual[6], 0.7)
+        self.assertEqual(float(actual[0]), 0.0)
+        self.assertGreater(actual[6], actual[5])
 
     def test_color_and_opacity_controls_are_independent(self):
         original = self.data.copy()
@@ -97,26 +98,45 @@ class IndependentDisplayTests(unittest.TestCase):
         self.style["opacity"].update(density=0.0)
         alpha = independent_opacity_values(self.data, self.info, self.style, 100.0)
         self.assertTrue(np.all(alpha[np.isfinite(self.data)] == 0.0))
-        self.style["opacity"].update(density=100.0, threshold=50.0)
+        self.style["opacity"].update(density=100.0, threshold=75.0)
         alpha = independent_opacity_values(self.data, self.info, self.style, 1.0)
         self.assertEqual(float(alpha[3]), 0.0)
-        self.assertGreater(float(alpha[5]), 0.0)
+        self.assertGreater(float(alpha[6]), 0.0)
 
-    def test_percentile_manual_empty_and_constant_ranges(self):
+    def test_full_range_ignores_removed_policies_and_handles_empty_and_constant_data(self):
         values = np.array([0.0, 1.0, 2.0, 100.0, np.nan, np.inf])
         style = new_display_style()
-        expected = np.percentile(values[np.isfinite(values)], (0.0, 99.5))
-        np.testing.assert_allclose(normalization_range(values, style), expected)
+        np.testing.assert_allclose(normalization_range(values, style), (0.0, 100.0))
         with patch("numpy.percentile", wraps=np.percentile) as percentile:
             finite_range(values, style)
             finite_range(values, style)
-            self.assertEqual(percentile.call_count, 1)
-        style["normalization"]["mode"] = "manual"
-        style["normalization"]["manual_range"] = (-4.0, 8.0)
-        self.assertEqual(normalization_range(values, style), (-4.0, 8.0))
+            percentile.assert_not_called()
+        style["normalization"] = {
+            "mode": "manual", "percentiles": (2.0, 98.0), "manual_range": (-4.0, 8.0),
+        }
+        self.assertEqual(normalization_range(values, style), (0.0, 100.0))
         self.assertEqual(normalization_range([], new_display_style()), (0.0, 1.0))
         info = display_level_info(np.full(3, 4.0), new_display_style())
         self.assertEqual((info["data_min"], info["data_max"]), (4.0, 5.0))
+
+    def test_region_uses_full_range_and_lock_survives_frame_changes(self):
+        style = new_display_style()
+        style["normalization"] = {"mode": "percentile", "percentiles": (0.0, 99.5)}
+        context = context_2d(np.array([[0.0, 1.0], [2.0, 1000.0]]))
+        state = {
+            "background": new_display_style(), "common": False, "revision": 0,
+            "regions": [region(1, (0, 1, 0, 1), style=style)],
+        }
+        fields = resolve_display(context, state)
+        self.assertEqual(fields["regions"][0]["data_range"], (0.0, 1000.0))
+
+        state["regions"][0]["locked_range"] = (0.0, 1000.0)
+        context["data"] = context["data"] * 3.0
+        locked = resolve_display(context, state)
+        self.assertEqual(locked["regions"][0]["data_range"], (0.0, 1000.0))
+        state["regions"][0].pop("locked_range")
+        unlocked = resolve_display(context, state)
+        self.assertEqual(unlocked["regions"][0]["data_range"], (0.0, 3000.0))
 
     def test_unit_distance_depends_on_display_grid_not_crop_size(self):
         full = (100, 80, 40)
@@ -136,8 +156,6 @@ class IndependentDisplayTests(unittest.TestCase):
         values[0, 0, 0] = np.nan
         values[1, 0, 0] = np.inf
         style = new_display_style()
-        style["normalization"]["mode"] = "manual"
-        style["normalization"]["manual_range"] = (0.0, 1.0)
         style["opacity"].update(threshold=13.0, transition=17.0, gamma=1.7, density=33.0, preset="custom")
         info = display_level_info(values, style)
         gpu_display.set_enabled(False)

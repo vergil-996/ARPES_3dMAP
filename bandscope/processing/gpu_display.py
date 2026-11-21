@@ -138,7 +138,9 @@ def try_channels(values, info, mode, *, style=None, unit_distance=None, color=No
                 ratio = cp.clip((device.astype(cp.float64) - low) / (high - low), 0.0, 1.0)
                 mapped = cp.power(ratio, float(info["gamma_power"]))
                 if need_color:
-                    computed_color = mapped
+                    cmap_low = float(info.get("colormap_start", 0.0))
+                    cmap_high = float(info.get("colormap_end", 1.0))
+                    computed_color = cmap_low + (cmap_high - cmap_low) * mapped
             if independent:
                 if need_alpha:
                     opacity = resolved_display_style(style)["opacity"]

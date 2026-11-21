@@ -8,13 +8,13 @@ import h5py
 from scipy.io import loadmat
 from tkinter import filedialog
 
-from bandscope.core.axis_mapping import (
-    AXIS_MAPPING_VERSION,
-    MAT_COORD_CANDIDATES as COORD_CANDIDATES,
-    canonicalize_array,
-    find_first_key,
-    infer_axis_roles,
-    role_order_for_shape,
+from bandscope.core.axis_mapping import AXIS_MAPPING_VERSION, MAT_COORD_CANDIDATES
+from bandscope.core.axis_assignment import (
+    ROLES,
+    SCAN_UNKNOWN,
+    infer_assignment,
+    numeric_coordinate_candidates,
+    scalar_text,
 )
 
 
@@ -179,95 +179,78 @@ def load_mat_auto(file_path):
 def convert(src, dst):
     mode, data = load_mat_auto(src)
     try:
-        if mode == "h5py":
-            keys = list(data.keys())
-        else:
-            keys = [k for k in data.keys() if not k.startswith('__')]
-
+        keys = [
+            key for key in data.keys()
+            if mode == "h5py" or not str(key).startswith("__")
+        ]
         print("变量列表:", keys)
-
-        # 自动匹配
-        kx_key = find_first_key(keys, COORD_CANDIDATES["X"])
-        ky_key = find_first_key(keys, COORD_CANDIDATES["Y"])
-        e_key = find_first_key(keys, COORD_CANDIDATES["E"])
-        t_key = find_first_key(keys, COORD_CANDIDATES["T"])
-        s_key = find_first_key(keys, ("sample", "binned", "data"))
-
-        if s_key is None:
+        main_key = next(
+            (key for key in ("sample", "binned", "data") if key in keys),
+            None,
+        )
+        if main_key is None:
             raise ValueError("❌ 未找到 sample/binned/data")
 
-        # ===== 读取数据 =====
-        def read_array(obj, key):
-            if key is None:
-                return None
-            return np.array(obj[key]).squeeze().reshape(-1)
-
-        kx = read_array(data, kx_key)
-        ky = read_array(data, ky_key)
-        energy = read_array(data, e_key)
-
-        sample = np.asarray(data[s_key])
-        print("原始 sample shape:", sample.shape)
-
-        coord_lengths = {}
-        for role, arr in (("X", kx), ("Y", ky), ("E", energy)):
-            if arr is not None:
-                coord_lengths[role] = int(arr.size)
-        if t_key and t_key in keys:
-            raw_time = read_array(data, t_key)
-            coord_lengths["T"] = int(raw_time.size)
-        else:
-            raw_time = None
-
-        if sample.ndim not in (2, 3, 4):
+        sample = np.asarray(data[main_key])
+        if sample.ndim not in (3, 4):
             raise ValueError(f"❌ 不支持维度: {sample.ndim}")
-
-        axis_order = role_order_for_shape(sample.shape, raw_time is not None)
-        roles = infer_axis_roles(sample.shape, coord_lengths, axis_order)
-        sample = canonicalize_array(sample, roles, axis_order)
-        print("轴映射:", roles)
-        print("规范化 sample shape:", sample.shape)
-
-        if "T" in axis_order:
-            if raw_time is not None and raw_time.size == sample.shape[3]:
-                time = raw_time
-                print("✅ 使用原始 time")
-            else:
-                time = np.arange(sample.shape[3], dtype=np.float32)
-                print("⚠️ time 与数据维度不匹配，按索引生成")
-        else:
-            time = np.array([0.0], dtype=np.float32)
-            if raw_time is None:
-                print("⚠️ 未检测到 time，按静谱处理")
-
-        # ===== 类型优化 =====
+        variables = {key: data[key] for key in keys if key != main_key}
+        assignment = infer_assignment(
+            main_key,
+            sample,
+            variables,
+            search_map=MAT_COORD_CANDIDATES,
+        )
+        candidates = numeric_coordinate_candidates(variables)
         sample = sample.astype(np.float32, copy=False)
+        print("原始 sample shape:", sample.shape)
+        print("轴映射:", assignment.axis_roles)
 
-        # ===== 保存 =====
         save_dict = {
             "sample": sample,
-            "time": time,
-            "axis_order": np.array(axis_order),
-            "axis_mapping_version": np.array([AXIS_MAPPING_VERSION]),
+            "axis_order": np.asarray([
+                next(
+                    role for role, axis in assignment.axis_roles.items()
+                    if axis == original_axis
+                )
+                for original_axis in range(sample.ndim)
+            ]),
+            "axis_mapping_version": np.asarray([AXIS_MAPPING_VERSION]),
+            "axis_coordinate_keys": np.asarray([
+                assignment.coord_keys.get(role) or "" for role in ROLES
+            ]),
+            "scan_type": np.asarray([assignment.scan_kind]),
+            "scan_name": np.asarray([assignment.display_scan_name]),
         }
-        if kx is not None:
-            save_dict["kx"] = kx
-        if ky is not None:
-            save_dict["ky"] = ky
-        if energy is not None:
-            save_dict["E"] = energy
+        reserved = set(save_dict)
+        for key, values in candidates.items():
+            if key not in reserved:
+                save_dict[key] = np.asarray(values).reshape(-1)
+        for key in keys:
+            lower = str(key).lower()
+            if key in save_dict or not (
+                lower.endswith("_unit") or lower.endswith("_units") or lower.endswith("unit")
+            ):
+                continue
+            text = scalar_text(variables.get(key))
+            if text:
+                save_dict[key] = np.asarray([text])
+        for key in ("axis_types", "scan_type", "scan_name"):
+            if key in variables and key not in {"scan_type", "scan_name"}:
+                save_dict[key] = np.asarray(variables[key])
+        if assignment.is_time:
+            time_key = assignment.coord_keys.get("T")
+            if time_key in candidates:
+                save_dict["time"] = np.asarray(candidates[time_key]).reshape(-1)
+            else:
+                save_dict["time"] = np.arange(assignment.axis_length("T"), dtype=np.float32)
+        elif "T" not in assignment.role_order:
+            save_dict["time"] = np.asarray([0.0], dtype=np.float32)
 
         np.savez(dst, **save_dict)
-
-        # ===== 输出信息 =====
         print("\n--- 转换完成 ---")
-        if kx is not None:
-            print("kx:", kx.shape)
-        if ky is not None:
-            print("ky:", ky.shape)
-        if energy is not None:
-            print("E :", energy.shape)
-        print("time:", time.shape)
+        print("坐标变量:", assignment.coord_keys)
+        print("扫描类型:", assignment.scan_kind or SCAN_UNKNOWN)
         print("sample:", sample.shape)
         print("✅ 保存路径:", dst)
     finally:

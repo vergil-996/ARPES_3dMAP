@@ -1,6 +1,7 @@
 import unittest
 
 import numpy as np
+from matplotlib import colormaps
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
@@ -82,6 +83,14 @@ class PathSliceRenderingTests(unittest.TestCase):
         viewport = viewport_for_segment(self.sample, 1, (0, 3))
         self.assertLessEqual(viewport[0], self.sample.segments[1].start_k)
         self.assertGreaterEqual(viewport[1], self.sample.segments[1].end_k)
+
+    def test_legacy_segment_defaults_full_palette_and_range_changes_colors(self):
+        legacy = PathSegmentStyle.from_mapping({"levels": (0, 50, 100)})
+        self.assertEqual((legacy.colormap_start, legacy.colormap_end), (0.0, 1.0))
+        style = PathSegmentStyle(colormap_start=0.2, colormap_end=0.8)
+        rgba, info = segment_rgba(np.array([[0.0, 0.5, 1.0]]), style, "gray")
+        np.testing.assert_array_equal(rgba[0], colormaps["gray"]([0.2, 0.5, 0.8]))
+        self.assertEqual((info["colormap_start"], info["colormap_end"]), (0.2, 0.8))
 
     def test_invalid_samples_are_transparent_and_mapping_affects_color(self):
         values = np.array([[0.0, 0.1, 0.25, np.nan]])

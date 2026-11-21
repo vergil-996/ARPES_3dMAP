@@ -84,7 +84,6 @@ class VolumeQualityTests(unittest.TestCase):
 
     def test_independent_channels_survive_color_opacity_and_plugin_changes(self):
         style = new_display_style()
-        style["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
         state = {"background": style, "regions": [], "common": False, "revision": 0}
         quality = new_render_quality()
         original = self.data.copy()

@@ -97,6 +97,7 @@ def main():
     app = QApplication(sys.argv)
 
     import bandscope.app.refactored_app as refactored_app
+    from scripts.validation.verify_integration_context_menu import create_from_page_menu
 
     refactored_app.UpdateController = _NullUpdateController
 
@@ -193,15 +194,25 @@ def main():
 
     def step_1d():
         # 能级态密度（1D 曲线）：比例必须释放，曲线重新铺满画布
-        window.left_workspace.activate_page(window.left_workspace.home_page_id)
-        combo = window.page_data.combo_other
-        index = combo.findText("能级态密度")
-        assert index >= 0, "找不到「能级态密度」选项"
-        combo.setCurrentIndex(index)
+        home_page_id = window.left_workspace.home_page_id
+        window.left_workspace.activate_page(home_page_id)
 
         def click():
-            window.page_data.btn_other_apply.click()
-            QTimer.singleShot(8000, measure_1d)
+            def after_menu(report):
+                check(
+                    "右键创建能级态密度",
+                    report["triggered"],
+                    report["error"] or "、".join(report["keys"]),
+                )
+                if report["triggered"]:
+                    QTimer.singleShot(8000, measure_1d)
+                else:
+                    finish()
+
+            create_from_page_menu(
+                window, home_page_id, "builtin:energy_dos", after_menu,
+                output_dir=out_dir,
+            )
 
         QTimer.singleShot(700, click)
 

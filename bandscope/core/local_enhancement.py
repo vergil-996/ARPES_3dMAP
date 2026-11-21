@@ -17,7 +17,7 @@ STATE_KEY = "local_enhancement"
 RENDER_QUALITY_KEY = "render_quality"
 DEFAULT_STYLE = {"levels": (0.0, 50.0, 100.0), "opacity_mode": "线性"}
 DISPLAY_PAGE_KINDS = frozenset({
-    "home", "time_integral", "axis_integral", "axis_integral_crop",
+    "home", "axis_integral", "axis_integral_crop",
     "second_derivative", "plugin_derived",
 })
 

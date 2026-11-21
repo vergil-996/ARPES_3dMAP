@@ -70,7 +70,7 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertTrue(self.control.input_length.isReadOnly())
         self.assertEqual(len(self.commits), 1)
 
-    def test_unlock_keeps_position_then_white_endpoint_separates_left(self):
+    def test_unlock_keeps_position_then_black_endpoint_separates_left(self):
         self.controller.interval.set_up(-0.5)
         self.controller.sync_widgets()
         self.slider.lock_badge.click()
@@ -134,6 +134,17 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertTrue(self.controller.interval.locked)
         self.assertTrue(self.control.input_length.isReadOnly())
 
+    def test_separated_handles_paint_black_left_and_white_right(self):
+        QApplication.processEvents()
+        image = self.slider.grab().toImage()
+        ratio = image.devicePixelRatio()
+        y = int(self.slider.TRACK_Y * ratio)
+        low_x = int(self.slider.handle_center("low") * ratio)
+        up_x = int(self.slider.handle_center("up") * ratio)
+
+        self.assertLess(QColor(image.pixel(low_x, y)).lightness(), 60)
+        self.assertGreater(QColor(image.pixel(up_x, y)).lightness(), 200)
+
     def test_collapsed_handle_paints_black_core_inside_white_shell(self):
         self.controller.interval.set_up(-0.5)
         self.controller.sync_widgets()
@@ -144,8 +155,8 @@ class DualIntervalMouseTests(unittest.TestCase):
         y = int(self.slider.TRACK_Y * ratio)
         self.assertLess(QColor(image.pixel(x, y)).lightness(), 60)
         shell_found = False
-        for dx in (-9, -7, -5, 5, 7, 9):
-            for dy in (-4, 0, 4):
+        for dx in (-6, 6):
+            for dy in (-3, 0, 3):
                 sample_x = int((self.slider.handle_center("low") + dx) * ratio)
                 sample_y = int((self.slider.TRACK_Y + dy) * ratio)
                 if QColor(image.pixel(sample_x, sample_y)).lightness() > 200:

@@ -5,6 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QColor, QImage, QTransform
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
@@ -52,10 +53,22 @@ class CanvasToolOverlayTests(unittest.TestCase):
         parent.resize(420, 360)
         overlay.reposition()
         self.assertEqual(overlay.x() + overlay.width(), parent.width() - 12)
-        parent.resize(640, 360)
+        parent.resize(640, 600)
         overlay.reposition()
         self.assertFalse(overlay.preset_container.isHidden())
         self.assertEqual(overlay.x() + overlay.width(), parent.width() - 12)
+        parent.resize(640, 280)
+        overlay.reposition()
+        self.assertTrue(overlay.preset_container.isHidden())
+        self.assertLessEqual(overlay.y() + overlay.height(), parent.height() - 12)
+        overlay.install_path_button(QPushButton("折线路径切片"))
+        overlay.set_path_available(True)
+        overlay.set_3d_active(False)
+        overlay.set_return_active(True)
+        parent.resize(640, 248)
+        overlay.reposition()
+        self.assertLessEqual(overlay.y() + overlay.height(), parent.height())
+        self.assertFalse(overlay.path_button.isHidden())
 
     def test_rounded_corners_are_transparent(self):
         _parent, overlay, _buttons = self.make_overlay()
@@ -127,6 +140,78 @@ class CanvasToolOverlayTests(unittest.TestCase):
         overlay.set_return_active(True)
         overlay.preset_buttons["3d"].click()
         self.assertEqual(returned, [True])
+
+    def test_view_controls_are_checkable_focusable_and_grouped_above_crop(self):
+        _parent, overlay, _buttons = self.make_overlay()
+        for button, name in (
+            (overlay.switch_axes, "显示坐标"),
+            (overlay.switch_flip, "图像翻转"),
+            (overlay.rotation_button, "Z 轴旋转"),
+        ):
+            self.assertTrue(button.isCheckable())
+            self.assertEqual(button.focusPolicy(), Qt.StrongFocus)
+            self.assertEqual(button.accessibleName(), name)
+            self.assertIs(button.parentWidget(), overlay.view_container)
+        layout = overlay.layout()
+        self.assertGreater(layout.indexOf(overlay.view_container), layout.indexOf(overlay.reset_button))
+        self.assertLess(layout.indexOf(overlay.view_container), layout.indexOf(overlay.crop_button))
+        overlay.switch_axes.click()
+        overlay.switch_flip.click()
+        self.assertTrue(overlay.switch_axes.isChecked())
+        self.assertTrue(overlay.switch_flip.isChecked())
+
+    def test_rotation_popup_closes_with_button_and_escape_and_preserves_highlight(self):
+        parent, overlay, _buttons = self.make_overlay()
+        parent.show()
+        overlay.show()
+        overlay.reposition()
+        overlay.set_rotation_angle(-7.5)
+        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertIn("−7.5°", overlay.rotation_button.toolTip())
+
+        overlay.rotation_button.click()
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        button_left = overlay.rotation_button.mapToGlobal(QPoint(0, 0)).x()
+        self.assertLess(overlay.rotation_panel.x() + overlay.rotation_panel.width(), button_left)
+        overlay.rotation_button.click()
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+        overlay.rotation_button.click()
+        QTest.keyClick(overlay.rotation_panel, Qt.Key_Escape)
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        overlay.rotation_button.click()
+        overlay.rotation_panel.zero_button.click()
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
+        overlay.close_rotation_panel(commit=False)
+        overlay.set_rotation_angle(0)
+        self.assertFalse(overlay.rotation_button.isChecked())
+
+    def test_timeline_state_round_trip_drives_the_same_overlay_controls(self):
+        from bandscope.ui.timeline_bar import TimelineBar
+
+        _parent, overlay, _buttons = self.make_overlay()
+        bar = TimelineBar(view_controls=overlay)
+        self.addCleanup(bar.deleteLater)
+        self.assertIs(bar.switch_axes, overlay.switch_axes)
+        self.assertIs(bar.switch_flip, overlay.switch_flip)
+        self.assertIs(bar.edit_rotation, overlay.edit_rotation)
+        previews = []
+        commits = []
+        overlay.rotation_preview.connect(previews.append)
+        overlay.rotation_committed.connect(commits.append)
+
+        bar.restore_state({"switch_axes": True, "switch_flip": True, "rotation_angle": -7.5})
+
+        self.assertEqual(bar.export_state(), {
+            "switch_axes": True,
+            "switch_flip": True,
+            "rotation_angle": -7.5,
+        })
+        self.assertEqual(overlay.rotation_panel.dial.angle(), -7.5)
+        self.assertEqual(previews, [])
+        self.assertEqual(commits, [])
 
     def test_focus_mode_updates_the_existing_button_and_3d_state(self):
         _parent, overlay, _buttons = self.make_overlay()

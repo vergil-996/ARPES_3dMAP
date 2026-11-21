@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""真实数据冒烟测试：加载 npz → 渲染 → 控件页 → 专注模式 → 出版导出 → Toast → 截图 → 干净退出。
+"""真实数据冒烟测试：加载 npz → 渲染 → 外观页 → 专注模式 → 出版导出 → Toast → 截图 → 干净退出。
 
 用法: .venv/Scripts/python.exe scripts/validation/smoke_test.py <npz路径> [--output-dir <目录>] [--dynamic]
 
@@ -81,25 +81,22 @@ def main():
         else:
             QTimer.singleShot(500, step_pages)
 
-    def step_pages(page_index=0):
-        # 右侧控件页现在只有「渲染控制」「处理分析」两页。
-        if page_index < 2:
-            window._select_control_page(page_index)
-            def capture_page():
-                ppage = os.path.join(out_dir, f"smoke_page{page_index}.png")
-                window.grab().save(ppage)
-                log(f"[smoke] page {page_index} grab -> {ppage}")
-                QTimer.singleShot(100, lambda: step_pages(page_index + 1))
-            QTimer.singleShot(300, capture_page)
-            return
-        window._select_control_page(0)
-        log("[smoke] control pages switched")
-        assert window.canvas_tool_overlay.reset_button.isEnabled(), "3D 画布工具未启用"
-        assert "150 × 150 × 200 × 25" in window.left_workspace.page_tree.source_meta.text()
-        assert "原始数据" in window.left_workspace.source_breadcrumb.text()
-        assert not hasattr(window.timeline_bar, "play_button"), "时间轴不应提供自动播放按钮"
-        window.canvas_tool_overlay.focus_button.click()
-        QTimer.singleShot(350, step_focus_capture)
+    def step_pages():
+        assert window.page_container.count() == 1, "右侧应只保留外观控制页"
+        assert window.page_container.currentWidget() is window.page_render
+
+        def capture_page():
+            ppage = os.path.join(out_dir, "smoke_appearance.png")
+            window.grab().save(ppage)
+            log(f"[smoke] appearance page grab -> {ppage}")
+            assert window.canvas_tool_overlay.reset_button.isEnabled(), "3D 画布工具未启用"
+            assert "150 × 150 × 200 × 25" in window.left_workspace.page_tree.source_meta.toolTip()
+            assert "原始数据" in window.left_workspace.source_breadcrumb.text()
+            assert not hasattr(window.timeline_bar, "play_button"), "时间轴不应提供自动播放按钮"
+            window.canvas_tool_overlay.focus_button.click()
+            QTimer.singleShot(350, step_focus_capture)
+
+        QTimer.singleShot(300, capture_page)
 
     def step_focus_capture():
         assert not window.right_panel.isVisible(), "专注模式未隐藏右侧栏"

@@ -18,6 +18,7 @@ from bandscope.processing.display_transfer import (
 from bandscope.processing.gpu_display import array_key
 
 _RANGE_CACHE = {}
+_HISTOGRAM_CACHE = {}
 _RANGE_CACHE_LOCK = threading.RLock()
 _RANGE_CACHE_LIMIT = 24
 
@@ -39,6 +40,56 @@ def cached_finite_range(data, style=None, *, include_zero=False):
     return False, None
 
 
+def cumulative_counts(values, thresholds):
+    finite = np.sort(np.asarray(values)[np.isfinite(values)].ravel())
+    thresholds = np.asarray(thresholds, dtype=np.float64).ravel()
+    return finite.size - np.searchsorted(finite, thresholds, side="left")
+
+
+def cached_cumulative_histogram(data, *, bin_count=256):
+    values = np.asarray(data)
+    key, base = array_key(values)
+    cache_key = (key, int(bin_count))
+    with _RANGE_CACHE_LOCK:
+        entry = _HISTOGRAM_CACHE.get(cache_key)
+        if entry is not None and entry[0]() is not None:
+            return True, entry[1]
+    return False, None
+
+
+def cumulative_histogram(data, *, bin_count=256, allow_compute=True):
+    hit, result = cached_cumulative_histogram(data, bin_count=bin_count)
+    if hit or not allow_compute:
+        return result
+    values = np.asarray(data)
+    finite = np.sort(values[np.isfinite(values)].ravel())
+    if finite.size == 0:
+        thresholds = np.asarray([], dtype=np.float64)
+        counts = np.asarray([], dtype=np.int64)
+        data_range = None
+    else:
+        low, high = float(finite[0]), float(finite[-1])
+        data_range = (low, high)
+        thresholds = (np.asarray([low], dtype=np.float64) if high <= low else
+                      np.linspace(low, high, max(2, int(bin_count)), dtype=np.float64))
+        counts = finite.size - np.searchsorted(finite, thresholds, side="left")
+    thresholds.setflags(write=False)
+    counts.setflags(write=False)
+    result = {"thresholds": thresholds, "counts": counts,
+              "data_range": data_range, "total": int(finite.size)}
+    key, base = array_key(values)
+    cache_key = (key, int(bin_count))
+    with _RANGE_CACHE_LOCK:
+        _HISTOGRAM_CACHE[cache_key] = (weakref.ref(base), result)
+        if len(_HISTOGRAM_CACHE) > _RANGE_CACHE_LIMIT:
+            for stale_key, item in list(_HISTOGRAM_CACHE.items()):
+                if item[0]() is None:
+                    _HISTOGRAM_CACHE.pop(stale_key, None)
+            while len(_HISTOGRAM_CACHE) > _RANGE_CACHE_LIMIT:
+                _HISTOGRAM_CACHE.pop(next(iter(_HISTOGRAM_CACHE)))
+    return result
+
+
 def finite_range(data, style=None, *, include_zero=False, allow_compute=True):
     values = np.asarray(data)
     hit, result = cached_finite_range(values, style, include_zero=include_zero)
@@ -58,8 +109,6 @@ def finite_range(data, style=None, *, include_zero=False, allow_compute=True):
 
 
 def _measure_range(values, style=None, include_zero=False):
-    if is_independent(style) and normalization_policy(style)[0] == "manual":
-        return normalization_range(values, style)
     policy = normalization_policy(style)
     if policy[0] == "legacy" and not np.any(np.isfinite(values)):
         return None
@@ -77,6 +126,7 @@ def _measure_range(values, style=None, include_zero=False):
 def clear_range_cache():
     with _RANGE_CACHE_LOCK:
         _RANGE_CACHE.clear()
+        _HISTOGRAM_CACHE.clear()
 
 
 def _rebased_alpha(alpha, source_distance, target_distance):
@@ -95,7 +145,9 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
     if regions or previous is None or not is_independent(background_style):
         previous = None
         update = frozenset(("color", "alpha"))
-    if not regions and not is_independent(background_style):
+    background_colormap_range = tuple(background_style.get("colormap_range", (0.0, 1.0)))
+    if (not regions and not is_independent(background_style)
+            and background_colormap_range == (0.0, 1.0)):
         return None
     source = np.asarray(context["data"])
     view = context["view"]
@@ -136,7 +188,10 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
             region,
             data_range=data_range,
             status=status,
-            level_info=level_info(data_range, style["levels"]),
+            level_info=level_info(
+                data_range, style["levels"],
+                colormap_range=style.get("colormap_range", (0.0, 1.0)),
+            ),
             style=dict(style),
             slices=slices,
             normalization_range=data_range,
@@ -153,7 +208,10 @@ def resolve_display(context, state, *, background_locked_range=None, region_data
         source, background_style,
         include_zero=background_include_zero and not is_independent(background_style),
     )
-    bg_info = level_info(bg_range, background_style["levels"])
+    bg_info = level_info(
+        bg_range, background_style["levels"],
+        colormap_range=background_colormap_range,
+    )
     color, alpha = channels(
         source, bg_info, background_style["opacity_mode"], view=view,
         style=background_style, unit_distance=target_distance,

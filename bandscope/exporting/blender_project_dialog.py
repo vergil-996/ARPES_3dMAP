@@ -27,10 +27,6 @@ from bandscope.exporting.blender_project import (
 )
 from bandscope.processing.display_transfer import channels, volume_display_unit_distance
 from bandscope.core.display_style import (
-    INDEPENDENT_MODE,
-    NORMALIZATION_FULL,
-    NORMALIZATION_MANUAL,
-    NORMALIZATION_PERCENTILE,
     is_independent,
     legacy_display_style,
     legacy_render_quality,
@@ -127,17 +123,6 @@ class BlenderProjectEditor(QWidget):
             if quality:
                 self.quality_rows.append((label, widget))
 
-        self.normalization_combo = QComboBox()
-        self.normalization_combo.addItem("完整范围", NORMALIZATION_FULL)
-        self.normalization_combo.addItem("百分位范围（P0–P99.5）", NORMALIZATION_PERCENTILE)
-        self.normalization_combo.addItem("手动范围", NORMALIZATION_MANUAL)
-        add_independent_row("归一化策略", self.normalization_combo)
-        self.manual_low = QDoubleSpinBox()
-        self.manual_high = QDoubleSpinBox()
-        for name, spin in (("手动下限", self.manual_low), ("手动上限", self.manual_high)):
-            spin.setRange(-1.0e12, 1.0e12)
-            spin.setDecimals(6)
-            add_independent_row(name, spin)
         self.opacity_spins = {}
         for name, text, minimum, maximum, decimals, value in (
             ("threshold", "阈值（%）", 0.0, 100.0, 3, 0.0),
@@ -215,8 +200,8 @@ class BlenderProjectEditor(QWidget):
         self._preview_timer.setInterval(180)
         self._preview_timer.timeout.connect(self._refresh_preview)
         for widget in (self.cmap_combo, self.include_zero, self.opacity_combo, *self.level_spins,
-                       self.lock_check, self.lock_low, self.lock_high, self.normalization_combo,
-                       self.manual_low, self.manual_high, *self.opacity_spins.values(),
+                       self.lock_check, self.lock_low, self.lock_high,
+                       *self.opacity_spins.values(),
                        self.interpolation_combo, self.resting_combo):
             if isinstance(widget, QComboBox):
                 widget.currentIndexChanged.connect(self._on_display_changed)
@@ -333,11 +318,6 @@ class BlenderProjectEditor(QWidget):
             style = resolved_display_style(style)
             independent = is_independent(style)
             extended = style if independent else new_display_style(style["levels"], style["opacity_mode"])
-            normalization = extended["normalization"]
-            index = self.normalization_combo.findData(normalization["mode"])
-            self.normalization_combo.setCurrentIndex(max(0, index))
-            self.manual_low.setValue(float(normalization["manual_range"][0]))
-            self.manual_high.setValue(float(normalization["manual_range"][1]))
             for name, spin in self.opacity_spins.items():
                 spin.setValue(float(extended["opacity"][name]))
             quality = resolved_render_quality(snapshot.payload.get("render_quality"))
@@ -358,9 +338,6 @@ class BlenderProjectEditor(QWidget):
             widget.setVisible(independent)
         self.opacity_label.setVisible(not independent)
         self.opacity_combo.setVisible(not independent)
-        manual = independent and self.normalization_combo.currentData() == NORMALIZATION_MANUAL
-        self.manual_low.setEnabled(manual)
-        self.manual_high.setEnabled(manual)
 
     def _on_entry_changed(self, *_args):
         if self._loading:
@@ -389,13 +366,9 @@ class BlenderProjectEditor(QWidget):
         opacity_mode = str(self.opacity_combo.currentData())
         snapshot = self.current_snapshot
         current_style = (snapshot.payload.get("display") or {}).get("background_style") if snapshot else None
+        colormap_range = (current_style or {}).get("colormap_range", (0.0, 1.0))
         if self.project and self.project.supports_display_styles and is_independent(current_style):
-            style = new_display_style(levels, opacity_mode)
-            style["normalization"] = {
-                "mode": str(self.normalization_combo.currentData()),
-                "percentiles": (0.0, 99.5),
-                "manual_range": (self.manual_low.value(), self.manual_high.value()),
-            }
+            style = new_display_style(levels, opacity_mode, colormap_range)
             style["opacity"] = dict(current_style["opacity"])
             for name, spin in self.opacity_spins.items():
                 style["opacity"][name] = float(spin.value())
@@ -403,7 +376,7 @@ class BlenderProjectEditor(QWidget):
             quality["interpolation"] = str(self.interpolation_combo.currentData())
             quality["resting"] = str(self.resting_combo.currentData())
         else:
-            style = legacy_display_style(levels, opacity_mode)
+            style = legacy_display_style(levels, opacity_mode, colormap_range)
             quality = (snapshot.payload.get("render_quality") if snapshot else None) or legacy_render_quality()
         self._sync_display_mode_rows()
         return {
@@ -574,8 +547,8 @@ class BlenderProjectEditor(QWidget):
     def _set_busy_widgets(self, busy):
         for widget in (self.entry_combo, self.cmap_combo, self.include_zero, self.opacity_combo,
                        self.path_edit, self.browse_button, *self.level_spins, self.lock_check,
-                       self.lock_low, self.lock_high, self.normalization_combo,
-                       self.manual_low, self.manual_high, *self.opacity_spins.values(),
+                       self.lock_low, self.lock_high,
+                       *self.opacity_spins.values(),
                        self.interpolation_combo, self.resting_combo):
             widget.setEnabled(not busy)
         self.cancel_button.setEnabled(busy)

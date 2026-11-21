@@ -1,192 +1,115 @@
+"""当前视图的时间区间求和：不创建独立时间积分页面。"""
+import os
 import unittest
-from types import SimpleNamespace
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt5.QtWidgets import QApplication
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.axis_interval import AxisInterval
+from bandscope.ui.result_workspace import AnalysisPageSpec
+from tests.support.view_recipe import control_window, synthetic_npz
 
 
-class _StubControl:
-    def __init__(self, value=0):
-        self._value = value
+class CurrentViewTimeIntervalTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
 
-    def value(self):
-        return self._value
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / "source.npz"
+        self.data = synthetic_npz(self.path, seed=19)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(str(self.path)))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
 
+    def _set_range(self, spec, low, up):
+        coords = self.window.core.coords["delay"]
+        spec.params["time_interval"] = AxisInterval.from_indices(
+            coords, low, up, locked=low == up, axis_key="delay"
+        ).as_dict()
+        self.window._bind_time_interval(spec, animate=False)
 
-def _axis_page(**overrides):
-    params = {
-        "axis_index": 1,
-        "axis_name": "Y轴",
-        "low": 2,
-        "up": 4,
-        "mid": 3,
-        "source_mode": "frame",
-        "source_page_kind": "home",
-        "source_t_index": 0,
-        "source_t_low": 0,
-        "source_t_up": 1,
-    }
-    params.update(overrides)
-    return SimpleNamespace(
-        page_id="axis-1",
-        title="Y轴积分_3",
-        page_kind="axis_integral",
-        params=params,
-    )
-
-
-def _home_page(**params):
-    return SimpleNamespace(
-        page_id="home-1",
-        title="主页",
-        page_kind="home",
-        params=dict(params),
-    )
-
-
-class TimeIntegralDerivationTests(unittest.TestCase):
-    def _analyzer(self, current_spec, *, shape=(4, 5, 6, 4), t_low=1, t_up=3):
-        analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
-        analyzer.core = SimpleNamespace(
-            raw_data=np.zeros(shape, dtype=np.float32),
-            coords={
-                "X": np.linspace(-1.0, 1.0, shape[0]),
-                "Y": np.linspace(-1.0, 1.0, shape[1]),
-                "E": np.linspace(-1.0, 1.0, shape[2]),
-                "delay": np.linspace(0.0, 3.0, shape[3]),
-            },
-            coord_sources={"X": "file", "Y": "file", "E": "file", "delay": "file"},
-            coord_units={},
-            has_time_axis=True,
-            logical_to_physical=lambda axis, value: float(value) * 0.5,
+    def test_home_sums_only_the_current_view_and_collapses_back_to_a_frame(self):
+        spec = self.window.left_workspace.current_spec()
+        original = (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs))
+        self._set_range(spec, 0, 1)
+        context = self.window._compute_render_context(spec)
+        np.testing.assert_allclose(
+            context["data"], np.sum(self.data[..., 0:2], axis=3), rtol=2e-6, atol=2e-6
         )
-        analyzer.page_data = SimpleNamespace(
-            s_t_low=_StubControl(t_low),
-            s_t_up=_StubControl(t_up),
-        )
-        analyzer.timeline_bar = SimpleNamespace(slider_time=_StubControl(0))
-        analyzer.axis_source_mode = "frame"
-        analyzer.home_slice_info = None
-        added = []
-        analyzer.left_workspace = SimpleNamespace(
-            current_spec=lambda: current_spec,
-            page_specs={},
-            home_spec=lambda: current_spec,
-            page_by_id=lambda page_id: current_spec if page_id == current_spec.page_id else None,
-            add_page=lambda spec: added.append(spec),
-        )
-        analyzer._make_page_id = lambda: "derived-1"
-        analyzer._persist_axis_integral_page_state = lambda _spec: None
-        analyzer._seed_control_state_for_spec = lambda _spec: None
-        analyzer._time_physical_range = lambda: (0.0, 3.0, 0.5, 1)
-        analyzer._capture_control_state = lambda: {"data_process": {}}
-        return analyzer, added
-
-    def test_2d_axis_page_derives_a_2d_time_integral_page(self):
-        analyzer, added = self._analyzer(_axis_page())
-
-        analyzer.on_apply_time_integral()
-
-        self.assertEqual(len(added), 1)
-        spec = added[0]
-        self.assertEqual(spec.page_kind, "axis_integral")
-        self.assertEqual(spec.source_page_id, "axis-1")
-        self.assertEqual(spec.params["axis_index"], 1)
-        self.assertEqual(spec.params["axis_name"], "Y轴")
-        self.assertEqual(spec.params["low"], 2)
-        self.assertEqual(spec.params["up"], 4)
-        self.assertEqual(spec.params["mid"], 3)
-        self.assertEqual(spec.params["source_mode"], "time_integral")
-        self.assertEqual(spec.params["source_t_low"], 1)
-        self.assertEqual(spec.params["source_t_up"], 3)
-        self.assertEqual(spec.title, "时间积分_Y轴积分_3")
-
-    def test_derived_page_seeds_axis_window_and_time_range(self):
-        analyzer, added = self._analyzer(_axis_page())
-
-        analyzer.on_apply_time_integral()
-
-        params = added[0].params
-        # 新页面的区间以物理值保存，整数 low/up/mid 由它派生。
-        interval = params["axis_interval"]
-        self.assertEqual(interval["axis_key"], "Y")
-        self.assertAlmostEqual(interval["low"], 0.0, places=9)
-        self.assertAlmostEqual(interval["up"], 1.0, places=9)
-        self.assertFalse(interval["locked"])
-        self.assertEqual((params["low"], params["up"], params["mid"]), (2, 4, 3))
-
-        control_state = params["control_state"]
-        data_state = control_state["data_process"]
-        self.assertEqual(control_state["axis_source_mode"], "time_integral")
-        self.assertNotIn("combo_ax", data_state)
-        self.assertEqual(params["axis_index"], 1)
-        self.assertEqual(data_state["s_t_low"]["value"], 1)
-        self.assertEqual(data_state["s_t_up"]["value"], 3)
-
-    def test_derived_2d_page_reads_the_time_integrated_volume(self):
-        source = _axis_page()
-        analyzer, added = self._analyzer(source)
-        analyzer.on_apply_time_integral()
-
-        integral_calls = []
-        analyzer._get_rotated_time_integral = (
-            lambda _raw, low, up: integral_calls.append((low, up))
-            or np.zeros((4, 5, 6), dtype=np.float32)
-        )
-        context = analyzer._get_3d_source_context_for_axis(
-            added[0],
-            analyzer.core.raw_data,
+        self.assertEqual(
+            (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs)), original
         )
 
-        self.assertEqual(integral_calls, [(1, 3)])
-        self.assertEqual(context["view"], "3d")
-
-    def test_crop_page_keeps_its_rectangle(self):
-        source = _axis_page(
-            crop_k_low=1,
-            crop_k_up=3,
-            crop_e_low=2,
-            crop_e_up=5,
+        self._set_range(spec, 2, 2)
+        context = self.window._compute_render_context(spec)
+        np.testing.assert_allclose(context["data"], self.data[..., 2], rtol=2e-6, atol=2e-6)
+        self.assertEqual(
+            (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs)), original
         )
-        source.page_kind = "axis_integral_crop"
-        analyzer, added = self._analyzer(source)
 
-        analyzer.on_apply_time_integral()
+    def test_spatial_and_time_intervals_compose_on_the_same_2d_page(self):
+        source = self.window.left_workspace.current_spec()
+        spec = self.window._build_canvas_axis_slice_spec(source, 2)
+        self.window.left_workspace.add_page(spec)
+        original = (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs))
+        self._set_range(spec, 0, 1)
 
-        spec = added[0]
-        self.assertEqual(spec.page_kind, "axis_integral_crop")
-        self.assertEqual(spec.params["crop_k_low"], 1)
-        self.assertEqual(spec.params["crop_k_up"], 3)
-        self.assertEqual(spec.params["crop_e_low"], 2)
-        self.assertEqual(spec.params["crop_e_up"], 5)
-        self.assertEqual(spec.params["source_mode"], "time_integral")
-        self.assertEqual(spec.title, "时间积分_Y轴积分裁剪_3")
+        spatial = AxisInterval.from_dict(spec.params["axis_interval"])
+        low, up = spatial.to_indices(self.window.core.coords["E"])
+        expected = np.sum(np.sum(self.data[..., 0:2], axis=3)[:, :, low:up + 1], axis=2)
+        context = self.window._get_axis_integral_context(
+            spec, self.window.core.raw_data, self.window.core.coords
+        )
+        np.testing.assert_allclose(context["data"], expected, rtol=2e-6, atol=2e-6)
+        self.assertEqual(
+            (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs)), original
+        )
 
-    def test_home_slice_view_still_derives_a_2d_slice(self):
-        analyzer, added = self._analyzer(_home_page())
-        analyzer.home_slice_info = {"axis": 0, "index": 2}
+    def test_energy_dos_reads_its_own_time_interval(self):
+        home = self.window.left_workspace.current_spec()
+        self._set_range(home, 0, 1)
+        spec = self.window._build_energy_dos_spec()
+        self.window.left_workspace.add_page(spec)
+        original = (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs))
+        raw, coords = self.window._get_display_state_for_spec(spec)
 
-        analyzer.on_apply_time_integral()
+        context = self.window._get_energy_dos_context(spec, raw, coords)
+        np.testing.assert_allclose(
+            context["y_data"], np.sum(self.data[..., 0:2], axis=(0, 1, 3)), rtol=2e-6, atol=2e-6
+        )
 
-        spec = added[0]
-        self.assertEqual(spec.page_kind, "axis_integral")
-        self.assertEqual(spec.params["axis_index"], 0)
-        self.assertEqual(spec.params["low"], 2)
-        self.assertEqual(spec.params["up"], 2)
-        self.assertEqual(spec.params["mid"], 2)
-        self.assertEqual(spec.params["source_mode"], "time_integral")
-        self.assertEqual(spec.source_page_id, "home-1")
-        self.assertEqual(spec.title, "时间积分_X轴切片_3")
+        self._set_range(spec, 1, 2)
+        context = self.window._get_energy_dos_context(spec, raw, coords)
+        np.testing.assert_allclose(
+            context["y_data"], np.sum(self.data[..., 1:3], axis=(0, 1, 3)), rtol=2e-6, atol=2e-6
+        )
+        self.assertEqual(
+            (spec.page_id, spec.page_kind, len(self.window.left_workspace.page_specs)), original
+        )
 
-    def test_home_3d_view_still_derives_a_volume_page(self):
-        analyzer, added = self._analyzer(_home_page())
 
-        analyzer.on_apply_time_integral()
+class LegacyTimePageMigrationTests(unittest.TestCase):
+    def test_legacy_page_kind_becomes_an_ordinary_home_page(self):
+        spec = AnalysisPageSpec(
+            "legacy", "旧时间积分", "time_integral", "test",
+            params={"t_low": 0, "t_up": 1},
+        )
+        self.assertEqual(spec.page_kind, "home")
 
-        spec = added[0]
-        self.assertEqual(spec.page_kind, "time_integral")
-        self.assertEqual(spec.params, {"t_low": 1, "t_up": 3})
+    def test_static_volume_is_not_sliced(self):
+        raw = np.ones((2, 3, 4), dtype=np.float32)
+        self.assertIs(My3DAnalyzer._time_range_data(raw, 0, 0), raw)
 
 
 if __name__ == "__main__":

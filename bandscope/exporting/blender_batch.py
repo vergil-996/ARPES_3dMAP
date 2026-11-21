@@ -35,17 +35,16 @@ class BlenderPageCandidate:
 
 def _candidate_kind(window, session, spec):
     kind = str(spec.page_kind)
-    if kind in {"home", "time_integral"}:
-        if kind == "home":
-            active = window.source_manager.is_active(session.session_id)
-            state = session.state or {}
-            core = window.core if active else state.get("core")
-            data = getattr(core, "raw_data", None)
-            if data is None or getattr(data, "ndim", 0) not in {3, 4}:
-                return False
-            slice_info = window.home_slice_info if active else state.get("home_slice_info")
-            if slice_info is not None:
-                return False
+    if kind == "home":
+        active = window.source_manager.is_active(session.session_id)
+        state = session.state or {}
+        core = window.core if active else state.get("core")
+        data = getattr(core, "raw_data", None)
+        if data is None or getattr(data, "ndim", 0) not in {3, 4}:
+            return False
+        slice_info = window.home_slice_info if active else state.get("home_slice_info")
+        if slice_info is not None:
+            return False
         return True
     if kind == "second_derivative":
         return str(spec.params.get("source_view")) == "3d"

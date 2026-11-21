@@ -93,7 +93,7 @@ def main():
             return
         name = names[index]
         window._set_theme(name)
-        window._select_control_page(0)
+        window.page_container.setCurrentWidget(window.page_render)
         QTimer.singleShot(2200, lambda: guard(lambda: capture_main(index, name)))
 
     def capture_main(index, name):
@@ -109,17 +109,8 @@ def main():
         assert actual_accent == theme.ACCENT, (actual_accent, theme.ACCENT)
         capture(window, args.output_dir / f"main-{name}.png")
         window.plotter.screenshot(str(args.output_dir / f"volume-{name}.png"))
-        if name == "dark":
-            window._select_control_page(1)
-            QTimer.singleShot(500, lambda: guard(capture_analysis))
-        else:
-            QTimer.singleShot(200, lambda: guard(check_camera_presets))
+        QTimer.singleShot(200, lambda: guard(check_camera_presets))
         results.append(f"主窗口 {name}：背景、按钮、参数保持")
-
-    def capture_analysis():
-        capture(window, args.output_dir / "analysis-dark.png")
-        window._select_control_page(0)
-        QTimer.singleShot(300, lambda: guard(check_camera_presets))
 
     def check_camera_presets():
         window._set_camera_view_preset("xy")

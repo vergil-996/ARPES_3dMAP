@@ -42,7 +42,6 @@ import bandscope.ui.theme as theme
 PAGE_KIND_ICONS = {
     "home": "ic_fluent_cube_regular",
     "control_panel": "ic_fluent_wrench_screwdriver_filled",
-    "time_integral": "ic_fluent_history_filled",
     "axis_integral": "ic_fluent_data_trending_filled",
     "axis_integral_crop": "ic_fluent_data_trending_filled",
     "path_slice": "ic_fluent_bezier_curve_square_filled",
@@ -576,6 +575,30 @@ class PageGroupView(QTreeWidget):
         super().keyPressEvent(event)
 
 
+class SourceSummaryCard(QFrame):
+    activated = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName("重新分配轴")
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self.activated.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.activated.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class PageTreePanel(QWidget):
     """常驻页面树面板：搜索框 + 来源树 + 独立分组区域 + 数据源摘要。"""
 
@@ -590,6 +613,8 @@ class PageTreePanel(QWidget):
     group_rename_requested = pyqtSignal(str)
     group_delete_requested = pyqtSignal(str)
     group_copy_page_requested = pyqtSignal(str, str)
+    page_create_requested = pyqtSignal(str, str)
+    source_assignment_requested = pyqtSignal()
 
     MAX_DEPTH = 64
 
@@ -615,6 +640,7 @@ class PageTreePanel(QWidget):
         self._signature = None
         self._editor: Optional[InlineRenameEditor] = None
         self._editing_page_id: Optional[str] = None
+        self._page_create_action_provider = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -696,8 +722,9 @@ class PageTreePanel(QWidget):
         )
         root.addWidget(self.group_tree, 1)
 
-        self.source_card = QFrame(self)
+        self.source_card = SourceSummaryCard(self)
         self.source_card.setObjectName("source_summary_card")
+        self.source_card.activated.connect(self.source_assignment_requested)
         self.source_card.setFixedHeight(82)
         card_layout = QVBoxLayout(self.source_card)
         card_layout.setContentsMargins(10, 9, 10, 8)
@@ -839,7 +866,20 @@ class PageTreePanel(QWidget):
                 item.setIcon(0, page_kind_icon(entry.page_kind))
 
     # ------------------------------------------------------------ 对外接口
-    def set_source_summary(self, title, filename, shape, backend):
+    def set_page_create_action_provider(self, provider):
+        self._page_create_action_provider = provider
+
+    def set_source_summary(
+        self,
+        title,
+        filename,
+        shape,
+        backend,
+        *,
+        assignment_summary="",
+        needs_confirmation=False,
+        warnings=(),
+    ):
         title = str(title or "当前数据源")
         filename = str(filename or "实验数据")
         self.source_name.setText(
@@ -851,7 +891,16 @@ class PageTreePanel(QWidget):
         )
         self.source_file.setToolTip(filename)
         dimensions = " × ".join(str(int(value)) for value in (shape or ()))
-        self.source_meta.setText(" · ".join(value for value in (dimensions, str(backend or "")) if value))
+        details = " · ".join(value for value in (dimensions, str(backend or "")) if value)
+        self.source_meta.setText(str(assignment_summary or details))
+        tooltip = [details, str(assignment_summary or "")]
+        tooltip.extend(str(item) for item in warnings if item)
+        self.source_meta.setToolTip("\n".join(item for item in tooltip if item))
+        self.source_state.setText("● 待确认" if needs_confirmation else "● 已载入")
+        self.source_state.setStyleSheet(
+            f"color: {theme.WARNING if needs_confirmation else theme.SUCCESS};"
+        )
+        self.source_card.setToolTip("重新分配轴\n" + "\n".join(item for item in tooltip if item))
         self.source_card.show()
 
     def clear_source_summary(self):
@@ -1425,6 +1474,39 @@ class PageTreePanel(QWidget):
         self.group_copy_page_requested.emit(self._clipboard_page_id, str(group_id))
 
     # ------------------------------------------------------------ 右键菜单
+    def _page_create_actions(self, page_id):
+        if self._page_create_action_provider is None or page_id not in self._entries:
+            return []
+        actions = []
+        for key, label, order in self._page_create_action_provider(page_id) or ():
+            key = str(key or "")
+            label = str(label or "")
+            if not key.strip() or not label.strip():
+                continue
+            actions.append((key, label, order))
+        return sorted(actions, key=lambda action: action[2])
+
+    def _add_page_create_menu(self, menu, page_id):
+        actions = self._page_create_actions(page_id)
+        if not actions:
+            return None
+        create_menu = menu.addMenu("创建结果页")
+        for key, label, _order in actions:
+            action = create_menu.addAction(label)
+            action.setData(key)
+            action.triggered.connect(
+                lambda _checked=False, pid=page_id, action_key=key: self._request_page_create(
+                    pid, action_key
+                )
+            )
+        return create_menu
+
+    def _request_page_create(self, page_id, action_key):
+        for key, _label, _order in self._page_create_actions(page_id):
+            if key == action_key:
+                self.page_create_requested.emit(page_id, action_key)
+                return
+
     def _on_context_menu(self, pos):
         item = self.tree.row_at(pos)
         page_id = self.tree.item_page_id(item)
@@ -1451,6 +1533,8 @@ class PageTreePanel(QWidget):
         copy_action = menu.addAction("复制页面")
         copy_action.setEnabled(len(selected_ids) == 1)
         copy_action.triggered.connect(lambda: self._copy_page(page_id))
+        if len(selected_ids) == 1:
+            self._add_page_create_menu(menu, page_id)
 
         menu.addSeparator()
         delete_label = (
@@ -1487,6 +1571,7 @@ class PageTreePanel(QWidget):
         else:
             entry = self._entries.get(page_id)
             menu.addAction("复制页面").triggered.connect(lambda: self._copy_page(page_id))
+            self._add_page_create_menu(menu, page_id)
             rename_action = menu.addAction("重命名")
             rename_action.setEnabled(bool(entry and entry.renameable))
             rename_action.triggered.connect(lambda: self.begin_rename(page_id))

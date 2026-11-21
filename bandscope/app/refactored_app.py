@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QPushButton,
     QShortcut,
     QSizePolicy,
     QSplitter,
@@ -62,6 +61,7 @@ from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.app.path_slice_integration import PathSliceController
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.app.source_workspace import SourceWorkspaceMixin
+from bandscope.app.time_interval_integration import TimeIntervalMixin
 from bandscope.app.blender_recipe_integration import BlenderRecipeMixin
 from bandscope.app.view_recipe_integration import ViewRecipeMixin
 from bandscope.core.crop_model import CropSelection, apply_crop_regions, export_cropped_context, waterfall_offsets
@@ -73,7 +73,6 @@ from bandscope.ui.blank_control_page import BlankControlPage
 from bandscope.core.data_trans import convert as convert_mat_to_npz
 from bandscope.exporting.publication_models import axis_label
 from bandscope.ui.numeric_wheel import install_numeric_wheel_filter
-from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.ui.plot_coordinate_tooltip import PlotCoordinateTooltip
 from bandscope.processing.compute_backends import ArrayLRUCache, BackendManager
@@ -125,7 +124,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
+class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
     refreshFinished = pyqtSignal(object)
     refreshFailed = pyqtSignal(object, str)
 
@@ -147,6 +146,12 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     NAVIGATION_CLASS_MARKERS = ("Slider", "Combo", "Tree")
     #: 右键菜单统一走 theme.context_menu_qss()（抬升面 + 圆角 + 禁用态 + 分隔线）。
     CONTEXT_MENU_STYLE = theme.context_menu_qss()
+    BUILTIN_PAGE_CREATE_ACTIONS = (
+        ("builtin:slice_dos", "切片内强度积分", 0.0),
+        ("builtin:energy_dos", "能级态密度", 10.0),
+        ("builtin:edc_curve", "单条 EDC 曲线", 30.0),
+        ("builtin:second_derivative", "二阶导", 40.0),
+    )
 
     def __init__(self):
         super().__init__()
@@ -181,12 +186,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self._pending_scope_denoise_keys = set()
         self._pending_roi_scope_id = None
         self._syncing_controls = False
-        self._syncing_axis_value_boxes = False
         # 积分区间的唯一真值：控件、页面参数与计算都从这里派生。
         self.axis_space = None
         self.axis_interval = None
         self.axis_interval_controller = AxisIntervalController(self)
-        self.axis_source_mode = "frame"
+        self.time_space = None
+        self.time_interval = None
+        self.time_interval_controller = AxisIntervalController(self)
         self.loaded_npz_stem = "data"
         self._preserve_control_tab_on_next_page_sync = False
         self.curve_clipboard = None
@@ -279,15 +285,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             session = PluginSession(self)
             session.startup()
             session.mount_cards(self.page_render)
-            session.mount_analysis_cards(self.page_data)
+            session.mount_analysis_cards(self.page_render)
             self.plugin_session = session
         except Exception as exc:
             print(f"Extension startup failed: {type(exc).__name__}: {exc}")
             traceback.print_exc()
         # 设置菜单先于本段构造：会话就绪（或失败）后刷新插件管理入口状态。
         self._update_plugin_button_state()
-        # 「其他积分」下拉并入插件注册的动作；插件未加载时保持内置项。
-        self._sync_integration_actions()
         # 提示要等窗口显示之后再弹，构造期 Toast 还没有可用的落点。
         QTimer.singleShot(0, self._notify_plugin_load_issues)
         self._update_render_status("complete", self.backend_manager.selected_backend_name())
@@ -317,11 +321,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def run_brute_force_layout(self):
         self.showMaximized()
-        self.page_container.setCurrentIndex(1)
         self.showNormal()
         self.showMaximized()
         self.page_container.setCurrentIndex(0)
-        self.btn_page2.setChecked(True)
         self.updateGeometry()
         self.setWindowOpacity(1)
         self.activateWindow()
@@ -346,7 +348,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             _bind("Ctrl+O", self.on_load),
             _bind("Ctrl+S", self.open_publication_dialog),
             _bind("Ctrl+1", lambda: self._select_control_page(0)),
-            _bind("Ctrl+2", lambda: self._select_control_page(1)),
             _bind("Ctrl+W", self.left_workspace.close_current_page),
         ]
 
@@ -357,7 +358,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         """
         if focus_widget is None:
             focus_widget = QApplication.focusWidget()
-        if focus_widget is None or focus_widget is self.timeline_bar.slider_time:
+        interval_control = getattr(self.timeline_bar, "time_interval_control", None)
+        range_slider = getattr(interval_control, "range_slider", None)
+        if (
+            focus_widget is None
+            or focus_widget is self.timeline_bar.slider_time
+            or (range_slider is not None and focus_widget is range_slider)
+        ):
             return False
         if self._widget_has_class_marker(focus_widget, self.EDITABLE_CLASS_MARKERS):
             return True
@@ -373,6 +380,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return False
 
         slider = self.timeline_bar.slider_time
+        if hasattr(slider, "isEnabled") and not slider.isEnabled():
+            return False
         if slider.maximum() <= slider.minimum():
             return False
         step = 10 if event.modifiers() & Qt.ShiftModifier else 1
@@ -654,59 +663,20 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         inspector_header.addWidget(self.btn_reset_view)
         right_vbox.addLayout(inspector_header)
 
-        nav_group = QFrame()
-        nav_group.setObjectName("inspector_tabs")
-        nav_group.setFixedHeight(38)
-        nav_group.setStyleSheet(f"QFrame#inspector_tabs {{ background: {theme.BG_1}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px; }}")
-        nav_layout = QHBoxLayout(nav_group)
-        nav_layout.setContentsMargins(3, 3, 3, 3)
-        nav_layout.setSpacing(3)
-
-        self.btn_page2 = QPushButton("外观", self)
-        self.btn_page2.setCheckable(True)
-        self.btn_page2.setChecked(True)
-
-        self.btn_page3 = QPushButton("处理分析", self)
-        self.btn_page3.setCheckable(True)
-        theme.set_button_icon(self.btn_page2, "ic_fluent_slide_settings_regular", 15)
-        theme.set_button_icon(self.btn_page3, "ic_fluent_data_trending_regular", 15)
-        for button in (self.btn_page2, self.btn_page3):
-            button.setIconSize(QSize(15, 15))
-
-        self.button_group = QButtonGroup(self)
-        for btn in [self.btn_page2, self.btn_page3]:
-            self.button_group.addButton(btn)
-            btn.setFixedHeight(30)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(theme.nav_tab_qss())
-            nav_layout.addWidget(btn, 1)
-        self.button_group.setExclusive(True)
-
-        right_vbox.addWidget(nav_group)
-
         self.page_container = QStackedWidget()
         self.page_render = RenderControlPage()
-        self.page_data = DataProcessPage()
-
         self.page_container.addWidget(self.page_render)
-        self.page_container.addWidget(self.page_data)
 
         right_vbox.addWidget(self.page_container)
 
-        # 画布正下方的底条：自己创建并持有时间轴控件与画布视图控件
-        # （显示坐标 / E轴翻转 / Z轴旋转，右对齐），主窗口的信号/快捷键/控件
-        # 状态都指向 timeline_bar 上的同名属性。底条本身常驻可见。
-        self.timeline_bar = TimelineBar(self.left_workspace)
+        # 底条只排布位置和时间区间；画布视图控件由悬浮工具栏持有，
+        # 既有调用方仍通过 timeline_bar 的同名入口读写状态。
+        self.timeline_bar = TimelineBar(
+            self.left_workspace, view_controls=self.canvas_tool_overlay
+        )
         self.left_workspace.set_footer_widget(self.timeline_bar)
-        # 加载数据前时间轴部分处于待机能态。
-        self.timeline_bar.slider_time.setEnabled(False)
-        self.timeline_bar.input_time.setEnabled(False)
-        self.timeline_bar.time_hint.setText("加载数据后可浏览时间轴")
-        # 启动时还没有数据：时间轴相关 UI（底条里的时间轴分组、“对时间轴积分”
-        # 卡片、“其他积分”里的时间相关项）默认隐藏，加载含时间轴的数据后再平滑
-        # 展开；底条上的视图控件与时间轴无关，始终保留。
+        # 启动时还没有数据：两个区间组都隐藏，底栏不占画布高度。
         self.timeline_bar.set_timeline_visible(False, animate=False)
-        self.page_data.set_time_axis_available(False, animate=False)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -741,8 +711,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             box_length=self.timeline_bar.interval_control.input_length,
             label_lock=self.status_lock,
         )
+        self.time_interval_controller.attach(
+            interval_widget=self.timeline_bar.time_interval_control,
+            box_length=self.timeline_bar.time_interval_control.input_length,
+        )
         # 加载数据前没有任何页面持有区间：控件先落下禁用态。
         self.axis_interval_controller.clear()
+        self.time_interval_controller.clear()
 
     def _save_splitter_sizes(self, *_args):
         sizes = getattr(self, "main_splitter", None)
@@ -1025,11 +1000,15 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 page_tree.clear_source_summary()
             else:
                 filename = os.path.basename(str(getattr(active_source, "primary_path", "") or ""))
+                assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
                 page_tree.set_source_summary(
                     getattr(active_source, "alias", "当前数据源"),
                     filename or "实验数据",
                     self.core.raw_data.shape,
                     backend,
+                    assignment_summary=assignment.summary() if assignment is not None else "",
+                    needs_confirmation=bool(assignment.needs_confirmation) if assignment is not None else False,
+                    warnings=assignment.warnings if assignment is not None else (),
                 )
 
     def _on_canvas_layout_changed(self):
@@ -1507,17 +1486,14 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             self.refresh_coordinator.schedule_exact(request, immediate=immediate)
 
     @staticmethod
-    def _volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle):
-        identity = My3DAnalyzer._raw_data_identity(raw_data)
-        if source_mode == "time_integral":
-            return (
-                "integral",
-                identity,
-                int(t_low),
-                int(t_up),
-                round(float(angle), 2),
-            )
-        return ("frame", identity, int(frame_index), round(float(angle), 2))
+    def _volume_cache_key(raw_data, t_low, t_up, angle):
+        return (
+            "time_range",
+            My3DAnalyzer._raw_data_identity(raw_data),
+            int(t_low),
+            int(t_up),
+            round(float(angle), 2),
+        )
 
     def _volume_source_descriptor(self, spec, request):
         if spec is None or spec.page_kind in {"control_panel", self.COMPARISON_PAGE_KIND, "slice_dos"}:
@@ -1527,30 +1503,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return None
 
         params = spec.params
-        source_mode = "frame"
-        frame_index = int(params.get("source_t_index", params.get("t_index", self.timeline_bar.slider_time.value())))
-        t_low = int(params.get("source_t_low", params.get("t_low", self.page_data.s_t_low.value())))
-        t_up = int(params.get("source_t_up", params.get("t_up", self.page_data.s_t_up.value())))
-
-        if spec.page_kind == "time_integral":
-            source_mode = "time_integral"
-        elif spec.page_kind in {
-            "axis_integral",
-            "axis_integral_crop",
-            self.PLUGIN_DERIVED_PAGE_KIND,
-            self.PATH_SLICE_PAGE_KIND,
-            "edc_curve",
-            "second_derivative",
-        }:
-            source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
-        if spec.page_kind == "second_derivative" and params.get("source_page_kind") == "time_integral":
-            source_mode = "time_integral"
-
-        if t_low > t_up:
-            t_low, t_up = t_up, t_low
+        t_low, t_up = self._time_indices_for_spec(spec)
         angle = float(request.snapshot.get("rotation_angle", self.rotation_angle))
-        key = self._volume_cache_key(raw_data, source_mode, frame_index, t_low, t_up, angle)
-        needs_compute = source_mode == "time_integral" or abs(angle) >= 1e-6
+        key = self._volume_cache_key(raw_data, t_low, t_up, angle)
+        needs_compute = t_up > t_low or abs(angle) >= 1e-6
         extra_metadata = {}
         if not needs_compute:
             operation = None
@@ -1558,8 +1514,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             operation = "prepare_volume"
         payload = {
             "raw_data": raw_data.values if isinstance(raw_data, ScopedDataVolume) else raw_data,
-            "source_mode": source_mode,
-            "frame_index": frame_index,
             "t_low": t_low,
             "t_up": t_up,
             "angle": angle,
@@ -1598,11 +1552,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             coordinate_values = np.asarray(self.original_coords[coordinate_key], dtype=np.float64)
             if descriptor is not None and not descriptor.is_full and abs(angle) < 1e-6:
                 coordinate_values = coordinate_values[descriptor.spatial_slices[derivative_axis]]
-            source_signature = (
-                ("time_integral", t_low, t_up)
-                if source_mode == "time_integral"
-                else ("frame", frame_index)
-            )
+            source_signature = ("time_range", t_low, t_up)
             sd_params = params.get("second_derivative_params") or {}
             threshold = float(sd_params.get("threshold", 0.0))
             prepared_shape = (
@@ -1659,7 +1609,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             if self._apply_rotation_actor_preview(self.rotation_angle):
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
-            if spec.page_kind not in {"home", "time_integral"}:
+            if spec.page_kind != "home":
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
 
@@ -2047,19 +1997,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return spec
 
     def add_plugin_derived_page(self, *, title, plugin_id, action_id, source, params):
-        """插件派生结果页：冻结来源 + 逐页参数；创建后进入该页。
-
-        调用方（``DerivedPageController``）已经用插件算过一次并校验通过，这里
-        只落地页面状态。来源页、数据域、时间帧/积分区间与裁剪范围都取自冻结
-        来源，之后不再跟随来源页变化。
-        """
+        """插件派生结果页：冻结空间来源，时间区间由新页面独立持有。"""
         spec_params = {
             "source_page_id": str(source.source_page_id),
             "source_page_kind": str(source.source_page_kind),
-            "source_mode": str(source.source_mode or "frame"),
-            "source_t_index": int(source.frame_index),
-            "source_t_low": int(source.time_low),
-            "source_t_up": int(source.time_up),
             DERIVED_SOURCE_KEY: source.to_mapping(),
             DERIVED_PLUGIN_KEY: str(plugin_id),
             DERIVED_ACTION_KEY: str(action_id),
@@ -2166,22 +2107,19 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return context, multiplier
 
     def bind_all_events(self):
-        self.btn_page2.clicked.connect(lambda: self._select_control_page(0))
-        self.btn_page3.clicked.connect(lambda: self._select_control_page(1))
-
         self.crop_controller.apply_requested.connect(self.on_cut)
         self.crop_controller.selection_changed.connect(self._on_crop_selection_changed)
-        self.timeline_bar.slider_time.valueChanged.connect(self.on_time_slider_changed)
-        self.timeline_bar.slider_time.sliderReleased.connect(self.flush_time_slider_refresh)
-        self.timeline_bar.input_time.editingFinished.connect(self.flush_time_slider_refresh)
+        self.timeline_bar.slider_time.valueChanged.connect(
+            lambda value: self.on_time_slider_changed(value)
+        )
         self.timeline_bar.switch_axes.toggled.connect(
             lambda _checked: self.request_refresh(RefreshCause.OVERLAY, RenderQuality.EXACT, immediate=True)
         )
         self.btn_tb_crop.toggled.connect(self.on_toggle_interactive_box)
         self.btn_tb_erase.toggled.connect(self.on_toggle_erase)
         self.timeline_bar.switch_flip.toggled.connect(self.on_toggle_e_flip)
-        self.timeline_bar.edit_rotation.textChanged.connect(self.on_rotation_angle_preview)
-        self.timeline_bar.edit_rotation.editingFinished.connect(self.on_rotation_angle_changed)
+        self.canvas_tool_overlay.rotation_preview.connect(self.on_rotation_angle_preview)
+        self.canvas_tool_overlay.rotation_committed.connect(self.on_rotation_angle_changed)
 
         self.page_render.btn_apply_cmap.clicked.connect(
             lambda: self.request_refresh(RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True)
@@ -2189,9 +2127,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.page_render.s_low.valueChanged.connect(self.schedule_render_levels_refresh)
         self.page_render.s_gamma.valueChanged.connect(self.schedule_render_levels_refresh)
         self.page_render.s_up.valueChanged.connect(self.schedule_render_levels_refresh)
+        self.page_render.s_cmap_low.valueChanged.connect(self.schedule_render_levels_refresh)
+        self.page_render.s_cmap_high.valueChanged.connect(self.schedule_render_levels_refresh)
         self.page_render.s_low.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_gamma.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
+        self.page_render.s_cmap_low.sliderReleased.connect(self.flush_render_levels_refresh)
+        self.page_render.s_cmap_high.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.btn_apply_map.clicked.connect(
             self.flush_render_levels_refresh
         )
@@ -2200,21 +2142,29 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
         self.page_render.camera_view_reset_requested.connect(self.on_camera_view_reset)
 
-        self.page_data.btn_t_apply.clicked.connect(self.on_apply_time_integral)
-        self.page_data.s_t_low.valueChanged.connect(self.on_time_integral_controls_changed)
-        self.page_data.s_t_up.valueChanged.connect(self.on_time_integral_controls_changed)
-        self.page_data.s_t_low.sliderReleased.connect(self.flush_axis_refresh)
-        self.page_data.s_t_up.sliderReleased.connect(self.flush_axis_refresh)
-        self._connect_time_value_box_signals()
+        self.time_interval_controller.intervalChanged.connect(
+            lambda: self.on_time_interval_changed()
+        )
+        self.time_interval_controller.intervalCommitted.connect(
+            lambda: self.flush_time_interval_refresh()
+        )
+        self.time_interval_controller.lockChanged.connect(
+            lambda locked: self.on_time_interval_lock_changed(locked)
+        )
         # 区间控件的约束、联动与刷新时机统一由 axis_interval_controller 决定：
         # 拖动只发预览，释放/输入提交才发精确刷新，一次操作只落定一次。
         self.axis_interval_controller.intervalChanged.connect(self.schedule_axis_refresh)
         self.axis_interval_controller.intervalCommitted.connect(self.flush_axis_refresh)
         self.axis_interval_controller.lockChanged.connect(self.on_axis_lock_changed)
         self.timeline_bar.layoutChanged.connect(self._on_canvas_layout_changed)
-        self.page_data.btn_other_apply.clicked.connect(self.on_apply_other_integral)
-        self.page_data.combo_other.currentIndexChanged.connect(self.on_other_mode_selection_changed)
 
+        self.left_workspace.set_page_create_action_provider(
+            self._integration_actions_for_parent
+        )
+        self.left_workspace.page_create_requested.connect(self._on_page_create_requested)
+        self.left_workspace.page_tree.source_assignment_requested.connect(
+            self.on_source_assignment_requested
+        )
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
         self.left_workspace.group_page_activation_requested.connect(
             self._on_group_page_activation_requested
@@ -2236,14 +2186,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.last_visual_page_id = home_spec.page_id
         home_spec.params["control_state"] = self._capture_control_state()
 
-    def _control_page_buttons(self):
-        return [self.btn_page2, self.btn_page3]
-
     def _select_control_page(self, index):
-        # 夹紧下标：旧设置或脚本可能仍传来三标签页时代的编号。
+        # 夹紧下标：旧设置或脚本可能仍传来多标签页时代的编号。
         index = max(0, min(int(index), self.page_container.count() - 1))
         self.page_container.setCurrentIndex(index)
-        self._control_page_buttons()[index].setChecked(True)
         if not self._syncing_controls:
             self._persist_page_ui_state()
 
@@ -2426,11 +2372,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _capture_control_state(self):
         return {
             "active_control_tab": int(self.page_container.currentIndex()),
-            "axis_source_mode": self.axis_source_mode,
             "image": self.timeline_bar.export_state(),
             "render": self._enhancement_export_render_state(self.page_render.export_state()),
             "denoise_detail": self.page_control_blank.export_state(),
-            "data_process": self.page_data.export_state(),
         }
 
     def _capture_global_denoise_control_state(self):
@@ -2466,31 +2410,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return
         self._assign_scope_to_spec(spec)
         control_state = self._capture_control_state()
-        control_state["axis_source_mode"] = self._page_axis_source_mode(spec)
         self._store_control_state(spec, control_state)
+        self._seed_time_interval_for_spec(spec)
 
         self._inherit_enhancement_state(spec)
-
-    def _page_axis_source_mode(self, spec):
-        if spec is None:
-            return "frame"
-        if spec.page_kind == "time_integral":
-            return "time_integral"
-        if spec.page_kind in {
-            "axis_integral",
-            "axis_integral_crop",
-            self.PLUGIN_DERIVED_PAGE_KIND,
-            self.PATH_SLICE_PAGE_KIND,
-            "edc_curve",
-            "second_derivative",
-        }:
-            return self._normalize_axis_source_mode(
-                spec.params.get(
-                    "source_mode",
-                    "time_integral" if spec.params.get("source_page_kind") == "time_integral" else "frame",
-                )
-            )
-        return "frame"
 
     def _persist_home_page_state(self, spec):
         if spec is None:
@@ -2512,22 +2435,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return
         if spec.page_kind == "home":
             self._persist_home_page_state(spec)
-        elif spec.page_kind == "time_integral":
-            self._persist_time_integral_page_state(spec)
         elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             self._persist_axis_integral_page_state(spec)
         elif spec.page_kind == "second_derivative":
             self._persist_second_derivative_page_state(spec)
-        elif spec.page_kind == self.PATH_SLICE_PAGE_KIND and self._path_slices() is not None:
-            self._path_slices().persist_time(spec)
-        elif spec.page_kind == "energy_dos":
-            if spec.params.get("source_page_kind") != "time_integral":
-                spec.params["t_index"] = int(self.timeline_bar.slider_time.value())
 
     def _persist_page_ui_state(self, spec=None):
         owner_spec = self._control_state_owner(spec)
         if owner_spec is None:
             return
+        self._persist_time_interval_state(owner_spec)
         self._store_control_state(owner_spec, self._capture_control_state())
         self._persist_page_specific_state(owner_spec)
         session = self._plugin_session()
@@ -2539,12 +2456,14 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if owner_spec is None:
             return
 
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        if overlay is not None:
+            overlay.close_rotation_panel(commit=False)
         self._ensure_page_display_state(owner_spec)
         global_denoise_state = self._capture_global_denoise_control_state()
         control_state = self._copy_state(owner_spec.params.get("control_state"))
         if control_state is None:
             control_state = self._capture_control_state()
-            control_state["axis_source_mode"] = self._page_axis_source_mode(owner_spec)
             self._store_control_state(owner_spec, control_state)
 
         self._syncing_controls = True
@@ -2557,7 +2476,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             if session is not None:
                 session.restore_page_state(owner_spec)
 
-            self.axis_source_mode = control_state.get("axis_source_mode", self._page_axis_source_mode(owner_spec))
             self.timeline_bar.restore_state(control_state.get("image"), block_signals=True)
             self.rotation_angle = self.timeline_bar.get_rotation_angle()
             self.page_render.restore_state(
@@ -2575,10 +2493,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 ),
                 block_signals=True,
             )
-            self.page_data.restore_state(control_state.get("data_process"), block_signals=True)
-
-            if self.core.raw_data is not None:
-                self.sync_time_value_boxes_from_sliders()
 
             if self._preserve_control_tab_on_next_page_sync:
                 tab_index = int(self.page_container.currentIndex())
@@ -2594,11 +2508,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if target_spec is None or target_spec.page_kind not in {"axis_integral", "axis_integral_crop"}:
             return
 
-        if not target_spec.params.get("source_3d"):
-            source_mode = self._normalize_axis_source_mode(self.axis_source_mode)
-            target_spec.params["source_mode"] = source_mode
-            target_spec.params["source_page_kind"] = "time_integral" if source_mode == "time_integral" else "home"
-            target_spec.params.update(self._source_time_params())
         self._persist_axis_interval_state(target_spec)
 
     def _persist_second_derivative_page_state(self, spec=None):
@@ -2660,9 +2569,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.request_refresh(RefreshCause.DISPLAY_MAPPING if local else RefreshCause.TRANSFER_FUNCTION, interactive=True)
 
     def on_time_slider_changed(self, value):
-        self.on_image_time_changed(value)
         if self._syncing_controls or self.core.raw_data is None:
             return
+        self._persist_time_interval_state()
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
 
     def on_toggle_color_lock(self, checked):
@@ -2970,23 +2879,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 page_spec.params.pop("denoise_methods", None)
 
     @staticmethod
-    def _get_data_for_t_from_raw(raw_data, t_idx):
-        if isinstance(raw_data, ScopedDataVolume):
-            return raw_data.frame(t_idx)
-        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
-        return raw_data[:, :, :, t_idx]
-
-    @staticmethod
-    def _get_time_integrated_data_from_raw(raw_data, t_low, t_up):
-        if isinstance(raw_data, ScopedDataVolume):
-            return raw_data.time_integral(t_low, t_up)
-        t_low = max(0, int(t_low))
-        t_up = min(raw_data.shape[3] - 1, int(t_up))
-        if t_low > t_up:
-            t_low, t_up = t_up, t_low
-        return np.sum(raw_data[:, :, :, t_low:t_up + 1], axis=3)
-
-    @staticmethod
     def _get_axis_integrated_data_from_raw(data_3d, axis_index, low_idx, up_idx):
         axis_index = int(axis_index)
         descriptor = scoped_descriptor_from_array(data_3d)
@@ -3072,12 +2964,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             self._axis_prefix_cache = None
 
     def _axis_prefix_cache_key(self, spec, params, raw_data):
-        source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
-        if source_mode == "time_integral":
-            t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
-            time_key = ("time_integral", t_low, t_up)
-        else:
-            time_key = ("frame", int(params["source_t_index"]))
+        time_key = self._time_indices_for_spec(spec)
 
         return (
             spec.page_id,
@@ -3171,78 +3058,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 )
             return ScopedSpatialArray(source, descriptor)
         return value
-
-    def _get_rotated_frame(self, raw_data, t_idx):
-        """Extract a time frame and apply Z-axis (Kx-Ky plane) rotation.
-
-        Caches the rotated volume by (t_idx, angle). Returns the
-        original frame directly when rotation_angle is effectively 0.
-        """
-        angle = self.rotation_angle
-        t_idx = int(np.clip(t_idx, 0, raw_data.shape[3] - 1))
-        key = (
-            "frame",
-            self._raw_data_identity(raw_data),
-            int(t_idx),
-            round(float(angle), 2),
-        )
-        computed_cache = self.__dict__.get("_computed_volume_cache")
-        cached = computed_cache.get(key) if computed_cache is not None else None
-        if cached is not None:
-            return self._restore_scoped_spatial(raw_data, cached, angle)
-        if angle is None or abs(float(angle)) < 1e-6:
-            return self._get_data_for_t_from_raw(raw_data, t_idx)
-
-        cached = self._rotation_cache_get(key)
-        if cached is not None:
-            return self._restore_scoped_spatial(raw_data, cached, angle)
-
-        data_3d = self._get_data_for_t_from_raw(raw_data, t_idx)
-        if isinstance(raw_data, ScopedDataVolume):
-            data_3d = raw_data.materialize_3d(data_3d)
-        rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
-        self._rotation_cache_store(key, rotated)
-        return rotated
-
-    def _get_rotated_time_integral(self, raw_data, t_low, t_up):
-        """Compute time-integrated 3D data and apply Z-axis rotation.
-
-        Caches the result by (t_low, t_up, angle). Skips rotation
-        entirely when rotation_angle is effectively 0.
-        """
-        angle = self.rotation_angle
-        t_low = max(0, int(t_low))
-        t_up = min(raw_data.shape[3] - 1, int(t_up))
-        if t_low > t_up:
-            t_low, t_up = t_up, t_low
-
-        key = (
-            "integral",
-            self._raw_data_identity(raw_data),
-            int(t_low),
-            int(t_up),
-            round(float(angle), 2),
-        )
-        computed_cache = self.__dict__.get("_computed_volume_cache")
-        cached = computed_cache.get(key) if computed_cache is not None else None
-        if cached is not None:
-            return self._restore_scoped_spatial(raw_data, cached, angle)
-        cached = self._rotation_cache_get(key)
-        if cached is not None:
-            return self._restore_scoped_spatial(raw_data, cached, angle)
-
-        data_3d = self._get_time_integrated_data_from_raw(raw_data, t_low, t_up)
-        if angle is None or abs(float(angle)) < 1e-6:
-            rotated = np.asfortranarray(data_3d, dtype=np.float32)
-            descriptor = scoped_descriptor_from_array(data_3d)
-            if descriptor is not None:
-                rotated = ScopedSpatialArray(rotated, descriptor)
-        else:
-            if isinstance(raw_data, ScopedDataVolume):
-                data_3d = raw_data.materialize_3d(data_3d)
-            rotated = self.backend_manager.cpu.rotate_volume(data_3d, float(angle))
-        self._rotation_cache_store(key, rotated)
-        return rotated
 
     def _get_display_state_for_spec(self, spec):
         if self.original_raw_data is None or self.original_coords is None:
@@ -3409,6 +3224,83 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return str(t_index)
         safe_index = min(max(int(t_index), 0), len(delays) - 1)
         return f"{float(delays[safe_index]):.3f}"
+
+    def _scan_frame_description(self, frame_index):
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is None or not assignment.has_scan:
+            return self._current_delay_text(frame_index)
+        source = (getattr(self.core, "coord_sources", {}) or {}).get("delay", "index")
+        if source == "index":
+            return f"{assignment.display_scan_name}（索引） {int(frame_index)}"
+        unit = resolve_axis_unit(
+            "delay" if assignment.is_time else "scan",
+            (getattr(self.core, "coord_units", {}) or {}).get("delay"),
+        )
+        value = self._current_delay_text(frame_index)
+        return f"{assignment.display_scan_name} {value} {unit}".rstrip()
+
+    def _scan_interval_description(self, low, up):
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        low, up = sorted((int(low), int(up)))
+        if assignment is None or assignment.is_time:
+            delays = np.asarray(self.core.coords.get("delay") if self.core.coords.get("delay") is not None else [], dtype=np.float64)
+            if delays.size <= up:
+                return f"时间积分 {low}~{up}"
+            if up > low:
+                return f"时间积分 {low}~{up}（Delay {delays[low]:.4g}~{delays[up]:.4g}）"
+            return f"帧 {low}（Delay {delays[low]:.4g}）"
+        if up == low:
+            return self._scan_frame_description(low)
+        delays = np.asarray(self.core.coords.get("delay") if self.core.coords.get("delay") is not None else [], dtype=np.float64)
+        unit = resolve_axis_unit("scan", (getattr(self.core, "coord_units", {}) or {}).get("delay"))
+        values = f"{delays[low]:.4g}~{delays[up]:.4g}" if delays.size > up else f"{low}~{up}"
+        return f"{assignment.display_scan_name}区间 {low}~{up}（{values} {unit}）".rstrip()
+
+    def _scan_axis_spec(self, frame_index=None, *, spec=None, interval=None, interval_bounds=None):
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is None or not assignment.has_scan:
+            return None
+        from bandscope.extensions.api import ScanAxisSpec
+
+        coords = np.asarray(
+            self.core.coords.get("delay") if self.core.coords.get("delay") is not None else [],
+            dtype=np.float64,
+        ).reshape(-1)
+        if not coords.size:
+            return None
+        interval_model = None
+        if interval is None:
+            spec = spec or self.left_workspace.current_spec()
+            interval_model = self._time_interval_for_spec(spec)
+            low, up = self._time_indices_for_spec(spec)
+        else:
+            low, up = sorted((int(interval[0]), int(interval[1])))
+        low = int(np.clip(low, 0, coords.size - 1))
+        up = int(np.clip(up, 0, coords.size - 1))
+        if frame_index is None:
+            frame_index = low
+        frame_index = int(np.clip(frame_index, 0, coords.size - 1))
+        if interval_bounds is None:
+            interval_bounds = (
+                (interval_model.low, interval_model.up)
+                if interval_model is not None
+                else tuple(sorted((coords[low], coords[up])))
+            )
+        values = coords.copy()
+        values.setflags(write=False)
+        return ScanAxisSpec(
+            values=values,
+            scan_type=str(assignment.scan_kind),
+            name=str(assignment.display_scan_name),
+            unit=resolve_axis_unit(
+                "delay" if assignment.is_time else "scan",
+                (getattr(self.core, "coord_units", {}) or {}).get("delay"),
+            ),
+            source=(getattr(self.core, "coord_sources", {}) or {}).get("delay", "index"),
+            frame_index=frame_index,
+            value=float(coords[frame_index]),
+            interval=(float(interval_bounds[0]), float(interval_bounds[1])),
+        )
 
     @staticmethod
     def _compute_axis_spacing(axis_values, fallback=0.01):
@@ -4177,80 +4069,32 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "roi_physical_bounds": descriptor.physical_bounds(coords),
         }
 
-    def _is_time_integral_axis_page(self, spec):
-        return (
-            spec is not None
-            and spec.page_kind in {"axis_integral", "axis_integral_crop"}
-            and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
-        )
-
-    def _is_time_locked_page(self, spec):
-        if spec is None:
-            return False
-        if self._is_time_integral_axis_page(spec):
-            return True
-        if (
-            spec.page_kind == "energy_dos"
-            and spec.params.get("source_page_kind") == "time_integral"
-        ):
-            return True
-        return (
-            spec.page_kind in {self.PLUGIN_DERIVED_PAGE_KIND, self.PATH_SLICE_PAGE_KIND, "edc_curve", "second_derivative"}
-            and self._normalize_axis_source_mode(spec.params.get("source_mode")) == "time_integral"
-        )
-
     def _has_time_axis(self):
+        core = self.__dict__.get("core")
+        raw_data = getattr(core, "raw_data", None)
         return (
-            bool(self.core.has_time_axis)
-            and self.core.raw_data is not None
-            and int(self.core.raw_data.shape[3]) > 1
+            bool(getattr(core, "has_time_axis", False))
+            and raw_data is not None
+            and int(raw_data.shape[3]) > 1
         )
 
     def _set_time_axis_ui_visible(self, visible, *, animate=True):
-        """时间轴相关 UI（底条里的时间轴分组、“对时间轴积分”卡片、“其他积分”
-        里的时间相关项）只在数据含时间轴时出现，切换时带高度/淡入淡出动画。
-
-        底条本身常驻：右侧的显示坐标 / E轴翻转 / Z轴旋转与时间轴无关。"""
-        # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
-        # RuntimeError；实例 __dict__ 查询则安全。
+        """按数据与当前页能力控制时间组显隐。"""
+        spec = self._control_state_owner(self.left_workspace.current_spec())
         timeline_bar = self.__dict__.get("timeline_bar")
         if timeline_bar is not None:
-            timeline_bar.set_timeline_visible(visible, animate=animate)
-        page_data = self.__dict__.get("page_data")
-        if page_data is not None:
-            page_data.set_time_axis_available(visible, animate=animate)
+            timeline_bar.set_timeline_visible(
+                bool(visible) and self._time_page_editable(spec), animate=animate
+            )
 
     def _update_time_slider_state(self):
-        has_time_axis = self._has_time_axis()
-        active_spec = self._control_state_owner(self.left_workspace.current_spec())
-        is_enabled = has_time_axis and not self._is_time_locked_page(active_spec)
-        # 不用 getattr：部分测试用 __new__ 绕过 QWidget 构造，sip 属性查找会抛
-        # RuntimeError；实例 __dict__ 查询则安全。
         bar = self.__dict__.get("timeline_bar")
-        if bar is None:
-            return
-        bar.slider_time.setEnabled(is_enabled)
-        bar.input_time.setEnabled(is_enabled)
-        if hasattr(bar, "time_hint"):
-            if is_enabled:
-                hint = "当前帧 · ← → 逐帧切换"
-            elif self.core.raw_data is None:
-                hint = "加载数据后可浏览时间轴"
-            elif has_time_axis:
-                hint = "当前结果已固定时间范围"
-            else:
-                hint = "静态数据 · 无时间维度"
-            bar.time_hint.setText(hint)
+        if bar is not None:
+            spec = self._control_state_owner(self.left_workspace.current_spec())
+            bar.slider_time.setEnabled(self._time_page_editable(spec))
 
     def _configure_time_controls(self):
-        has_time_axis = self._has_time_axis()
-        self._update_time_slider_state()
-        self.page_data.s_t_low.setEnabled(has_time_axis)
-        self.page_data.s_t_up.setEnabled(has_time_axis)
-        self.page_data.input_t_low.setEnabled(has_time_axis)
-        self.page_data.input_t_up.setEnabled(has_time_axis)
-        self.page_data.btn_t_apply.setEnabled(has_time_axis)
-        self._set_time_axis_ui_visible(has_time_axis, animate=True)
+        self._bind_time_interval(self.left_workspace.current_spec(), animate=True)
 
     def _update_export_button_states(self):
         has_data = self.base_raw_data is not None
@@ -4288,11 +4132,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def _get_loaded_npz_stem(self):
         return self._sanitize_filename_component(self.loaded_npz_stem)
-
-    def _build_time_integral_default_name(self, t_low, t_up):
-        low_text = self._format_filename_number(self.core.logical_to_physical("delay", t_low))
-        up_text = self._format_filename_number(self.core.logical_to_physical("delay", t_up))
-        return self._sanitize_filename_component(f"{low_text}_{up_text}_t_{self._get_loaded_npz_stem()}")
 
     @staticmethod
     def _axis_plot_info(axis_index):
@@ -4404,9 +4243,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "low": low,
             "up": up,
             "mid": mid,
-            "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
-            **self._source_time_params(params),
         }
+        if self._has_time_axis():
+            resolved["time_interval"] = self._legacy_time_interval(
+                spec, self._time_space_for_data()
+            ).as_dict()
+        t_low, t_up = self._time_indices_for_spec(spec)
+        resolved.update(
+            source_t_index=t_low,
+            source_t_low=t_low,
+            source_t_up=t_up,
+            source_mode="time_integral" if t_up > t_low else "frame",
+        )
         for key in ("source_3d", "axis_domain"):
             if params.get(key) is not None:
                 resolved[key] = copy.deepcopy(params[key])
@@ -4437,11 +4285,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "mode": "integral",
             "range": (int(params["low"]), int(params["up"])),
         }
-        if params["source_mode"] == "time_integral":
-            t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
+        t_low, t_up = self._time_indices_for_spec(spec)
+        if t_up > t_low:
             delay_axis = np.asarray(coords["delay"], dtype=np.float64)
-            t_low = int(np.clip(t_low, 0, len(delay_axis) - 1))
-            t_up = int(np.clip(t_up, 0, len(delay_axis) - 1))
             spatial_low = self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["low"]))
             spatial_up = self.core.logical_to_physical(axis_info["integrated_axis_key"], int(params["up"]))
             if int(params["low"]) == int(params["up"]):
@@ -4451,10 +4297,19 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                     f"{axis_info['integrated_axis_label']}-Integral "
                     f"{spatial_low:.4g}~{spatial_up:.4g}"
                 )
-            slice_info["title_override"] = (
-                f"Time-Integrated {spatial_text} "
-                f"(Delay {delay_axis[t_low]:.4g}~{delay_axis[t_up]:.4g})"
-            )
+            assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+            if assignment is None or assignment.is_time:
+                slice_info["title_override"] = (
+                    f"Time-Integrated {spatial_text} "
+                    f"(Delay {delay_axis[t_low]:.4g}~{delay_axis[t_up]:.4g})"
+                )
+            else:
+                unit = resolve_axis_unit("scan", (self.core.coord_units or {}).get("delay"))
+                unit_text = f" {unit}" if unit else ""
+                slice_info["title_override"] = (
+                    f"{assignment.display_scan_name}-Integrated {spatial_text} "
+                    f"({delay_axis[t_low]:.4g}~{delay_axis[t_up]:.4g}{unit_text})"
+                )
 
         context = {
             "view": "2d",
@@ -4554,127 +4409,61 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _get_axis_integral_export_context(self, spec, raw_data, coords):
         if raw_data is None:
             return None
-
         params = self._resolved_axis_integral_params(spec)
-        if params is None:
+        context = self._build_axis_integral_base_context(spec, raw_data, coords)
+        if params is None or context is None:
             return None
 
         axis_index = int(params["axis_index"])
-        low = int(params["low"])
-        up = int(params["up"])
-        mid = int(params["mid"])
-
-        if low > up:
-            low, up = up, low
-
+        axis_max = raw_data.shape[axis_index] - 1
+        low = int(np.clip(min(int(params["low"]), int(params["up"])), 0, axis_max))
+        up = int(np.clip(max(int(params["low"]), int(params["up"])), 0, axis_max))
+        mid = int(np.clip(int(params["mid"]), low, up))
         axis_key = {0: "X", 1: "Y", 2: "E"}.get(axis_index, "X")
         axis_tag = {0: "x", 1: "y", 2: "z"}.get(axis_index, "x")
-        axis_max = raw_data.shape[axis_index] - 1
-        low = int(np.clip(low, 0, axis_max))
-        up = int(np.clip(up, 0, axis_max))
-        mid = int(np.clip(mid, low, up))
-
-        if params["source_mode"] == "time_integral" or spec.params.get("source_3d"):
-            context = self._build_axis_integral_base_context(spec, raw_data, coords)
-            if context is None:
-                return None
-
-            axis_info = self._axis_plot_info(axis_index)
-            sample = np.asarray(context["data"], dtype=np.float32)
-            descriptor = (
-                raw_data.descriptor
-                if isinstance(raw_data, ScopedDataVolume) and not spec.params.get("source_3d")
-                else None
-            )
-            if descriptor is not None and not descriptor.is_full:
-                remaining_axes = [axis for axis in range(3) if axis != axis_index]
-                sample = sample[
-                    descriptor.spatial_slices[remaining_axes[0]],
-                    descriptor.spatial_slices[remaining_axes[1]],
-                ]
-            export_data = {
-                "sample": sample,
-                "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
-                "integrated_range": np.asarray(
-                    [
-                        self.core.logical_to_physical(axis_key, low),
-                        self.core.logical_to_physical(axis_key, up),
-                    ],
-                    dtype=np.float32,
-                ),
-                "integrated_center": np.asarray(
-                    [self.core.logical_to_physical(axis_key, mid)],
-                    dtype=np.float32,
-                ),
-                "source_mode": np.asarray([params["source_mode"]]),
-            }
-            if axis_index == 0:
-                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
-                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
-                export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
-                export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
-            elif axis_index == 1:
-                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
-                e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
-                export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
-                export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
-            else:
-                x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
-                y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
-                export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
-                export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
-            if params["source_mode"] == "time_integral":
-                export_data.update(self._time_integral_export_metadata(params, coords))
-
-            low_text = self._format_filename_number(self.core.logical_to_physical(axis_key, low))
-            up_text = self._format_filename_number(self.core.logical_to_physical(axis_key, up))
-            mid_text = self._format_filename_number(self.core.logical_to_physical(axis_key, mid))
-            prefix = "time_integral_" if params["source_mode"] == "time_integral" else ""
-            default_name = self._sanitize_filename_component(
-                f"{prefix}{low_text}_{up_text}_{mid_text}_{axis_tag}_{self._get_loaded_npz_stem()}"
-            )
-            return {"export_data": export_data, "default_name": default_name}
-
-        if isinstance(raw_data, ScopedDataVolume):
-            descriptor = raw_data.descriptor
-            sample = self._scoped_axis_sum_4d(raw_data, axis_index, low, up)
+        axis_info = self._axis_plot_info(axis_index)
+        sample = np.asarray(context["data"], dtype=np.float32)
+        descriptor = (
+            raw_data.descriptor
+            if isinstance(raw_data, ScopedDataVolume) and not spec.params.get("source_3d")
+            else None
+        )
+        if descriptor is not None and not descriptor.is_full:
             remaining_axes = [axis for axis in range(3) if axis != axis_index]
-            coordinate_keys = ("X", "Y", "E")
-            export_data = {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            }
-            export_names = {"X": "kx", "Y": "ky", "E": "E"}
-            for remaining_axis in remaining_axes:
-                key = coordinate_keys[remaining_axis]
-                export_data[export_names[key]] = np.asarray(
-                    coords[key][descriptor.spatial_slices[remaining_axis]],
-                    dtype=np.float32,
-                )
-        elif axis_index == 0:
-            sample = np.sum(raw_data[low:up + 1, :, :, :], axis=0)
-            export_data = {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "ky": np.asarray(coords["Y"], dtype=np.float32),
-                "E": np.asarray(coords["E"], dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            }
+            sample = sample[
+                descriptor.spatial_slices[remaining_axes[0]],
+                descriptor.spatial_slices[remaining_axes[1]],
+            ]
+        export_data = {
+            "sample": sample,
+            "integrated_axis": np.asarray([axis_info["integrated_axis_label"]]),
+            "integrated_range": np.asarray(
+                [
+                    self.core.logical_to_physical(axis_key, low),
+                    self.core.logical_to_physical(axis_key, up),
+                ],
+                dtype=np.float32,
+            ),
+            "integrated_center": np.asarray(
+                [self.core.logical_to_physical(axis_key, mid)], dtype=np.float32
+            ),
+        }
+        if axis_index == 0:
+            y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+            e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
+            export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
+            export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
         elif axis_index == 1:
-            sample = np.sum(raw_data[:, low:up + 1, :, :], axis=1)
-            export_data = {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(coords["X"], dtype=np.float32),
-                "E": np.asarray(coords["E"], dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            }
+            x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+            e_slice = descriptor.spatial_slices[2] if descriptor is not None else slice(None)
+            export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
+            export_data["E"] = np.asarray(coords["E"][e_slice], dtype=np.float32)
         else:
-            sample = np.sum(raw_data[:, :, low:up + 1, :], axis=2)
-            export_data = {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(coords["X"], dtype=np.float32),
-                "ky": np.asarray(coords["Y"], dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            }
+            x_slice = descriptor.spatial_slices[0] if descriptor is not None else slice(None)
+            y_slice = descriptor.spatial_slices[1] if descriptor is not None else slice(None)
+            export_data["kx"] = np.asarray(coords["X"][x_slice], dtype=np.float32)
+            export_data["ky"] = np.asarray(coords["Y"][y_slice], dtype=np.float32)
+        export_data.update(self._time_interval_export_metadata(spec, coords))
 
         low_text = self._format_filename_number(self.core.logical_to_physical(axis_key, low))
         up_text = self._format_filename_number(self.core.logical_to_physical(axis_key, up))
@@ -4682,18 +4471,35 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         default_name = self._sanitize_filename_component(
             f"{low_text}_{up_text}_{mid_text}_{axis_tag}_{self._get_loaded_npz_stem()}"
         )
-
         return {"export_data": export_data, "default_name": default_name}
 
-    @staticmethod
-    def _time_integral_export_metadata(params, coords):
-        delay_axis = np.asarray(coords["delay"], dtype=np.float64)
-        t_low, t_up = sorted((int(params["source_t_low"]), int(params["source_t_up"])))
-        t_low = int(np.clip(t_low, 0, len(delay_axis) - 1))
-        t_up = int(np.clip(t_up, 0, len(delay_axis) - 1))
+    def _time_interval_export_metadata(self, spec, coords):
+        delay_values = coords.get("delay")
+        delay_axis = np.asarray([] if delay_values is None else delay_values, dtype=np.float64)
+        if delay_axis.size == 0:
+            return {}
+        t_low, t_up = self._time_indices_for_spec(spec)
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and not assignment.has_scan:
+            return {}
+        if assignment is None or assignment.is_time:
+            return {
+                "source_t_indices": np.asarray([t_low, t_up], dtype=np.int32),
+                "source_t_range": np.asarray([delay_axis[t_low], delay_axis[t_up]], dtype=np.float32),
+            }
+        interval = self._time_interval_for_spec(spec)
+        scan_range = (
+            (interval.low, interval.up)
+            if interval is not None
+            else tuple(sorted((delay_axis[t_low], delay_axis[t_up])))
+        )
         return {
-            "source_t_indices": np.asarray([t_low, t_up], dtype=np.int32),
-            "source_t_range": np.asarray([delay_axis[t_low], delay_axis[t_up]], dtype=np.float32),
+            "scan_coordinates": np.asarray(delay_axis, dtype=np.float64),
+            "scan_type": np.asarray([str(assignment.scan_kind)]),
+            "scan_name": np.asarray([str(assignment.display_scan_name)]),
+            "scan_unit": np.asarray([str(self.core.coord_units.get("delay") or "")]),
+            "scan_range": np.asarray(scan_range, dtype=np.float64),
+            "scan_indices": np.asarray([t_low, t_up], dtype=np.int32),
         }
 
     def _get_axis_integral_crop_export_context(self, spec, raw_data, coords):
@@ -4760,9 +4566,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 dtype=np.float32,
             ),
         }
-        if params["source_mode"] == "time_integral":
-            export_data["source_mode"] = np.asarray(["time_integral"])
-            export_data.update(self._time_integral_export_metadata(params, coords))
+        export_data.update(self._time_interval_export_metadata(spec, coords))
         if plot_axes["y_key"] == "E":
             export_data["k"] = x_values
             export_data["E"] = y_values
@@ -4821,8 +4625,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return None
 
         params = spec.params or {}
-        t_idx = int(params.get("source_t_index", self.timeline_bar.slider_time.value()))
-        data_3d = self._get_rotated_frame(raw_data, t_idx)
+        data_3d = self._get_rotated_time_range_for_spec(raw_data, spec)
 
         slice_info = params.get("home_slice_info", self.home_slice_info)
         if slice_info is not None:
@@ -4859,40 +4662,12 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         current_spec = self.left_workspace.current_spec()
         return current_spec is not None and current_spec.page_id == spec.page_id
 
-    def _normalize_axis_source_mode(self, mode):
-        if not self.core.has_time_axis:
-            return "frame"
-        return "time_integral" if mode == "time_integral" else "frame"
-
-    def _source_time_params(self, params=None):
-        params = params or {}
-        return {
-            "source_t_index": int(
-                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
-            ),
-            "source_t_low": int(
-                params.get("source_t_low", int(self.page_data.s_t_low.value()))
-            ),
-            "source_t_up": int(
-                params.get("source_t_up", int(self.page_data.s_t_up.value()))
-            ),
-        }
-
-    def _persist_time_integral_page_state(self, spec=None):
-        target_spec = spec or self.left_workspace.current_spec()
-        if target_spec is None or target_spec.page_kind != "time_integral":
-            return
-
-        target_spec.params["t_low"] = int(self.page_data.s_t_low.value())
-        target_spec.params["t_up"] = int(self.page_data.s_t_up.value())
-
-    def _build_axis_request_params(self, source_mode=None, axis_index=None):
+    def _build_axis_request_params(self, axis_index=None):
         current = self.left_workspace.current_spec()
         if axis_index is None:
             axis_index = self._axis_index_for_interval(current) if current is not None else 0
         axis_index = int(axis_index)
         axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
-        normalized_source_mode = self._normalize_axis_source_mode(source_mode or self.axis_source_mode)
         low, up, mid = self._axis_input_logical_values()
 
         params = {
@@ -4901,10 +4676,11 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "low": int(low),
             "up": int(up),
             "mid": int(mid),
-            "source_mode": normalized_source_mode,
-            "source_page_kind": "time_integral" if normalized_source_mode == "time_integral" else "home",
-            **self._source_time_params(),
+            "source_page_kind": "home",
         }
+        time_interval = self.__dict__.get("time_interval")
+        if time_interval is not None:
+            params["time_interval"] = time_interval.as_dict()
         # 区间可能停在采样点之间：整数下标表达不了，把物理区间原样带给新页面。
         # 锁定是编辑方式而不是数据属性，新页面和「新数据默认未锁定」保持一致。
         interval = self.__dict__.get("axis_interval")
@@ -4915,13 +4691,15 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             params["axis_interval"] = state
         return params
 
-    def _compute_frozen_axis_source(self, snapshot):
+    def _compute_frozen_axis_source(self, snapshot, *, time_interval=None):
         if not isinstance(snapshot, dict):
             return None
         kind = str(snapshot.get("page_kind") or "")
-        if kind not in {"home", "time_integral", "second_derivative"}:
+        if kind not in {"home", "second_derivative"}:
             return None
         params = copy.deepcopy(snapshot.get("params") or {})
+        if isinstance(time_interval, dict):
+            params["time_interval"] = copy.deepcopy(time_interval)
         source_spec = AnalysisPageSpec(
             page_id="__axis_slice_source__",
             title="切片来源",
@@ -4948,53 +4726,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return context
 
     def _get_3d_source_context_for_axis(self, spec, raw_data):
-        params = spec.params
-        if params.get("source_3d"):
-            return self._compute_frozen_axis_source(params["source_3d"])
-        source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
-        if source_mode == "time_integral":
-            t_low = params.get("source_t_low")
-            t_up = params.get("source_t_up")
-            if t_low is not None and t_up is not None:
-                context = {
-                    "view": "3d",
-                    "data": self._get_rotated_time_integral(raw_data, int(t_low), int(t_up)),
-                }
-                descriptor = scoped_descriptor_from_array(context["data"])
-                if descriptor is not None:
-                    context["data_scope"] = descriptor
-                return context
-
-        t_index = int(params.get("source_t_index", int(self.timeline_bar.slider_time.value())))
-        context = {"view": "3d", "data": self._get_rotated_frame(raw_data, t_index)}
+        if spec.params.get("source_3d"):
+            return self._compute_frozen_axis_source(
+                spec.params["source_3d"],
+                time_interval=spec.params.get("time_interval"),
+            )
+        context = {"view": "3d", "data": self._get_rotated_time_range_for_spec(raw_data, spec)}
         descriptor = scoped_descriptor_from_array(context["data"])
         if descriptor is not None:
             context["data_scope"] = descriptor
         return context
-
-    def _get_time_integral_context(self, spec, raw_data, coords):
-        if self._is_current_page(spec):
-            self._persist_time_integral_page_state(spec)
-
-        t_low = int(spec.params["t_low"])
-        t_up = int(spec.params["t_up"])
-        data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
-        context = {
-            "view": "3d",
-            "data": data_3d,
-            "coords": coords,
-        }
-        descriptor = scoped_descriptor_from_array(data_3d)
-        if descriptor is not None and not descriptor.is_full:
-            context.update(
-                {
-                    "data_bounds": descriptor.spatial_bounds,
-                    "full_shape": descriptor.full_shape[:3],
-                    "include_zero": True,
-                }
-            )
-        return context
-
 
     def _compute_slice_dos(self, raw_data, logical_bounds):
         clip_info = self._get_clip_slices(logical_bounds)
@@ -5010,12 +4751,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return np.sum(raw_data[slices[0], slices[1], slices[2], :], axis=(0, 1, 2))
 
     def _get_slice_dos_context(self, spec, raw_data, coords):
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        is_time = assignment is None or assignment.is_time
+        scan_name = "Time" if is_time else assignment.display_scan_name
         return {
             "view": "1d",
             "x_data": coords["delay"],
             "y_data": self._compute_slice_dos_for_spec(spec, raw_data, coords),
-            "title": "Slice Integrated Intensity vs Time",
+            "title": f"Slice Integrated Intensity vs {scan_name}",
             "xlabel": self._axis_label_text("delay"),
+            "x_axis_key": "delay",
         }
 
     def _compute_slice_dos_for_spec(self, spec, raw_data, coords):
@@ -5030,7 +4775,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         has_erasure = any(region.get("operation") == "erase" for region in regions)
         intensities = []
         for t_index in range(raw_data.shape[3]):
-            frame = self._get_rotated_frame(raw_data, t_index)
+            frame = self._get_rotated_time_range(raw_data, t_index, t_index)
             context = dict(template, coords=coords)
             if template["view"] == "3d":
                 context["data"] = frame
@@ -5072,9 +4817,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "low": int(low),
             "up": int(up),
             "mid": int(params.get("integral_mid", params.get("mid", mid_default))),
-            "source_mode": self._normalize_axis_source_mode(params.get("source_mode")),
-            **self._source_time_params(params),
         }
+        for key in (
+            "time_interval", "source_mode", "source_page_kind", "source_t_index",
+            "source_t_low", "source_t_up", "t_low", "t_up",
+        ):
+            if key in params:
+                spec_params[key] = copy.deepcopy(params[key])
 
         for key in ("source_3d", "axis_domain"):
             if params.get(key) is not None:
@@ -5091,13 +4840,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 }
             )
 
-        return AnalysisPageSpec(
+        source_spec = AnalysisPageSpec(
             page_id=page_id,
             title=title,
             page_kind=page_kind,
             source_module="data_process",
             params=spec_params,
         )
+        if self._has_time_axis():
+            source_spec.params["time_interval"] = self._legacy_time_interval(
+                source_spec, self._time_space_for_data()
+            ).as_dict()
+        return source_spec
 
     def _build_axis_like_context_from_params(self, raw_data, coords, params):
         source_spec = self._build_axis_source_spec_from_params(params)
@@ -5131,36 +4885,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 "plot_logical_bounds": plot_bounds,
             }
 
-        if source_kind == "time_integral":
-            t_low = int(spec.params.get("source_t_low", int(self.page_data.s_t_low.value())))
-            t_up = int(spec.params.get("source_t_up", int(self.page_data.s_t_up.value())))
-            t_low, t_up = sorted((t_low, t_up))
-            data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
-            energy_axis = np.asarray(coords["E"], dtype=np.float64)
-            descriptor = scoped_descriptor_from_array(data_3d)
-            if descriptor is not None and not descriptor.is_full:
-                compact_intensity = np.sum(
-                    np.asarray(data_3d),
-                    axis=(0, 1),
-                    dtype=np.float32,
-                )
-                intensity = np.zeros(descriptor.full_shape[2], dtype=np.float32)
-                intensity[descriptor.spatial_slices[2]] = compact_intensity
-            else:
-                intensity = np.sum(data_3d, axis=(0, 1))
-            return {
-                "view": "1d",
-                "x_data": energy_axis,
-                "y_data": intensity,
-                "title": f"Energy DOS (Time-integrated {self._current_delay_text(t_low)}~{self._current_delay_text(t_up)})",
-                "xlabel": "Energy (eV)",
-            }
-
-        if self._is_current_page(spec):
-            t_index = int(self.timeline_bar.slider_time.value())
-        else:
-            t_index = int(spec.params["t_index"])
-        data_3d = self._get_rotated_frame(raw_data, t_index)
+        data_3d = self._get_rotated_time_range_for_spec(raw_data, spec)
+        t_low, t_up = self._time_indices_for_spec(spec)
         energy_axis = np.asarray(coords["E"], dtype=np.float64)
         descriptor = scoped_descriptor_from_array(data_3d)
         clipped = False
@@ -5182,11 +4908,14 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             intensity[descriptor.spatial_slices[2]] = compact_intensity
         else:
             intensity = np.sum(data_3d, axis=(0, 1))
+        delay_text = self._current_delay_text(t_low)
+        if t_up != t_low:
+            delay_text = f"{delay_text}~{self._current_delay_text(t_up)}"
         return {
             "view": "1d",
             "x_data": energy_axis,
             "y_data": intensity,
-            "title": f"Energy DOS ({'Clipped, ' if clipped else ''}T={self._current_delay_text(t_index)})",
+            "title": f"Energy DOS ({'Clipped, ' if clipped else ''}T={delay_text})",
             "xlabel": "Energy (eV)",
         }
 
@@ -5247,8 +4976,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             intensity = np.sum(selected_cube, axis=(0, 1))
         energy_axis = np.asarray(coords["E"], dtype=np.float64)
 
-        source_mode = self._normalize_axis_source_mode(params.get("source_mode"))
-        context = {
+        t_low, t_up = self._time_indices_for_spec(source_spec)
+        return {
             "view": "1d",
             "x_data": energy_axis,
             "y_data": intensity,
@@ -5268,21 +4997,14 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 float(self.core.logical_to_physical("Y", y_low)),
                 float(self.core.logical_to_physical("Y", y_up)),
             ),
-            "source_mode": source_mode,
-        }
-        if source_mode == "time_integral":
-            t_low = int(params.get("source_t_low", int(self.page_data.s_t_low.value())))
-            t_up = int(params.get("source_t_up", int(self.page_data.s_t_up.value())))
-            context["source_t_range"] = (
+            "source_t_index": t_low,
+            "source_t_value": float(coords["delay"][t_low]),
+            "source_t_indices": (t_low, t_up),
+            "source_t_range": (
                 float(coords["delay"][t_low]),
                 float(coords["delay"][t_up]),
-            )
-            context["source_t_indices"] = (t_low, t_up)
-        else:
-            t_index = int(params.get("source_t_index", int(self.timeline_bar.slider_time.value())))
-            context["source_t_index"] = t_index
-            context["source_t_value"] = float(coords["delay"][t_index])
-        return context
+            ),
+        }
 
     def _get_edc_curve_context(self, spec, raw_data, coords):
         return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
@@ -5454,8 +5176,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _second_derivative_source_label(self, params):
         if params.get("source_view") == "3d":
             derivative_label = self._second_derivative_axis_label(params.get("derivative_axis"))
-            source_prefix = "时间积分3D" if params.get("source_page_kind") == "time_integral" else "3D"
-            return f"{source_prefix}-{derivative_label}方向"
+            return f"3D-{derivative_label}方向"
         if params.get("source_page_kind") == "home":
             axis_index = int(params.get("slice_axis", -1))
             axis_name = {0: "X切片", 1: "Y切片"}.get(axis_index, "切片")
@@ -5468,8 +5189,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _second_derivative_plot_label(self, params):
         if params.get("source_view") == "3d":
             derivative_label = self._second_derivative_axis_label(params.get("derivative_axis"))
-            source_prefix = "Time-integrated-3D" if params.get("source_page_kind") == "time_integral" else "3D"
-            return f"{source_prefix}-{derivative_label}"
+            return f"3D-{derivative_label}"
         if params.get("source_page_kind") == "home":
             axis_index = int(params.get("slice_axis", -1))
             return {0: "X-slice", 1: "Y-slice"}.get(axis_index, "Slice")
@@ -5595,27 +5315,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         return derivative
 
     def _build_3d_second_derivative_context(self, raw_data, coords, params):
-        source_kind = params.get("source_page_kind")
-        if source_kind == "time_integral":
-            t_low, t_up = sorted(
-                (int(params["source_t_low"]), int(params["source_t_up"]))
-            )
-            data_3d = self._get_rotated_time_integral(raw_data, t_low, t_up)
-            source_signature = ("time_integral", t_low, t_up)
-            source_metadata = {
-                "source_mode": "time_integral",
-                "source_t_indices": (t_low, t_up),
-            }
-        else:
-            t_index = int(
-                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
-            )
-            data_3d = self._get_rotated_frame(raw_data, t_index)
-            source_signature = ("frame", t_index)
-            source_metadata = {
-                "source_mode": "frame",
-                "source_t_index": t_index,
-            }
+        t_low, t_up = self._time_indices_for_params(params, page_kind="second_derivative")
+        data_3d = self._get_rotated_time_range(raw_data, t_low, t_up)
+        source_signature = ("time_range", t_low, t_up)
+        source_metadata = {
+            "source_t_index": t_low,
+            "source_t_indices": (t_low, t_up),
+        }
 
         derivative_axis = int(params.get("derivative_axis", -1))
         if derivative_axis not in (0, 1, 2):
@@ -5653,10 +5359,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         compact_source_data = None
         compact_plot_bounds = None
         if source_kind == "home":
-            t_index = int(
-                params.get("source_t_index", int(self.timeline_bar.slider_time.value()))
-            )
-            data_3d = self._get_rotated_frame(raw_data, t_index)
+            t_low, t_up = self._time_indices_for_params(params, page_kind="second_derivative")
+            data_3d = self._get_rotated_time_range(raw_data, t_low, t_up)
             slice_axis = int(params.get("slice_axis", -1))
             if slice_axis not in (0, 1):
                 return None
@@ -5727,7 +5431,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return None
 
         source_kind = params.get("source_page_kind")
-        if params.get("source_view") == "3d" and source_kind in {"home", "time_integral"}:
+        if params.get("source_view") == "3d" and source_kind == "home":
             return self._build_3d_second_derivative_context(raw_data, coords, params)
         return self._build_2d_second_derivative_context(raw_data, coords, params)
 
@@ -5844,7 +5548,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _get_derived_render_context(self, spec):
         """派生结果页的渲染上下文：由插件同步计算，宿主负责缓存与回退。"""
         saved = spec.params.get("_restored_result")
-        if saved:
+        if saved and not self._time_page_editable(spec):
             return self._recipe_derived_context(spec, saved)
         session = self._plugin_session()
         if session is None:
@@ -5867,8 +5571,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
         if spec.page_kind == "home":
             return self._get_home_render_context(spec, raw_data, coords)
-        if spec.page_kind == "time_integral":
-            return self._get_time_integral_context(spec, raw_data, coords)
         if spec.page_kind == "axis_integral":
             return self._get_axis_integral_context(spec, raw_data, coords)
         if spec.page_kind == "axis_integral_crop":
@@ -5948,9 +5650,11 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.ax_2d.set_axisbelow(True)
         self.ax_2d.grid(True, color=theme.BORDER_HEX, linewidth=0.6, alpha=0.35)
         self.ax_2d.set_title(display_title, color=theme.TEXT_1, fontsize=11, pad=12,
-                             fontfamily=["DejaVu Sans", "Microsoft YaHei"])
-        self.ax_2d.set_xlabel(context["xlabel"], color=theme.TEXT_1)
-        self.ax_2d.set_ylabel(ylabel, color=theme.TEXT_1)
+                             fontfamily=theme.MPL_FONT_FAMILIES)
+        self.ax_2d.set_xlabel(context["xlabel"], color=theme.TEXT_1,
+                              fontfamily=theme.MPL_FONT_FAMILIES)
+        self.ax_2d.set_ylabel(ylabel, color=theme.TEXT_1,
+                              fontfamily=theme.MPL_FONT_FAMILIES)
         self.ax_2d.tick_params(colors=theme.TEXT_2, labelsize=9)
         return display_title
 
@@ -6083,6 +5787,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.request_refresh(RefreshCause.PAGE_ACTIVATION, RenderQuality.EXACT, immediate=True)
 
     def on_result_page_activated(self, page_id):
+        self.canvas_tool_overlay.close_rotation_panel()
         self._clear_enhancement_interaction()
         self.crop_controller.popup.hide()
         self._clear_axis_crop_interaction(redraw=False)
@@ -6107,7 +5812,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         # 轴向与区间状态在页面自己的参数里：控件恢复之后再绑定，避免用上一页
         # 的区间覆盖这一页。
         self._bind_axis_interval(spec)
-        self._update_time_slider_state()
+        self._bind_time_interval(spec)
         self._request_scope_denoise_if_needed(spec)
         self.global_refresh()
         self._update_screenshot_tooltip()
@@ -6136,10 +5841,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         )
         self.global_refresh()
 
-    def on_rotation_angle_changed(self):
-        """Handle edit finished in the Z-axis rotation angle spin box."""
-        angle = self.timeline_bar.get_rotation_angle()
-        self.rotation_angle = round(angle, 2)
+    def on_rotation_angle_changed(self, angle=None):
+        if self._syncing_controls:
+            return
+        if angle is None:
+            angle = self.timeline_bar.get_rotation_angle()
+        self.rotation_angle = round(float(angle), 2)
+        self.timeline_bar.set_rotation_angle(self.rotation_angle)
         self._clear_axis_prefix_cache()
 
         if self.core.raw_data is not None:
@@ -6150,14 +5858,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 snapshot={"rotation_angle": self.rotation_angle},
             )
 
-    def on_rotation_angle_preview(self, _text=None):
+    def on_rotation_angle_preview(self, angle=None):
         if self._syncing_controls:
             return
         try:
-            angle = self.timeline_bar.get_rotation_angle()
+            if angle is None:
+                angle = self.timeline_bar.get_rotation_angle()
+            angle = float(angle)
         except (TypeError, ValueError):
             return
-        self.rotation_angle = round(float(angle), 2)
+        self.rotation_angle = round(angle, 2)
         self._clear_axis_prefix_cache()
         if self.core.raw_data is not None:
             # Actor rotation is cheap enough to follow each wheel step and does
@@ -6366,51 +6076,25 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             self.timeline_bar.restore_state(self.initial_control_state.get("image"), block_signals=True)
             self.page_render.restore_state(self.initial_control_state.get("render"), block_signals=True)
             self.page_control_blank.restore_state(self.initial_control_state.get("denoise_detail"), block_signals=True)
-            self.page_data.restore_state(self.initial_control_state.get("data_process"), block_signals=True)
             self._select_control_page(int(self.initial_control_state.get("active_control_tab", 0)))
         finally:
             self._syncing_controls = False
 
     def _configure_loaded_time_controls(self, info):
-        t_max = info[3] - 1
-        slider_max = max(t_max, 1)
-        # 时间轴缺单位元数据时按 fs 显示；文件声明了单位就如实用它。
-        delay_unit = resolve_axis_unit(
-            "delay", (getattr(self.core, "coord_units", None) or {}).get("delay")
+        if not self._has_time_axis():
+            self.time_space = None
+            self.time_interval = None
+            self.timeline_bar.time_space = None
+            self.timeline_bar.time_interval = None
+            return
+        self.time_space = self._time_space_for_data()
+        initial = float(self.time_space.coords[0])
+        self.time_interval = self.time_space.as_interval(
+            low=initial, up=initial, locked=True
         )
-        unit_suffix = f" {delay_unit}" if delay_unit else ""
-        time_func = lambda value: (
-            f"Delay: {self.core.coords['delay'][min(int(value), len(self.core.coords['delay']) - 1)]:.4f}"
-            f"{unit_suffix}"
-        )
-
-        self.timeline_bar.slider_time.setRange(0, slider_max)
-        self.timeline_bar.slider_time.setValue(0)
-        self.timeline_bar.slider_time.setToolTipConvertionFunc(time_func)
-
-        # 注意不能用 getattr(self, ...)：部分测试用 __new__ 绕过 QWidget 构造，
-        # sip 属性查找会抛 RuntimeError；实例 __dict__ 查询则安全。
-        timeline_bar = self.__dict__.get("timeline_bar")
-        if timeline_bar is not None:
-            timeline_bar.set_total_frames(info[3])
-
-        self.page_data.s_t_low.setRange(0, slider_max)
-        self.page_data.s_t_up.setRange(0, slider_max)
-        self.page_data.s_t_low.setValue(0)
-        self.page_data.s_t_up.setValue(0 if t_max == 0 else t_max)
-        self.page_data.s_t_low.setToolTipConvertionFunc(time_func)
-        self.page_data.s_t_up.setToolTipConvertionFunc(time_func)
-
-        physical_min, physical_max, physical_step, decimals = self._time_physical_range()
-        self._syncing_axis_value_boxes = True
-        try:
-            for slider, value_box in self._time_slider_box_pairs():
-                value_box.setDecimals(decimals)
-                value_box.setRange(physical_min, physical_max)
-                value_box.setSingleStep(physical_step)
-                value_box.setValue(self.core.logical_to_physical("delay", int(slider.value())))
-        finally:
-            self._syncing_axis_value_boxes = False
+        self.timeline_bar.sync_time_interval(self.time_space, self.time_interval, True)
+        self.time_interval_controller.bind(self.time_space, self.time_interval)
+        self.timeline_bar.set_total_frames(info[3])
 
     def _reset_workspace_after_load(self):
         # 只收起当前裁剪交互，不清空其它数据源尚未应用的选区草稿。
@@ -6432,6 +6116,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             home_spec.data_scope_id = self.FULL_SCOPE_ID
             home_spec.params.clear()
             home_spec.params["data_scope_label"] = "完整数据"
+            if self.time_interval is not None:
+                home_spec.params["time_interval"] = self.time_interval.as_dict()
             home_spec.params["control_state"] = self._capture_control_state()
             self._persist_home_page_state(home_spec)
             self._refresh_scope_hint(home_spec)
@@ -6441,6 +6127,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self.axis_space = None
         self.left_workspace.reset_to_home()
         self._bind_axis_interval(self.left_workspace.home_spec(), animate=False)
+        self._bind_time_interval(self.left_workspace.home_spec(), animate=False)
         self.plotter.set_background(theme.CANVAS_BG)
         self.global_refresh()
         # 新数据的默认视角同样按 E 轴方向摆正：降序数据的较小能量在画面下方。
@@ -6732,98 +6419,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 return int(slice_axis)
         return int(spec.params.get("axis_index", 0))
 
-    # ------------------------------------------------------------------
-    # 时间积分：滑条 ↔ 物理值输入框联动（与坐标轴积分同一套机制）
-    # ------------------------------------------------------------------
-    def _connect_time_value_box_signals(self):
-        self.page_data.s_t_low.valueChanged.connect(
-            lambda value: self.on_time_slider_value_changed(self.page_data.input_t_low, value)
-        )
-        self.page_data.s_t_up.valueChanged.connect(
-            lambda value: self.on_time_slider_value_changed(self.page_data.input_t_up, value)
-        )
-        self.page_data.input_t_low.valueChanged.connect(
-            lambda _value: self.on_time_physical_value_changed(self.page_data.input_t_low, self.page_data.s_t_low)
-        )
-        self.page_data.input_t_up.valueChanged.connect(
-            lambda _value: self.on_time_physical_value_changed(self.page_data.input_t_up, self.page_data.s_t_up)
-        )
-
-    def _time_slider_box_pairs(self):
-        return (
-            (self.page_data.s_t_low, self.page_data.input_t_low),
-            (self.page_data.s_t_up, self.page_data.input_t_up),
-        )
-
-    def _time_physical_range(self):
-        coords = self.core.coords.get("delay")
-        coords = np.asarray(coords, dtype=np.float64).flatten() if coords is not None else np.array([], dtype=np.float64)
-        finite = coords[np.isfinite(coords)]
-        if finite.size == 0:
-            return 0.0, 0.0, 0.01, 2
-
-        physical_min = float(np.min(finite))
-        physical_max = float(np.max(finite))
-        if np.isclose(physical_min, physical_max):
-            physical_max = physical_min + 0.01
-
-        step = max(float(self._compute_axis_spacing(finite, 0.01)), 1e-4)
-        decimals = min(6, max(2, int(np.ceil(-np.log10(step)))))
-        return physical_min, physical_max, step, decimals
-
-    def _time_physical_to_logical_index(self, physical_value):
-        coords = self.core.coords.get("delay")
-        coords_size = int(np.asarray(coords).size) if coords is not None else 0
-        if coords_size == 0:
-            return 0
-
-        max_val = max(coords_size - 1, 0)
-        logical_value = self.core.physical_to_logical("delay", float(physical_value))
-        return int(np.clip(round(logical_value), 0, max_val))
-
-    def _set_time_value_box_from_slider(self, value_box, logical_value):
-        if self.core.raw_data is None:
-            return
-
-        physical_value = self.core.logical_to_physical("delay", int(logical_value))
-        if physical_value < value_box.minimum():
-            value_box.setMinimum(float(physical_value))
-        elif physical_value > value_box.maximum():
-            value_box.setMaximum(float(physical_value))
-        blocker = QSignalBlocker(value_box)
-        try:
-            value_box.setValue(float(physical_value))
-        finally:
-            del blocker
-
-    def sync_time_value_boxes_from_sliders(self):
-        for slider, value_box in self._time_slider_box_pairs():
-            self._set_time_value_box_from_slider(value_box, int(slider.value()))
-
-    def on_time_slider_value_changed(self, value_box, logical_value):
-        if self.core.raw_data is None:
-            return
-        if self._syncing_controls or self._syncing_axis_value_boxes:
-            return
-
-        self._set_time_value_box_from_slider(value_box, int(logical_value))
-
-    def on_time_physical_value_changed(self, value_box, slider):
-        if self.core.raw_data is None:
-            return
-        if self._syncing_controls or self._syncing_axis_value_boxes:
-            return
-
-        logical_value = self._time_physical_to_logical_index(float(value_box.value()))
-        if int(slider.value()) == logical_value:
-            self._set_time_value_box_from_slider(value_box, logical_value)
-            self.on_time_integral_controls_changed(logical_value)
-            return
-
-        slider.setValue(logical_value)
-        self._set_time_value_box_from_slider(value_box, logical_value)
-
-
     def _toast_success(self, title, text):
         """成功提示：窗口装配完成前（或测试中无管理器时）静默跳过。"""
         manager = self.__dict__.get("toast_manager")
@@ -6898,60 +6493,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             )
             return False
 
-    def _build_time_integral_spec(self):
-        low = self.page_data.s_t_low.value()
-        up = self.page_data.s_t_up.value()
-        title = f"时间积分_{self._integral_length(low, up)}"
-        source_spec = self._current_home_source_spec()
-        spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=title,
-            page_kind="time_integral",
-            source_module="data_process",
-            params={"t_low": low, "t_up": up},
-            source_page_id=source_spec.page_id if source_spec is not None else self.left_workspace.home_page_id,
-        )
-        self._seed_control_state_for_spec(spec)
-        return spec
-
-    @staticmethod
-    def _update_saved_widget_state(container, name, **values):
-        widget_state = dict(container.get(name) or {})
-        widget_state.update(values)
-        container[name] = widget_state
-
-    def _seed_time_integrated_slice_control_state(self, spec):
-        slice_index = int(spec.params["mid"])
-        self._seed_time_integrated_axis_control_state(
-            spec,
-            axis_index=int(spec.params["axis_index"]),
-            low=slice_index,
-            up=slice_index,
-            mid=slice_index,
-        )
-
-    def _seed_time_integrated_axis_control_state(self, spec, *, axis_index, low, up, mid):
-        """时间积分结果页的轴向状态：区间同时决定切片位置与积分厚度。"""
-        axis_index = int(axis_index)
-        self._seed_axis_interval_params(spec, axis_index=axis_index, low=low, up=up, mid=mid)
-
-        control_state = spec.params.get("control_state") or self._capture_control_state()
-        control_state["axis_source_mode"] = "time_integral"
-        data_state = dict(control_state.get("data_process") or {})
-        self._update_saved_widget_state(data_state, "s_t_low", value=int(spec.params["source_t_low"]))
-        self._update_saved_widget_state(data_state, "s_t_up", value=int(spec.params["source_t_up"]))
-        t_physical_min, t_physical_max, _, _ = self._time_physical_range()
-        for input_name, slider_name in (("input_t_low", "source_t_low"), ("input_t_up", "source_t_up")):
-            self._update_saved_widget_state(
-                data_state,
-                input_name,
-                minimum=t_physical_min,
-                maximum=t_physical_max,
-                value=float(self.core.logical_to_physical("delay", int(spec.params[slider_name]))),
-            )
-        control_state["data_process"] = data_state
-        self._store_control_state(spec, control_state)
-
     def _seed_second_derivative_axis_control_state(self, spec):
         if (
             spec is None
@@ -6984,123 +6525,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         control_state = spec.params.get("control_state") or self._capture_control_state()
         self._store_control_state(spec, control_state)
 
-    def _build_time_integrated_slice_spec(self, source_spec):
-        slice_info = dict(self.home_slice_info or {})
-        axis_index = int(slice_info.get("axis", 0))
-        axis_max = max(int(self.core.raw_data.shape[axis_index]) - 1, 0)
-        slice_index = int(np.clip(int(slice_info.get("index", 0)), 0, axis_max))
-        t_low, t_up = sorted(
-            (int(self.page_data.s_t_low.value()), int(self.page_data.s_t_up.value()))
-        )
-        axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
-        title = f"时间积分_{axis_name}切片_{self._integral_length(t_low, t_up)}"
-        spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=title,
-            page_kind="axis_integral",
-            source_module="data_process",
-            source_page_id=source_spec.page_id if source_spec is not None else None,
-            params={
-                "axis_index": axis_index,
-                "axis_name": axis_name,
-                "low": slice_index,
-                "up": slice_index,
-                "mid": slice_index,
-                "source_mode": "time_integral",
-                "source_page_kind": "time_integral",
-                "source_t_index": int(self.timeline_bar.slider_time.value()),
-                "source_t_low": t_low,
-                "source_t_up": t_up,
-                "source_slice_axis": axis_index,
-                "source_slice_index": slice_index,
-            },
-        )
-        self._seed_control_state_for_spec(spec)
-        self._seed_time_integrated_slice_control_state(spec)
-        return spec
-
-    def _build_time_integrated_axis_spec(self, source_spec):
-        """2D 坐标轴积分页的时间积分版本：保留轴向与积分区间，数据源换成时间积分体。"""
-        if self._is_current_page(source_spec) and source_spec.page_kind == "axis_integral":
-            self._persist_axis_integral_page_state(source_spec)
-
-        params = self._resolved_axis_integral_params(source_spec)
-        if params is None:
-            return None
-
-        axis_index = int(params["axis_index"])
-        axis_name = ["X轴", "Y轴", "Z轴"][axis_index]
-        low = int(params["low"])
-        up = int(params["up"])
-        mid = int(params["mid"])
-        t_low, t_up = sorted(
-            (int(self.page_data.s_t_low.value()), int(self.page_data.s_t_up.value()))
-        )
-        crop_rect = self._axis_crop_rect_from_params(source_spec.params)
-
-        spec_params = {
-            "axis_index": axis_index,
-            "axis_name": axis_name,
-            "low": low,
-            "up": up,
-            "mid": mid,
-            "source_mode": "time_integral",
-            "source_page_kind": "time_integral",
-            "source_t_index": int(self.timeline_bar.slider_time.value()),
-            "source_t_low": t_low,
-            "source_t_up": t_up,
-        }
-
-        page_kind = "axis_integral"
-        title_label = f"{axis_name}积分"
-        if crop_rect is not None:
-            page_kind = "axis_integral_crop"
-            title_label = f"{axis_name}积分裁剪"
-            spec_params.update(
-                {
-                    "crop_k_low": int(crop_rect["x_low"]),
-                    "crop_k_up": int(crop_rect["x_up"]),
-                    "crop_e_low": int(crop_rect["y_low"]),
-                    "crop_e_up": int(crop_rect["y_up"]),
-                }
-            )
-
-        spec = AnalysisPageSpec(
-            page_id=self._make_page_id(),
-            title=f"时间积分_{title_label}_{self._integral_length(t_low, t_up)}",
-            page_kind=page_kind,
-            source_module="data_process",
-            source_page_id=source_spec.page_id,
-            params=spec_params,
-        )
-        self._seed_control_state_for_spec(spec)
-        self._seed_time_integrated_axis_control_state(
-            spec,
-            axis_index=axis_index,
-            low=low,
-            up=up,
-            mid=mid,
-        )
-        return spec
-
-    def _build_axis_integral_spec(self, source_mode=None):
-        params = self._build_axis_request_params(source_mode=source_mode)
+    def _build_axis_integral_spec(self):
+        params = self._build_axis_request_params()
         title = f"{params['axis_name']}积分_{self._integral_length(params['low'], params['up'])}"
 
-        current_spec = self.left_workspace.current_spec()
-        if params.get("source_page_kind") == "time_integral":
-            source_page_id = (
-                current_spec.page_id
-                if current_spec is not None and current_spec.page_kind == "time_integral"
-                else self.left_workspace.home_page_id
-            )
-        else:
-            source_spec = self._current_home_source_spec()
-            source_page_id = (
-                source_spec.page_id
-                if source_spec is not None
-                else self.left_workspace.home_page_id
-            )
+        source_spec = self._current_home_source_spec()
+        source_page_id = (
+            source_spec.page_id
+            if source_spec is not None
+            else self.left_workspace.home_page_id
+        )
 
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
@@ -7177,13 +6611,15 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if current_spec is None:
             return None
 
-        t_index = int(self.timeline_bar.slider_time.value())
-        delay_text = self._current_delay_text(t_index)
+        t_low, t_up = self._time_indices_for_spec(current_spec)
+        delay_text = self._current_delay_text(t_low)
+        if t_up > t_low:
+            delay_text = f"{delay_text}~{self._current_delay_text(t_up)}"
         spec_params = {
-            "t_index": t_index,
             "source_page_kind": "home",
+            **self._time_interval_params_for_spec(current_spec),
         }
-        title = f"Energy-DOS [T={t_index}/{delay_text}]"
+        title = f"Energy-DOS [T={t_low}/{delay_text}]"
 
         if current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             params = self._resolved_axis_integral_params(current_spec)
@@ -7202,10 +6638,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 "integral_low": int(params["low"]),
                 "integral_up": int(params["up"]),
                 "integral_mid": int(params["mid"]),
-                "source_mode": params.get("source_mode", "frame"),
-                "source_t_index": int(params["source_t_index"]),
-                "source_t_low": int(params["source_t_low"]),
-                "source_t_up": int(params["source_t_up"]),
+                **self._time_interval_params_for_spec(current_spec),
             }
             crop_rect = self._axis_crop_rect_from_params(current_spec.params)
             if crop_rect is not None:
@@ -7218,24 +6651,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                     }
                 )
             title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._crop_rect_title_suffix(spec_params)}]"
-        elif current_spec.page_kind == "time_integral":
-            t_low = int(current_spec.params.get("t_low", int(self.page_data.s_t_low.value())))
-            t_up = int(current_spec.params.get("t_up", int(self.page_data.s_t_up.value())))
-            t_low, t_up = sorted((t_low, t_up))
-            spec_params = {
-                "source_page_id": current_spec.page_id,
-                "source_page_kind": "time_integral",
-                "source_t_low": t_low,
-                "source_t_up": t_up,
-            }
-            title = f"Energy-DOS [Time-integrated {self._current_delay_text(t_low)}~{self._current_delay_text(t_up)}]"
         elif (
             current_spec.page_kind == "home"
             and self.clip_ranges is not None
             and (self._scope_for_spec(current_spec) or DataScopeDescriptor.full(self.original_raw_data.shape)).is_full
         ):
             spec_params["clip_ranges"] = list(self.clip_ranges)
-            title = f"Energy-DOS [Clipped T={t_index}/{delay_text}]"
+            title = f"Energy-DOS [Clipped T={t_low}/{delay_text}]"
 
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
@@ -7278,10 +6700,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "integral_low": int(params["low"]),
             "integral_up": int(params["up"]),
             "integral_mid": int(params["mid"]),
-            "source_mode": params.get("source_mode", "frame"),
-            "source_t_index": int(params["source_t_index"]),
-            "source_t_low": int(params["source_t_low"]),
-            "source_t_up": int(params["source_t_up"]),
+            **self._time_interval_params_for_spec(current_spec),
             "crop_k_low": int(crop_rect["x_low"]),
             "crop_k_up": int(crop_rect["x_up"]),
             "crop_e_low": int(crop_rect["y_low"]),
@@ -7309,13 +6728,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         A cropped home page is a persistent result: either a collapsed 2D
         single layer (first region flattens one 3D axis) or a cropped
         transient slice.  The derivative must reproduce exactly what the page
-        displays, so read the effective slice from the live render context
+        displays, so rebuild or reuse only the target page's exact render context
         and keep the remaining 2D crop chain for the derivative page.
         """
         regions = current_spec.params.get("crop_regions") or []
-        if not regions or not self._is_current_page(current_spec):
+        if not regions:
             return None, []
-        context = self.current_render_context
+        context = self._context_for_publication_capture(current_spec)
         if context is None or context.get("crop_empty") or context.get("view") != "2d":
             return None, []
         slice_info = context.get("slice_info") or {}
@@ -7334,9 +6753,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return None
 
         if current_spec.page_kind == "home":
-            source_t_index = int(self.timeline_bar.slider_time.value())
             crop_slice_info, crop_tail = self._crop_regions_for_derivative(current_spec)
-            slice_info = self.home_slice_info or crop_slice_info
+            slice_info = current_spec.params.get("home_slice_info", self.home_slice_info) or crop_slice_info
             if slice_info is None:
                 derivative_axis = self._ask_second_derivative_axis()
                 if derivative_axis is None:
@@ -7346,8 +6764,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                     "source_page_kind": "home",
                     "source_view": "3d",
                     "derivative_axis": derivative_axis,
-                    "source_mode": "frame",
-                    "source_t_index": source_t_index,
+                    **self._time_interval_params_for_spec(current_spec),
                     "clip_ranges": self._copy_state(self.clip_ranges),
                 }
             else:
@@ -7362,43 +6779,15 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                     "slice_axis": slice_axis,
                     "slice_index": int(slice_info["index"]),
                     "derivative_axis": 2,
-                    "source_mode": "frame",
-                    "source_t_index": source_t_index,
+                    **self._time_interval_params_for_spec(current_spec),
                 }
                 if crop_tail:
                     spec_params["crop_regions"] = crop_tail
 
-            source_label = self._second_derivative_source_label(spec_params)
-            spec = AnalysisPageSpec(
-                page_id=self._make_page_id(),
-                title=f"二阶导 [{source_label}]",
-                page_kind="second_derivative",
-                source_module="data_process",
-                source_page_id=current_spec.page_id,
-                params=spec_params,
-            )
-        elif current_spec.page_kind == "time_integral":
-            self._persist_time_integral_page_state(current_spec)
-            derivative_axis = self._ask_second_derivative_axis()
-            if derivative_axis is None:
-                return None
-            t_low, t_up = sorted(
-                (int(current_spec.params["t_low"]), int(current_spec.params["t_up"]))
-            )
-            spec_params = {
-                "source_page_id": current_spec.page_id,
-                "source_page_kind": "time_integral",
-                "source_view": "3d",
-                "derivative_axis": derivative_axis,
-                "source_mode": "time_integral",
-                "source_t_low": t_low,
-                "source_t_up": t_up,
-            }
-            # The derivative keeps the source page's display crop chain: the
-            # 3D chain applies to the derivative volume unchanged, including
-            # a possible single-layer collapse.
-            if current_spec.params.get("crop_regions"):
-                spec_params["crop_regions"] = copy.deepcopy(list(current_spec.params["crop_regions"]))
+            if spec_params["source_view"] == "3d" and current_spec.params.get("crop_regions"):
+                spec_params["crop_regions"] = copy.deepcopy(
+                    list(current_spec.params["crop_regions"])
+                )
             source_label = self._second_derivative_source_label(spec_params)
             spec = AnalysisPageSpec(
                 page_id=self._make_page_id(),
@@ -7436,10 +6825,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                     "integral_low": int(params["low"]),
                     "integral_up": int(params["up"]),
                     "integral_mid": int(params["mid"]),
-                    "source_mode": params.get("source_mode", "frame"),
-                    "source_t_index": int(params["source_t_index"]),
-                    "source_t_low": int(params["source_t_low"]),
-                    "source_t_up": int(params["source_t_up"]),
+                    **self._time_interval_params_for_spec(current_spec),
                 },
             )
             for key in ("source_3d", "axis_domain"):
@@ -7458,7 +6844,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         else:
             self._show_message(
                 "无法生成二阶导",
-                "仅支持主页 3D/2D、时间积分 3D 或 X/Y 轴积分页面。",
+                "仅支持主页 3D/2D 或 X/Y 轴积分页面。",
                 QMessageBox.Warning,
             )
             return None
@@ -7487,67 +6873,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         self._seed_control_state_for_spec(spec)
         self._seed_second_derivative_axis_control_state(spec)
         return spec
-
-    def on_apply_time_integral(self):
-        if self.core.raw_data is None or not self.core.has_time_axis:
-            return
-
-        current_spec = self.left_workspace.current_spec()
-        if (
-            current_spec is not None
-            and current_spec.page_kind == "home"
-            and self.home_slice_info is not None
-        ):
-            candidate_spec = self._build_time_integrated_slice_spec(current_spec)
-        elif current_spec is not None and current_spec.page_kind in {
-            "axis_integral",
-            "axis_integral_crop",
-        }:
-            # A 2D analysis view stays 2D: the derived page shows the same
-            # plane taken from the time-integrated volume.
-            candidate_spec = self._build_time_integrated_axis_spec(current_spec)
-        else:
-            candidate_spec = self._build_time_integral_spec()
-        if candidate_spec is None:
-            return
-        candidate_spec.title = self._make_unique_page_title(candidate_spec.title)
-        self.left_workspace.add_page(candidate_spec)
-
-    def on_time_integral_controls_changed(self, _):
-        if self.core.raw_data is None or self._syncing_controls:
-            return
-
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is None:
-            return
-
-        if current_spec.page_kind == "time_integral":
-            # A 3D result is immutable while its source controls are edited.
-            # The values remain available to the Apply buttons, but moving a
-            # slider must not rebuild the active volume.
-            self.axis_source_mode = "time_integral"
-            return
-        elif self._is_time_integral_axis_page(current_spec):
-            self.axis_source_mode = "time_integral"
-            self._persist_axis_integral_page_state(current_spec)
-            self._update_time_slider_state()
-            self.schedule_axis_refresh()
-
-    def on_image_time_changed(self, _):
-        if self.core.raw_data is None or self._syncing_controls:
-            return
-
-        current_spec = self.left_workspace.current_spec()
-        if current_spec is not None and current_spec.page_kind == "time_integral":
-            return
-
-        self.axis_source_mode = "frame"
-        if current_spec is not None and current_spec.page_kind in {"axis_integral", "axis_integral_crop"}:
-            self._persist_axis_integral_page_state(current_spec)
-        elif current_spec is not None and current_spec.page_kind == self.PATH_SLICE_PAGE_KIND:
-            path_controller = self._path_slices()
-            if path_controller is not None:
-                path_controller.persist_time(current_spec)
 
     def sync_ax_sliders_to_box(self):
         if not self._can_show_interactive_box():
@@ -7587,11 +6912,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
 
     def schedule_axis_refresh(self):
         """拖动中的区间变化：保存页面状态并请求一次预览刷新。"""
-        if (
-            self.core.raw_data is None
-            or self._syncing_controls
-            or bool(getattr(self.__dict__.get("page_data"), "_is_updating", False))
-        ):
+        if self.core.raw_data is None or self._syncing_controls:
             return
 
         # On the home 3D view these controls are only a convenient way to move
@@ -7628,12 +6949,9 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             if key.startswith("_restored_"):
                 params.pop(key, None)
         if source.page_kind == "home":
-            params["source_t_index"] = int(self.timeline_bar.slider_time.value())
+            params.update(self._time_interval_params_for_spec(source))
             params["clip_ranges"] = copy.deepcopy(self.clip_ranges)
             params["home_slice_info"] = copy.deepcopy(self.home_slice_info)
-        elif source.page_kind == "time_integral":
-            params["source_t_low"] = int(params.get("t_low", self.page_data.s_t_low.value()))
-            params["source_t_up"] = int(params.get("t_up", self.page_data.s_t_up.value()))
         return {
             "page_kind": source.page_kind,
             "params": params,
@@ -7666,10 +6984,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         )
         low_index, up_index = interval.to_indices(coords)
         mid_index = int(np.clip(nearest_index(coords, interval.center), low_index, up_index))
-        source_params = snapshot["params"]
-        source_mode = "time_integral" if source.page_kind == "time_integral" else self._normalize_axis_source_mode(
-            source_params.get("source_mode")
-        )
         params = {
             "axis_index": axis_index,
             "axis_name": ["X轴", "Y轴", "Z轴"][axis_index],
@@ -7678,11 +6992,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "low": int(low_index),
             "up": int(up_index),
             "mid": int(mid_index),
-            "source_mode": source_mode,
             "source_page_kind": source.page_kind,
             "source_3d": snapshot,
             "3d_source_page_id": source.page_id,
-            **self._source_time_params(source_params),
+            **self._time_interval_params_for_spec(source),
         }
         plane = {0: "YZ", 1: "XZ", 2: "XY"}[axis_index]
         spec = AnalysisPageSpec(
@@ -7750,63 +7063,200 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             immediate=True,
         )
 
-    def _sync_integration_actions(self):
-        """把插件注册的「其他积分」动作并入下拉。
+    def _integration_core_for_spec(self, spec):
+        core = self.__dict__.get("core")
+        manager = self.__dict__.get("source_manager")
+        if manager is None or spec is None:
+            return core
+        owner = manager.owner_of(spec.page_id)
+        if owner is None or manager.is_active(owner):
+            return core
+        session = manager.get(owner)
+        return (session.state or {}).get("core", core) if session is not None else None
 
-        插件未加载（或加载失败）时下拉只剩内置项；动作键里的插件 ID 保证旧状态
-        不会被下标映射到别的功能。
-        """
-        actions = []
+    def _integration_has_time_axis(self, spec):
+        core = self._integration_core_for_spec(spec)
+        raw_data = getattr(core, "raw_data", None)
+        return (
+            bool(getattr(core, "has_time_axis", False))
+            and raw_data is not None
+            and getattr(raw_data, "ndim", 0) >= 4
+            and int(raw_data.shape[3]) > 1
+        )
+
+    @staticmethod
+    def _integration_axis_index(spec):
+        try:
+            axis_index = int(spec.params.get("axis_index", 0))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return axis_index if axis_index in (0, 1, 2) else None
+
+    @staticmethod
+    def _integration_home_slice_axis(spec):
+        params = getattr(spec, "params", {}) or {}
+        info = params.get("home_slice_info")
+        if isinstance(info, dict) and info:
+            try:
+                axis_index = int(info["axis"])
+            except (KeyError, TypeError, ValueError):
+                return -1
+            return axis_index if axis_index in (0, 1, 2) else -1
+
+        for region in params.get("crop_regions") or ():
+            if not isinstance(region, dict):
+                return -1
+            view = region.get("view")
+            if view == "3d":
+                bounds = region.get("bounds") or ()
+                if len(bounds) != 6:
+                    return -1
+                try:
+                    collapsed = [
+                        index for index in range(3)
+                        if float(bounds[2 * index]) == float(bounds[2 * index + 1])
+                    ]
+                except (TypeError, ValueError):
+                    return -1
+                if len(collapsed) == 1:
+                    return collapsed[0]
+                continue
+            if view == "2d":
+                axes = set(region.get("axes") or ())
+                remaining = [
+                    index for index, key in enumerate(("X", "Y", "E")) if key not in axes
+                ]
+                return remaining[0] if len(remaining) == 1 else -1
+            return -1
+        return None
+
+    def _integration_home_has_clip_range(self, spec):
+        clip_ranges = (getattr(spec, "params", {}) or {}).get("clip_ranges")
+        if clip_ranges is None:
+            return False
+        try:
+            values = np.asarray(clip_ranges, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        return values.size == 6 and bool(np.all(np.isfinite(values)))
+
+    def _integration_action_available(self, action_key, spec):
+        if spec is None:
+            return False
+        kind = getattr(spec, "page_kind", None)
+        integral_kind = kind in {"axis_integral", "axis_integral_crop"}
+        axis_index = self._integration_axis_index(spec) if integral_kind else None
+
+        if action_key == "builtin:slice_dos":
+            if not self._integration_has_time_axis(spec):
+                return False
+            if integral_kind:
+                return axis_index is not None
+            if kind != "home":
+                return False
+            return (
+                self._integration_home_slice_axis(spec) in (0, 1, 2)
+                or self._integration_home_has_clip_range(spec)
+            )
+        if action_key == "builtin:energy_dos":
+            return kind == "home" or (integral_kind and axis_index in (0, 1))
+        if action_key == "builtin:edc_curve":
+            if kind != "axis_integral_crop" or axis_index != 2:
+                return False
+            try:
+                return self._axis_crop_rect_from_params(spec.params) is not None
+            except (KeyError, TypeError, ValueError, AttributeError):
+                return False
+        if action_key == "builtin:second_derivative":
+            if integral_kind:
+                return axis_index in (0, 1)
+            if kind != "home":
+                return False
+            return self._integration_home_slice_axis(spec) in (None, 0, 1)
+        return False
+
+    def _integration_actions_for_parent(self, parent_page_id):
+        workspace = self.left_workspace
+        spec = workspace.page_by_id(parent_page_id)
+        core = self._integration_core_for_spec(spec)
+        if spec is None or getattr(core, "raw_data", None) is None:
+            return []
+
+        actions = [
+            (key, label, float(order))
+            for key, label, order in self.BUILTIN_PAGE_CREATE_ACTIONS
+            if self._integration_action_available(key, spec)
+        ]
         session = self._plugin_session()
         if session is not None:
             try:
-                actions = session.integration_actions()
+                can_freeze = session.can_freeze_source(spec)
+                plugin_actions = session.integration_actions() if can_freeze else ()
             except Exception as exc:
                 print(f"Integration action discovery failed: {type(exc).__name__}: {exc}")
-        page_data = self.__dict__.get("page_data")
-        if page_data is not None and hasattr(page_data, "set_integration_actions"):
-            page_data.set_integration_actions(actions)
+                plugin_actions = ()
+            for item in plugin_actions or ():
+                try:
+                    key, label, order = item
+                    key = str(key).strip()
+                    label = str(label).strip()
+                    order = float(order)
+                except (TypeError, ValueError):
+                    continue
+                if key and label:
+                    actions.append((key, label, order))
+        actions.sort(key=lambda item: (item[2], item[1], item[0]))
+        return actions
 
-    def on_apply_other_integral(self):
-        if self.core.raw_data is None:
-            return
+    def _on_page_create_requested(self, parent_page_id, action_key):
+        workspace = self.left_workspace
+        parent = workspace.page_by_id(parent_page_id)
+        if parent is None:
+            return None
 
-        # 下拉项按稳定动作键分派：内置项与插件动作同一条路径，插件未加载时
-        # 恢复出来的旧状态不会被下标误映射到其他功能。
-        key = self.page_data.current_other_key() if hasattr(self.page_data, "current_other_key") else ""
-        if key == "builtin:slice_dos":
-            if not self.core.has_time_axis:
-                self._show_message("静态数据", "当前数据不包含时间轴，无法计算切片内强度积分。", QMessageBox.Information)
-                return
-            spec = self._build_slice_dos_spec()
-        elif key == "builtin:energy_dos":
-            spec = self._build_energy_dos_spec()
-        elif key == "builtin:edc_curve":
-            spec = self._build_edc_curve_spec()
-        elif key == "builtin:second_derivative":
-            spec = self._build_second_derivative_spec()
-        elif ":" in key:
-            # 插件动作：插件只负责计算，宿主负责冻结来源、建页与切换。
-            plugin_id, _, action_id = key.partition(":")
-            session = self._plugin_session()
-            if session is None:
-                self._show_message("插件不可用", "插件系统未初始化，无法执行该积分。", QMessageBox.Warning)
-                return
-            session.invoke_integration_action(plugin_id, action_id)
-            self._update_export_button_states()
-            return
+        if getattr(parent, "group_id", None) is not None:
+            self._on_group_page_activation_requested(parent_page_id)
         else:
-            self._show_message("未知积分类型", "当前下拉项对应的功能不可用，请重新选择。", QMessageBox.Warning)
-            return
+            workspace.activate_page(parent_page_id)
+        current = workspace.current_spec()
+        if current is None or current.page_id != parent_page_id:
+            return None
 
-        if spec is not None:
+        key = str(action_key)
+        allowed = {item[0] for item in self._integration_actions_for_parent(parent_page_id)}
+        current = workspace.current_spec()
+        if key not in allowed or current is None or current.page_id != parent_page_id:
+            return None
+
+        if key == "builtin:slice_dos" and not self._integration_has_time_axis(current):
+            self._show_message(
+                "静态数据",
+                "当前数据不包含扫描轴，无法计算切片内强度积分。",
+                QMessageBox.Information,
+            )
+            return None
+        builders = {
+            "builtin:slice_dos": self._build_slice_dos_spec,
+            "builtin:energy_dos": self._build_energy_dos_spec,
+            "builtin:edc_curve": self._build_edc_curve_spec,
+            "builtin:second_derivative": self._build_second_derivative_spec,
+        }
+        builder = builders.get(key)
+        if builder is not None:
+            spec = builder()
+            if spec is None:
+                return None
             spec.title = self._make_unique_page_title(spec.title)
-            self.left_workspace.add_page(spec)
+            workspace.add_page(spec)
+            return spec.page_id
 
-    def on_other_mode_selection_changed(self, _):
-        if self._syncing_controls:
-            return
+        plugin_id, separator, action_id = key.partition(":")
+        session = self._plugin_session()
+        if not separator or not plugin_id or not action_id or session is None:
+            return None
+        result = session.invoke_integration_action(plugin_id, action_id)
         self._update_export_button_states()
+        return result
 
 
     def _clear_axis_crop_selector(self):
@@ -7901,11 +7351,21 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
     def _axis_label_text(self, axis_key):
         """坐标标签规则与导出共用一份：单位缺失不猜，索引回退标 index。
 
-        时间轴例外：来源没声明单位时按 fs（见 ``bandscope.core.axis_units``）。
+        只有时间类型的扫描轴在来源没声明单位时按 fs；其他扫描类型使用实际名称与单位。
         """
-        core = getattr(self, "core", None)
+        core = self.__dict__.get("core")
         sources = dict(getattr(core, "coord_sources", {}) or {})
         units = dict(getattr(core, "coord_units", {}) or {})
+        assignment = getattr(core, "axis_assignment", None)
+        if str(axis_key) == "delay" and assignment is not None and assignment.has_scan:
+            name = assignment.display_scan_name
+            return axis_label(
+                "delay",
+                str(sources.get(axis_key, "index")),
+                units.get(axis_key),
+                name=None if assignment.is_time and name == "时间" else name,
+                use_time_default=assignment.is_time,
+            )
         return axis_label(
             str(axis_key),
             str(sources.get(axis_key, "index")),
@@ -8214,6 +7674,8 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         )
         active_display_fields = display_fields if display_fields and (
             display_fields["active"] or display_fields.get("independent")
+            or tuple(display_fields["background_style"].get("colormap_range", (0.0, 1.0)))
+            != (0.0, 1.0)
         ) else None
         self.ax_2d.set_axis_on()
         if preserve_2d_interaction and render_context.get("view") != "2d":
@@ -8463,39 +7925,20 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         if not self.core.has_time_axis:
             sample = sample[..., 0]
 
-        return (
-            "Save current slice cube",
-            "slice_cube.mat",
-            {
-                "sample": np.asarray(sample, dtype=np.float32),
-                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
-                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
-                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-            },
-        )
-
-    def _build_time_integral_export_payload(self, spec, raw_data, coords):
-        self._persist_time_integral_page_state(spec)
-        context = self._get_time_integral_context(spec, raw_data, coords)
-        t_low = int(spec.params["t_low"])
-        t_up = int(spec.params["t_up"])
-        descriptor = scoped_descriptor_from_array(context["data"])
-        slices = (
-            descriptor.spatial_slices
-            if descriptor is not None
-            else (slice(None),) * 3
-        )
-        return (
-            "Save time-integral result",
-            self._build_time_integral_default_name(t_low, t_up),
-            {
-                "sample": np.asarray(context["data"], dtype=np.float32),
-                "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
-                "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
-                "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
-            },
-        )
+        export_data = {
+            "sample": np.asarray(sample, dtype=np.float32),
+            "kx": np.asarray(coords["X"][slices[0]], dtype=np.float32),
+            "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
+            "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
+        }
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(
+                self.left_workspace.current_spec(), coords
+            ))
+        else:
+            export_data["time"] = np.asarray(coords["delay"], dtype=np.float32)
+        return "Save current slice cube", "slice_cube.mat", export_data
 
     def _build_axis_integral_export_payload(self, spec, raw_data, coords):
         is_crop = spec.page_kind == "axis_integral_crop"
@@ -8514,17 +7957,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         )
 
     def _build_slice_dos_export_payload(self, spec, raw_data, coords):
-        return (
-            "Save slice-integrated intensity",
-            "slice_dos.mat",
-            {
-                "time": np.asarray(coords["delay"], dtype=np.float32),
-                "intensity": np.asarray(
-                    self._compute_slice_dos_for_spec(spec, raw_data, coords),
-                    dtype=np.float32,
-                ),
-            },
-        )
+        export_data = {
+            "intensity": np.asarray(
+                self._compute_slice_dos_for_spec(spec, raw_data, coords),
+                dtype=np.float32,
+            ),
+        }
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(spec, coords))
+        else:
+            export_data["time"] = np.asarray(coords["delay"], dtype=np.float32)
+        return "Save slice-integrated intensity", "slice_dos.mat", export_data
 
     def _build_edc_export_payload(self, spec, raw_data, coords):
         context = self._get_edc_curve_context(spec, raw_data, coords)
@@ -8542,23 +7986,18 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
             "kx_range": np.asarray(context["kx_range"], dtype=np.float32),
             "ky_range": np.asarray(context["ky_range"], dtype=np.float32),
-            "source_mode": np.asarray([context["source_mode"]]),
             "crop_rect": self._crop_rect_export_array(context["crop_rect"]),
         }
-        if context["source_mode"] == "time_integral":
-            export_data["source_t_range"] = np.asarray(
-                context["source_t_range"], dtype=np.float32
-            )
-            export_data["source_t_indices"] = np.asarray(
-                context["source_t_indices"], dtype=np.int32
-            )
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(spec, coords))
         else:
-            export_data["source_t_index"] = np.asarray(
-                [context["source_t_index"]], dtype=np.int32
-            )
-            export_data["source_t_value"] = np.asarray(
-                [context["source_t_value"]], dtype=np.float32
-            )
+            export_data.update({
+                "source_t_range": np.asarray(context["source_t_range"], dtype=np.float32),
+                "source_t_indices": np.asarray(context["source_t_indices"], dtype=np.int32),
+                "source_t_index": np.asarray([context["source_t_index"]], dtype=np.int32),
+                "source_t_value": np.asarray([context["source_t_value"]], dtype=np.float32),
+            })
         return "Save EDC curve result", "edc_curve.mat", export_data
 
     def _build_derived_export_payload(self, spec, raw_data, coords):
@@ -8618,6 +8057,7 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
         export_data["derived_plugin_id"] = np.asarray(
             [str(spec.params.get(DERIVED_PLUGIN_KEY) or "")]
         )
+        export_data.update(self._time_interval_export_metadata(spec, coords))
         default_name = self._sanitize_filename_component(str(spec.title)) + ".mat"
         return "Save derived result", default_name, export_data
 
@@ -8636,26 +8076,21 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "ky": np.asarray(coords["Y"][slices[1]], dtype=np.float32),
             "E": np.asarray(coords["E"][slices[2]], dtype=np.float32),
             "derivative_axis": np.asarray([derivative_label]),
-            "source_mode": np.asarray([context["source_mode"]]),
         }
-        if context["source_mode"] == "time_integral":
-            t_low, t_up = context["source_t_indices"]
-            export_data["source_t_indices"] = np.asarray(
-                [t_low, t_up], dtype=np.int32
-            )
-            export_data["source_t_range"] = np.asarray(
-                [coords["delay"][t_low], coords["delay"][t_up]],
-                dtype=np.float32,
-            )
+        t_low, t_up = context["source_t_indices"]
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(
+                self.left_workspace.current_spec(), coords
+            ))
         else:
-            source_t_index = int(context["source_t_index"])
-            export_data["source_t_index"] = np.asarray(
-                [source_t_index], dtype=np.int32
+            export_data["source_t_indices"] = np.asarray([t_low, t_up], dtype=np.int32)
+            export_data["source_t_range"] = np.asarray(
+                [coords["delay"][t_low], coords["delay"][t_up]], dtype=np.float32
             )
-            if coords.get("delay") is not None and len(coords["delay"]) > source_t_index:
-                export_data["time"] = np.asarray(
-                    [coords["delay"][source_t_index]], dtype=np.float32
-                )
+            export_data["source_t_index"] = np.asarray([t_low], dtype=np.int32)
+            if coords.get("delay") is not None and len(coords["delay"]) > t_low:
+                export_data["time"] = np.asarray([coords["delay"][t_low]], dtype=np.float32)
         return (
             "Save 3D second-derivative result",
             f"second_derivative_3d_{derivative_label}.mat",
@@ -8730,7 +8165,13 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return None
         if context.get("view") == "3d":
             return self._build_second_derivative_3d_export_payload(context, coords)
-        return self._build_second_derivative_2d_export_payload(context, raw_data, coords)
+        title, name, export_data = self._build_second_derivative_2d_export_payload(
+            context, raw_data, coords
+        )
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(spec, coords))
+        return title, name, export_data
 
     def _build_energy_dos_export_payload(self, spec, raw_data, coords):
         context = self._get_energy_dos_context(spec, raw_data, coords)
@@ -8747,45 +8188,16 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "E": np.asarray(context["x_data"][e_slice], dtype=np.float32),
             "intensity": np.asarray(context["y_data"][e_slice], dtype=np.float32),
         }
-        source_kind = spec.params.get("source_page_kind", "home")
-        if source_kind == "axis_integral":
-            if spec.params.get("source_mode") == "time_integral":
-                export_data["time_range"] = np.asarray(
-                    [
-                        coords["delay"][int(spec.params["source_t_low"])],
-                        coords["delay"][int(spec.params["source_t_up"])],
-                    ],
-                    dtype=np.float32,
-                )
-            else:
-                t_index = int(
-                    spec.params.get(
-                        "source_t_index", int(self.timeline_bar.slider_time.value())
-                    )
-                )
-                export_data["time"] = np.asarray(
-                    [coords["delay"][t_index]], dtype=np.float32
-                )
-        elif source_kind == "time_integral":
+        t_low, t_up = self._time_indices_for_spec(spec)
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        if assignment is not None and assignment.has_scan and not assignment.is_time:
+            export_data.update(self._time_interval_export_metadata(spec, coords))
+        elif t_up > t_low:
             export_data["time_range"] = np.asarray(
-                [
-                    coords["delay"][int(spec.params["source_t_low"])],
-                    coords["delay"][int(spec.params["source_t_up"])],
-                ],
-                dtype=np.float32,
+                [coords["delay"][t_low], coords["delay"][t_up]], dtype=np.float32
             )
         else:
-            if self._is_current_page(spec):
-                t_index = int(self.timeline_bar.slider_time.value())
-            else:
-                t_index = int(
-                    spec.params.get(
-                        "t_index", int(self.timeline_bar.slider_time.value())
-                    )
-                )
-            export_data["time"] = np.asarray(
-                [coords["delay"][t_index]], dtype=np.float32
-            )
+            export_data["time"] = np.asarray([coords["delay"][t_low]], dtype=np.float32)
         if "clip_ranges" in spec.params:
             export_data["clip_ranges"] = np.asarray(
                 spec.params["clip_ranges"], dtype=np.float32
@@ -8828,26 +8240,21 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
                 metadata[range_key] = np.asarray(context[range_key], dtype=np.float32)
 
         delay = coords.get("delay")
-        source_mode = context.get("source_mode", params.get("source_mode"))
-        if source_mode is not None:
-            metadata["source_mode"] = np.asarray([str(source_mode)])
-        has_time_axis = delay is not None and len(delay) > 0
-        if self._normalize_axis_source_mode(source_mode) == "time_integral":
-            if has_time_axis and "source_t_low" in params and "source_t_up" in params:
-                metadata.update(self._time_integral_export_metadata(params, coords))
-        elif has_time_axis:
-            # A 1D time series (e.g. slice DOS) exports the delay axis as its
-            # x data; a scalar frame-time would collide with that array.
+        assignment = getattr(self.__dict__.get("core"), "axis_assignment", None)
+        non_time_scan = assignment is not None and assignment.has_scan and not assignment.is_time
+        if non_time_scan:
+            metadata.update(self._time_interval_export_metadata(spec, coords))
+        elif delay is not None and len(delay) > 0:
             is_time_series = context.get("view") == "1d" and "energy" not in str(
                 context.get("xlabel", "")
             ).lower()
-            t_index = None if is_time_series else params.get("source_t_index", params.get("t_index"))
-            if t_index is None and not is_time_series and self._is_current_page(spec):
-                t_index = int(self.timeline_bar.slider_time.value())
-            if t_index is not None:
-                t_index = int(np.clip(int(t_index), 0, len(delay) - 1))
-                metadata["source_t_index"] = np.asarray([t_index], dtype=np.int32)
-                metadata["time"] = np.asarray([delay[t_index]], dtype=np.float32)
+            if not is_time_series:
+                t_low, t_up = self._time_indices_for_spec(spec)
+                if t_up > t_low:
+                    metadata.update(self._time_interval_export_metadata(spec, coords))
+                else:
+                    metadata["source_t_index"] = np.asarray([t_low], dtype=np.int32)
+                    metadata["time"] = np.asarray([delay[t_low]], dtype=np.float32)
         return metadata
 
     def _build_export_payload(self, spec, raw_data, coords):
@@ -8862,8 +8269,6 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             return "导出裁剪结果", self._sanitize_filename_component(spec.title) + ".mat", payload
         if spec.page_kind == "home":
             return self._build_home_export_payload(raw_data, coords)
-        elif spec.page_kind == "time_integral":
-            return self._build_time_integral_export_payload(spec, raw_data, coords)
         elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
             return self._build_axis_integral_export_payload(spec, raw_data, coords)
         elif spec.page_kind == "slice_dos":
@@ -8898,6 +8303,10 @@ class My3DAnalyzer(SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, En
             "x_label": np.asarray([str(snapshot.get("xlabel") or "")]),
             "source_title": np.asarray([str(snapshot.get("source_title") or "")]),
         }
+        core = self.__dict__.get("core")
+        export_data.update(self._time_interval_export_metadata(
+            spec, getattr(core, "coords", {}) or {}
+        ))
         analysis = dict(spec.params.get("plugin_analysis") or {})
         for key in ("plugin_id", "plugin_version", "snapshot_id", "data_generation", "scope_id"):
             if key in analysis:

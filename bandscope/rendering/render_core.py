@@ -407,6 +407,7 @@ class VisualEngine:
     def _3d_colorbar_lut(cmap, level_info):
         """Use color coordinates for geometry and label physical intensities."""
         palette = colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        palette = LeveledColormap(palette, dict(level_info, gamma_power=1.0))
         lut = pv.LookupTable(cmap=palette, scalar_range=(0., 1.))
         lut.annotations = {position: VisualEngine._format_level_tick(level_info[key])
                            for position, key in ((0., "black_value"), (.5, "gray_value"), (1., "white_value"))}
@@ -414,8 +415,9 @@ class VisualEngine:
 
     @staticmethod
     def _colorbar_mappable(cmap, level_info):
-        """Show the full palette with ticks positioned by the same Gamma."""
+        """Show the selected palette interval with ticks positioned by Gamma."""
         palette = cmap.base_cmap if isinstance(cmap, LeveledColormap) else cmap
+        palette = LeveledColormap(palette, dict(level_info, gamma_power=1.0))
         return ScalarMappable(norm=PowerNorm(level_info["gamma_power"],
                                             vmin=level_info["black_value"], vmax=level_info["white_value"]),
                               cmap=palette)

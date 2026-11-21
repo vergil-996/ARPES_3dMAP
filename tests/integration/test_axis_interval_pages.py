@@ -6,7 +6,7 @@
 - 区间模型到采样下标、再到实际求和结果的数值链路；
 - 页面切换时各自恢复自己的物理区间与锁定状态；单层切片页移动位置只更新
   产生该切面的源范围，保留面内裁剪与裁空链；
-- 底栏位置组在无时间轴时占用原时间轴位置，窄窗下视图控件换行。
+- 底栏位置组在无时间轴时占满整行，两组空间不足时换行，全部隐藏时底栏折叠。
 """
 
 import os
@@ -26,7 +26,6 @@ from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval, AxisSpace
 from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
-from bandscope.ui.page_data_process_v2 import DataProcessPage
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from bandscope.ui.timeline_bar import TimelineBar
 
@@ -86,7 +85,6 @@ class _AxisHarness:
                 self.core.source_identity.future.result(timeout=30)
         assert success, f"合成数据加载失败: {info}"
 
-        self.page_data = DataProcessPage()
         self.bar = TimelineBar()
         self.controller = AxisIntervalController()
         self.controller.attach(
@@ -96,7 +94,6 @@ class _AxisHarness:
 
         self.analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
         self.analyzer.core = self.core
-        self.analyzer.page_data = self.page_data
         self.analyzer.timeline_bar = self.bar
         self.analyzer.axis_interval_controller = self.controller
         self.analyzer.axis_space = None
@@ -532,7 +529,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         # 位置组从底栏左侧内边距处开始，不为时间轴保留空位（只差 1px 边框）。
         self.assertLessEqual(abs(geometry.left() - left_margin), 2)
         self.assertFalse(bar.timeline_group.isVisible())
-        self.assertLess(geometry.right(), bar.width() - bar.view_controls.width())
+        self.assertLessEqual(abs(geometry.right() - (bar.width() - bar.ROW_MARGINS[2])), 2)
         # 滑条拿到整行富余宽度，明显宽于与其他分组同排时的份额。
         self.assertGreater(bar.interval_control.range_slider.width(), bar.AXIS_SLIDER_MIN_WIDTH * 2)
 
@@ -544,8 +541,9 @@ class BottomBarLayoutTests(unittest.TestCase):
 
         self.assertTrue(bar.timeline_group.isVisible())
         self.assertLess(bar.axis_group.geometry().right(), bar.timeline_group.geometry().left())
+        self.assertLessEqual(abs(bar.axis_group.width() - bar.timeline_group.width()), 2)
 
-    def test_narrow_window_wraps_the_view_controls_to_a_second_row(self):
+    def test_narrow_window_wraps_only_the_timeline_to_a_second_row(self):
         bar = TimelineBar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
@@ -553,33 +551,38 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(bar._wrapped)
         self.assertEqual(bar.height(), bar.HEIGHT)
 
-        bar.resize(1180, bar.HEIGHT)
+        narrow_width = bar._groups_min_width() + bar.ROW_MARGINS[0] + bar.ROW_MARGINS[2] - 1
+        bar.resize(narrow_width, bar.HEIGHT)
         bar._apply_wrap(bar._should_wrap())
 
         self.assertTrue(bar._wrapped)
         self.assertEqual(bar.height(), bar.HEIGHT + bar.SECOND_ROW_HEIGHT)
         self.assertTrue(bar.secondary_row.isVisible())
         self.assertTrue(bar.secondary_row.isAncestorOf(bar.timeline_group))
-        self.assertTrue(bar.secondary_row.isAncestorOf(bar.view_controls))
+        self.assertEqual(bar._primary_layout.indexOf(bar.axis_group), 0)
+        self.assertFalse(hasattr(bar, "view_controls"))
 
-    def test_very_narrow_window_gives_view_controls_a_third_row(self):
+    def test_one_visible_group_never_adds_another_row(self):
         bar = TimelineBar()
-        bar.resize(700, bar.HEIGHT)
+        bar.resize(1400, bar.HEIGHT)
         bar.show()
+        bar.set_timeline_visible(False, animate=False)
         bar.set_position_visible(True, animate=False)
+
+        bar.resize(320, bar.HEIGHT)
         bar._apply_wrap(bar._should_wrap())
 
-        self.assertTrue(bar._wrapped)
-        self.assertTrue(bar._view_stacked)
-        self.assertTrue(bar.secondary_row.isAncestorOf(bar.timeline_group))
-        self.assertTrue(bar.tertiary_row.isAncestorOf(bar.view_controls))
-        self.assertEqual(bar.height(), bar.HEIGHT + bar.SECOND_ROW_HEIGHT + bar.THIRD_ROW_HEIGHT)
+        self.assertFalse(bar._wrapped)
+        self.assertFalse(bar.secondary_row.isVisible())
+        self.assertEqual(bar.height(), bar.HEIGHT)
 
     def test_unwrapping_restores_the_single_row_height(self):
         bar = TimelineBar()
-        bar.resize(1180, bar.HEIGHT)
+        bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=False)
+        narrow_width = bar._groups_min_width() + bar.ROW_MARGINS[0] + bar.ROW_MARGINS[2] - 1
+        bar.resize(narrow_width, bar.HEIGHT)
         bar._apply_wrap(bar._should_wrap())
         self.assertTrue(bar._wrapped)
 
@@ -589,7 +592,19 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(bar._wrapped)
         self.assertEqual(bar.height(), bar.HEIGHT)
         self.assertFalse(bar.secondary_row.isAncestorOf(bar.timeline_group))
-        self.assertFalse(bar.secondary_row.isAncestorOf(bar.view_controls))
+
+    def test_bottom_bar_collapses_when_both_groups_are_hidden(self):
+        bar = TimelineBar()
+        bar.show()
+        bar.set_position_visible(True, animate=False)
+        bar.set_timeline_visible(False, animate=False)
+        self.assertTrue(bar.isVisible())
+
+        bar.set_position_visible(False, animate=False)
+        self.assertFalse(bar.isVisible())
+        bar.set_position_visible(True, animate=False)
+        self.assertTrue(bar.isVisible())
+        self.assertEqual(bar.height(), bar.HEIGHT)
 
     def test_revealing_twice_does_not_restart_the_animation(self):
         bar = TimelineBar()

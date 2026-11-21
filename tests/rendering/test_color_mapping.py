@@ -34,6 +34,13 @@ class LeveledColormapTests(unittest.TestCase):
         })
         np.testing.assert_array_equal(cmap([0.0, 1.0]), colormaps["magma"]([0.0, 1.0]))
 
+    def test_selected_palette_interval_maps_black_midpoint_and_white(self):
+        cmap = LeveledColormap("gray", {
+            "gamma_power": 1.0, "colormap_start": 0.2, "colormap_end": 0.8,
+        })
+        actual = cmap([0.0, 0.5, 1.0], bytes=True)
+        np.testing.assert_array_equal(actual, colormaps["gray"]([0.2, 0.5, 0.8], bytes=True))
+
     def test_masks_nans_and_alpha_match_palette_behavior(self):
         source = np.ma.array([0.0, 1e-6, 0.3, np.nan], mask=[False, False, True, False])
         alpha = np.array([0.0, 0.3, 0.5, 1.0])

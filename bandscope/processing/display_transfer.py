@@ -2,10 +2,7 @@
 import numpy as np
 
 from bandscope.core.display_style import (
-    INDEPENDENT_MODE,
-    NORMALIZATION_FULL,
-    NORMALIZATION_MANUAL,
-    NORMALIZATION_PERCENTILE,
+    DEFAULT_COLORMAP_RANGE,
     is_independent,
     resolved_display_style,
 )
@@ -21,7 +18,7 @@ for _name, _key in (("线性", "linear"), ("对数", "log"), ("幂函数", "powe
     OPACITY_MAPS[_name] = OPACITY_MAPS[_key]
 
 
-def level_info(data_range, levels, *, include_zero=False):
+def level_info(data_range, levels, *, include_zero=False, colormap_range=DEFAULT_COLORMAP_RANGE):
     low, high = data_range or (0., 1.)
     if include_zero:
         low, high = min(low, 0.), max(high, 0.)
@@ -36,10 +33,24 @@ def level_info(data_range, levels, *, include_zero=False):
     power = max(float(np.power(10., (50 - gamma) / 50.)), 1e-6)
     gray = b + (w - b) * np.power(.5, 1. / power)
     span = high - low
+    cmap_low, cmap_high = colormap_range or DEFAULT_COLORMAP_RANGE
     return {"data_min": low, "data_max": high, "span": span,
             "black_pos": float(b), "white_pos": float(w), "gray_pos": float(gray),
             "black_value": low + b * span, "white_value": low + w * span,
-            "gray_value": low + gray * span, "gamma_power": power}
+            "gray_value": low + gray * span, "gamma_power": power,
+            "colormap_start": float(cmap_low), "colormap_end": float(cmap_high)}
+
+
+def gamma_for_gray_position(black, white, gray):
+    black, white, gray = (float(value) for value in (black, white, gray))
+    if white <= black:
+        return 50.0
+    position = float(np.clip((gray - black) / (white - black), 1.0e-9, 1.0 - 1.0e-9))
+    power = np.log(0.5) / np.log(position)
+    if not np.isfinite(power) or power <= 0.0:
+        return 50.0
+    gamma = 50.0 - 50.0 * np.log10(power)
+    return float(np.clip(gamma, 0.0, 100.0))
 
 
 def finite_samples(values):
@@ -66,20 +77,7 @@ def normalization_range(values, style=None, *, locked_range=None, include_zero=F
         if include_zero:
             low, high = min(low, 0.0), max(high, 0.0)
         return low, high
-    normalization = resolved_display_style(style)["normalization"]
-    mode = normalization["mode"]
-    if mode == NORMALIZATION_MANUAL:
-        return tuple(float(value) for value in normalization["manual_range"])
-    measured = finite_minmax(values)
-    if measured is None:
-        return 0.0, 1.0
-    if mode == NORMALIZATION_FULL:
-        return measured
-    if mode == NORMALIZATION_PERCENTILE:
-        low, high = normalization["percentiles"]
-        finite = finite_samples(values)
-        return tuple(float(value) for value in np.percentile(finite, (low, high)))
-    return measured
+    return finite_minmax(values) or (0.0, 1.0)
 
 
 def display_level_info(values, style, *, locked_range=None, include_zero=False):
@@ -88,12 +86,20 @@ def display_level_info(values, style, *, locked_range=None, include_zero=False):
         values, resolved, locked_range=locked_range,
         include_zero=include_zero and not is_independent(resolved),
     )
-    return level_info(data_range, resolved["levels"])
+    return level_info(
+        data_range, resolved["levels"], colormap_range=resolved["colormap_range"],
+    )
 
 
 def mapped_positions(info, samples):
     samples = np.asarray(samples, dtype=np.float64)
     return np.power(np.clip(samples, 0., 1.), info["gamma_power"])
+
+
+def colormap_positions(info, samples):
+    low = float(info.get("colormap_start", 0.0))
+    high = float(info.get("colormap_end", 1.0))
+    return low + (high - low) * np.asarray(samples, dtype=np.float64)
 
 
 def mapped_opacity(opacity, info):
@@ -165,9 +171,12 @@ def channels(values, info, mode, *, view="3d", style=None, unit_distance=None,
         if accelerated is not None:
             return accelerated
     computed_color = color
+    mapped = None
     if color is None or (alpha is None and not independent and view != "2d"):
         t = normalized_color_samples(source, info)
-        computed_color = mapped_positions(info, t)
+        mapped = mapped_positions(info, t)
+        if color is None:
+            computed_color = colormap_positions(info, mapped)
     computed_alpha = alpha
     if alpha is None:
         if view == "2d":
@@ -178,7 +187,7 @@ def channels(values, info, mode, *, view="3d", style=None, unit_distance=None,
             )
         else:
             ramp = OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"])
-            computed_alpha = np.interp(computed_color, np.linspace(0., 1., len(ramp)), ramp)
+            computed_alpha = np.interp(mapped, np.linspace(0., 1., len(ramp)), ramp)
     finite = np.isfinite(source)
     if color is None:
         computed_color = np.where(finite, computed_color, 0).astype(

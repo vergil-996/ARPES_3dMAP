@@ -27,7 +27,7 @@
 | `control_page_base.py` | [bandscope/ui/control_page_base.py](../../bandscope/ui/control_page_base.py) |
 | `crop_controls.py` | [bandscope/ui/crop_controls.py](../../bandscope/ui/crop_controls.py) |
 | `denoise_control_utils.py` | [bandscope/ui/denoise_control_utils.py](../../bandscope/ui/denoise_control_utils.py) |
-| `page_data_process_v2.py` | [bandscope/ui/page_data_process_v2.py](../../bandscope/ui/page_data_process_v2.py) |
+| `page_data_process_v2.py` | 曾迁移至 `bandscope/ui/page_data_process_v2.py`；该模块后续随「处理分析」页一并移除。 |
 | `page_render_control.py` | [bandscope/ui/page_render_control.py](../../bandscope/ui/page_render_control.py) |
 | `plot_coordinate_tooltip.py` | [bandscope/ui/plot_coordinate_tooltip.py](../../bandscope/ui/plot_coordinate_tooltip.py) |
 | `result_workspace.py` | [bandscope/ui/result_workspace.py](../../bandscope/ui/result_workspace.py) |

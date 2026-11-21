@@ -31,8 +31,8 @@ class ComputeBackendTests(unittest.TestCase):
                 "prepare_axis_prefix",
                 {
                     "raw_data": raw,
-                    "source_mode": "frame",
-                    "frame_index": 1,
+                    "t_low": 1,
+                    "t_up": 1,
                     "angle": 0.0,
                     "axis": 1,
                 },

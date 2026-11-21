@@ -24,6 +24,7 @@ from bandscope.core.crop_model import (
     waterfall_offsets,
 )
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.data_scope import DataScopeDescriptor, ScopedDataVolume
 from bandscope.rendering.refresh_pipeline import RefreshCause
 from bandscope.ui.result_workspace import AnalysisPageSpec
@@ -62,13 +63,10 @@ def _stub_analyzer(spec):
     analyzer.clip_ranges = None
     analyzer.precise_logical_bounds = None
     analyzer.current_render_context = None
+    analyzer._context_for_publication_capture = lambda _spec: analyzer.current_render_context
     analyzer.timeline_bar = SimpleNamespace(
         slider_time=SimpleNamespace(value=lambda: 0),
         switch_flip=SimpleNamespace(isChecked=lambda: False),
-    )
-    analyzer.page_data = SimpleNamespace(
-        s_t_low=SimpleNamespace(value=lambda: 0),
-        s_t_up=SimpleNamespace(value=lambda: 2),
     )
     analyzer._persist_axis_integral_page_state = lambda *a, **k: None
     analyzer.page_control_blank = SimpleNamespace(get_second_derivative_params=lambda: {"sg_window": 5})
@@ -82,7 +80,7 @@ def _stub_analyzer(spec):
     analyzer._get_display_state_for_spec = lambda _spec: (None, None)
     analyzer._build_second_derivative_context_from_params = lambda *a: {"view": "2d"}
     analyzer.core = SimpleNamespace(
-        raw_data=np.zeros((4, 5, 6, 1), dtype=np.float32),
+        raw_data=np.zeros((4, 5, 6, 3), dtype=np.float32),
         has_time_axis=True,
         logical_to_physical=lambda key, index: float(index),
         coords={"delay": np.arange(3.0)},
@@ -298,10 +296,17 @@ class DerivativePropagationTests(unittest.TestCase):
         self.assertEqual(result.params["source_view"], "3d")
         self.assertNotIn("crop_regions", result.params)
 
-    def test_time_integral_derivative_propagates_regions(self):
+    def test_time_interval_home_derivative_propagates_regions(self):
         regions = [CropSelection("3d", ("X", "Y", "E"), (-1.0, 1.0, 0.0, 3.0, 2.0, 8.0)).to_dict()]
-        spec = AnalysisPageSpec("ti", "时间积分", "time_integral", "data_process",
-                                params={"t_low": 0, "t_up": 2, "crop_regions": regions})
+        spec = AnalysisPageSpec(
+            "home", "原始视图", "home", "system",
+            params={
+                "time_interval": AxisInterval.from_indices(
+                    np.arange(3.0), 0, 2, axis_key="delay"
+                ).as_dict(),
+                "crop_regions": regions,
+            },
+        )
         analyzer = _stub_analyzer(spec)
         analyzer._get_display_state_for_spec = lambda _spec: (
             np.zeros((2, 2, 2, 1)),
@@ -309,7 +314,9 @@ class DerivativePropagationTests(unittest.TestCase):
         )
         result = analyzer._build_second_derivative_spec()
         self.assertIsNotNone(result)
-        self.assertEqual(result.params["source_mode"], "time_integral")
+        self.assertEqual(result.params["time_interval"]["low"], 0.0)
+        self.assertEqual(result.params["time_interval"]["up"], 2.0)
+        self.assertNotIn("source_mode", result.params)
         self.assertEqual(len(result.params.get("crop_regions", [])), 1)
         # Deep copy: mutating the source chain must not leak into the child.
         spec.params["crop_regions"][0]["bounds"] = (0, 0, 0, 0, 0, 0)
@@ -344,7 +351,6 @@ class CropTimeFrameTests(unittest.TestCase):
         del analyzer._persist_axis_integral_page_state
         analyzer._persist_axis_interval_state = lambda _spec: None
         analyzer._syncing_controls = False
-        analyzer.axis_source_mode = spec.params["source_mode"]
         analyzer.rotation_angle = 0.0
         analyzer._axis_prefix_cache = None
         analyzer._rotation_cache = {}
@@ -360,11 +366,13 @@ class CropTimeFrameTests(unittest.TestCase):
         analyzer._get_display_state_for_spec = lambda _spec: (raw_data, coords)
         return analyzer
 
-    def _spec(self, *, source_mode="frame", regions=True):
+    def _spec(self, *, time_range=(0, 0), regions=True):
+        low, up = time_range
         params = {
             "axis_index": 0, "low": 1, "up": 2, "mid": 1,
-            "source_mode": source_mode, "source_t_index": 0,
-            "source_t_low": 0, "source_t_up": 2,
+            "time_interval": AxisInterval.from_indices(
+                np.array([0.0, 0.4, 1.5]), low, up, locked=low == up, axis_key="delay"
+            ).as_dict(),
             "crop_k_low": 2, "crop_k_up": 3, "crop_e_low": 2, "crop_e_up": 4,
         }
         if regions:
@@ -381,11 +389,14 @@ class CropTimeFrameTests(unittest.TestCase):
         source_params = copy.deepcopy(spec.params)
         analyzer = self._analyzer(spec)
         before = analyzer._compute_render_context(spec)
-        analyzer.timeline_bar.slider_time.value = lambda: 2
+        analyzer.time_interval = AxisInterval.from_indices(
+            analyzer.core.coords["delay"], 2, 2, locked=True, axis_key="delay"
+        )
 
         analyzer.on_time_slider_changed(2)
 
-        self.assertEqual(spec.params["source_t_index"], 2)
+        self.assertEqual(spec.params["time_interval"]["low"], 1.5)
+        self.assertEqual(spec.params["time_interval"]["up"], 1.5)
         analyzer.request_refresh.assert_called_once_with(RefreshCause.DATA_SOURCE, interactive=True)
         after = analyzer._compute_render_context(spec)
         expected = analyzer.core.raw_data[1:3, 2:4, 2:5, 2].sum(axis=0)
@@ -398,16 +409,15 @@ class CropTimeFrameTests(unittest.TestCase):
         np.testing.assert_array_equal(payload["source_t_index"], [2])
         np.testing.assert_allclose(payload["time"], [1.5])
 
-    def test_active_crop_render_resolves_current_frame_without_slider_signal(self):
+    def test_crop_render_reads_page_time_interval_without_slider_signal(self):
         for regions in (False, True):
             with self.subTest(regions=regions):
-                spec = self._spec(regions=regions)
+                spec = self._spec(time_range=(1, 1), regions=regions)
                 analyzer = self._analyzer(spec)
-                analyzer.timeline_bar.slider_time.value = lambda: 1
                 context = analyzer._compute_render_context(spec)
                 np.testing.assert_array_equal(
                     context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, 1].sum(axis=0))
-                self.assertEqual(spec.params["source_t_index"], 1)
+                self.assertEqual(spec.params["time_interval"]["low"], 0.4)
 
     def test_inactive_crop_keeps_its_saved_frame(self):
         spec = self._spec()
@@ -417,17 +427,16 @@ class CropTimeFrameTests(unittest.TestCase):
         context = analyzer._compute_render_context(spec)
         np.testing.assert_array_equal(
             context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, 0].sum(axis=0))
-        self.assertEqual(spec.params["source_t_index"], 0)
+        self.assertEqual(spec.params["time_interval"]["low"], 0.0)
 
-    def test_time_integrated_crop_stays_time_integrated_when_rendered(self):
-        spec = self._spec(source_mode="time_integral")
+    def test_expanded_time_interval_sums_all_frames_on_the_same_crop_page(self):
+        spec = self._spec(time_range=(0, 2))
         analyzer = self._analyzer(spec)
-        self.assertTrue(analyzer._is_time_locked_page(spec))
-        analyzer.timeline_bar.slider_time.value = lambda: 1
         context = analyzer._compute_render_context(spec)
         np.testing.assert_array_equal(
             context["data"], analyzer.core.raw_data[1:3, 2:4, 2:5, :].sum(axis=(0, 3)))
-        self.assertEqual(spec.params["source_mode"], "time_integral")
+        self.assertEqual(spec.params["time_interval"]["up"], 1.5)
+        self.assertNotIn("source_mode", spec.params)
 
 
 class CroppedSliceIntensityTests(unittest.TestCase):
@@ -492,13 +501,14 @@ class CroppedSliceIntensityTests(unittest.TestCase):
         expected = analyzer.core.raw_data[1:3, 2:4, 2:5, :].sum(axis=(0, 1, 2))
         self._assert_curve_and_export(analyzer, result, expected)
 
-    def test_apply_action_accepts_2d_crop_without_old_3d_clip(self):
+    def test_create_action_accepts_2d_crop_without_old_3d_clip(self):
         source = self._axis_spec()
         analyzer = self._analyzer(source)
         analyzer.clip_ranges = None
-        analyzer.page_data.current_other_key = lambda: "builtin:slice_dos"
+        analyzer.left_workspace.page_by_id = lambda page_id: source if page_id == source.page_id else None
+        analyzer.left_workspace.activate_page = lambda page_id: None
         analyzer.left_workspace.add_page = Mock()
-        analyzer.on_apply_other_integral()
+        analyzer._on_page_create_requested(source.page_id, "builtin:slice_dos")
         result = analyzer.left_workspace.add_page.call_args.args[0]
         expected = analyzer.core.raw_data[1:3, 1:3, 1:4, :].sum(axis=(0, 1, 2))
         self._assert_curve_and_export(analyzer, result, expected)
@@ -622,7 +632,9 @@ class CropExportMetadataTests(unittest.TestCase):
             "aic", "裁剪", "axis_integral_crop", "data_process",
             params={
                 "axis_index": 0, "low": 1, "up": 3, "mid": 2,
-                "source_mode": "time_integral", "source_t_low": 0, "source_t_up": 2,
+                "time_interval": AxisInterval.from_indices(
+                    np.asarray([0.5, 1.5, 2.5]), 0, 2, axis_key="delay"
+                ).as_dict(),
                 "crop_regions": [CropSelection("2d", ("Y", "E"), (0.0, 2.0, 3.0, 6.0)).to_dict()],
             },
         )
@@ -633,18 +645,19 @@ class CropExportMetadataTests(unittest.TestCase):
         self.assertEqual(str(metadata["integrated_axis"][0]), "X")
         np.testing.assert_allclose(metadata["integrated_range"], [1.0, 3.0])
         np.testing.assert_allclose(metadata["integrated_center"], [2.0])
-        self.assertEqual(str(metadata["source_mode"][0]), "time_integral")
         np.testing.assert_allclose(metadata["source_t_range"], [0.5, 2.5])
 
     def test_derivative_metadata_keeps_axis_and_frame_time(self):
         spec = AnalysisPageSpec(
             "sd", "二阶导", "second_derivative", "data_process",
-            params={"source_view": "3d", "derivative_axis": 2, "source_mode": "frame",
-                    "source_t_index": 1,
+            params={"source_view": "3d", "derivative_axis": 2,
+                    "time_interval": AxisInterval.from_indices(
+                        np.asarray([0.5, 1.5, 2.5]), 1, 1, locked=True, axis_key="delay"
+                    ).as_dict(),
                     "crop_regions": [CropSelection("3d", ("X", "Y", "E"), (0, 1, 0, 1, 0, 1)).to_dict()]},
         )
         analyzer = self._analyzer_for_export(spec)
-        context = {"derivative_axis": 2, "source_mode": "frame"}
+        context = {"derivative_axis": 2}
         coords = {"delay": np.asarray([0.5, 1.5, 2.5])}
         metadata = analyzer._crop_export_metadata(spec, context, coords)
         self.assertEqual(str(metadata["derivative_axis"][0]), "E")

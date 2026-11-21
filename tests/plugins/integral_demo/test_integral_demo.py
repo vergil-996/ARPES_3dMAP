@@ -216,6 +216,7 @@ class PluginTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        self.assertEqual(manifest["version"], "1.0.1")
         self.assertEqual(manifest["api_version"], 2)
         self.assertEqual(
             set(manifest["capabilities"]),

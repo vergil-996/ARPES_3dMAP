@@ -132,14 +132,14 @@ class ControlPageScrollingTests(unittest.TestCase):
         self.page.relayout_scroll_content()
         expanded_height = self.page.container.height()
 
-        self.page.grp_normalize.toggle_button.click()
+        self.page.grp_opacity.toggle_button.click()
         QApplication.processEvents()
 
-        self.assertTrue(self.page.grp_normalize.body_host.isHidden())
+        self.assertTrue(self.page.grp_opacity.body_host.isHidden())
         self.assertLess(self.page.container.height(), expanded_height)
-        self.page.grp_normalize.toggle_button.click()
+        self.page.grp_opacity.toggle_button.click()
         QApplication.processEvents()
-        self.assertFalse(self.page.grp_normalize.body_host.isHidden())
+        self.assertFalse(self.page.grp_opacity.body_host.isHidden())
         self.assertEqual(self.page.container.height(), expanded_height)
 
     def test_wheel_scrolls_the_page(self):

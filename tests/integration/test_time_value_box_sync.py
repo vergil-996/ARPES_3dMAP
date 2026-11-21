@@ -1,14 +1,10 @@
-# -*- coding: utf-8 -*-
-"""时间积分滑条 ↔ 物理值输入框联动回归测试（离屏，无需 GPU/VTK）。
-
-借助 My3DAnalyzer.__new__ 绕过窗口构造，只装配真实 AnalyzerCore +
-DataProcessPage，直接驱动 app 侧的联动 handler。
-"""
+"""页面级时间区间与双端控件联动回归测试（离屏，无需 GPU/VTK）。"""
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,122 +12,169 @@ import numpy as np
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.core.analyzer_core import AnalyzerCore
-from bandscope.ui.page_data_process_v2 import DataProcessPage
+from bandscope.ui.axis_interval_controller import AxisIntervalController
+from bandscope.ui.timeline_bar import TimelineBar
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.app.refactored_app import My3DAnalyzer
 
 configure_qt_plugin_path()
 
-class _FakeSlider:
-    """bandscope.ui.timeline_bar.slider_time 的最小替身。"""
 
-    def setRange(self, *_args):
-        pass
-
-    def setValue(self, *_args):
-        pass
-
-    def setToolTipConvertionFunc(self, *_args):
-        pass
-
-
-class _FakeTimelineBar:
-    """timeline_bar 的最小替身：只保留加载流程会碰到的接口。"""
-
-    def __init__(self):
-        self.slider_time = _FakeSlider()
-
-    def set_total_frames(self, _count):
-        pass
+def _page(page_id):
+    return SimpleNamespace(
+        page_id=page_id,
+        page_kind="home",
+        source_page_id=None,
+        params={},
+    )
 
 
 def _build_analyzer():
     core = AnalyzerCore()
-    # Nonuniform, signed delays exercise physical-value/index conversion without
-    # requiring the maintainer's large experimental dataset.
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "time-sync.npz"
-        np.savez(path, sample=np.ones((4, 5, 6, 5), dtype=np.float32),
-                 kx=np.linspace(-1, 1, 4), ky=np.linspace(-1, 1, 5),
-                 E=np.linspace(-2, 0, 6), time=np.array([-300., -80., 0., 150., 500.]))
-        success, info = core.load_npz(str(path))
-    assert success, f"测试数据加载失败: {info}"
+        path = Path(directory) / "time-interval.npz"
+        np.savez(
+            path,
+            sample=np.ones((4, 5, 6, 5), dtype=np.float32),
+            kx=np.linspace(-1, 1, 4),
+            ky=np.linspace(-1, 1, 5),
+            E=np.linspace(-2, 0, 6),
+            time=np.array([-300.0, -80.0, 0.0, 150.0, 500.0]),
+        )
+        success, _info = core.load_npz(str(path))
+        if success and core.source_identity.future is not None:
+            core.source_identity.future.result(timeout=30)
+    assert success
 
     analyzer = My3DAnalyzer.__new__(My3DAnalyzer)
     analyzer.core = core
-    analyzer.page_data = DataProcessPage()
-    analyzer.timeline_bar = _FakeTimelineBar()
+    analyzer.timeline_bar = TimelineBar()
+    analyzer.time_space = None
+    analyzer.time_interval = None
+    analyzer.time_interval_controller = AxisIntervalController()
+    analyzer.time_interval_controller.attach(
+        interval_widget=analyzer.timeline_bar.time_interval_control,
+        box_length=analyzer.timeline_bar.time_interval_control.input_length,
+    )
     analyzer._syncing_controls = False
-    analyzer._syncing_axis_value_boxes = False
-    analyzer.left_workspace = SimpleNamespace(current_spec=lambda: None)
-    analyzer._connect_time_value_box_signals()
-    analyzer._configure_loaded_time_controls(info)
+    analyzer.request_refresh = Mock()
+    analyzer.timeline_bar.slider_time.valueChanged.connect(
+        lambda value: analyzer.on_time_slider_changed(value)
+    )
+    analyzer.time_interval_controller.intervalChanged.connect(
+        lambda: analyzer.on_time_interval_changed()
+    )
+    analyzer.time_interval_controller.intervalCommitted.connect(
+        lambda: analyzer.flush_time_interval_refresh()
+    )
+    analyzer.time_interval_controller.lockChanged.connect(
+        lambda locked: analyzer.on_time_interval_lock_changed(locked)
+    )
+    pages = {page_id: _page(page_id) for page_id in ("home", "other")}
+    current = {"spec": pages["home"]}
+    analyzer.left_workspace = SimpleNamespace(
+        current_spec=lambda: current["spec"],
+        page_by_id=lambda page_id: pages.get(page_id),
+    )
+    analyzer._test_pages = pages
+    analyzer._test_current = current
+    analyzer._bind_time_interval(current["spec"], animate=False)
     return analyzer
 
 
-class TimeValueBoxSyncTests(unittest.TestCase):
+class TimeIntervalControlTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
         self.analyzer = _build_analyzer()
-        self.page = self.analyzer.page_data
-        self.delay = np.asarray(self.analyzer.core.coords["delay"], dtype=np.float64)
-        self.t_max = int(self.analyzer.core.raw_data.shape[3]) - 1
+        self.bar = self.analyzer.timeline_bar
+        self.control = self.bar.time_interval_control
+        self.spec = self.analyzer.left_workspace.current_spec()
+        self.addCleanup(self.control.range_slider.coordinate_popup.close)
+        self.addCleanup(self.bar.close)
 
-    def test_boxes_initialized_from_delay_axis(self):
-        page = self.page
-        self.assertEqual(float(np.min(self.delay)), page.input_t_low.minimum())
-        self.assertEqual(float(np.max(self.delay)), page.input_t_low.maximum())
-        self.assertEqual(float(np.min(self.delay)), page.input_t_up.minimum())
-        self.assertEqual(float(np.max(self.delay)), page.input_t_up.maximum())
-        self.assertEqual(0, page.s_t_low.value())
-        self.assertEqual(self.t_max, page.s_t_up.value())
-        self.assertAlmostEqual(float(self.delay[0]), page.input_t_low.value(), places=6)
-        self.assertAlmostEqual(float(self.delay[self.t_max]), page.input_t_up.value(), places=6)
+    def _activate(self, spec):
+        self.analyzer._test_current["spec"] = spec
+        self.analyzer._bind_time_interval(spec, animate=False)
 
-    def test_slider_to_box_syncs_physical_value(self):
-        page = self.page
-        page.s_t_low.setValue(1)
-        self.assertAlmostEqual(float(self.delay[1]), page.input_t_low.value(), places=6)
-        page.s_t_up.setValue(self.t_max - 1)
-        self.assertAlmostEqual(float(self.delay[self.t_max - 1]), page.input_t_up.value(), places=6)
+    def test_delay_axis_starts_as_a_locked_single_frame(self):
+        interval = self.analyzer.time_interval
+        self.assertEqual(self.control.title_label.text(), "时间延迟")
+        self.assertEqual(self.control.subtitle_label.text(), "合拢逐帧 · 分离积分")
+        self.assertTrue(interval.locked)
+        self.assertEqual((interval.low, interval.up), (-300.0, -300.0))
+        self.assertEqual(self.bar.slider_time.value(), 0)
+        self.assertEqual(self.bar.slider_time.maximum(), 4)
 
-    def test_box_to_slider_snaps_to_nearest_index(self):
-        page = self.page
-        target_index = min(1, self.t_max)
-        page.input_t_low.setValue(float(self.delay[target_index]))
-        self.assertEqual(target_index, page.s_t_low.value())
-        self.assertAlmostEqual(float(self.delay[target_index]), page.input_t_low.value(), places=6)
+    def test_frame_adapter_moves_the_same_page_interval(self):
+        page_id = self.spec.page_id
+        self.bar.slider_time.setValue(3)
 
-        # 介于两帧之间的值应吸附到最近帧
-        if self.t_max >= 2:
-            between = float((self.delay[1] + self.delay[2]) / 2.0)
-            page.input_t_up.setValue(between)
-            self.assertIn(page.s_t_up.value(), (1, 2))
-            self.assertAlmostEqual(
-                float(self.delay[page.s_t_up.value()]), page.input_t_up.value(), places=6
-            )
+        interval = self.analyzer.time_interval
+        self.assertEqual(self.bar.slider_time.value(), 3)
+        self.assertEqual((interval.low, interval.up), (150.0, 150.0))
+        self.assertTrue(interval.locked)
+        self.assertEqual(self.spec.page_id, page_id)
+        self.assertEqual(self.spec.params["time_interval"]["low"], 150.0)
+        self.analyzer.request_refresh.assert_called()
 
-    def test_cross_constraint_still_holds_via_boxes(self):
-        page = self.page
-        page.s_t_up.setValue(1)
-        page.input_t_low.setValue(float(self.delay[self.t_max]))
-        self.assertEqual(page.s_t_up.value(), page.s_t_low.value())
-        self.assertAlmostEqual(page.input_t_up.value(), page.input_t_low.value(), places=6)
+    def test_unlock_and_length_input_create_a_physical_time_interval(self):
+        self.control.range_slider.lock_badge.click()
+        self.control.input_length.setValue(230.0)
+        self.control.input_length.editingFinished.emit()
 
-    def test_state_round_trip_includes_time_boxes(self):
-        page = self.page
-        page.s_t_low.setValue(1)
-        state = page.export_state()
-        self.assertIn("input_t_low", state)
-        self.assertIn("input_t_up", state)
-        self.assertAlmostEqual(float(self.delay[1]), state["input_t_low"]["value"], places=6)
+        interval = self.analyzer.time_interval
+        self.assertFalse(interval.locked)
+        self.assertAlmostEqual(interval.low, -300.0)
+        self.assertAlmostEqual(interval.up, -70.0)
+        self.assertEqual(self.analyzer._time_indices_for_spec(self.spec), (0, 1))
+        self.assertEqual(self.spec.params["time_interval"]["up"], -70.0)
 
-        page.s_t_low.setValue(0)
-        page.restore_state(state)
-        self.assertEqual(state, page.export_state())
+        self.bar.slider_time.setValue(1)
+        self.assertTrue(self.analyzer.time_interval.locked)
+        self.assertEqual(self.analyzer.time_interval.length, 0.0)
+        self.assertEqual(self.spec.params["time_interval"]["low"], -80.0)
+
+    def test_popup_uses_physical_values_and_computation_uses_nearest_frame(self):
+        self.control.range_slider.lock_badge.click()
+        self.control.input_length.setValue(230.0)
+        self.control.input_length.editingFinished.emit()
+        slider = self.control.range_slider
+        slider._show_popup("up")
+        popup = slider.coordinate_popup
+        popup.value_edit.setValue(100.0)
+        popup.value_edit.editingFinished.emit()
+
+        self.assertAlmostEqual(self.analyzer.time_interval.up, 100.0)
+        self.assertEqual(self.analyzer._time_indices_for_spec(self.spec), (0, 3))
+
+    def test_time_curve_page_hides_the_interval_group_and_home_restores_it(self):
+        curve = _page("curve")
+        curve.page_kind = "slice_dos"
+        self.analyzer._test_pages["curve"] = curve
+
+        self._activate(curve)
+        self.assertTrue(self.bar.timeline_group.isHidden())
+        self.assertFalse(self.bar.slider_time.isEnabled())
+        self._activate(self.spec)
+        self.assertFalse(self.bar.timeline_group.isHidden())
+        self.assertTrue(self.bar.slider_time.isEnabled())
+
+    def test_each_page_restores_its_own_frame(self):
+        first = self.spec
+        second = self.analyzer._test_pages["other"]
+        self.bar.slider_time.setValue(2)
+        self._activate(second)
+        self.bar.slider_time.setValue(3)
+
+        self._activate(first)
+        self.assertEqual(self.bar.slider_time.value(), 2)
+        self.assertEqual(self.analyzer.time_interval.center, 0.0)
+        self._activate(second)
+        self.assertEqual(self.bar.slider_time.value(), 3)
+        self.assertEqual(self.analyzer.time_interval.center, 150.0)
 
 
 if __name__ == "__main__":

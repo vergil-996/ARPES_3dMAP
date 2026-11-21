@@ -116,7 +116,11 @@ def main():
             and abs(interval.up - (interval.minimum + interval.span * 0.75)) < 1e-8,
             f"{interval.low:g} … {interval.up:g}",
         )
-        record("旧坐标轴积分卡片已移除", not hasattr(window.page_data, "combo_ax"))
+        record(
+            "仅保留外观控制页",
+            window.page_container.count() == 1
+            and window.page_container.currentWidget() is window.page_render,
+        )
         record("双端底栏可见", window.timeline_bar.interval_control.isVisible())
 
         slider = window.timeline_bar.interval_control.range_slider
@@ -145,7 +149,12 @@ def main():
         capture("xy-dark.png")
         window.resize(1050, 760)
         QTest.qWait(500)
-        record("窄窗口底栏三行自适应", window.timeline_bar._wrapped and window.timeline_bar._view_stacked)
+        record(
+            "窄窗口底栏两行自适应",
+            window.timeline_bar._wrapped
+            and window.timeline_bar.secondary_row.isAncestorOf(window.timeline_bar.timeline_group)
+            and not hasattr(window.timeline_bar, "view_controls"),
+        )
         capture("xy-dark-narrow.png")
         window.resize(1500, 920)
         window._set_theme("light")

@@ -48,6 +48,8 @@ class PathSegmentStyle:
     gray: float = 50.0
     white: float = 100.0
     intensity_map: str = "线性"
+    colormap_start: float = 0.0
+    colormap_end: float = 1.0
 
     def __post_init__(self):
         self.thickness = max(0.0, float(self.thickness))
@@ -55,6 +57,8 @@ class PathSegmentStyle:
         self.gray = float(np.clip(float(self.gray), 0.0, 100.0))
         self.white = float(np.clip(float(self.white), 0.0, 100.0))
         self.intensity_map = str(self.intensity_map or "线性")
+        self.colormap_start = float(np.clip(float(self.colormap_start), 0.0, 1.0))
+        self.colormap_end = float(np.clip(float(self.colormap_end), 0.0, 1.0))
 
     @property
     def levels(self) -> Tuple[float, float, float]:
@@ -67,6 +71,8 @@ class PathSegmentStyle:
             "gray": self.gray,
             "white": self.white,
             "intensity_map": self.intensity_map,
+            "colormap_start": self.colormap_start,
+            "colormap_end": self.colormap_end,
         }
 
     @classmethod
@@ -79,6 +85,8 @@ class PathSegmentStyle:
             value.get("gray", levels[1]),
             value.get("white", levels[2]),
             value.get("intensity_map", value.get("opacity_mode", "线性")),
+            value.get("colormap_start", 0.0),
+            value.get("colormap_end", 1.0),
         )
 
 
@@ -175,7 +183,8 @@ class PathSliceModel:
             for key, value in changes.items():
                 if key == "levels":
                     segment.black, segment.gray, segment.white = (float(v) for v in value)
-                elif key in {"thickness", "black", "gray", "white", "intensity_map"}:
+                elif key in {"thickness", "black", "gray", "white", "intensity_map",
+                             "colormap_start", "colormap_end"}:
                     setattr(segment, key, value)
             segment.__post_init__()
 
@@ -198,7 +207,8 @@ def common_segment_values(
     if not chosen:
         return {}
     result: Dict[str, Any] = {}
-    for key in ("thickness", "black", "gray", "white", "intensity_map"):
+    for key in ("thickness", "black", "gray", "white", "intensity_map",
+                "colormap_start", "colormap_end"):
         value = getattr(chosen[0], key)
         result[key] = value if all(getattr(item, key) == value for item in chosen[1:]) else None
     return result

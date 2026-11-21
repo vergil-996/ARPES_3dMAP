@@ -97,18 +97,7 @@ def main():
     # ---------- 3D 主页验证 ----------
     def step_3d_frame0():
         log(f"[verify] time slider range: {slider.minimum()}..{slider.maximum()}")
-        # 默认百分位归一化下，该数据各帧的 P99.5 可能相同，换帧后色带端点不变，
-        # 无法验证锁定效果；先切到完整范围，让各帧的黑色/白色端点真正不同。
-        from bandscope.ui.page_render_control import NORMALIZATION_FULL
-
-        combo = window.page_render.combo_normalization
-        index = combo.findData(NORMALIZATION_FULL)
-        if index >= 0 and combo.currentIndex() != index:
-            combo.setCurrentIndex(index)
-            window.flush_time_slider_refresh()
-            QTimer.singleShot(1500, step_3d_frame0_ready)
-        else:
-            step_3d_frame0_ready()
+        step_3d_frame0_ready()
 
     def step_3d_frame0_ready():
         state["bw0"] = volume_bw(window)

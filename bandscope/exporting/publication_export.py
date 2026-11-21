@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 from bandscope.exporting.curve_presentation import source_revision
 from bandscope.core.crop_model import waterfall_offsets
+from bandscope.core.display_style import is_independent
 from bandscope.rendering.path_slice import axis_edges, matching_colorbar, segment_rgba
 
 from bandscope.exporting.publication_models import (
@@ -244,7 +245,7 @@ def capture_snapshot(window) -> PublicationSnapshot:
         state = state_getter(spec) if state_getter is not None else None
         prepare = getattr(window, "_prepare_display_statistics", None)
         if prepare is not None and prepare(context, spec, state):
-            raise ExportError("强度归一化仍在后台统计，请等待精确结果完成后导出。")
+            raise ExportError("强度范围仍在后台统计，请等待精确结果完成后导出。")
         getter = getattr(window, "_enhancement_display", None)
         display_fields = getter(context, spec) if getter is not None else None
         background_style = (
@@ -338,24 +339,19 @@ def _freeze_enhancement(window, snapshot, spec, context, render_context, *, disp
 def _build_source_desc(window, spec, render_context) -> str:
     """面板顶部展示的来源信息（位于预览图片之外）。"""
     parts = [str(spec.title)]
-    view = render_context.get("view")
-    if spec.page_kind == "home" and window.core.has_time_axis:
-        t_idx = int(window.timeline_bar.slider_time.value())
+    if spec.page_kind in window.TIME_INTERVAL_PAGE_KINDS and window.core.has_time_axis:
+        t_low, t_up = window._time_indices_for_spec(spec)
         delay_coords = window.core.coords.get("delay")
-        if delay_coords is None:
-            delay_coords = []
-        delays = np.asarray(delay_coords, dtype=np.float64).ravel()
-        if delays.size > t_idx:
-            parts.append(f"帧 {t_idx}（delay {delays[t_idx]:.4g}）")
+        delays = np.asarray([] if delay_coords is None else delay_coords, dtype=np.float64).ravel()
+        if delays.size <= max(t_low, t_up):
+            return " · ".join(parts)
+        describe = getattr(window, "_scan_interval_description", None)
+        if callable(describe):
+            parts.append(describe(t_low, t_up))
+        elif t_up > t_low:
+            parts.append(f"时间积分 {t_low}~{t_up}（delay {delays[t_low]:.4g}~{delays[t_up]:.4g}）")
         else:
-            parts.append(f"帧 {t_idx}")
-    elif spec.page_kind == "time_integral":
-        params = spec.params
-        parts.append(f"时间积分 {int(params.get('t_low', 0))}~{int(params.get('t_up', 0))}")
-    elif view in {"waterfall", "path_slice"}:
-        params = spec.params
-        if params.get("source_mode") == "time_integral":
-            parts.append("时间积分来源")
+            parts.append(f"帧 {t_low}（delay {delays[t_low]:.4g}）")
     return " · ".join(parts)
 
 
@@ -378,7 +374,9 @@ def _freeze_3d(window, snapshot: PublicationSnapshot, render_context) -> None:
 
     include_zero = bool(render_context.get("include_zero", False))
     display = snapshot.payload.get("display") or {}
-    level_info = display.get("background_level_info") or compute_level_info(
+    style = display.get("background_style")
+    cached_info = None if is_independent(style) else display.get("background_level_info")
+    level_info = cached_info or compute_level_info(
         data, snapshot.levels_params, include_zero=include_zero,
         locked_range=snapshot.locked_range,
         style=display.get("background_style"),
@@ -504,7 +502,9 @@ def _freeze_2d(window, snapshot: PublicationSnapshot, render_context) -> None:
     _check_uniform(snapshot.coords[y_key], y_key)
 
     display = snapshot.payload.get("display") or {}
-    level_info = display.get("background_level_info") or compute_level_info(
+    style = display.get("background_style")
+    cached_info = None if is_independent(style) else display.get("background_level_info")
+    level_info = cached_info or compute_level_info(
         img, snapshot.levels_params, locked_range=snapshot.locked_range,
         style=display.get("background_style"), resolved_range=display.get("resolved_range"),
     )
@@ -598,10 +598,13 @@ def _freeze_1d(window, snapshot: PublicationSnapshot, render_context) -> None:
     x, y = _ascending_xy(render_context["x_data"], render_context["y_data"])
     if x.size == 0 or not np.any(np.isfinite(y)):
         raise ExportError("曲线数据为空或全部无效，不能生成科学图片。")
-    xlabel = _resolve_xlabel(
-        render_context.get("xlabel", ""), snapshot.coords,
-        snapshot.coord_sources, snapshot.coord_units,
-    )
+    if render_context.get("x_axis_key") == "delay":
+        xlabel = window._axis_label_text("delay")
+    else:
+        xlabel = _resolve_xlabel(
+            render_context.get("xlabel", ""), snapshot.coords,
+            snapshot.coord_sources, snapshot.coord_units,
+        )
     snapshot.payload = {
         "curve": {"x": x, "y": y, "label": None, "curve_id": "main",
                   "source_title": snapshot.source_page_title, "is_base": True, "palette_slot": 0},

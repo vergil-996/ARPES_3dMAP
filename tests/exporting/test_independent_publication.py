@@ -18,7 +18,6 @@ class IndependentPublicationTests(unittest.TestCase):
     def test_frozen_channels_and_fine_mapper_match_main_display(self):
         volume = np.random.default_rng(37).random((8, 6, 5), dtype=np.float32)
         style = new_display_style()
-        style["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
         fields = resolve_display(
             {"view": "3d", "data": volume, "full_shape": volume.shape,
              "coords": {key: np.arange(size) for key, size in zip(("X", "Y", "E"), volume.shape)}},

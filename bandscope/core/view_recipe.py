@@ -14,9 +14,12 @@ from pathlib import Path
 import numpy as np
 
 from bandscope.core.display_style import (
+    has_restricted_normalization,
+    is_independent,
     legacy_display_style,
     legacy_render_quality,
     migrate_display_state,
+    resolved_display_style,
 )
 from bandscope.core.local_enhancement import (
     DISPLAY_PAGE_KINDS,
@@ -26,10 +29,12 @@ from bandscope.core.local_enhancement import (
 )
 
 FORMAT = "bandscope.view"
-SCHEMA_VERSION = 2
-PAGE_KINDS = frozenset({"home", "time_integral", "axis_integral", "axis_integral_crop",
+SCHEMA_VERSION = 4
+TIME_PAGE_SCHEMA_VERSION = 3
+PAGE_KINDS = frozenset({"home", "axis_integral", "axis_integral_crop",
                         "slice_dos", "energy_dos", "edc_curve", "second_derivative",
                         "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived", "path_slice"})
+LEGACY_PAGE_KINDS = PAGE_KINDS | {"time_integral"}
 
 
 class RecipeError(ValueError):
@@ -145,6 +150,162 @@ def _migrate_legacy_document(document):
     }
     view["render_quality"] = legacy_render_quality()
     result["view_state"] = view
+    result["schema_version"] = TIME_PAGE_SCHEMA_VERSION
+    result["state_digest"] = state_digest(result)
+    return result
+
+
+def _without_legacy_time_page_kind(value):
+    if isinstance(value, dict):
+        return {
+            key: (
+                "home"
+                if key in {"page_kind", "source_page_kind"} and item == "time_integral"
+                else _without_legacy_time_page_kind(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_legacy_time_page_kind(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_without_legacy_time_page_kind(item) for item in value)
+    return value
+
+
+def _migrate_time_page_document(document):
+    result = copy.deepcopy(document)
+    pages = result["pages"]
+    params_by_node = {}
+    for page in pages:
+        old_key = page["recipe_id"]
+        params_by_node[old_key] = _without_legacy_time_page_kind(page["params"])
+        if page["page_kind"] == "time_integral":
+            page["page_kind"] = "home"
+    key_map = {}
+    migrated_nodes = {}
+
+    def visit(old_key):
+        if old_key in key_map:
+            return key_map[old_key]
+        node = copy.deepcopy(result["recipes"][old_key])
+        node["inputs"] = [visit(parent) for parent in node["inputs"]]
+        if node.get("operation") == "time_integral":
+            node["operation"] = "home"
+        if old_key in params_by_node:
+            node["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        else:
+            node["params"] = _remap_recipe_references(node["params"], key_map)
+        node["params"] = _without_legacy_time_page_kind(node["params"])
+        new_key = digest(node)
+        key_map[old_key] = new_key
+        migrated_nodes[new_key] = node
+        return new_key
+
+    for old_key in result["recipes"]:
+        visit(old_key)
+    for page in pages:
+        old_key = page["recipe_id"]
+        page["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        page["params"] = _without_legacy_time_page_kind(page["params"])
+        page["recipe_id"] = key_map[old_key]
+    result["recipes"] = migrated_nodes
+    result["schema_version"] = TIME_PAGE_SCHEMA_VERSION
+    result["state_digest"] = state_digest(result)
+    return result
+
+
+def _full_range_value(value):
+    if isinstance(value, dict):
+        if is_independent(value):
+            return resolved_display_style(value)
+        result = {key: _full_range_value(item) for key, item in value.items()}
+        if has_restricted_normalization(value.get("display_style")):
+            result["display_range"] = None
+        if has_restricted_normalization(value.get("background_style")):
+            result["resolved_range"] = None
+            result.pop("background_level_info", None)
+        return result
+    if isinstance(value, list):
+        return [_full_range_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_full_range_value(item) for item in value)
+    return value
+
+
+def _full_range_params(params):
+    result = _full_range_value(copy.deepcopy(params))
+    original_state = params.get(STATE_KEY) or {}
+    state = result.get(STATE_KEY) or {}
+    for original, converted in zip(original_state.get("regions", []), state.get("regions", [])):
+        if has_restricted_normalization(original.get("style")) and converted.pop("locked_range", None) is not None:
+            converted["lock_pending"] = True
+    if (has_restricted_normalization(original_state.get("common_style"))
+            and state.pop("common_locked_range", None) is not None):
+        state["common_lock_pending"] = True
+    return result
+
+
+def full_range_display_override(override):
+    original = copy.deepcopy(override) or {}
+    display = original.get("display") or {}
+    restricted = has_restricted_normalization(display.get("background_style"))
+    result = _full_range_value(original)
+    if not restricted:
+        return result
+    result.pop("level_info", None)
+    if result.get("locked_range") is not None:
+        result["locked_range"] = None
+        result["relock_full_range"] = True
+    return result
+
+
+def _migrate_full_range_document(document):
+    result = copy.deepcopy(document)
+    pages = result["pages"]
+    params_by_node = {page["recipe_id"]: _full_range_params(page["params"]) for page in pages}
+    key_map = {}
+    migrated_nodes = {}
+
+    def visit(old_key):
+        if old_key in key_map:
+            return key_map[old_key]
+        node = copy.deepcopy(result["recipes"][old_key])
+        node["inputs"] = [visit(parent) for parent in node["inputs"]]
+        params = params_by_node.get(old_key, _full_range_params(node["params"]))
+        node["params"] = _remap_recipe_references(params, key_map)
+        new_key = digest(node)
+        key_map[old_key] = new_key
+        migrated_nodes[new_key] = node
+        return new_key
+
+    for old_key in result["recipes"]:
+        visit(old_key)
+    for page in pages:
+        old_key = page["recipe_id"]
+        page["params"] = _remap_recipe_references(params_by_node[old_key], key_map)
+        page["recipe_id"] = key_map[old_key]
+    result["recipes"] = migrated_nodes
+    for saved in (result.get("results") or {}).values():
+        if isinstance(saved, dict) and isinstance(saved.get("params"), dict):
+            saved["params"] = _remap_recipe_references(
+                _full_range_params(saved["params"]), key_map,
+            )
+
+    view = _full_range_value(result.get("view_state") or {})
+    display = view.get("display") or {}
+    restricted = has_restricted_normalization(display.get("background_style"))
+    target = next((page for page in pages if page["page_id"] == result.get("target_page_id")), None)
+    if target is not None:
+        original_target = next(page for page in document["pages"]
+                               if page["page_id"] == target["page_id"])
+        original_state = original_target["params"].get(STATE_KEY) or {}
+        restricted = restricted or has_restricted_normalization(original_state.get("background"))
+    if restricted:
+        view.pop("level_info", None)
+        if view.get("locked_range") is not None:
+            view["locked_range"] = None
+            view["relock_full_range"] = True
+    result["view_state"] = view
     result["schema_version"] = SCHEMA_VERSION
     result["state_digest"] = state_digest(result)
     return result
@@ -169,7 +330,7 @@ def file_digest(path, expected_stamp=None):
 
 
 class SourceIdentity:
-    """Hash starts at load time, bound to the file that produced the arrays."""
+    """File hashing starts at load time; source IDs also include the axis layout."""
     def __init__(self, path):
         self.path = Path(path).resolve().as_posix()
         self.stamp = file_stamp(self.path)
@@ -192,8 +353,14 @@ class SourceIdentity:
                 current_stamp = self.stamp
             if current_stamp != self.stamp:
                 raise RecipeError("原始 NPZ 在加载后发生变化，请重新加载数据。")
-        return {"source_id": sha, "path": self.path, "sha256": sha,
-                "size": self.stamp[0], "layout": plain(layout)}
+        serialized_layout = plain(layout)
+        identity_layout = {
+            key: value for key, value in serialized_layout.items()
+            if key not in {"warnings", "manual"}
+        }
+        source_id = digest({"sha256": sha, "layout": identity_layout})
+        return {"source_id": source_id, "path": self.path, "sha256": sha,
+                "size": self.stamp[0], "layout": serialized_layout}
 
 
 class ProvenanceStore:
@@ -239,8 +406,9 @@ class ViewRecipeDocument:
     def validate(self):
         d = _object(self.data, "复现文件")
         version = d.get("schema_version")
-        if d.get("format") != FORMAT or type(version) is not int or version not in {1, SCHEMA_VERSION}:
+        if d.get("format") != FORMAT or type(version) is not int or version not in set(range(1, SCHEMA_VERSION + 1)):
             raise RecipeError("不是受支持的 BandScope 视图复现文件版本。")
+        page_kinds = LEGACY_PAGE_KINDS if version < TIME_PAGE_SCHEMA_VERSION else PAGE_KINDS
         sources = _object(d.get("sources"), "sources")
         if d.get("primary_source_id") not in sources:
             raise RecipeError("缺少主原始数据来源。")
@@ -258,7 +426,7 @@ class ViewRecipeDocument:
             pid = page.get("page_id")
             if not isinstance(pid, str) or not pid or pid in by_id:
                 raise RecipeError("页面 ID 为空或重复。")
-            if page.get("page_kind") not in PAGE_KINDS:
+            if page.get("page_kind") not in page_kinds:
                 raise RecipeError(f"不支持的页面类型：{page.get('page_kind')}")
             _object(page.get("params"), "页面参数")
             by_id[pid] = page
@@ -286,7 +454,7 @@ class ViewRecipeDocument:
         nodes = _object(d.get("recipes"), "recipes")
         for key, node in nodes.items():
             _object(node, "处理节点")
-            if node.get("operation") not in PAGE_KINDS or node.get("operation_version") != 1:
+            if node.get("operation") not in page_kinds or node.get("operation_version") != 1:
                 raise RecipeError("处理节点类型或版本不受支持。")
             if node.get("source_id") not in sources or not isinstance(node.get("inputs"), list):
                 raise RecipeError("处理节点来源无效。")
@@ -307,7 +475,13 @@ class ViewRecipeDocument:
             raise RecipeError("科学参数或结果已被编辑；请在软件内修改后重新导出。")
         plain(d)
         if version == 1:
-            self.data = _migrate_legacy_document(d)
+            self.data = _migrate_time_page_document(_migrate_legacy_document(d))
+            return self.validate()
+        if version == 2:
+            self.data = _migrate_time_page_document(d)
+            return self.validate()
+        if version == 3:
+            self.data = _migrate_full_range_document(d)
             return self.validate()
         return self
 

@@ -12,6 +12,7 @@ from bandscope.core.blender_recipe import (
     build_blender_recipe,
     updated_blender_recipe,
 )
+from bandscope.core.display_style import new_display_style
 from bandscope.core.view_recipe import RecipeError, ViewRecipeDocument
 from bandscope.exporting.blender_project import BlenderProjectRequest, request_from_recipe_settings
 from bandscope.exporting.blender_project import update_snapshot_display
@@ -88,6 +89,30 @@ class BlenderRecipeContractTests(unittest.TestCase):
         changed["export_settings"]["presets"]["coordinates"] = False
         with self.assertRaisesRegex(RecipeError, "已被编辑"):
             BlenderRecipeDocument(changed).validate()
+
+    def test_display_override_is_checked_before_full_range_migration(self):
+        document = build_blender_recipe(BlenderProjectRequest([self.snapshot("one")]))
+        style = new_display_style()
+        style["normalization"] = {"mode": "manual", "manual_range": (0.0, 1.0)}
+        document["entries"][0]["display_override"] = {
+            "locked_range": (0.0, 1.0),
+            "level_info": {"data_min": 0.0, "data_max": 1.0},
+            "display": {"background_style": style, "resolved_range": (0.0, 1.0)},
+        }
+        document["state_digest"] = blender_recipe_digest(document)
+        tampered = copy.deepcopy(document)
+        tampered["entries"][0]["display_override"]["locked_range"] = (2.0, 3.0)
+        with self.assertRaises(RecipeError):
+            BlenderRecipeDocument(tampered).validate()
+
+        restored = BlenderRecipeDocument(document).validate().data
+        override = restored["entries"][0]["display_override"]
+        self.assertEqual(override["display"]["background_style"]["normalization"], {"mode": "full"})
+        self.assertIsNone(override["display"]["resolved_range"])
+        self.assertIsNone(override["locked_range"])
+        self.assertTrue(override["relock_full_range"])
+        self.assertNotIn("level_info", override)
+        self.assertEqual(restored["state_digest"], blender_recipe_digest(restored))
 
     def test_update_preserves_science_and_records_removed_effects(self):
         snapshot = self.snapshot("one")

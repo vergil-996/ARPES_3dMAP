@@ -99,7 +99,9 @@ def main():
         window = make_window()
         window.load_data(str(args.data.resolve()))
         wait_until(lambda: exact(window))
-        window.on_apply_time_integral()
+        integrated = window._build_home_page(title="时间区间视图")
+        integrated.params["time_interval"] = window.time_space.as_interval().as_dict()
+        window.left_workspace.add_page(integrated)
         wait_until(lambda: exact(window))
         check("真实 WSe₂ 同源两页准备", len(window.left_workspace.page_specs) == 2)
 

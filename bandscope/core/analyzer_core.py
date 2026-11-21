@@ -2,15 +2,16 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal
 from bandscope.core.view_recipe import SourceIdentity
 
-from bandscope.core.axis_mapping import (
-    NPZ_COORD_CANDIDATES,
-    canonicalize_array,
-    find_first_key,
-    infer_axis_roles,
-    interpolate_axis,
-    legacy_hdf5_axis_roles,
-    metadata_axis_roles,
-    role_order_for_shape,
+from bandscope.core.axis_mapping import interpolate_axis
+from bandscope.core.axis_assignment import (
+    AxisAssignment,
+    ROLES,
+    assignment_coordinates,
+    canonical_data,
+    coordinate_candidate_unit,
+    infer_assignment,
+    numeric_coordinate_candidates,
+    validate_assignment,
 )
 
 
@@ -30,8 +31,13 @@ class AnalyzerCore(QObject):
     def __init__(self):
         super().__init__()
         self.raw_data = None
+        self.source_array = None
         self.coords = {'X': None, 'Y': None, 'E': None, 'delay': None}
         self.has_time_axis = True
+        self.axis_assignment = None
+        self.auto_axis_assignment = None
+        self.coordinate_candidates = {}
+        self.coordinate_candidate_units = {}
         # 坐标来源与单位可信度（科研导出用）：
         # coord_sources[axis] = 'file'（文件提供坐标数组）/ 'index'（索引回退）；
         # coord_units[axis] = 显式单位元数据（如 'eV'、'Å⁻¹'），没有则为 None。
@@ -51,8 +57,12 @@ class AnalyzerCore(QObject):
             return False, str(exc)
         success, info = candidate._read_npz(path, layout=layout)
         if success:
-            for name in ("raw_data", "coords", "has_time_axis", "coord_sources", "coord_units",
-                         "source_identity", "source_layout"):
+            for name in (
+                "raw_data", "source_array", "coords", "has_time_axis",
+                "axis_assignment", "auto_axis_assignment", "coordinate_candidates",
+                "coordinate_candidate_units", "coord_sources", "coord_units",
+                "source_identity", "source_layout",
+            ):
                 setattr(self, name, getattr(candidate, name))
         return success, info
 
@@ -67,132 +77,58 @@ class AnalyzerCore(QObject):
                 except (KeyError, ValueError):
                     return None
 
-            search_map = NPZ_COORD_CANDIDATES
-            coord_keys = {
-                role: find_first_key(data, candidates)
-                for role, candidates in search_map.items()
-            }
-            if layout is not None:
-                coord_keys = dict(layout["coord_keys"])
-            coord_lengths = {}
-            for role, key in coord_keys.items():
-                values = safe_get_array(key) if key is not None else None
-                if values is not None:
-                    coord_lengths[role] = int(values.size)
-
-            # 1. 自动寻找 4 维或 3 维数据矩阵
-            main_key = None
-            main_ndim = None
-            for key in data.keys():
-                arr = safe_get_array(key)
-                if hasattr(arr, 'ndim') and arr.ndim == 4:
-                    main_key = key
-                    main_ndim = 4
-                    break
+            main_key = layout.get("array_key") if layout is not None else None
             if main_key is None:
-                for key in data.keys():
-                    arr = safe_get_array(key)
-                    if hasattr(arr, 'ndim') and arr.ndim == 3:
-                        main_key = key
-                        main_ndim = 3
+                for ndim in (4, 3):
+                    main_key = next(
+                        (
+                            key for key in data.keys()
+                            if getattr(safe_get_array(key), "ndim", None) == ndim
+                        ),
+                        None,
+                    )
+                    if main_key is not None:
                         break
             if main_key is None:
                 return False, "文件内未找到 3 维或 4 维数据矩阵"
 
-            if layout is not None:
-                main_key = layout["array_key"]
             raw = data[main_key]
-            main_ndim = raw.ndim
-            sh = list(raw.shape)
-            if layout is not None and sh != layout["original_shape"]:
-                raise ValueError("NPZ 数组形状与复现记录不同。")
-            has_time_coord_axis = coord_lengths.get("T") in sh
-            role_order = role_order_for_shape(sh, main_ndim == 4 or has_time_coord_axis)
-
-            roles = (
-                metadata_axis_roles(
-                    safe_get_array("axis_mapping_version"),
-                    safe_get_array("axis_order"),
-                    role_order,
-                )
-                or legacy_hdf5_axis_roles(sh, coord_lengths, role_order)
-                or infer_axis_roles(sh, coord_lengths, role_order)
+            variables = {
+                key: safe_get_array(key)
+                for key in data.keys()
+                if key != main_key
+            }
+            candidates = numeric_coordinate_candidates(variables)
+            automatic = infer_assignment(main_key, raw, variables)
+            assignment = automatic if layout is None else AxisAssignment.from_layout(layout)
+            candidate_units = {
+                role: {
+                    key: coordinate_candidate_unit(variables, key, role, assignment.scan_kind)
+                    for key in candidates
+                }
+                for role in ROLES
+            }
+            self._apply_assignment(
+                raw,
+                assignment,
+                candidates=candidates,
+                automatic=automatic,
+                candidate_units=candidate_units,
             )
+
             if layout is not None:
-                role_order = list(layout["role_order"])
-                roles = dict(layout["axis_roles"])
-            self.has_time_axis = 'T' in role_order
-
-            # 3. 重排与内存优化
-            if self.has_time_axis:
-                raw_4d = canonicalize_array(raw, roles, role_order)
-                self.raw_data = np.asarray(raw_4d, dtype=np.float32)
-            else:
-                raw_3d = np.asarray(
-                    canonicalize_array(raw, roles, role_order),
-                    dtype=np.float32,
-                )
-                self.raw_data = raw_3d[..., np.newaxis]
-
-            # 4. 坐标映射与单位同步
-            self.coords = {}
-            self.coord_sources = {}
-            self.coord_units = {}
-
-            # 助手函数：安全提取坐标
-            def get_coord(role_key, fallback_shape_idx):
-                actual_key = coord_keys[role_key]
-                if actual_key:
-                    loaded_arr = safe_get_array(actual_key)
-                    if loaded_arr is not None:
-                        arr = loaded_arr.flatten()
-                        self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'file'
-                    else:
-                        arr = np.arange(self.raw_data.shape[fallback_shape_idx])
-                        self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'index'
+                if layout.get("assignment_version") is not None:
+                    matches = self.source_layout == layout
                 else:
-                    # 如果没找到坐标，按像素索引生成
-                    arr = np.arange(self.raw_data.shape[fallback_shape_idx])#根据此轴长度生成相应的等差数列（默认步长为1）
-                    self.coord_sources[role_key if role_key != 'T' else 'delay'] = 'index'
-                return arr
-
-            # 显式单位元数据（可选）：kx_unit / ky_unit / E_unit / time_unit
-            def get_unit(unit_key):
-                unit_arr = safe_get_array(unit_key)
-                if unit_arr is None:
-                    return None
-                try:
-                    value = np.asarray(unit_arr).flatten()[0]
-                    text = str(value).strip()
-                except (IndexError, TypeError, ValueError):
-                    return None
-                return text or None
-
-            self.coord_units = {
-                'X': get_unit('kx_unit'),
-                'Y': get_unit('ky_unit'),
-                'E': get_unit('E_unit'),
-                'delay': get_unit('time_unit'),
-            }
-
-            # 获取各轴坐标
-            self.coords['X'] = get_coord('X', 0)
-            self.coords['Y'] = get_coord('Y', 1)
-            self.coords['E'] = get_coord('E', 2)
-            if self.has_time_axis:
-                self.coords['delay'] = get_coord('T', 3)
-            else:
-                self.coords['delay'] = np.array([0.0], dtype=np.float32)
-                self.coord_sources['delay'] = 'index'
-
-            self.source_layout = {
-                "array_key": main_key, "original_shape": sh, "axis_roles": roles,
-                "role_order": list(role_order), "coord_keys": coord_keys,
-                "canonical_shape": list(self.raw_data.shape),
-                "coord_sources": dict(self.coord_sources), "coord_units": dict(self.coord_units),
-            }
-            if layout is not None and self.source_layout != layout:
-                raise ValueError("NPZ 坐标或轴解析结果与复现记录不同。")
+                    matches = all(
+                        key not in layout or self.source_layout.get(key) == layout[key]
+                        for key in (
+                            "array_key", "original_shape", "axis_roles", "role_order",
+                            "coord_keys", "canonical_shape", "coord_sources", "coord_units",
+                        )
+                    )
+                if not matches:
+                    raise ValueError("NPZ 坐标或轴解析结果与复现记录不同。")
             if self.source_identity is not None:
                 from bandscope.core.view_recipe import file_stamp
                 if file_stamp(path) != self.source_identity.stamp:
@@ -207,6 +143,76 @@ class AnalyzerCore(QObject):
         finally:
             if data is not None:
                 data.close()
+
+    def _apply_assignment(self, raw, assignment, *, candidates, automatic=None, candidate_units=None):
+        assignment = validate_assignment(assignment.clone(), candidates)
+        source_array = np.asarray(raw, dtype=np.float32)
+        canonical = canonical_data(assignment, source_array)
+        coordinates, sources = assignment_coordinates(assignment, candidates)
+        self.source_array = source_array
+        self.raw_data = canonical
+        self.axis_assignment = assignment
+        self.auto_axis_assignment = (
+            automatic.clone() if automatic is not None else assignment.clone()
+        )
+        self.coordinate_candidates = dict(candidates)
+        self.coordinate_candidate_units = {
+            role: dict(values) for role, values in (candidate_units or {}).items()
+        }
+        self.has_time_axis = assignment.has_scan
+        self.coords = {
+            "X": coordinates["X"],
+            "Y": coordinates["Y"],
+            "E": coordinates["E"],
+            "delay": coordinates["T"],
+        }
+        self.coord_sources = {
+            role if role != "T" else "delay": source
+            for role, source in sources.items()
+        }
+        self.coord_units = {
+            "X": assignment.coord_units.get("X"),
+            "Y": assignment.coord_units.get("Y"),
+            "E": assignment.coord_units.get("E"),
+            "delay": assignment.coord_units.get("T"),
+        }
+        self.source_layout = assignment.to_layout(self.coord_sources)
+
+    def copy_with_assignment(self, assignment):
+        if self.source_array is None or self.axis_assignment is None:
+            raise ValueError("当前数据源没有可重新分配的原始数组。")
+        candidate = AnalyzerCore()
+        candidate.source_identity = self.source_identity
+        updated = assignment.clone()
+        updated.manual = True
+        candidate._apply_assignment(
+            self.source_array,
+            updated,
+            candidates=self.coordinate_candidates,
+            automatic=self.auto_axis_assignment,
+            candidate_units=self.coordinate_candidate_units,
+        )
+        return candidate
+
+    @property
+    def has_scan_axis(self):
+        return bool(self.axis_assignment is not None and self.axis_assignment.has_scan)
+
+    @property
+    def is_time_axis(self):
+        return bool(self.axis_assignment is not None and self.axis_assignment.is_time)
+
+    @property
+    def scan_kind(self):
+        return self.axis_assignment.scan_kind if self.axis_assignment is not None else "unknown"
+
+    @property
+    def scan_name(self):
+        return self.axis_assignment.display_scan_name if self.axis_assignment is not None else "扫描轴"
+
+    @property
+    def scan_unit(self):
+        return self.coord_units.get("delay") if self.has_scan_axis else None
 
     def _resolve_axis_key(self, axis_ref):
         if isinstance(axis_ref, int):

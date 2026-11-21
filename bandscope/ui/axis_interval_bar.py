@@ -91,8 +91,8 @@ class CoordinatePopup(QFrame):
         self.value_edit.setSuffix(f" {unit}" if unit else "")
         self.value_edit.setValue(value)
         self.value_edit.blockSignals(False)
-        color = "#FFFFFF" if endpoint == "low" else "#17191C"
-        border = "#8C929B" if endpoint == "low" else "#D9DCE0"
+        color = "#17191C" if endpoint == "low" else "#FFFFFF"
+        border = "#555B64" if endpoint == "low" else "#9CA1A8"
         self.endpoint_marker.setStyleSheet(
             f"background: {color}; border: 1px solid {border}; border-radius: 3px;"
         )
@@ -142,7 +142,7 @@ class LockBadge(QToolButton):
         self._open_progress = 0.0
         self.setFixedSize(24, 20)
         self.setCursor(Qt.PointingHandCursor)
-        self.setToolTip("解锁区间；随后向左拖白端、向右拖黑端")
+        self.setToolTip("解锁区间；随后向左拖黑端、向右拖白端")
         self.setAccessibleName("解锁切片区间")
         self._animation = QPropertyAnimation(self, b"openProgress", self)
         self._animation.setDuration(180)
@@ -210,8 +210,8 @@ class DualRangeSlider(QWidget):
     lockRequested = pyqtSignal(bool)
 
     TRACK_Y = 30
-    HANDLE_WIDTH = 16
-    HANDLE_HEIGHT = 24
+    HANDLE_WIDTH = 10
+    HANDLE_HEIGHT = 16
     SIDE_MARGIN = 10
 
     def __init__(self, parent=None):
@@ -388,36 +388,30 @@ class DualRangeSlider(QWidget):
 
         collapsed = self._interval.locked and self._interval.length == 0.0
         if collapsed:
-            self._draw_handle(painter, low_x, "up", collapsed=False)
-            self._draw_handle(painter, low_x, "low", collapsed=True)
+            self._draw_handle(painter, low_x, "up", collapsed=True)
+            self._draw_handle(painter, low_x, "low")
         else:
             self._draw_handle(painter, low_x, "low")
             self._draw_handle(painter, up_x, "up")
         self._position_lock_badge()
 
     def _draw_handle(self, painter, x, endpoint, collapsed=False):
+        outline = 4 if collapsed else 0
         outer = QRectF(
-            x - (self.HANDLE_WIDTH + 2) / 2 if collapsed else x - self.HANDLE_WIDTH / 2,
-            self.TRACK_Y - (self.HANDLE_HEIGHT + 2) / 2 if collapsed else self.TRACK_Y - self.HANDLE_HEIGHT / 2,
-            self.HANDLE_WIDTH + 2 if collapsed else self.HANDLE_WIDTH,
-            self.HANDLE_HEIGHT + 2 if collapsed else self.HANDLE_HEIGHT,
+            x - (self.HANDLE_WIDTH + outline) / 2,
+            self.TRACK_Y - (self.HANDLE_HEIGHT + outline) / 2,
+            self.HANDLE_WIDTH + outline,
+            self.HANDLE_HEIGHT + outline,
         )
-        white = endpoint == "low"
+        white = endpoint == "up"
         fill = QColor("#FFFFFF" if white else "#17191C")
         border = QColor("#9CA1A8" if white else "#555B64")
         if self._hovered == endpoint or self._drag_mode == endpoint:
             border = QColor(theme.TEXT_1)
         painter.setBrush(fill)
-        painter.setPen(QPen(border, 1.2))
-        painter.drawRoundedRect(outer, outer.height() / 2, outer.height() / 2)
-        if collapsed:
-            inner = QRectF(x - 4, self.TRACK_Y - 8, 8, 16)
-            painter.setBrush(QColor("#17191C"))
-            painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(inner, 4, 4)
-            return
-        painter.setPen(QPen(QColor("#3D424A" if white else "#E7E9EC"), 1.2, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(x, self.TRACK_Y - 4), QPointF(x, self.TRACK_Y + 4))
+        painter.setPen(QPen(border, 1))
+        radius = outer.width() / 2
+        painter.drawRoundedRect(outer, radius, radius)
 
 
 class AxisIntervalControl(QWidget):
@@ -477,9 +471,15 @@ class AxisIntervalControl(QWidget):
     def sync(self, space, interval, enabled=True):
         if space is None or interval is None:
             return
-        plane = {"X": "YZ", "Y": "XZ", "E": "XY"}.get(space.key, "二维")
-        self.title_label.setText(f"{plane} 切片")
-        self.subtitle_label.setText(f"沿 {space.display_label} 积分")
+        if space.key == "delay":
+            self.title_label.setText("时间延迟" if space.label == "时间" else space.label)
+            self.subtitle_label.setText("合拢逐帧 · 分离积分")
+            self.length_label.setText("积分长度")
+        else:
+            plane = {"X": "YZ", "Y": "XZ", "E": "XY"}.get(space.key, "二维")
+            self.title_label.setText(f"{plane} 切片")
+            self.subtitle_label.setText(f"沿 {space.display_label} 积分")
+            self.length_label.setText("区间长度")
         unit = "" if space.describes_index else space.unit
         self.input_length.setSuffix(f" {unit}" if unit else "")
         self.range_slider.sync(space, interval, enabled)

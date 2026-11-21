@@ -110,7 +110,7 @@ def make_window(*, spec=_UNSET, context=_UNSET, pages=None, exact=True, generati
         timeline_bar=SimpleNamespace(slider_time=SimpleNamespace(value=lambda: 3)),
         _current_delay_text=lambda index: f"{index} ps",
         add_plugin_result_page=add_plugin_result_page,
-        page_data=None,
+        page_render=None,
     )
     window.created_pages = created
     for key, value in extra.items():
@@ -299,7 +299,18 @@ class AnalysisSessionTests(unittest.TestCase):
         self.assertEqual(session.cancel_page_analysis("other-page"), 0)
 
     # -- 面板 ----------------------------------------------------------
-    def test_analysis_plugin_mounts_on_the_analysis_slot_only(self):
+    def test_can_freeze_source_forwards_the_lightweight_check(self):
+        spec = spec_stub(params={"axis_index": 1})
+        window = make_window(spec=spec)
+        window._resolved_axis_integral_params = lambda _spec: self.fail(
+            "菜单过滤不应解析或持久化页面参数"
+        )
+        session = self.make_session(window)
+        self.assertTrue(session.can_freeze_source(spec))
+        spec.params["axis_index"] = 2
+        self.assertFalse(session.can_freeze_source(spec))
+
+    def test_analysis_plugin_uses_extension_cards_with_separate_registration(self):
         archive = make_plugin_archive(
             self.root / "staging" / "analysis.bsplugin",
             manifest=manifest_payload(
@@ -320,18 +331,33 @@ class AnalysisSessionTests(unittest.TestCase):
         self.assertFalse(PluginSession.is_analysis_plugin(v1_record))
         self.assertTrue(PluginSession.is_analysis_plugin(record))
 
-        session = self.make_session(make_window())
-        session.manager = manager
-        session.mount_cards(SimpleNamespace(mount_extension_card=lambda *a: object()))
-        self.assertEqual(session.card_ids(), [])
-
         mounted = []
+        visibility = []
         page = SimpleNamespace(
-            mount_analysis_card=lambda pid, title, panel: mounted.append((pid, title, panel)) or object()
+            mount_extension_card=lambda pid, title, panel: (
+                mounted.append((pid, title, panel)) or object()
+            ),
+            set_extension_card_visible=lambda pid, visible, animate=True: (
+                visibility.append((pid, visible, animate))
+            ),
         )
+        session = self.make_session(make_window(page_render=page))
+        session.manager = manager
+        session.mount_cards(page)
+        self.assertEqual(session.card_ids(), [])
+        self.assertEqual(mounted, [])
+
         session.mount_analysis_cards(page)
         self.assertEqual([item[0] for item in mounted], ["demo_analysis"])
         self.assertEqual(session.analysis_card_ids(), ["demo_analysis"])
+        self.assertEqual(visibility, [("demo_analysis", False, False)])
+
+        session.set_analysis_cards_visible(True)
+        session.set_analysis_cards_visible(False, animate=False)
+        self.assertEqual(
+            visibility[1:],
+            [("demo_analysis", True, True), ("demo_analysis", False, False)],
+        )
 
     def test_v1_plugin_still_get_a_v1_compatible_host(self):
         install_fake(self.root)  # api_version = 当前宿主版本(2)

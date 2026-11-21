@@ -203,7 +203,8 @@ class PluginSession:
         frame_label = ""
         try:
             frame_index = int(window.timeline_bar.slider_time.value())
-            frame_label = str(window._current_delay_text(frame_index))
+            describe = getattr(window, "_scan_frame_description", window._current_delay_text)
+            frame_label = str(describe(frame_index))
         except Exception:
             frame_index = None
 
@@ -216,6 +217,10 @@ class PluginSession:
             frame_label=frame_label,
             display_e_flip=self._e_flip(window),
             roi_label=self._roi_label(axis),
+            scan_axis=(
+                window._scan_axis_spec(frame_index, spec=spec)
+                if hasattr(window, "_scan_axis_spec") else None
+            ),
         )
         self._context = context
         return context
@@ -372,8 +377,8 @@ class PluginSession:
             if record.plugin_id in self._cards:
                 continue
             if self.is_analysis_plugin(record):
-                # 声明了分析能力的插件走「处理分析」页的挂载点，面板只在二维
-                # 结果页显示；这里跳过，避免同一插件挂出两份面板。
+                # 分析插件使用单独的卡片登记，面板只在二维结果页显示；这里跳过，
+                # 避免同一插件在外观页挂出两份面板。
                 continue
             if self._derived.is_derived_plugin(record):
                 # 派生结果插件（API 3）的面板只出现在插件管理里，不挂 3D 卡片。
@@ -593,7 +598,8 @@ class PluginSession:
     def _current_frame(window):
         try:
             index = int(window.timeline_bar.slider_time.value())
-            return index, str(window._current_delay_text(index))
+            describe = getattr(window, "_scan_frame_description", window._current_delay_text)
+            return index, str(describe(index))
         except Exception:
             return None, ""
 
@@ -665,6 +671,10 @@ class PluginSession:
                 "slice_info": slice_info,
                 "data_order": ANALYSIS_ARRAY_ORDER,
             },
+            scan_axis=(
+                window._scan_axis_spec(frame_index, spec=spec)
+                if hasattr(window, "_scan_axis_spec") else None
+            ),
         )
         if getattr(window.__dict__.get("core"), "source_identity", None) is not None:
             window._persist_active_page_state()
@@ -833,11 +843,15 @@ class PluginSession:
         return self._derived
 
     def integration_actions(self) -> List[tuple]:
-        """「其他积分」下拉里由插件注册的动作：``(稳定键, 展示文本, 权重)``。"""
+        """插件注册的创建动作：``(稳定键, 展示文本, 权重)``。"""
         return self._derived.integration_actions()
 
+    def can_freeze_source(self, spec) -> bool:
+        """只读检查页面能否作为派生来源，供创建菜单按需过滤。"""
+        return self._derived.can_freeze_source(spec)
+
     def invoke_integration_action(self, plugin_id: str, action_id: str):
-        """执行下拉动作；失败时宿主已提示用户并返回 None。"""
+        """执行插件创建动作；失败时宿主已提示用户并返回 None。"""
         return self._derived.invoke_action(plugin_id, action_id)
 
     def derived_render_context(self, spec):
@@ -939,8 +953,8 @@ class PluginSession:
     # ------------------------------------------------------------------
     # 能力 2b：分析面板（只在二维结果页显示）
     # ------------------------------------------------------------------
-    def mount_analysis_cards(self, page_data) -> None:
-        """把分析插件的面板挂到「处理分析」页；失败只记录，不影响界面。"""
+    def mount_analysis_cards(self, page_render) -> None:
+        """把分析面板挂到外观页的通用扩展卡片位；单卡失败不影响其他插件。"""
         for record in self.manager.ready_plugins():
             if record.plugin_id in self._analysis_cards:
                 continue
@@ -958,7 +972,10 @@ class PluginSession:
                 continue
             title = str(getattr(record.manifest, "name", "") or record.plugin_id)
             try:
-                card = page_data.mount_analysis_card(record.plugin_id, title, panel)
+                card = page_render.mount_extension_card(record.plugin_id, title, panel)
+                page_render.set_extension_card_visible(
+                    record.plugin_id, False, animate=False
+                )
             except Exception as exc:
                 message = f"分析面板挂载失败：{type(exc).__name__}: {exc}"
                 self._failed[record.plugin_id] = message
@@ -968,12 +985,12 @@ class PluginSession:
             self.manager.mark_healthy(record.plugin_id)
 
     def set_analysis_cards_visible(self, visible: bool, *, animate: bool = True) -> None:
-        page_data = self._analysis_page()
-        if page_data is None:
+        page_render = self._analysis_page()
+        if page_render is None:
             return
         for plugin_id in self._analysis_cards:
             try:
-                page_data.set_analysis_card_visible(plugin_id, visible, animate=animate)
+                page_render.set_extension_card_visible(plugin_id, visible, animate=animate)
             except Exception:
                 pass
 
@@ -981,7 +998,7 @@ class PluginSession:
         return list(self._analysis_cards)
 
     def _analysis_page(self):
-        return getattr(self.window, "page_data", None)
+        return getattr(self.window, "page_render", None)
 
     # ------------------------------------------------------------------
     # 刷新

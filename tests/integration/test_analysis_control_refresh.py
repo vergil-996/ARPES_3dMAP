@@ -38,31 +38,24 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         self.assertEqual(calls, ["box"])
 
     def test_other_3d_pages_do_not_request_analysis_refresh(self):
-        specs = [
-            SimpleNamespace(page_kind="time_integral", params={}),
-            SimpleNamespace(page_kind="second_derivative", params={"source_view": "3d"}),
-        ]
+        specs = [SimpleNamespace(page_kind="second_derivative", params={"source_view": "3d"})]
 
         for spec in specs:
             with self.subTest(page_kind=spec.page_kind):
                 analyzer = self._analyzer_with_page(spec)
                 analyzer.schedule_axis_refresh()
 
-    def test_time_slider_does_not_recompute_a_time_integral_3d_page(self):
-        spec = SimpleNamespace(page_kind="time_integral", params={})
+    def test_time_interval_preview_updates_the_current_page(self):
+        spec = SimpleNamespace(page_id="home", page_kind="home", params={})
         analyzer = self._analyzer_with_page(spec)
-        analyzer._syncing_controls = False
-        analyzer.axis_source_mode = "frame"
-        analyzer._persist_time_integral_page_state = lambda _spec: (_ for _ in ()).throw(
-            AssertionError("3D result parameters must not be changed while dragging")
-        )
-        analyzer.schedule_axis_refresh = lambda: (_ for _ in ()).throw(
-            AssertionError("3D time sliders must not schedule a refresh")
-        )
+        analyzer.time_interval = _FULL_INTERVAL
+        calls = []
+        analyzer.request_refresh = lambda *args, **kwargs: calls.append((args, kwargs))
 
-        analyzer.on_time_integral_controls_changed(2)
+        analyzer.on_time_interval_changed()
 
-        self.assertEqual(analyzer.axis_source_mode, "time_integral")
+        self.assertEqual(spec.params["time_interval"], _FULL_INTERVAL.as_dict())
+        self.assertTrue(calls[0][1]["interactive"])
 
     def test_axis_integral_2d_page_still_refreshes_interactively(self):
         spec = SimpleNamespace(page_kind="axis_integral", params={})
@@ -77,10 +70,10 @@ class AnalysisControlRefreshTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "refresh")
         self.assertTrue(calls[1][2]["interactive"])
 
-    def test_linked_slider_signal_does_not_schedule_a_duplicate_refresh(self):
+    def test_control_sync_does_not_schedule_a_duplicate_refresh(self):
         spec = SimpleNamespace(page_kind="axis_integral", params={})
         analyzer = self._analyzer_with_page(spec)
-        analyzer.page_data = SimpleNamespace(_is_updating=True)
+        analyzer._syncing_controls = True
         calls = []
         analyzer.request_refresh = lambda *args, **kwargs: calls.append((args, kwargs))
 

@@ -6,8 +6,6 @@ import copy
 LEGACY_MODE = "legacy"
 INDEPENDENT_MODE = "independent"
 NORMALIZATION_FULL = "full"
-NORMALIZATION_PERCENTILE = "percentile"
-NORMALIZATION_MANUAL = "manual"
 OPACITY_PRESET_WEAK = "weak"
 OPACITY_PRESET_STRONG = "strong"
 OPACITY_PRESET_CUSTOM = "custom"
@@ -16,23 +14,27 @@ OPACITY_PRESETS = {
     OPACITY_PRESET_STRONG: {"threshold": 21.739, "transition": 0.0, "gamma": 1.3, "density": 40.0},
 }
 DEFAULT_LEVELS = (0.0, 50.0, 100.0)
+DEFAULT_COLORMAP_RANGE = (0.0, 1.0)
 DEFAULT_OPACITY_MODE = "线性"
 
 
-def legacy_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE):
-    return {"levels": tuple(float(value) for value in levels), "opacity_mode": str(opacity_mode)}
+def legacy_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE,
+                         colormap_range=DEFAULT_COLORMAP_RANGE):
+    return {
+        "levels": tuple(float(value) for value in levels),
+        "opacity_mode": str(opacity_mode),
+        "colormap_range": tuple(float(value) for value in colormap_range),
+    }
 
 
-def new_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE):
+def new_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE,
+                      colormap_range=DEFAULT_COLORMAP_RANGE):
     return {
         "display_mode": INDEPENDENT_MODE,
         "levels": tuple(float(value) for value in levels),
         "opacity_mode": str(opacity_mode),
-        "normalization": {
-            "mode": NORMALIZATION_PERCENTILE,
-            "percentiles": (0.0, 99.5),
-            "manual_range": (0.0, 1.0),
-        },
+        "colormap_range": tuple(float(value) for value in colormap_range),
+        "normalization": {"mode": NORMALIZATION_FULL},
         "opacity": dict(OPACITY_PRESETS[OPACITY_PRESET_WEAK], preset=OPACITY_PRESET_CUSTOM),
     }
 
@@ -49,11 +51,23 @@ def _finite_float(value, default):
     return result if result == result and abs(result) != float("inf") else float(default)
 
 
+def _colormap_range(style):
+    values = tuple(style.get("colormap_range", DEFAULT_COLORMAP_RANGE))
+    if len(values) != 2:
+        values = DEFAULT_COLORMAP_RANGE
+    low, high = (
+        min(1.0, max(0.0, _finite_float(value, default)))
+        for value, default in zip(values, DEFAULT_COLORMAP_RANGE)
+    )
+    return (low, high) if low <= high else (high, low)
+
+
 def resolved_display_style(style):
     if not is_independent(style):
         if isinstance(style, dict):
             return legacy_display_style(
-                style.get("levels", DEFAULT_LEVELS), style.get("opacity_mode", DEFAULT_OPACITY_MODE)
+                style.get("levels", DEFAULT_LEVELS), style.get("opacity_mode", DEFAULT_OPACITY_MODE),
+                _colormap_range(style),
             )
         return legacy_display_style()
     levels = tuple(style.get("levels", DEFAULT_LEVELS))
@@ -61,23 +75,6 @@ def resolved_display_style(style):
         levels = DEFAULT_LEVELS
     levels = tuple(min(100.0, max(0.0, _finite_float(value, default)))
                    for value, default in zip(levels, DEFAULT_LEVELS))
-    normalization = style.get("normalization") or {}
-    mode = normalization.get("mode", NORMALIZATION_PERCENTILE)
-    if mode not in {NORMALIZATION_FULL, NORMALIZATION_PERCENTILE, NORMALIZATION_MANUAL}:
-        mode = NORMALIZATION_PERCENTILE
-    percentiles = tuple(normalization.get("percentiles", (0.0, 99.5)))
-    if len(percentiles) != 2:
-        percentiles = (0.0, 99.5)
-    low = min(100.0, max(0.0, _finite_float(percentiles[0], 0.0)))
-    high = min(100.0, max(0.0, _finite_float(percentiles[1], 99.5)))
-    if high < low:
-        low, high = high, low
-    manual = tuple(normalization.get("manual_range", (0.0, 1.0)))
-    if len(manual) != 2:
-        manual = (0.0, 1.0)
-    manual = tuple(_finite_float(value, default) for value, default in zip(manual, (0.0, 1.0)))
-    if manual[1] <= manual[0]:
-        manual = (manual[0], manual[0] + 1.0)
     opacity = style.get("opacity") or {}
     values = {
         "threshold": min(100.0, max(0.0, _finite_float(opacity.get("threshold"), 0.0))),
@@ -100,25 +97,25 @@ def resolved_display_style(style):
         "display_mode": INDEPENDENT_MODE,
         "levels": levels,
         "opacity_mode": str(style.get("opacity_mode", DEFAULT_OPACITY_MODE)),
-        "normalization": {
-            "mode": mode,
-            "percentiles": (low, high),
-            "manual_range": manual,
-        },
+        "colormap_range": _colormap_range(style),
+        "normalization": {"mode": NORMALIZATION_FULL},
         "opacity": dict(values, preset=preset),
     }
 
 
 def with_display_mode(style, mode):
     current = copy.deepcopy(style) if isinstance(style, dict) else legacy_display_style()
+    colormap_range = _colormap_range(current)
     if mode == INDEPENDENT_MODE:
         converted = new_display_style(current.get("levels", DEFAULT_LEVELS),
-                                      current.get("opacity_mode", DEFAULT_OPACITY_MODE))
+                                      current.get("opacity_mode", DEFAULT_OPACITY_MODE),
+                                      colormap_range)
         if is_independent(current):
             return resolved_display_style(current)
         return converted
     return legacy_display_style(current.get("levels", DEFAULT_LEVELS),
-                                current.get("opacity_mode", DEFAULT_OPACITY_MODE))
+                                current.get("opacity_mode", DEFAULT_OPACITY_MODE),
+                                colormap_range)
 
 
 def new_render_quality():
@@ -175,11 +172,11 @@ def migrate_display_state(state, *, legacy=True):
 
 
 def normalization_policy(style):
+    return (NORMALIZATION_FULL,) if is_independent(style) else ("legacy",)
+
+
+def has_restricted_normalization(style):
     if not is_independent(style):
-        return ("legacy",)
-    normalization = resolved_display_style(style)["normalization"]
-    if normalization["mode"] == NORMALIZATION_MANUAL:
-        return (NORMALIZATION_MANUAL, tuple(normalization["manual_range"]))
-    if normalization["mode"] == NORMALIZATION_FULL:
-        return (NORMALIZATION_FULL,)
-    return (NORMALIZATION_PERCENTILE, tuple(normalization["percentiles"]))
+        return False
+    normalization = style.get("normalization")
+    return not isinstance(normalization, dict) or normalization.get("mode") != NORMALIZATION_FULL

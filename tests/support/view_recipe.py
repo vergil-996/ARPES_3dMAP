@@ -113,12 +113,13 @@ def control_window():
          patch.object(My3DAnalyzer, "request_refresh", request), \
          patch.object(My3DAnalyzer, "global_refresh", refresh):
         window = My3DAnalyzer()
-    from bandscope.processing.local_enhancement import finite_range
+    from bandscope.processing.local_enhancement import cumulative_histogram, finite_range
 
     def prepare_sync(context, spec, state):
         _signature, requests = window._display_statistics_requests(context, spec, state)
         for values, style, include_zero, actual in requests:
             finite_range(values, style, include_zero=include_zero)
+            cumulative_histogram(values)
             if actual:
                 finite_range(values)
         return False

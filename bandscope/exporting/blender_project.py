@@ -42,6 +42,7 @@ from bandscope.exporting.blender_volume import (
     resolve_volume_shading,
 )
 from bandscope.core.display_style import (
+    has_restricted_normalization,
     is_independent,
     legacy_display_style,
     legacy_render_quality,
@@ -325,7 +326,7 @@ class LoadedBlenderProject:
         if not self.legacy and not self.supports_display_styles:
             messages.append(
                 f"工程为 schema {self.schema_version}：原位更新保留兼容显示；"
-                "需要独立透明度和归一化时请重新导出 schema 10。"
+                "需要独立不透明度时请重新导出 schema 10。"
             )
         if self.recipe is None:
             messages.append("未找到 Blender 配套复现配置；现有显示编辑仍可使用，从原始数据重新导出可获得完整复现配置。")
@@ -1111,14 +1112,17 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
         baked = ["unknown_legacy_effects"]
     display_schema = int(entry.get("schema_version", 0)) >= BLENDER_PROJECT_DISPLAY_SCHEMA
     if display_schema:
-        display_style = resolved_display_style(edit.get("display_style") or legacy_display_style(
-            levels, opacity_mode,
-        ))
+        original_style = edit.get("display_style") or legacy_display_style(levels, opacity_mode)
+        restricted = has_restricted_normalization(original_style)
+        display_style = resolved_display_style(original_style)
+        if restricted and locked is not None:
+            finite = volume[np.isfinite(volume)]
+            locked = ((float(np.min(finite)), float(np.max(finite))) if finite.size else None)
         levels = tuple(display_style["levels"])
         opacity_mode = str(display_style["opacity_mode"])
         render_quality = resolved_render_quality(edit.get("render_quality"))
-        resolved_range = edit.get("resolved_range")
-        if resolved_range is None and info:
+        resolved_range = None if is_independent(display_style) else edit.get("resolved_range")
+        if resolved_range is None and info and not is_independent(display_style):
             resolved_range = (info.get("data_min"), info.get("data_max"))
         if resolved_range is not None:
             if len(resolved_range) != 2 or not np.all(np.isfinite(np.asarray(resolved_range, dtype=float))):
@@ -1128,12 +1132,15 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
             volume, levels, include_zero=include_zero, locked_range=locked,
             style=display_style, resolved_range=resolved_range,
         )
+        if is_independent(display_style):
+            resolved_range = (computed_info["data_min"], computed_info["data_max"])
     else:
         display_style = legacy_display_style(levels, opacity_mode)
         render_quality = legacy_render_quality()
         resolved_range = None
         computed_info = compute_level_info(volume, levels, include_zero=include_zero, locked_range=locked)
-    if info and all(key in info for key in ("black_value", "white_value", "gamma_power")):
+    if (not is_independent(display_style) and info
+            and all(key in info for key in ("black_value", "white_value", "gamma_power"))):
         computed_info = info
     clip = tuple(float(value) / DISPLAY_TO_BLENDER + 100.0 for value in grid.get("material_clip_bounds", ()))
     if len(clip) != 6:
@@ -1287,7 +1294,9 @@ def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range,
         selected["levels"] = levels
         selected["opacity_mode"] = str(opacity_mode)
     else:
-        selected = legacy_display_style(levels, opacity_mode)
+        selected = legacy_display_style(
+            levels, opacity_mode, (current or {}).get("colormap_range", (0.0, 1.0)),
+        )
     selected = resolved_display_style(selected)
     if not display_schema and is_independent(selected):
         raise BlenderProjectError("schema 7–9 工程不能原位启用独立显示，请重新导出 schema 10。")

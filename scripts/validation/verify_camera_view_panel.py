@@ -334,12 +334,6 @@ def main():
             f"普通 3D 刷新不重播动画（采样 {len(height_samples)} 次，高度变化 {len(changed)} 次）",
             len(changed) == 0,
         )
-        window._select_control_page(1)
-        soon(200, step_other_tab)
-
-    def step_other_tab():
-        check("切到其他控制标签页时 3D 状态未被打乱", not group.isHidden())
-        window._select_control_page(0)
         soon(200, step_interaction)
 
     # ------------------------------------------------------------ 相机交互

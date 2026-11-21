@@ -52,6 +52,16 @@ ROLE_ALIASES = {
     "delay": "T",
     "t": "T",
     "T": "T",
+    "temperature": "T",
+    "temp": "T",
+    "Temperature": "T",
+    "Temp": "T",
+    "angle": "T",
+    "theta": "T",
+    "phi": "T",
+    "scan": "T",
+    "scan_axis": "T",
+    "custom": "T",
 }
 
 

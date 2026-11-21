@@ -35,7 +35,7 @@ CAPABILITY_DATA_SNAPSHOT_2D = "data_snapshot_2d"
 CAPABILITY_ANALYSIS_TASK = "analysis_task"
 #: 能力标识：插件可以交回一维曲线结果，由宿主建结果页。
 CAPABILITY_RESULT_CURVE_1D = "result_curve_1d"
-#: 能力标识：插件向「其他积分」下拉注册动作，由宿主按插件 ID / 动作 ID 分派。
+#: 能力标识：插件向来源页的「创建结果页」菜单注册动作，由宿主按插件 ID / 动作 ID 分派。
 CAPABILITY_INTEGRATION_ACTION = "integration_action"
 #: 能力标识：插件基于宿主冻结的来源做派生计算，结果由宿主建页与展示。
 CAPABILITY_DERIVED_RESULT = "derived_result"
@@ -50,7 +50,7 @@ ANALYSIS_CAPABILITIES = (
 )
 
 #: 派生结果插件（API 3）必须同时声明这三项能力，缺一不可：
-#: 注册下拉动作、提供派生计算、提供设置界面。
+#: 注册创建动作、提供派生计算、提供设置界面。
 DERIVED_CAPABILITIES = (
     CAPABILITY_INTEGRATION_ACTION,
     CAPABILITY_DERIVED_RESULT,

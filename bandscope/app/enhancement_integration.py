@@ -16,9 +16,15 @@ from bandscope.core.local_enhancement import (
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.core.display_style import (
     INDEPENDENT_MODE, is_independent, legacy_render_quality,
-    new_render_quality, with_display_mode,
+    new_render_quality, resolved_display_style, with_display_mode,
 )
-from bandscope.processing.local_enhancement import cached_finite_range, finite_range, resolve_display
+from bandscope.processing.local_enhancement import (
+    cached_cumulative_histogram,
+    cached_finite_range,
+    cumulative_histogram,
+    finite_range,
+    resolve_display,
+)
 from bandscope.rendering.local_enhancement import (
     add_region_scalar_bars_3d, draw_region_colorbars_2d, enhancement_legend,
 )
@@ -120,6 +126,7 @@ class _DisplayStatsTask(QRunnable):
         try:
             for values, style, include_zero, actual in self.requests:
                 finite_range(values, style, include_zero=include_zero)
+                cumulative_histogram(values)
                 if actual:
                     finite_range(values)
             outcome = ("ok", None)
@@ -203,7 +210,7 @@ class EnhancementInteractionMixin:
         return ensure_display_state(spec, legacy=bool(legacy))
 
     def _inherit_enhancement_state(self, spec):
-        kinds = {"home", "time_integral", "axis_integral", "axis_integral_crop",
+        kinds = {"home", "axis_integral", "axis_integral_crop",
                  "second_derivative", "plugin_derived"}
         if spec.page_kind not in kinds:
             return
@@ -264,7 +271,8 @@ class EnhancementInteractionMixin:
             targets = [(target, key)]
         changed = False
         for target, key in targets:
-            if target.get(key) != style:
+            current = target.get(key)
+            if current != style and resolved_display_style(current) != resolved_display_style(style):
                 target[key] = copy.deepcopy(style)
                 changed = True
         if changed:
@@ -680,6 +688,16 @@ class EnhancementInteractionMixin:
             timer.stop()
 
     def _display_statistics_requests(self, context, spec, state):
+        if context is not None and context.get("view") == "path_slice":
+            controller = self.__dict__.get("path_slice_controller")
+            if controller is None or spec is None:
+                return None, []
+            values = controller.statistics_values(spec, context)
+            range_hit, _result = cached_finite_range(values)
+            histogram_hit, _histogram = cached_cumulative_histogram(values)
+            required = [(values, None, False, False, range_hit and histogram_hit)]
+            signature = repr([(id(values), tuple(np.shape(values)), None, False)])
+            return signature, [request[:-1] for request in required if not request[-1]]
         if not state or context is None or context.get("view") not in {"2d", "3d"}:
             return None, []
         adapt_regions(context, state)
@@ -690,15 +708,16 @@ class EnhancementInteractionMixin:
         required = []
 
         def add(values, style, actual):
-            if not is_independent(style) or values is None:
+            if values is None:
                 return
             for with_actual in ((False, True) if actual else (False,)):
                 target_style = None if with_actual else style
-                hit, _result = cached_finite_range(values, target_style)
-                required.append((values, target_style, False, with_actual, hit))
+                range_hit, _result = cached_finite_range(values, target_style)
+                histogram_hit, _histogram = cached_cumulative_histogram(values)
+                required.append((values, target_style, False, with_actual,
+                                 range_hit and histogram_hit))
 
-        if VisualEngine.locked_data_range() is None:
-            add(source, state.get("background", DEFAULT_STYLE), False)
+        add(source, state.get("background", DEFAULT_STYLE), False)
         for region in matching_regions(context, state.get("regions", [])):
             slices = region_slices(context, region)
             if slices is None:
@@ -828,7 +847,9 @@ class EnhancementInteractionMixin:
         if previous_style.get("normalization") != style.get("normalization"):
             return both
         update = set()
-        if previous_style.get("levels") != style.get("levels"):
+        if (previous_style.get("levels") != style.get("levels")
+                or previous_style.get("colormap_range", (0.0, 1.0))
+                != style.get("colormap_range", (0.0, 1.0))):
             update.add("color")
         if previous_style.get("opacity") != style.get("opacity"):
             update.add("alpha")
@@ -926,7 +947,32 @@ class EnhancementInteractionMixin:
         if cached[1] is not None and VisualEngine.locked_data_range() is None:
             info = cached[1]["background_level_info"]
             VisualEngine._last_data_range = (info["data_min"], info["data_max"])
+        restore_lock = getattr(self, "_restore_recipe_full_range_lock", None)
+        if callable(restore_lock):
+            restore_lock(spec, cached[1])
         return cached[1]
+
+    def _sync_levels_statistics(self, context, spec, state):
+        page = getattr(self, "page_render", None)
+        if page is None:
+            return
+        if not state or context is None or context.get("view") not in {"2d", "3d"}:
+            page.set_levels_statistics(None, None)
+            return
+        context, region_data = self._enhancement_crop_data(
+            context, spec or self._enhancement_spec(), state, allow_compute=False,
+        )
+        source = np.asarray(context["data"])
+        values = source
+        region = None if state.get("show_all_regions") else self._enhancement_selected()
+        if region is not None:
+            slices = region_slices(context, region)
+            if slices is not None:
+                values = region_data.get(region["region_id"], source[slices])
+        hit, histogram = cached_cumulative_histogram(values)
+        page.set_levels_statistics(
+            histogram if hit else None, self._display_range_for_target(state),
+        )
 
     def _sync_enhancement_controls(self, spec, context=None):
         if "_enhancement_artists" not in self.__dict__:
@@ -951,6 +997,7 @@ class EnhancementInteractionMixin:
         else:
             self.page_render.set_display_view((context or {}).get("view", "3d"))
         self._sync_color_lock_button()
+        self._sync_levels_statistics(context, spec, state)
 
     def _append_enhancement_actions(self, menu, target_region_id=None):
         context = self.current_render_context

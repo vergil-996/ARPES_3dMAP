@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""一次性验证：动态数据加载并等动画落定后，抓取“处理分析”页截图。"""
+"""一次性验证：动态数据加载并等动画落定后，抓取外观页与时间区间底条。"""
 import os
 import sys
 
@@ -43,14 +43,13 @@ def main():
         window.load_data(str(args.data))
 
     def step_grab():
-        window._select_control_page(1)
+        window.page_container.setCurrentWidget(window.page_render)
 
     def step_shot():
-        grp = window.page_data.grp_t
-        print(f"[info] grp_t height={grp.height()} sizeHint={grp.sizeHint().height()} "
-              f"min={grp.minimumHeight()} max={grp.maximumHeight()} hidden={grp.isHidden()}",
+        group = window.timeline_bar.timeline_group
+        print(f"[info] time interval height={group.height()} hidden={group.isHidden()}",
               flush=True)
-        out = str(args.output_dir / "verify_page2_settled.png")
+        out = str(args.output_dir / "verify_appearance_settled.png")
         window.grab().save(out)
         print(f"[info] saved {out}", flush=True)
         app.exit(0)

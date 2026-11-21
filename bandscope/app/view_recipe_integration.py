@@ -104,13 +104,11 @@ class RecipeEvaluator:
     def evaluate(self, spec):
         controls = spec.params.get("control_state", {})
         self.timeline_bar = _Controls(controls.get("image"))
-        self.page_data = _Controls(controls.get("data_process"))
         self.page_render = _Controls(controls.get("render"))
         self.rotation_angle = self.timeline_bar.get_rotation_angle()
         self.home_slice_info = spec.params.get("home_slice_info")
         self.clip_ranges = spec.params.get("clip_ranges")
         self.precise_logical_bounds = spec.params.get("precise_logical_bounds")
-        self.axis_source_mode = controls.get("axis_source_mode", "frame")
         result = self._compute_render_context(spec)
         if result is None or result.get("crop_empty"):
             raise RecipeError(f"无法恢复页面：{spec.title}")
@@ -423,6 +421,7 @@ class ViewRecipeMixin:
                 self.active_page_spec.params["_restored_effect"] = True
             self.left_workspace._refresh_header()
             self._bind_axis_interval(self.active_page_spec, animate=False)
+            self._bind_time_interval(self.active_page_spec, animate=False)
             self._configure_time_controls()
             self._refresh_core_display_state()
             # 先把相机落到当前窗口：切源会保存这份状态，切回来时不能退回旧视角。
@@ -435,6 +434,27 @@ class ViewRecipeMixin:
             self._syncing_controls = False
             self._restoring_recipe = False
         return target_id
+
+    def _restore_recipe_full_range_lock(self, spec, fields):
+        if spec is None or not fields:
+            return False
+        views = self.__dict__.get("_restored_recipe_views", {})
+        view = views.get(spec.page_id) or {}
+        if not view.get("relock_full_range"):
+            return False
+        data_range = fields.get("background_range")
+        if data_range is None or len(data_range) != 2:
+            return False
+        locked = (float(data_range[0]), float(data_range[1]))
+        from bandscope.rendering.render_core import VisualEngine
+
+        VisualEngine._locked_data_range = locked
+        view["locked_range"] = locked
+        view.pop("relock_full_range", None)
+        view["level_info"] = copy.deepcopy(fields.get("background_level_info"))
+        display = view.setdefault("display", {})
+        display["resolved_range"] = locked
+        return True
 
     def _apply_recipe_camera(self, camera):
         """把复现文件里的相机姿态写到当前 3D 场景；不触发渲染。"""

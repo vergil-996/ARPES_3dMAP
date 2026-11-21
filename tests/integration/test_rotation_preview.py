@@ -1,8 +1,15 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import numpy as np
+from PyQt5.QtWidgets import QApplication
+
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.crop_model import CropSelection
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
+from tests.support.view_recipe import control_window, synthetic_npz
 
 
 class _Volume:
@@ -100,6 +107,52 @@ class RotationPreviewTests(unittest.TestCase):
 
         self.assertEqual(analyzer.rotation_angle, 7.0)
         self.assertEqual(finished, [(request, "CPU")])
+
+
+class RotationWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_zero_preserves_camera_and_allows_full_frame_roi_crop(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "source.npz"
+            synthetic_npz(path)
+            window = control_window()
+            self.addCleanup(window.close)
+            self.assertTrue(window.load_data(str(path)))
+            overlay = window.canvas_tool_overlay
+            overlay.set_rotation_angle(-7.5)
+            window.on_rotation_angle_changed()
+            camera_before = np.asarray(window._current_3d_camera_position(), dtype=float)
+            source = window.left_workspace.current_spec()
+            window.crop_controller.set_selection(
+                CropSelection("3d", ("X", "Y", "E"), (1, 3, 1, 4, 1, 5)),
+                notify=False,
+            )
+
+            window.on_cut()
+            self.assertIs(window.left_workspace.current_spec(), source)
+            self.assertIn("0°", window.crop_controller.popup.error_label.text())
+
+            overlay.rotation_panel.zero_button.click()
+            self.assertEqual(window.rotation_angle, 0.0)
+            self.assertFalse(overlay.rotation_button.isChecked())
+            np.testing.assert_allclose(
+                np.asarray(window._current_3d_camera_position(), dtype=float), camera_before
+            )
+            window.crop_controller.set_selection(
+                CropSelection("3d", ("X", "Y", "E"), (1, 3, 1, 4, 1, 5)),
+                notify=False,
+            )
+            window.on_cut()
+
+            cropped = window.left_workspace.current_spec()
+            self.assertIsNot(cropped, source)
+            self.assertNotEqual(cropped.data_scope_id, "full")
+            self.assertEqual(
+                window.data_scopes[cropped.data_scope_id].bounds, (5, 5, 4, 6, 7, 7)
+            )
 
 
 if __name__ == "__main__":

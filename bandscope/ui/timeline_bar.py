@@ -1,34 +1,21 @@
 # -*- coding: utf-8 -*-
-"""画布下方底条 —— 左侧双端积分区间 / 时间轴 + 右侧画布视图控件。
+"""画布下方底条：空间区间与扫描区间。
 
-底条自己创建并持有这些控件（原「图像控制」页已删除）：
-
-- 左起第一组：切片方向、双端区间条与长度输入框。端点保留精确物理坐标，
-  重合时锁定为单层；解锁可扩成区间。只有二维切片页出现；数据没有时间轴
-  坐标时它直接占用原时间轴的位置，左侧不留空位。
-- 左起第二组：时间轴（滑条 + 帧号输入框 + 提示 + 总帧数），按数据显隐；只提供
-  手动滑帧与帧号定位，不提供自动播放；与位置滑条同排时两者共享富余宽度。
-- 右侧：显示坐标 / 图像翻转 开关与 Z 轴旋转输入框，常驻右对齐。宽度不够时
-  整组下移到第二行，底条高度同步增加。
-
-主窗口的时间轴、快捷键和按结果页保存的控件状态都指向这里的同名属性
-（``interval_control`` / ``slider_time`` / ``input_time`` / ``time_hint`` /
-``switch_axes`` / ``switch_flip`` / ``edit_rotation``），:meth:`export_state` /
-:meth:`restore_state` 保持与迁移前完全相同的字典结构。
+空间端点控制切片位置与厚度；扫描端点合拢时选择单帧，分离后选择当前页的
+扫描积分区间。内部沿用 ``time`` 接口兼容页面、配方、插件与导出，显示名称、
+单位和物理量由源级轴分配决定。视图按钮和旋转旋钮由 ``CanvasToolOverlay`` 持有。
 """
 
-from PyQt5.QtCore import QSize, Qt, QSignalBlocker, pyqtSignal
+from PyQt5.QtCore import QObject, QSize, Qt, QSignalBlocker, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAbstractSpinBox,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QLayout,
     QSizePolicy,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
-from siui.components.widgets import SiLabel
 
 import bandscope.ui.theme as theme
 from bandscope.ui.control_layout_utils import (
@@ -36,82 +23,92 @@ from bandscope.ui.control_layout_utils import (
     animate_widget_width,
     set_widget_visibility_instant,
 )
+from bandscope.core.axis_interval import nearest_index
 from bandscope.ui.axis_interval_bar import AxisIntervalControl
-from bandscope.ui.ui_controls import RotationSpinBox, SyncedSlider, SyncedSwitch
+from bandscope.ui.ui_controls import RotationSpinBox, SyncedSwitch
 
 
-class ContinuousFrameSlider(SyncedSlider):
-    """A discrete frame slider whose thumb still follows the mouse smoothly."""
+class FrameSliderAdapter(QObject):
+    """QSlider 风格的当前帧接口，直接投影到底部时间区间。"""
 
-    def _onValueChanged(self, value):
-        if self._is_dragging:
-            self._updateToolTip(flash=False)
+    valueChanged = pyqtSignal(int)
+    rangeChanged = pyqtSignal(int, int)
+    sliderReleased = pyqtSignal()
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self._bar = bar
+        self._minimum = 0
+        self._maximum = 0
+        self._value = 0
+        self._enabled = True
+
+    def minimum(self):
+        return 0 if self._bar.time_space is not None else self._minimum
+
+    def maximum(self):
+        space = self._bar.time_space
+        if space is not None:
+            return max(int(space.sample_count) - 1, 0)
+        return self._maximum
+
+    def value(self):
+        bar = self._bar
+        if bar.time_space is not None and bar.time_interval is not None:
+            return nearest_index(bar.time_space.coords, bar.time_interval.center)
+        return self._value
+
+    def setRange(self, minimum, maximum):
+        self._minimum = int(minimum)
+        self._maximum = max(int(minimum), int(maximum))
+        self._value = min(max(self._value, self._minimum), self._maximum)
+        self.rangeChanged.emit(self._minimum, self._maximum)
+
+    def setValue(self, value):
+        bar = self._bar
+        if bar.time_space is None or bar.time_interval is None:
+            self._value = min(max(int(value), self._minimum), self._maximum)
+            self.valueChanged.emit(self._value)
             return
-        super()._onValueChanged(value)
+        index = int(min(max(int(value), 0), self.maximum()))
+        was_single = bar.time_interval.locked and bar.time_interval.length == 0.0
+        changed = index != self.value() or not was_single
+        coords = bar.time_space.coords
+        physical = float(coords[index])
+        bar.time_interval.set_length(0.0)
+        bar.time_interval.set_center(physical)
+        bar.time_interval.set_locked(True)
+        bar.time_interval_control.sync(bar.time_space, bar.time_interval, self._enabled)
+        if changed:
+            self.valueChanged.emit(index)
 
-    def _onRangeChanged(self, minimum, maximum):
-        if maximum == minimum:
-            self.progress_ani.stop()
-            self.setProperty(self.Property.TrackProgress, 0.0)
-            self.progress_ani.setCurrentValue(0.0)
-            self.progress_ani.setEndValue(0.0)
-            return
-        super()._onRangeChanged(minimum, maximum)
+    def setEnabled(self, enabled):
+        self._enabled = bool(enabled)
+        self._bar.time_interval_control.setEnabled(self._enabled)
 
-    def _setValueToMousePos(self, pos):
-        thumb_width = self.style_data.thumb_width
-        if self.orientation() == Qt.Horizontal:
-            available = max(self.width() - thumb_width, 1)
-            progress = min(1.0, max((pos.x() - thumb_width / 2) / available, 0.0))
-        else:
-            available = max(self.height() - thumb_width, 1)
-            progress = min(1.0, max(1.0 - (pos.y() - thumb_width / 2) / available, 0.0))
+    def isEnabled(self):
+        return self._enabled
 
-        region = self.maximum() - self.minimum()
-        # SyncedSlider.setValue 会把滑块吸附到整数帧进度；随后立即用精确的
-        # 鼠标进度覆盖，保证 2~3 帧的数据集也能在整个轨道上拖动。
-        self.setValue(int(self.minimum() + region * progress + 0.5))
-
-        self.progress_ani.stop()
-        self.setProperty(self.Property.TrackProgress, progress)
-        self.progress_ani.setCurrentValue(progress)
-        self.progress_ani.setEndValue(progress)
-        self.update()
+    def setToolTipConvertionFunc(self, _func):
+        pass
 
 
 class TimelineBar(QFrame):
-    """画布正下方的常驻底条：积分位置组 + 时间轴组 + 右对齐的画布视图控件。"""
+    """位置组与时间组共享底栏宽度，只有空间不足时才分成两行。"""
 
-    #: 底条单行高度；出现第二行（视图控件下移）时再加 ``SECOND_ROW_HEIGHT``。
     HEIGHT = 64
     SECOND_ROW_HEIGHT = 40
-    THIRD_ROW_HEIGHT = 36
-    # 滑条长度下限：窄窗口下仍能拖动。滑条没有长度上限——分组吸满富余宽度，
-    # 滑条一直顶到相邻分组前，只留一处与行内一致的间隙（layout spacing）。
-    SLIDER_MIN_WIDTH = 160
-    #: 两条轨道同时显示时的分享比例：富余宽度在位置组与时间轴组之间均分。
     TIMELINE_STRETCH = 1
     SLIDER_STRETCH = 1
     AXIS_STRETCH = 1
-    #: 位置轨道最低可拖宽度（px）。
     AXIS_SLIDER_MIN_WIDTH = 120
-    # 时间轴控件尺寸
-    TIME_VALUE_BOX_WIDTH = 64
-    TIME_VALUE_BOX_HEIGHT = 30
     AXIS_VALUE_BOX_WIDTH = 92
     AXIS_VALUE_BOX_HEIGHT = 30
-    ROTATION_BOX_WIDTH = 108
-    ROTATION_BOX_HEIGHT = 32
-    SWITCH_WIDTH = 30
-    SWITCH_HEIGHT = 18
-    LABEL_CONTROL_SPACING = 6
-    VIEW_CONTROL_SPACING = 16
     ROW_MARGINS = (14, 6, 14, 6)
 
-    #: 底条每次重新排版（呼出/收起/换行/恢复）后发出，供宿主合并画布尺寸刷新。
     layoutChanged = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, view_controls=None):
         super().__init__(parent)
         self.setObjectName("timeline_bar")
         self.setFixedHeight(self.HEIGHT)
@@ -127,8 +124,6 @@ class TimelineBar(QFrame):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(*self.ROW_MARGINS)
         outer.setSpacing(0)
-        # 默认约束会把单行排布写死成控件的最小宽度，底条就永远缩不到换行阈值
-        # 以下。交给 minimumSizeHint() 表达可用最小宽度，换行由 resizeEvent 决定。
         outer.setSizeConstraint(QLayout.SetNoConstraint)
 
         layout = QHBoxLayout()
@@ -145,159 +140,71 @@ class TimelineBar(QFrame):
         self.secondary_row.setVisible(False)
         outer.addWidget(self.secondary_row)
 
-        self.tertiary_row = QWidget(self)
-        self.tertiary_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self._tertiary_layout = QHBoxLayout(self.tertiary_row)
-        self._tertiary_layout.setContentsMargins(0, 0, 0, 0)
-        self._tertiary_layout.setSpacing(12)
-        self._tertiary_layout.addStretch()
-        self.tertiary_row.setVisible(False)
-        outer.addWidget(self.tertiary_row)
-
-        # —— 左：积分位置组（整体收放）——
         self.axis_group = QWidget(self)
         self._axis_layout = QHBoxLayout(self.axis_group)
         self._axis_layout.setContentsMargins(0, 0, 0, 0)
         self._axis_layout.setSpacing(12)
 
-        # —— 中：时间轴分组（整体显隐）——
-        # 主色竖条 + 标题/提示两行，与结果页头部的设计语言一致。
         self.timeline_group = QWidget(self)
         group_layout = QHBoxLayout(self.timeline_group)
         group_layout.setContentsMargins(0, 0, 0, 0)
         group_layout.setSpacing(12)
-
-        self.accent = QFrame(self.timeline_group)
-        self.accent.setFixedSize(4, 26)
-        self.accent.setStyleSheet(
-            f"background-color: {theme.ACCENT}; border: none; border-radius: 2px;"
-        )
-        group_layout.addWidget(self.accent, 0, Qt.AlignVCenter)
-
-        self._title_block = QVBoxLayout()
-        self._title_block.setContentsMargins(0, 0, 0, 0)
-        self._title_block.setSpacing(2)
-        self.title_label = QLabel("时间延迟", self.timeline_group)
-        self.title_label.setStyleSheet(theme.card_title_qss())
-        # 文字标签固定宽度：分组里的富余宽度只留给滑条，标签不被拉长。
-        self.title_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self._title_block.addWidget(self.title_label)
-        group_layout.addLayout(self._title_block)
-
-        group_layout.addSpacing(self.LABEL_CONTROL_SPACING)
         self._group_layout = group_layout
+        self.time_space = None
+        self.time_interval = None
 
         layout.addWidget(self.axis_group, self.AXIS_STRETCH)
         layout.addWidget(self.timeline_group, self.TIMELINE_STRETCH)
-        # 空隙自身不带拉伸因子：分组可见时富余宽度全归分组（加长滑条）；
-        # 分组收起后这个 Expanding 空隙才撑住整行，右侧控件不会左移。
-        layout.addStretch()
-
-        # —— 右：画布视图控件（显示坐标 / 图像翻转 / Z轴旋转），默认右对齐 ——
-        self.view_controls = QWidget(self)
-        self.view_controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self._view_layout = QHBoxLayout(self.view_controls)
-        self._view_layout.setContentsMargins(0, 0, 0, 0)
-        self._view_layout.setSpacing(0)
-        layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
 
         self._timeline_visible_target = True
         self._axis_visible_target = False
         self._wrapped = False
-        self._view_stacked = False
+        self._view_controls_owner = view_controls
         self._create_axis_controls()
         self._create_timeline_controls()
-        self._create_view_controls()
-        # 位置组默认隐藏：只有需要位置控制的页面才呼出。
+        self._bind_view_controls(view_controls)
         set_widget_visibility_instant(self.axis_group, False)
 
-    # ------------------------------------------------------------------
-    # 控件创建
-    # ------------------------------------------------------------------
     def _create_axis_controls(self):
         self.interval_control = AxisIntervalControl(self.axis_group)
         self._axis_layout.addWidget(self.interval_control, self.SLIDER_STRETCH)
         self.axis_title_label = self.interval_control.title_label
 
     def _create_timeline_controls(self):
-        self.time_hint = QLabel("当前帧 · 拖动滑条或输入帧号", self.timeline_group)
-        self.time_hint.setStyleSheet(theme.field_label_qss())
-        self.time_hint.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self._title_block.addWidget(self.time_hint)
+        self.time_interval_control = AxisIntervalControl(self.timeline_group)
+        self._group_layout.addWidget(self.time_interval_control, self.SLIDER_STRETCH)
+        self.slider_time = FrameSliderAdapter(self)
+        self.time_hint = self.time_interval_control.subtitle_label
+        self.total_label = None
 
-        self.slider_time = ContinuousFrameSlider(self.timeline_group)
-        self.slider_time.setFixedHeight(32)
-        self.slider_time.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.slider_time.setMinimumWidth(self.SLIDER_MIN_WIDTH)
-        theme.style_accent_slider(self.slider_time)
-        self._group_layout.addWidget(self.slider_time, self.SLIDER_STRETCH)
-
-        self.input_time = QSpinBox(self.timeline_group)
-        self.input_time.setFixedSize(self.TIME_VALUE_BOX_WIDTH, self.TIME_VALUE_BOX_HEIGHT)
-        self.input_time.setRange(0, 99)
-        self.input_time.setSingleStep(1)
-        self.input_time.setKeyboardTracking(False)
-        self.input_time.setAlignment(Qt.AlignCenter)
-        self.input_time.setFocusPolicy(Qt.StrongFocus)
-        self.input_time.setToolTip("当前帧")
-        self.input_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.input_time.setStyleSheet(theme.value_input_qss())
-        self._group_layout.addWidget(self.input_time, 0, Qt.AlignVCenter)
-
-        self.total_label = QLabel(self.timeline_group)
-        self.total_label.setToolTip("总帧数")
-        self.total_label.setStyleSheet(
-            f"color: {theme.TEXT_3}; background: transparent;"
-            f"font-size: 12px; font-family: {theme.FONT_MONO};"
-        )
-        self.total_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        self._group_layout.addWidget(self.total_label, 0, Qt.AlignVCenter)
-        self.total_label.setText("–")
-
-        # 滑条与帧号输入框双向同步；范围变化同样跟随。
-        self.slider_time.valueChanged.connect(self.input_time.setValue)
-        self.slider_time.rangeChanged.connect(self.input_time.setRange)
-        self.input_time.valueChanged.connect(self.slider_time.setValue)
-
-    def _create_view_controls(self):
-        self.switch_axes = SyncedSwitch(self.view_controls)
-        self.switch_axes.setFixedSize(self.SWITCH_WIDTH, self.SWITCH_HEIGHT)
+    def _bind_view_controls(self, view_controls):
+        if view_controls is not None:
+            self.switch_axes = view_controls.switch_axes
+            self.switch_flip = view_controls.switch_flip
+            self.edit_rotation = view_controls.edit_rotation
+            return
+        self.switch_axes = SyncedSwitch(self)
+        self.switch_axes.setFixedSize(30, 18)
         self.switch_axes.setToolTip("显示物理坐标轴刻度")
-
-        self.switch_flip = SyncedSwitch(self.view_controls)
-        self.switch_flip.setFixedSize(self.SWITCH_WIDTH, self.SWITCH_HEIGHT)
+        self.switch_flip = SyncedSwitch(self)
+        self.switch_flip.setFixedSize(30, 18)
         self.switch_flip.setToolTip("翻转图像显示方向")
-
-        self.edit_rotation = RotationSpinBox(self.view_controls)
-        self.edit_rotation.setAccessibleName("Z轴旋转角度")
-        self.edit_rotation.setMinimum(-360.0)
-        self.edit_rotation.setMaximum(360.0)
+        self.edit_rotation = RotationSpinBox(self)
+        self.edit_rotation.setAccessibleName("Z 轴旋转角度")
+        self.edit_rotation.setRange(-360.0, 360.0)
+        self.edit_rotation.setDecimals(2)
         self.edit_rotation.setSingleStep(1.0)
+        self.edit_rotation.setButtonSymbols(QAbstractSpinBox.NoButtons)
         self.edit_rotation.setValue(0.0)
-        self.edit_rotation.setFixedSize(self.ROTATION_BOX_WIDTH, self.ROTATION_BOX_HEIGHT)
-        self.edit_rotation.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.edit_rotation.setToolTip("在 Kx-Ky 平面内旋转 3D 数据体（-360° ~ 360°）")
+        self.edit_rotation.setFixedSize(88, 30)
+        self.edit_rotation.setToolTip("在 Kx–Ky 平面内旋转（−360° 到 +360°）")
 
-        for switch, text in ((self.switch_axes, "显示坐标"), (self.switch_flip, "图像翻转")):
-            label = SiLabel(text, self.view_controls)
-            label.setStyleSheet(theme.field_label_qss())
-            self._view_layout.addWidget(label, 0, Qt.AlignVCenter)
-            self._view_layout.addSpacing(self.LABEL_CONTROL_SPACING)
-            self._view_layout.addWidget(switch, 0, Qt.AlignVCenter)
-            self._view_layout.addSpacing(self.VIEW_CONTROL_SPACING)
+    def sync_time_interval(self, space, interval, enabled=True):
+        self.time_space = space
+        self.time_interval = interval
+        self.time_interval_control.sync(space, interval, enabled)
 
-        rotation_label = QLabel("Z 轴旋转 / °", self.view_controls)
-        rotation_label.setStyleSheet(theme.field_label_qss())
-        self._view_layout.addWidget(rotation_label, 0, Qt.AlignVCenter)
-        self._view_layout.addSpacing(self.LABEL_CONTROL_SPACING)
-        self._view_layout.addWidget(self.edit_rotation, 0, Qt.AlignVCenter)
-
-    # ------------------------------------------------------------------
-    # 布局：位置组呼出与视图控件换行
-    # ------------------------------------------------------------------
     def _available_row_width(self):
-        # 用外层布局自己设的边距：QFrame.contentsMargins() 在控件未显示时
-        # 还没从布局同步过来，会算错换行阈值。
         left, _top, right, _bottom = self.ROW_MARGINS
         return max(int(self.width()) - left - right, 0)
 
@@ -307,78 +214,47 @@ class TimelineBar(QFrame):
     def _timeline_group_min_width(self):
         return int(self.timeline_group.minimumSizeHint().width())
 
-    def _view_controls_width(self):
-        widget = self.__dict__.get("view_controls")
-        return 0 if widget is None else int(widget.minimumSizeHint().width())
+    def _visible_group_min_widths(self):
+        widths = []
+        if self._axis_visible_target:
+            widths.append(self._axis_group_min_width())
+        if self._timeline_visible_target:
+            widths.append(self._timeline_group_min_width())
+        return widths
 
     def _groups_min_width(self):
-        """第一行（位置组 + 时间轴组）在单行里的最小宽度。"""
-        if self.__dict__.get("axis_group") is None or self.__dict__.get("timeline_group") is None:
-            # 构造期间宿主布局可能已经来问最小尺寸。
+        widths = self._visible_group_min_widths()
+        if not widths:
             return 0
-        width = 0
-        if self._axis_visible_target:
-            width += self._axis_group_min_width()
-        if self._timeline_visible_target:
-            width += self._timeline_group_min_width()
-        if self._axis_visible_target and self._timeline_visible_target:
+        width = sum(widths)
+        if len(widths) == 2:
             width += self._primary_layout.spacing()
         return width
 
     def minimumSizeHint(self):
-        # 不把「视图控件和两个分组同排」写进最小宽度：那样控件永远缩不到
-        # 换行阈值以下，_should_wrap 就永远不会成立。换行后第一行只剩两个
-        # 分组，第二行只需要视图控件，最小宽度取两者的较大者。
+        widths = self._visible_group_min_widths()
         left, _top, right, _bottom = self.ROW_MARGINS
-        width = max(self._groups_min_width(), self._view_controls_width())
-        return QSize(width + left + right, self.height())
+        return QSize((max(widths) if widths else 0) + left + right, self.height())
 
     def _should_wrap(self):
-        """换行阈值按实际控件最小宽度计算，不用固定像素猜。"""
+        if not (self._axis_visible_target and self._timeline_visible_target):
+            return False
         available = self._available_row_width()
-        if available <= 0:
-            return False
-        needed = self._groups_min_width() + self._view_controls_width()
-        return available < needed
-
-    def _should_stack_view(self, wrapped):
-        if not (wrapped and self._axis_visible_target and self._timeline_visible_target):
-            return False
-        needed = self._timeline_group_min_width() + self._view_controls_width()
-        return self._available_row_width() < needed
+        return available > 0 and available < self._groups_min_width()
 
     def _apply_wrap(self, wrapped):
-        stacked = self._should_stack_view(wrapped)
-        if self._wrapped == wrapped and self._view_stacked == stacked:
+        wrapped = bool(wrapped and self._axis_visible_target and self._timeline_visible_target)
+        if self._wrapped == wrapped:
             return
         self._wrapped = wrapped
-        self._view_stacked = stacked
-        self._primary_layout.removeWidget(self.view_controls)
-        self._secondary_layout.removeWidget(self.view_controls)
-        self._tertiary_layout.removeWidget(self.view_controls)
-        timeline_in_secondary = wrapped and self._axis_visible_target and self._timeline_visible_target
-        if timeline_in_secondary:
-            self._primary_layout.removeWidget(self.timeline_group)
-            self._secondary_layout.insertWidget(0, self.timeline_group, self.TIMELINE_STRETCH)
-        else:
-            self._secondary_layout.removeWidget(self.timeline_group)
-            self._primary_layout.insertWidget(1, self.timeline_group, self.TIMELINE_STRETCH)
-
-        if stacked:
-            self._tertiary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
-        elif wrapped:
-            self._secondary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
-        else:
-            self._primary_layout.addWidget(self.view_controls, 0, Qt.AlignVCenter)
-        self.secondary_row.setVisible(wrapped)
-        self.tertiary_row.setVisible(stacked)
-        height = self.HEIGHT
+        self._primary_layout.removeWidget(self.timeline_group)
+        self._secondary_layout.removeWidget(self.timeline_group)
         if wrapped:
-            height += self.SECOND_ROW_HEIGHT
-        if stacked:
-            height += self.THIRD_ROW_HEIGHT
-        self.setFixedHeight(height)
-
+            self._secondary_layout.addWidget(self.timeline_group, self.TIMELINE_STRETCH)
+        else:
+            self._primary_layout.addWidget(self.timeline_group, self.TIMELINE_STRETCH)
+        self.secondary_row.setVisible(wrapped)
+        self.setFixedHeight(self.HEIGHT + (self.SECOND_ROW_HEIGHT if wrapped else 0))
         self.updateGeometry()
         self.layoutChanged.emit()
 
@@ -387,37 +263,27 @@ class TimelineBar(QFrame):
         self._apply_wrap(self._should_wrap())
 
     def _axis_reveal_width(self, *, alone):
-        """呼出动画的目标宽度：与时间轴同排时取可用宽度的一半。"""
         available = self._available_row_width()
-        if alone:
-            available -= self._view_controls_width()
-        else:
-            available -= self._view_controls_width() + self._timeline_group_min_width()
-        available = max(available // (1 if alone else 2), self._axis_group_min_width())
-        return available
+        if not alone:
+            available = available // 2
+        return max(available, self._axis_group_min_width())
 
-    # ------------------------------------------------------------------
-    # 状态
-    # ------------------------------------------------------------------
     def get_rotation_angle(self):
-        # Read the visible text so live typing and delayed exact refresh share
-        # the same angle snapshot, including before editingFinished.
-        text = self.edit_rotation.text().strip()
+        if self._view_controls_owner is not None:
+            return float(self._view_controls_owner.rotation_angle())
         try:
-            return float(text)
+            return float(self.edit_rotation.text().strip())
         except (TypeError, ValueError):
             return float(self.edit_rotation.value())
 
     def set_rotation_angle(self, angle):
-        self.edit_rotation.setValue(float(angle))
+        if self._view_controls_owner is not None:
+            self._view_controls_owner.set_rotation_angle(angle)
+        else:
+            self.edit_rotation.setValue(float(angle))
 
     def export_state(self):
         return {
-            "slider_time": {
-                "minimum": int(self.slider_time.minimum()),
-                "maximum": int(self.slider_time.maximum()),
-                "value": int(self.slider_time.value()),
-            },
             "switch_axes": bool(self.switch_axes.isChecked()),
             "switch_flip": bool(self.switch_flip.isChecked()),
             "rotation_angle": self.get_rotation_angle(),
@@ -429,48 +295,39 @@ class TimelineBar(QFrame):
         if block_signals:
             blockers = [
                 QSignalBlocker(self.slider_time),
-                QSignalBlocker(self.input_time),
                 QSignalBlocker(self.switch_axes),
                 QSignalBlocker(self.switch_flip),
+                QSignalBlocker(self.edit_rotation),
             ]
 
         try:
             slider_state = state.get("slider_time") or {}
             minimum = slider_state.get("minimum")
             maximum = slider_state.get("maximum")
-            if minimum is not None and maximum is not None:
+            if minimum is not None and maximum is not None and self.time_space is None:
                 self.slider_time.setRange(int(minimum), int(maximum))
-                self.input_time.setRange(int(minimum), int(maximum))
             if "value" in slider_state:
                 value = int(slider_state["value"])
                 value = max(int(self.slider_time.minimum()),
                             min(int(self.slider_time.maximum()), value))
                 self.slider_time.setValue(value)
-                self.input_time.setValue(value)
 
             if "switch_axes" in state:
                 self.switch_axes.setChecked(bool(state["switch_axes"]))
-            rotation_angle = state.get("rotation_angle")
-            if rotation_angle is not None:
-                self.set_rotation_angle(str(rotation_angle))
-            else:
-                self.set_rotation_angle(0.0)
-
+            self.set_rotation_angle(state.get("rotation_angle", 0.0))
             if "switch_flip" in state:
                 self.switch_flip.setChecked(bool(state["switch_flip"]))
         finally:
             del blockers
 
     def set_total_frames(self, count):
-        """由加载流程用真实时间维度设置总帧数（滑条范围有 0..1 兜底，不可信）。"""
         if self.total_label is not None:
             self.total_label.setText(f"/ {int(count)} 帧" if count else "–")
 
     def set_timeline_visible(self, visible, *, animate=True):
-        """按数据是否含时间轴平滑收放左侧时间轴分组（底条本身常驻可见）。"""
         visible = bool(visible)
-        # 构造时时间轴分组默认可见；目标状态不变则不重复播放动画。
         if self._timeline_visible_target == visible:
+            self._sync_bar_visibility()
             return
         self._timeline_visible_target = visible
         self._relayout_for_visibility_change(animate=animate)
@@ -485,9 +342,9 @@ class TimelineBar(QFrame):
             set_widget_visibility_instant(self.timeline_group, visible)
 
     def set_position_visible(self, visible, *, animate=True):
-        """按当前页面呼出/收起积分位置组；同一目标状态不重复播放动画。"""
         visible = bool(visible)
         if self._axis_visible_target == visible:
+            self._sync_bar_visibility()
             return
         self._axis_visible_target = visible
         self._relayout_for_visibility_change(animate=animate)
@@ -503,12 +360,16 @@ class TimelineBar(QFrame):
             set_widget_visibility_instant(self.axis_group, visible)
 
     def _relayout_for_visibility_change(self, *, animate):
-        # 呼出/收起过程中行宽需求在变，换行判定要跟着走；位置组出现时
-        # 时间轴不再独占整行，反之亦然。
         self._apply_wrap(self._should_wrap())
+        self._sync_bar_visibility()
+
+    def _sync_bar_visibility(self):
+        self.setVisible(self._axis_visible_target or self._timeline_visible_target)
+        self.updateGeometry()
 
     def _on_group_animation_frame(self):
         self._apply_wrap(self._should_wrap())
+        self._sync_bar_visibility()
         self.layoutChanged.emit()
 
     def set_position_label(self, text):

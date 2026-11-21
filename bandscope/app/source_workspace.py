@@ -5,7 +5,8 @@
 
 - 把随数据源变化的窗口状态整体捕获 / 安装（数组按引用保存）；全局分组及其
   页面副本不进入会话状态包，切源时保持不变，副本激活时按页面归属切回所属源；
-- 新数据先独立准备，成功后才登记会话；失败不改变已有会话；
+- 新数据先独立准备，成功后才登记会话；失败不改变已有会话；轴重设复用同一事务，
+  只有原始主页时更新当前源，已有分析时新增源；
 - 切源时先提交当前页、保存旧源状态、失效旧源显示任务与交互对象，再绑定目标
   会话，最后只触发一次页面激活与刷新；
 - 根视图删除走源级关闭事务：先摘页面记录再清理，避免逐页删除时误激活。
@@ -71,7 +72,8 @@ class SourceWorkspaceMixin:
         "_pending_roi_scope_id",
         "axis_space",
         "axis_interval",
-        "axis_source_mode",
+        "time_space",
+        "time_interval",
         "loaded_npz_stem",
         "rotation_angle",
         "_rendered_rotation_angle",
@@ -253,6 +255,11 @@ class SourceWorkspaceMixin:
         self._pending_scope_denoise_keys = set()
         self._pending_roi_scope_id = None
 
+    def _finish_rotation_interaction(self):
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        if overlay is not None:
+            overlay.close_rotation_panel()
+
     def _clear_interaction_objects(self):
         """换源前清掉只对旧场景有效的交互对象（不改页面参数）。"""
         self._clear_enhancement_interaction()
@@ -279,7 +286,8 @@ class SourceWorkspaceMixin:
 
         self._source_switching = True
         try:
-            # 1. 失效旧源的显示任务，清理只对旧场景有效的交互对象。
+            # 1. 提交旧编辑，再失效旧源任务并清理其交互对象。
+            self._finish_rotation_interaction()
             self._invalidate_pending_tasks()
             self._clear_interaction_objects()
             # 2. 提交并保存旧源（页面、插件、相机、导航）。
@@ -349,6 +357,7 @@ class SourceWorkspaceMixin:
         if manager is not None:
             previous_id = manager.active_id
             if previous_id is not None:
+                self._finish_rotation_interaction()
                 self._invalidate_pending_tasks()
                 self._clear_interaction_objects()
                 self._store_active_session()
@@ -426,6 +435,108 @@ class SourceWorkspaceMixin:
         else:
             self._reset_empty_workspace()
         self._sync_source_switcher()
+
+    def _current_source_has_analysis(self):
+        manager = self.__dict__.get("source_manager")
+        session = manager.active() if manager is not None else None
+        if session is None:
+            return False
+        home_id = session.home_page_id or self.left_workspace.home_page_id
+        return any(str(page_id) != str(home_id) for page_id in session.page_ids)
+
+    def on_source_assignment_requested(self):
+        assignment = getattr(self.core, "axis_assignment", None)
+        automatic = getattr(self.core, "auto_axis_assignment", None)
+        if assignment is None or automatic is None or self.core.source_array is None:
+            return False
+        from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
+
+        dialog = AxisAssignmentDialog(
+            assignment,
+            automatic,
+            self.core.coordinate_candidates,
+            candidate_units=self.core.coordinate_candidate_units,
+            as_new_source=self._current_source_has_analysis(),
+            parent=self,
+        )
+        if dialog.exec_() != dialog.Accepted:
+            return False
+        try:
+            updated = dialog.assignment()
+        except (TypeError, ValueError) as exc:
+            self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
+            return False
+        return self.apply_axis_assignment(updated)
+
+    def apply_axis_assignment(self, assignment, *, as_new_source=None):
+        try:
+            candidate = self.core.copy_with_assignment(assignment)
+        except (TypeError, ValueError, AttributeError) as exc:
+            self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
+            return False
+        manager = self.__dict__.get("source_manager")
+        active = manager.active() if manager is not None else None
+        if active is None:
+            return False
+        create_new = self._current_source_has_analysis() if as_new_source is None else bool(as_new_source)
+        if create_new:
+            previous_id = self._begin_source_transaction()
+            try:
+                self._prepare_new_source_state(
+                    candidate, candidate.raw_data.shape, active.primary_path
+                )
+                self._commit_source_transaction(
+                    previous_id,
+                    entry_kind=active.entry_kind,
+                    entry_path=active.entry_path,
+                    primary_path=active.primary_path,
+                    alias=active.alias,
+                    reset_camera=True,
+                )
+            except Exception as exc:
+                self._abort_source_transaction(previous_id)
+                self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
+                return False
+            return True
+
+        previous_state = self._store_active_session().state
+        previous_page_ids = list(active.page_ids)
+        previous_home_id = active.home_page_id
+        previous_target_id = active.target_page_id
+        try:
+            self._invalidate_pending_tasks()
+            self._clear_interaction_objects()
+            self._prepare_new_source_state(
+                candidate, candidate.raw_data.shape, active.primary_path
+            )
+            self._sync_source_home_title(active)
+            for page_id in previous_page_ids:
+                if page_id not in self._local_workspace_page_ids():
+                    manager.unregister_page(page_id)
+            active.state = self._capture_source_state()
+            active.home_page_id = self.left_workspace.home_page_id
+            active.target_page_id = self.left_workspace.current_page_id
+            manager.register_pages(
+                active.session_id,
+                self._local_workspace_page_ids(),
+                home_page_id=active.home_page_id,
+            )
+            self._activate_current_session()
+            self._sync_source_switcher()
+        except Exception as exc:
+            for page_id in list(active.page_ids):
+                manager.unregister_page(page_id)
+            active.state = previous_state
+            active.home_page_id = previous_home_id
+            active.target_page_id = previous_target_id
+            manager.register_pages(
+                active.session_id, previous_page_ids, home_page_id=previous_home_id
+            )
+            self._install_source_state(previous_state)
+            self._activate_current_session()
+            self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
+            return False
+        return True
 
     def open_npz_source(self, entry_path, target_path) -> bool:
         """准备并把一份 NPZ（或已转换的 MAT）登记为新数据源。"""
@@ -530,7 +641,6 @@ class SourceWorkspaceMixin:
         self._camera_e_flip_applied = False
         self.clip_ranges = None
         self.home_slice_info = None
-        self.axis_source_mode = "frame"
         self._last_compute_backend = self.backend_manager.selected_backend_name()
         self._render_exact_ready = True
         self.axis_title_state = AxisTitleState()
@@ -569,6 +679,7 @@ class SourceWorkspaceMixin:
             # 先驱逐只属于它的缓存，此时会话对象还在管理器里。
             self._drop_session_cache_entries(session_id)
             if is_active:
+                self._finish_rotation_interaction()
                 self._invalidate_pending_tasks()
                 self._clear_interaction_objects()
                 self._store_active_session()
@@ -678,7 +789,8 @@ class SourceWorkspaceMixin:
             self._second_derivative_volume_cache = None
             self.axis_space = None
             self.axis_interval = None
-            self.axis_source_mode = "frame"
+            self.time_space = None
+            self.time_interval = None
             self.loaded_npz_stem = "data"
             self._restored_publication = {}
             self._restored_recipe_views = {}
@@ -704,6 +816,7 @@ class SourceWorkspaceMixin:
         self.last_visual_page_id = home.page_id
         home.params["control_state"] = self._capture_control_state()
         self._bind_axis_interval(home, animate=False)
+        self._bind_time_interval(home, animate=False)
         self._configure_time_controls()
         stack = self.__dict__.get("left_display_stack")
         if stack is not None:

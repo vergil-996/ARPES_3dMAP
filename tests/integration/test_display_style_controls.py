@@ -34,9 +34,6 @@ class DisplayControlStateTests(unittest.TestCase):
     def test_independent_controls_roundtrip_and_old_state_resets_everything(self):
         style = self.page.get_display_style()
         self.assertTrue(is_independent(style))
-        self.page.combo_normalization.setCurrentIndex(self.page.combo_normalization.findData("manual"))
-        self.page.manual_low.setValue(-3.0)
-        self.page.manual_high.setValue(9.0)
         slider, _spin, _scale = self.page.display_parameters["threshold"]
         slider.setValue(217)
         self.page.combo_resting_quality.setCurrentIndex(
@@ -90,42 +87,19 @@ class DisplayControlStateTests(unittest.TestCase):
                 self.assertEqual(self.page.btn_lock.attachment().text(), "")
                 self.assertEqual(self.page.btn_lock.property("buttonKind"), kind)
 
-    def test_presets_are_removed_and_custom_parameters_have_tooltips(self):
+    def test_presets_and_normalization_card_are_removed(self):
         self.assertFalse(hasattr(self.page, "combo_opacity_preset"))
         self.assertFalse(hasattr(self.page, "btn_apply_opacity_preset"))
+        self.assertFalse(hasattr(self.page, "grp_normalize"))
+        self.assertFalse(hasattr(self.page, "combo_normalization"))
+        self.assertFalse(hasattr(self.page, "display_parameter_labels"))
         style = self.page.get_display_style()
+        self.assertEqual(style["normalization"], {"mode": "full"})
         self.assertEqual(style["opacity"]["preset"], "custom")
-        expected = {
-            "阈值（%）": "阈值以下体素完全透明，用于去雾",
-            "起始过渡宽度（%）": "阈值边界开始的平滑过渡宽度",
-            "透明度 Gamma": "控制不透明度随强度变化曲线形状",
-        }
-        for name, tooltip in expected.items():
-            key = {"阈值（%）": "threshold", "起始过渡宽度（%）": "transition", "透明度 Gamma": "gamma"}[name]
-            slider, spin, _scale = self.page.display_parameters[key]
-            self.assertEqual(self.page.display_parameter_labels[name].hint, tooltip)
-            self.assertEqual(slider.toolTip(), str(slider.value()))
-            self.assertEqual(spin.toolTip(), "")
-
-        from siui.core import SiGlobal
-        from siui.components.tooltip import ToolTipWindow
-
-        tooltip_window = ToolTipWindow()
-        previous_window = SiGlobal.siui.windows.get("TOOL_TIP")
-        SiGlobal.siui.windows["TOOL_TIP"] = tooltip_window
-        try:
-            label = self.page.display_parameter_labels["阈值（%）"]
-            label.enterEvent(None)
-            self.assertEqual(tooltip_window.text_label.text(), expected["阈值（%）"])
-            self.assertTrue(tooltip_window.is_shown)
-            self.assertIs(tooltip_window.nowInsideOf(), label)
-            label.leaveEvent(None)
-        finally:
-            tooltip_window.close()
-            if previous_window is None:
-                SiGlobal.siui.windows.pop("TOOL_TIP", None)
-            else:
-                SiGlobal.siui.windows["TOOL_TIP"] = previous_window
+        for name in ("threshold", "transition", "gamma", "density"):
+            slider, spin, _scale = self.page.display_parameters[name]
+            self.assertTrue(slider.isHidden())
+            self.assertTrue(spin.toolTip())
 
         before = {key: style[key] for key in ("levels", "opacity_mode", "normalization")}
         self.page.display_parameters["threshold"][0].setValue(21739)
@@ -266,7 +240,7 @@ class DisplayStatisticsTests(unittest.TestCase):
             pool.waitForDone(5000)
         self.host._invalidate_display_statistics()
 
-    def test_percentile_runs_in_worker_once_and_color_changes_reuse_it(self):
+    def test_full_range_runs_in_worker_once_and_color_changes_reuse_it(self):
         host = self.host
         context = host.current_render_context
         state = host.active_page_spec.params[STATE_KEY]
@@ -279,13 +253,13 @@ class DisplayStatisticsTests(unittest.TestCase):
                 QTest.qWait(20)
                 deadline -= 20
             self.assertIsNone(host._display_stats_job)
-            self.assertEqual(percentile.call_count, 1)
+            percentile.assert_not_called()
             self.assertFalse(host._prepare_display_statistics(context, host.active_page_spec, state))
-            self.assertEqual(percentile.call_count, 1)
+            percentile.assert_not_called()
         hit, result = cached_finite_range(self.data, state["background"])
         self.assertTrue(hit)
         finite = self.data[np.isfinite(self.data)]
-        np.testing.assert_allclose(result, np.percentile(finite, (0.0, 99.5)))
+        np.testing.assert_allclose(result, (float(finite.min()), float(finite.max())))
         state["background"]["levels"] = (10, 80, 90)
         state["background"]["opacity"]["density"] = 35.0
         self.assertFalse(host._prepare_display_statistics(context, host.active_page_spec, state))
@@ -333,7 +307,6 @@ class DisplayStatisticsTests(unittest.TestCase):
         host.refresh_coordinator = Mock()
         spec = host.active_page_spec
         state = spec.params[STATE_KEY]
-        state["background"]["normalization"].update(mode="manual", manual_range=(0.0, 1.0))
         request = SimpleNamespace(cause=RefreshCause.DISPLAY_MAPPING)
 
         with patch("bandscope.processing.gpu_display.enabled", return_value=False):

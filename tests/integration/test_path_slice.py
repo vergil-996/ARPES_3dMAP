@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import QApplication
 from bandscope.app.path_slice_integration import PathSliceController
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.analyzer_core import AnalyzerCore
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.view_recipe import ViewRecipeDocument
 from bandscope.core.path_slice import (
     PATH_SOURCE_KEY,
@@ -66,8 +67,6 @@ class PathSliceHostTests(unittest.TestCase):
         self.window._rotation_cache = {}
         self.window._computed_volume_cache = ArrayLRUCache()
         self.window.backend_manager = BackendManager("CPU")
-        self.window.timeline_bar = SimpleNamespace(slider_time=_Slider(0))
-        self.window.page_data = SimpleNamespace(s_t_low=_Slider(0), s_t_up=_Slider(1))
         self.window._get_display_state_for_spec = lambda _spec: (self.raw, self.coords)
         self.window._syncing_controls = False
         self.window.left_workspace = SimpleNamespace(current_spec=lambda: self.source)
@@ -75,8 +74,9 @@ class PathSliceHostTests(unittest.TestCase):
             "source", "E map", "axis_integral", "test",
             params={
                 "axis_index": 2, "low": 1, "up": 1, "mid": 1,
-                "source_mode": "frame", "source_t_index": 0,
-                "source_t_low": 0, "source_t_up": 1,
+                "time_interval": AxisInterval.from_indices(
+                    self.coords["delay"], 0, 0, locked=True, axis_key="delay"
+                ).as_dict(),
             }, data_scope_id="full",
         )
         self.controller = PathSliceController(self.window, initialize_ui=False)
@@ -89,8 +89,9 @@ class PathSliceHostTests(unittest.TestCase):
     def path_spec(self):
         params = {
             PATH_SOURCE_KEY: dict(self.source.params, source_page_kind="axis_integral"),
-            "source_mode": "frame", "source_t_index": 0,
-            "source_t_low": 0, "source_t_up": 1,
+            "time_interval": AxisInterval.from_indices(
+                self.coords["delay"], 0, 0, locked=True, axis_key="delay"
+            ).as_dict(),
         }
         self.model.write_params(params)
         spec = AnalysisPageSpec(
@@ -130,11 +131,12 @@ class PathSliceHostTests(unittest.TestCase):
     def test_time_scrubbing_reuses_path_and_switches_source_frame(self):
         spec = self.path_spec()
         initial = self.controller.compute_context(spec)["raw_intensity"].copy()
-        self.window.timeline_bar.slider_time._value = 1
-        self.controller.persist_time(spec)
+        spec.params["time_interval"] = AxisInterval.from_indices(
+            self.coords["delay"], 1, 1, locked=True, axis_key="delay"
+        ).as_dict()
         changed = self.controller.compute_context(spec)["raw_intensity"]
-        self.assertEqual(spec.params["source_t_index"], 1)
-        self.assertEqual(spec.params[PATH_SOURCE_KEY]["source_t_index"], 1)
+        self.assertEqual(spec.params["time_interval"]["low"], 100.0)
+        self.assertEqual(spec.params["time_interval"]["up"], 100.0)
         np.testing.assert_allclose(changed, initial + 100)
         self.assertEqual([node["label"] for node in spec.params["path_nodes"]], ["Γ", "K", "M"])
 
@@ -271,6 +273,29 @@ class PathSliceHostTests(unittest.TestCase):
             self.assertEqual(segment["white"], 90)
             self.assertEqual(segment["intensity_map"], "幂函数")
         self.assertEqual(len(requests), 1)
+
+    def test_output_endpoint_change_does_not_flatten_other_segment_fields(self):
+        spec = self.path_spec()
+        self.model.selected = [0, 1]
+        self.model.segments[0].gray = 40
+        self.model.segments[1].gray = 70
+        self.model.segments[0].colormap_end = 0.3
+        self.model.segments[1].colormap_end = 0.9
+        self.model.segments[1].intensity_map = "对数"
+        self.model.write_params(spec.params)
+        self.window.page_render = SimpleNamespace(
+            s_low=_Slider(12), s_gamma=_Slider(50), s_up=_Slider(100),
+            s_cmap_low=_Slider(200), s_cmap_high=_Slider(800),
+            combo_map=_Combo("线性"), btn_apply_map=object(),
+        )
+        self.window.sender = lambda: self.window.page_render.s_cmap_low
+        self.window.request_refresh = lambda *args, **kwargs: None
+        self.controller.handle_levels_schedule()
+        segments = spec.params["path_segments"]
+        self.assertEqual([segment["colormap_start"] for segment in segments], [0.2, 0.2])
+        self.assertEqual([segment["colormap_end"] for segment in segments], [0.3, 0.9])
+        self.assertEqual([segment["gray"] for segment in segments], [40, 70])
+        self.assertEqual([segment["intensity_map"] for segment in segments], ["线性", "对数"])
 
 
 class PathSliceRecipeTests(unittest.TestCase):

@@ -201,8 +201,6 @@ class CpuComputeBackend(ComputeBackend):
     def prepare_volume(
         self,
         raw_data,
-        source_mode="frame",
-        frame_index=0,
         t_low=0,
         t_up=0,
         angle=0.0,
@@ -212,12 +210,11 @@ class CpuComputeBackend(ComputeBackend):
         full_shape=None,
     ):
         raw_data = np.asarray(raw_data, dtype=np.float32)
-        if source_mode == "time_integral":
-            low, up = _normalized_range(t_low, t_up, raw_data.shape[3])
-            volume = np.sum(raw_data[..., low:up + 1], axis=3, dtype=np.float32)
+        low, up = _normalized_range(t_low, t_up, raw_data.shape[3])
+        if low == up:
+            volume = raw_data[..., low]
         else:
-            frame_index = int(np.clip(int(frame_index), 0, raw_data.shape[3] - 1))
-            volume = raw_data[..., frame_index]
+            volume = np.sum(raw_data[..., low:up + 1], axis=3, dtype=np.float32)
 
         if abs(float(angle)) >= 1e-6:
             volume = _embed_compact_volume(
@@ -479,8 +476,6 @@ class CupyComputeBackend(ComputeBackend):
     def prepare_volume(
         self,
         raw_data,
-        source_mode="frame",
-        frame_index=0,
         t_low=0,
         t_up=0,
         angle=0.0,
@@ -502,19 +497,17 @@ class CupyComputeBackend(ComputeBackend):
             raise MemoryError(
                 f"A {volume_bytes / 1024 ** 3:.2f} GiB volume exceeds the CUDA working-memory budget."
             )
-        if source_mode == "time_integral":
-            low, up = _normalized_range(t_low, t_up, raw_data.shape[3])
-            interval = raw_data[..., low:up + 1]
-            if self.memory_budget and int(interval.nbytes + volume_bytes) > self.memory_budget:
-                # Stream one frame at a time so a large 4D interval is never copied to VRAM in full.
-                volume = cp.zeros(raw_data.shape[:3], dtype=cp.float32, order="F")
-                for frame_index in range(low, up + 1):
-                    volume += cp.asarray(raw_data[..., frame_index], dtype=cp.float32)
-            else:
-                volume = cp.sum(cp.asarray(interval), axis=3, dtype=cp.float32)
+        low, up = _normalized_range(t_low, t_up, raw_data.shape[3])
+        interval = raw_data[..., low:up + 1]
+        if low == up:
+            volume = cp.asarray(raw_data[..., low], dtype=cp.float32)
+        elif self.memory_budget and int(interval.nbytes + volume_bytes) > self.memory_budget:
+            # Stream one frame at a time so a large 4D interval is never copied to VRAM in full.
+            volume = cp.zeros(raw_data.shape[:3], dtype=cp.float32, order="F")
+            for frame_index in range(low, up + 1):
+                volume += cp.asarray(raw_data[..., frame_index], dtype=cp.float32)
         else:
-            frame_index = int(np.clip(int(frame_index), 0, raw_data.shape[3] - 1))
-            volume = cp.asarray(raw_data[..., frame_index], dtype=cp.float32)
+            volume = cp.sum(cp.asarray(interval), axis=3, dtype=cp.float32)
         if scope_bounds is not None and full_shape is not None and abs(float(angle)) >= 1e-6:
             bounds = tuple(int(value) for value in scope_bounds)
             full_volume = cp.zeros(target_shape, dtype=cp.float32, order="F")
