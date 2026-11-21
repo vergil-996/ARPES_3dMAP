@@ -7,6 +7,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt5 import sip
 from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QLabel, QPushButton
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
@@ -333,6 +334,34 @@ class AxisIntervalControllerTests(unittest.TestCase):
         )
         self.assertEqual(harness.slider_low.value(), 0)
         self.assertEqual(harness.slider_up.value(), 1000)
+
+    def test_deleted_widgets_are_ignored_by_sync_and_late_signals(self):
+        """底栏先被销毁时，控制器里的包装对象仍在；迟到信号不能再访问它。
+
+        回归：`RuntimeError: wrapped C/C++ object ... has been deleted` 从 Qt 槽
+        里抛出会终止进程（CI 上表现为区间模块整体失败）。
+        """
+        h = self.harness
+        before_committed = len(h.committed)
+        sip.delete(h.box_length)
+        sip.delete(h.slider_up)
+        self.assertTrue(sip.isdeleted(h.box_length))
+        self.assertTrue(sip.isdeleted(h.slider_up))
+
+        # 同步、提交与锁定都不应访问已销毁控件。
+        h.controller.sync_widgets()
+        h.controller._on_box_length()
+        h.controller._on_slider_up(500)
+        h.controller.set_locked(True)
+        self.assertEqual(len(h.committed), before_committed)
+
+    def test_reattach_detaches_previous_widgets(self):
+        h = self.harness
+        old_slider = h.slider_up
+        h.controller.attach(box_up=h.box_up)
+        before = len(h.changed)
+        old_slider.setValue(500)
+        self.assertEqual(len(h.changed), before)
 
 
 if __name__ == "__main__":

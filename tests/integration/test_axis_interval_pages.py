@@ -18,6 +18,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from PyQt5.QtCore import QEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QWidget
 
@@ -45,6 +46,38 @@ def _wait_for_animation(widget, *, timeout_ms=4000):
         waited += 25
         animation = getattr(widget, "_visibility_animation", None)
     return animation is None
+
+
+#: 本模块创建的真实控件与控制器。它们都没有父对象，若留给循环 GC 回收，可
+#: 能在别的测试正在绘制时销毁控件，Windows 上表现为 Qt 原生崩溃；统一在每个
+#: 测试结束时显式拆除。
+_CREATED_BARS = []
+_CREATED_HARNESSES = []
+
+
+def _new_timeline_bar():
+    bar = TimelineBar()
+    _CREATED_BARS.append(bar)
+    return bar
+
+
+def _cleanup_widgets():
+    for harness in _CREATED_HARNESSES:
+        try:
+            harness.controller.detach()
+        except RuntimeError:
+            pass
+    _CREATED_HARNESSES.clear()
+    while _CREATED_BARS:
+        bar = _CREATED_BARS.pop()
+        try:
+            bar.hide()
+            bar.setParent(None)
+            bar.deleteLater()
+        except RuntimeError:
+            pass
+    QApplication.processEvents()
+    QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 class _Workspace:
@@ -85,8 +118,9 @@ class _AxisHarness:
                 self.core.source_identity.future.result(timeout=30)
         assert success, f"合成数据加载失败: {info}"
 
-        self.bar = TimelineBar()
+        self.bar = _new_timeline_bar()
         self.controller = AxisIntervalController()
+        _CREATED_HARNESSES.append(self)
         self.controller.attach(
             interval_widget=self.bar.interval_control,
             box_length=self.bar.interval_control.input_length,
@@ -185,6 +219,9 @@ class PageIntervalBindingTests(unittest.TestCase):
 
     def setUp(self):
         self.harness = _AxisHarness()
+
+    def tearDown(self):
+        _cleanup_widgets()
 
     def test_integral_page_restores_its_own_interval_and_lock(self):
         spec = _spec("integral", low=2, up=8, mid=5)
@@ -420,6 +457,9 @@ class SliceSourceRangeTests(unittest.TestCase):
     def setUp(self):
         self.harness = _AxisHarness()
 
+    def tearDown(self):
+        _cleanup_widgets()
+
     @staticmethod
     def _slice_spec(position=0.0):
         return _spec(
@@ -517,8 +557,11 @@ class BottomBarLayoutTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def tearDown(self):
+        _cleanup_widgets()
+
     def test_position_group_takes_the_timeline_place_when_there_is_no_time_axis(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1400, bar.HEIGHT)
         bar.show()
         bar.set_timeline_visible(False, animate=False)
@@ -534,7 +577,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertGreater(bar.interval_control.range_slider.width(), bar.AXIS_SLIDER_MIN_WIDTH * 2)
 
     def test_position_group_shares_the_row_with_the_timeline(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=False)
@@ -544,7 +587,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertLessEqual(abs(bar.axis_group.width() - bar.timeline_group.width()), 2)
 
     def test_narrow_window_wraps_only_the_timeline_to_a_second_row(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=False)
@@ -563,7 +606,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(hasattr(bar, "view_controls"))
 
     def test_one_visible_group_never_adds_another_row(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1400, bar.HEIGHT)
         bar.show()
         bar.set_timeline_visible(False, animate=False)
@@ -577,7 +620,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertEqual(bar.height(), bar.HEIGHT)
 
     def test_unwrapping_restores_the_single_row_height(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=False)
@@ -594,7 +637,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(bar.secondary_row.isAncestorOf(bar.timeline_group))
 
     def test_bottom_bar_collapses_when_both_groups_are_hidden(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.show()
         bar.set_position_visible(True, animate=False)
         bar.set_timeline_visible(False, animate=False)
@@ -607,7 +650,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertEqual(bar.height(), bar.HEIGHT)
 
     def test_revealing_twice_does_not_restart_the_animation(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=True)
@@ -620,7 +663,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertFalse(bar.axis_group.isHidden())
 
     def test_reverse_collapse_continues_from_the_current_state(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=True)
@@ -632,7 +675,7 @@ class BottomBarLayoutTests(unittest.TestCase):
         self.assertTrue(bar.axis_group.isHidden())
 
     def test_collapse_then_reveal_again_settles_visible(self):
-        bar = TimelineBar()
+        bar = _new_timeline_bar()
         bar.resize(1500, bar.HEIGHT)
         bar.show()
         bar.set_position_visible(True, animate=True)

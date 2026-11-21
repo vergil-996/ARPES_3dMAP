@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from PyQt5 import sip
 from PyQt5.QtCore import QObject, QSignalBlocker, pyqtSignal
 
 from bandscope.core.axis_interval import AxisSpace
@@ -20,6 +21,17 @@ from bandscope.ui import theme
 #: 位置类滑条的等分数。滑条本身只认整数，等分整段物理跨度后拖动就是连续的，
 #: 精确物理值仍由模型和输入框持有。
 SLIDER_STEPS = 1000
+
+
+def _alive(widget) -> bool:
+    """控件是否仍可用。
+
+    PyQt 的包装对象可能比 C++ 控件活得久（父控件先被销毁、或测试里回收了
+    底栏），此时 ``widget is not None`` 仍为真，但任何访问都会抛
+    ``RuntimeError``。控制器被并发调用时这类异常会从 Qt 槽里冒出来终止进程，
+    所以所有控件访问都先过这一层判断。
+    """
+    return widget is not None and not sip.isdeleted(widget)
 
 
 class IntervalEditMode:
@@ -68,6 +80,8 @@ class AxisIntervalController(QObject):
         label_lock=None,
         interval_widget=None,
     ):
+        # 重新装配前先断开旧控件，避免旧控件继续把信号送进新状态。
+        self.detach()
         self._widgets = {
             "interval_widget": interval_widget,
             "slider_up": slider_up,
@@ -84,7 +98,7 @@ class AxisIntervalController(QObject):
 
     def _connect(self):
         for widget, signal_name, handler in self._signal_plan():
-            if widget is None:
+            if not _alive(widget):
                 continue
             signal = getattr(widget, signal_name, None)
             if signal is None:
@@ -161,23 +175,23 @@ class AxisIntervalController(QObject):
     def _reset_widgets(self):
         widgets = self._widgets
         interval_widget = widgets.get("interval_widget")
-        slider = getattr(interval_widget, "range_slider", None)
-        if slider is not None:
+        slider = getattr(interval_widget, "range_slider", None) if _alive(interval_widget) else None
+        if _alive(slider):
             slider.coordinate_popup.hide()
             slider.lock_badge.hide()
-        targets = [widget for widget in widgets.values() if widget is not None]
+        targets = [widget for widget in widgets.values() if _alive(widget)]
         blockers = [QSignalBlocker(widget) for widget in targets]
         try:
             for name, widget in widgets.items():
-                if widget is None or name == "label_lock":
+                if not _alive(widget) or name == "label_lock":
                     continue
                 widget.setEnabled(False)
             button = widgets.get("button_lock")
-            if button is not None:
+            if _alive(button):
                 button.setChecked(False)
                 button.setText("锁定区间")
             label = widgets.get("label_lock")
-            if label is not None:
+            if _alive(label):
                 label.setText("● 区间未锁定")
                 label.setStyleSheet(
                     f"color: {theme.TEXT_3}; font-size: 11px; background: transparent;"
@@ -211,13 +225,13 @@ class AxisIntervalController(QObject):
             return
 
         widgets = self._widgets
-        targets = [widget for widget in widgets.values() if widget is not None]
+        targets = [widget for widget in widgets.values() if _alive(widget)]
         blockers = [QSignalBlocker(widget) for widget in targets]
         previous = self._syncing
         self._syncing = True
         try:
             interval_widget = widgets.get("interval_widget")
-            if interval_widget is not None:
+            if _alive(interval_widget):
                 interval_widget.sync(space, interval, self._mode != IntervalEditMode.DISABLED)
             self._sync_sliders(interval, space)
             self._sync_boxes(interval, space)
@@ -236,7 +250,7 @@ class AxisIntervalController(QObject):
             ("slider_position", interval.center),
         ):
             slider = self._widgets.get(name)
-            if slider is None:
+            if not _alive(slider):
                 continue
             slider.setRange(0, steps)
             setter = getattr(slider, "setToolTipConvertionFunc", None)
@@ -253,7 +267,7 @@ class AxisIntervalController(QObject):
             ("box_position", interval.center),
         ):
             box = self._widgets.get(name)
-            if box is None:
+            if not _alive(box):
                 continue
             box.setDecimals(decimals)
             minimum, maximum = space.minimum, space.maximum
@@ -266,7 +280,7 @@ class AxisIntervalController(QObject):
             box.setValue(float(physical))
 
         length_box = self._widgets.get("box_length")
-        if length_box is not None:
+        if _alive(length_box):
             length_box.setDecimals(decimals)
             length_box.setRange(0.0, float(space.physical_span))
             length_box.setSingleStep(step)
@@ -274,12 +288,12 @@ class AxisIntervalController(QObject):
 
     def _sync_lock(self, interval):
         button = self._widgets.get("button_lock")
-        if button is not None:
+        if _alive(button):
             button.setChecked(bool(interval.locked))
             button.setText("已锁定" if interval.locked else "锁定区间")
 
         label = self._widgets.get("label_lock")
-        if label is not None:
+        if _alive(label):
             if interval.locked:
                 label.setText("● 区间已锁定")
                 label.setStyleSheet(
@@ -301,21 +315,21 @@ class AxisIntervalController(QObject):
             self._set_enabled(name, full)
         # 锁定后长度只能由端点平移改变，输入框只读。
         length_box = self._widgets.get("box_length")
-        if length_box is not None:
+        if _alive(length_box):
             length_box.setEnabled(full)
             length_box.setReadOnly(bool(full and locked))
         button = self._widgets.get("button_lock")
-        if button is not None:
+        if _alive(button):
             button.setEnabled(full)
         for name in ("slider_position", "box_position"):
             self._set_enabled(name, position)
         interval_widget = self._widgets.get("interval_widget")
-        if interval_widget is not None:
+        if _alive(interval_widget):
             interval_widget.setEnabled(full or position)
 
     def _set_enabled(self, name, enabled):
         widget = self._widgets.get(name)
-        if widget is not None:
+        if _alive(widget):
             widget.setEnabled(bool(enabled))
 
     # ------------------------------------------------------------------
@@ -378,7 +392,7 @@ class AxisIntervalController(QObject):
     def _commit(self, operation, widget_name):
         """输入框提交：一次操作只落定一次，不额外发预览。"""
         widget = self._widgets.get(widget_name)
-        if widget is None or self._interval is None or self._syncing:
+        if not _alive(widget) or self._interval is None or self._syncing:
             return
         self._commit_value(operation, float(widget.value()))
 

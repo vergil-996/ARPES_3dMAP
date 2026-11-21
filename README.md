@@ -1,12 +1,26 @@
 # BandScope
 
-BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、多数据源工作区、全局 ROI 数据域、3D 体渲染、2D 切片、折线路径 E–k 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出、多页面 Blender 工程导出／回读与原位显示更新，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.22.0**。
+BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工作台，提供 `npz` / `mat` 数据加载、多数据源工作区、全局 ROI 数据域、3D 体渲染、2D 切片、折线路径 E–k 切片、交互裁剪、去噪、积分分析、DOS 分析、EDC 曲线、EDC 瀑布图、二阶导锐化、曲线比较、截图与结果导出、多页面 Blender 工程导出／回读与原位显示更新，以及可独立安装的官方扩展等能力。当前源码版本为 **v1.22.1**。
 
 > 本项目 GUI 基于 [ChinaIceF/PyQt-SiliconUI](https://github.com/ChinaIceF/PyQt-SiliconUI) 开源项目修改而来。
 
 ---
 
 ## 界面概览
+
+### v1.22.1 更新
+
+本版是 v1.22.0 的发布修正，功能与 v1.22.0 相同（详见下一节）。v1.22.0 的 CI 全量回归在 `tests.integration.test_axis_interval_pages` 处中断，未产出 Release。
+
+- **积分区间控制器**：底栏区间条的输入框与滑条在底栏销毁后 C++ 对象已不存在，控制器仍持有其 PyQt 包装；迟到的 `editingFinished` 会在同步中访问已销毁控件并抛 `RuntimeError`，该异常从 Qt 槽冒出会终止进程。现在所有控件访问先判断 `sip.isdeleted`，销毁后一律跳过；`attach()` 重新装配前先断开旧控件。
+- **测试清理**：区间页面集成测试改为每个测试结束显式拆除无父控件的底栏，避免循环 GC 在别的测试绘制中途销毁控件；另补两项控制器单元测试。
+
+验证（Windows、仓库 `.venv`）：
+
+- 全量 `python -m unittest discover -s tests -t .`：**1941 项通过**（2026-11-21，155.846 秒），日志 `.local/logs/release-1.22.1-full.log`；`compileall` 通过。
+- `tests.integration.test_axis_interval_pages` 修正后连续 15 次单独运行全部通过；`tests.ui.test_axis_interval_controller` 24 项通过。
+- 真实窗口（`.local/data/WSe2_step.npz`，修正后重跑）：`verify_axis_assignment.py` 18 项、`verify_canvas_rotation_dial.py` 13 项通过；色阶、不透明度曲线、路径切片、画布轴切片与派生瀑布图脚本亦在同一数据上通过。
+- `check_release_version.py v1.22.1`、`scripts/validation/verify_plugin_release_flow.py` 与 `git diff --check` 通过。
 
 ### v1.22.0 更新
 
