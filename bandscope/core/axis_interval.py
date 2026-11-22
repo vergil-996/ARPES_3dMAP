@@ -20,12 +20,49 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["AxisInterval", "AxisSpace", "nearest_index", "physical_decimals"]
+__all__ = [
+    "AUTO_DOCKING",
+    "CONTINUOUS_DOCKING",
+    "DISCRETE_DOCKING",
+    "PAN_FRAMES",
+    "PAN_PHYSICAL",
+    "AxisInterval",
+    "AxisSpace",
+    "FourthAxisDragSettings",
+    "nearest_index",
+    "physical_decimals",
+]
 
 AXIS_DISPLAY_LABELS = {"X": "kx", "Y": "ky", "E": "E", "delay": "时间"}
+
+AUTO_DOCKING = "auto"
+DISCRETE_DOCKING = "discrete"
+CONTINUOUS_DOCKING = "continuous"
+PAN_PHYSICAL = "physical"
+PAN_FRAMES = "frames"
+
+
+@dataclass(frozen=True)
+class FourthAxisDragSettings:
+    """当前数据源内所有页面共用的第四轴拖动设置。"""
+
+    docking: str = AUTO_DOCKING
+    continuous_pan: str = PAN_PHYSICAL
+
+    def __post_init__(self):
+        if self.docking not in {AUTO_DOCKING, DISCRETE_DOCKING, CONTINUOUS_DOCKING}:
+            raise ValueError(f"未知的第四轴停靠模式: {self.docking!r}")
+        if self.continuous_pan not in {PAN_PHYSICAL, PAN_FRAMES}:
+            raise ValueError(f"未知的连续平移模式: {self.continuous_pan!r}")
+
+    def resolved_docking(self, sample_count):
+        if self.docking != AUTO_DOCKING:
+            return self.docking
+        return DISCRETE_DOCKING if int(sample_count) < 30 else CONTINUOUS_DOCKING
 
 
 def nearest_index(coords, value):
@@ -230,6 +267,38 @@ class AxisInterval:
         if value is None:
             return False
         return self._translate(value - self.center)
+
+    def set_sample_center(self, coords, value, *, continuous=False):
+        """按采样下标平移，保持选中帧数；连续模式保留下标间的小数位置。"""
+        value = self._coerce(value)
+        values = np.asarray(coords, dtype=np.float64).reshape(-1)
+        if value is None or values.size == 0:
+            return False
+        if values.size == 1 or not np.isfinite(values).all():
+            return self.set_center(value)
+
+        order = np.argsort(values, kind="stable")
+        sorted_values = values[order]
+        sample_positions = np.arange(values.size, dtype=np.float64)
+        ranks = np.empty(values.size, dtype=np.float64)
+        ranks[order] = sample_positions
+
+        low_idx, up_idx = self.to_indices(values)
+        low_position, up_position = sorted((ranks[low_idx], ranks[up_idx]))
+        selection_center = (low_position + up_position) / 2.0
+        if continuous:
+            target_position = float(np.interp(value, sorted_values, sample_positions))
+            delta = target_position - selection_center
+        else:
+            target_position = ranks[nearest_index(values, value)]
+            delta = float(np.rint(target_position - selection_center))
+
+        delta = min(max(delta, -low_position), values.size - 1 - up_position)
+        low_position += delta
+        up_position += delta
+        low = float(np.interp(low_position, sample_positions, sorted_values))
+        up = float(np.interp(up_position, sample_positions, sorted_values))
+        return self._assign(low=low, up=up)
 
     def set_length(self, value):
         """以当前中心向两侧调整长度；触边时平移整个区间容纳目标长度。"""

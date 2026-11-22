@@ -2,7 +2,7 @@
 from dataclasses import replace
 
 from PyQt5.QtCore import QObject, QPoint, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -18,26 +18,6 @@ from PyQt5.QtWidgets import (
 import bandscope.ui.theme as theme
 from bandscope.core.crop_model import axis_labels, reorient_volume_selection, selection_for_context
 from bandscope.ui.numeric_wheel import enable_numeric_wheel
-
-
-def scissors_cursor():
-    screen = QApplication.primaryScreen()
-    ratio = screen.devicePixelRatio() if screen else 1.0
-    pixmap = QPixmap(round(32 * ratio), round(32 * ratio))
-    pixmap.setDevicePixelRatio(ratio)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    # Contrasting outline keeps the cursor visible on both bright and dark data.
-    for color, width in (("#171923", 4.5), ("#ffffff", 2.1)):
-        painter.setPen(QPen(QColor(color), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(3, 21, 8, 8)
-        painter.drawEllipse(20, 21, 8, 8)
-        painter.drawLine(10, 22, 25, 3)
-        painter.drawLine(22, 22, 8, 5)
-    painter.end()
-    return QCursor(pixmap, 25, 3)
 
 
 class CropPopup(QFrame):
@@ -213,7 +193,8 @@ class CropController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.popup = CropPopup(parent)
-        self.cursor = scissors_cursor()
+        # 裁剪与裁空共用同一个十字光标；不要按操作区分光标样式。
+        self.cursor = QCursor(Qt.CrossCursor)
         self.operation = "crop"
         self.enabled = False
         self.page_id = None
@@ -243,7 +224,6 @@ class CropController(QObject):
 
     def set_operation(self, operation):
         self.operation = operation
-        self.cursor = QCursor(Qt.CrossCursor) if operation == "erase" else scissors_cursor()
         self.popup.hide()
         if self.selection is not None:
             self.set_selection(replace(self.selection, operation=operation), notify=False)

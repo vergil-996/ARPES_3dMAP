@@ -4,6 +4,13 @@ from __future__ import annotations
 import copy
 import math
 
+from bandscope.core.opacity_curve import (
+    DEFAULT_OPACITY_INTERPOLATION,
+    OPACITY_LINEAR,
+    normalize_opacity_interpolation,
+    sanitized_opacity_segments,
+)
+
 LEGACY_MODE = "legacy"
 INDEPENDENT_MODE = "independent"
 NORMALIZATION_FULL = "full"
@@ -12,7 +19,6 @@ DEFAULT_COLORMAP_RANGE = (0.0, 1.0)
 DEFAULT_OPACITY_MODE = "线性"
 # 默认三点曲线即旧“兼容映射 → 线性”在默认色阶下的外观。
 DEFAULT_OPACITY_POINTS = ((0.0, 0.0), (0.5, 0.5), (1.0, 1.0))
-MIN_OPACITY_POINT_GAP = 1.0e-4
 DEFAULT_OPACITY_REFERENCE_DISTANCE = 1.0
 # 旧独立模式保存过的四参数曲线。
 LEGACY_OPACITY_KEYS = ("threshold", "transition", "gamma", "density")
@@ -39,7 +45,7 @@ def legacy_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MOD
 
 
 def normalize_opacity_points(points):
-    """按强度排序、去重并固定端点的有效点列；端点始终位于 0 与 1。"""
+    """稳定排序并固定首尾强度；重复点和任意小的间距均保留原顺序。"""
     cleaned = []
     for entry in points or ():
         try:
@@ -52,22 +58,11 @@ def normalize_opacity_points(points):
     if not cleaned:
         return [tuple(point) for point in DEFAULT_OPACITY_POINTS]
     cleaned.sort(key=lambda point: point[0])
-    result = []
-    for intensity, alpha in cleaned:
-        if result and intensity - result[-1][0] < MIN_OPACITY_POINT_GAP:
-            # 同一强度的重复点合并：后写入的值获胜，横坐标保持前一个。
-            result[-1] = (result[-1][0], alpha)
-            continue
-        result.append((intensity, alpha))
-    if result[0][0] < MIN_OPACITY_POINT_GAP:
-        result[0] = (0.0, result[0][1])
-    else:
-        result.insert(0, (0.0, result[0][1]))
-    if result[-1][0] > 1.0 - MIN_OPACITY_POINT_GAP:
-        result[-1] = (1.0, result[-1][1])
-    else:
-        result.append((1.0, result[-1][1]))
-    return result
+    if cleaned[0][0] != 0.0:
+        cleaned.insert(0, (0.0, cleaned[0][1]))
+    if cleaned[-1][0] != 1.0:
+        cleaned.append((1.0, cleaned[-1][1]))
+    return cleaned
 
 
 def _opacity_parameter_values(opacity):
@@ -96,16 +91,28 @@ def _legacy_opacity_conversion(opacity, reference_distance):
 
 
 def new_display_style(levels=DEFAULT_LEVELS, opacity_mode=DEFAULT_OPACITY_MODE,
-                      colormap_range=DEFAULT_COLORMAP_RANGE, opacity_points=None):
+                      colormap_range=DEFAULT_COLORMAP_RANGE, opacity_points=None,
+                      opacity_interpolation=DEFAULT_OPACITY_INTERPOLATION,
+                      opacity_segments=None):
+    points = normalize_opacity_points(
+        default_opacity_points() if opacity_points is None else opacity_points
+    )
+    opacity = {
+        "points": [list(point) for point in points],
+        "interpolation": normalize_opacity_interpolation(
+            opacity_interpolation, DEFAULT_OPACITY_INTERPOLATION,
+        ),
+    }
+    segments = sanitized_opacity_segments(points, opacity_segments)
+    if segments is not None:
+        opacity["segments"] = segments
     return {
         "display_mode": INDEPENDENT_MODE,
         "levels": tuple(float(value) for value in levels),
         "opacity_mode": str(opacity_mode),
         "colormap_range": tuple(float(value) for value in colormap_range),
         "normalization": {"mode": NORMALIZATION_FULL},
-        "opacity": {"points": [list(point) for point in normalize_opacity_points(
-            default_opacity_points() if opacity_points is None else opacity_points
-        )]},
+        "opacity": opacity,
     }
 
 
@@ -177,10 +184,21 @@ def resolved_display_style(style, *, reference_distance=None, convert_opacity=Tr
                    for value, default in zip(levels, DEFAULT_LEVELS))
     opacity = style.get("opacity") or {}
     if has_opacity_points(opacity):
-        points = [list(point) for point in normalize_opacity_points(opacity["points"])]
-        opacity_value = {"points": points}
+        points = normalize_opacity_points(opacity["points"])
+        opacity_value = {
+            "points": [list(point) for point in points],
+            "interpolation": normalize_opacity_interpolation(
+                opacity.get("interpolation"), OPACITY_LINEAR,
+            ),
+        }
+        segments = sanitized_opacity_segments(points, opacity.get("segments"))
+        if segments is not None:
+            opacity_value["segments"] = segments
     elif convert_opacity:
-        opacity_value = {"points": _legacy_opacity_conversion(opacity, reference_distance)}
+        opacity_value = {
+            "points": _legacy_opacity_conversion(opacity, reference_distance),
+            "interpolation": OPACITY_LINEAR,
+        }
     else:
         opacity_value = sanitized_legacy_opacity(opacity)
     return {
@@ -208,7 +226,10 @@ def with_display_mode(style, mode, *, reference_distance=None, source_distance=N
             DEFAULT_OPACITY_REFERENCE_DISTANCE if reference_distance is None else reference_distance,
             source_distance,
         )
-        return new_display_style(levels, opacity_mode, colormap_range, points)
+        return new_display_style(
+            levels, opacity_mode, colormap_range, points,
+            opacity_interpolation=OPACITY_LINEAR,
+        )
     return legacy_display_style(levels, opacity_mode, colormap_range)
 
 

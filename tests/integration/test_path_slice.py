@@ -132,6 +132,21 @@ class PathSliceHostTests(unittest.TestCase):
         np.testing.assert_allclose(changed, initial + 100)
         self.assertEqual([node["label"] for node in spec.params["path_nodes"]], ["Γ", "K", "M"])
 
+    def test_statistics_values_are_stable_when_sampled_segments_are_cached(self):
+        spec = self.path_spec()
+        first_context = self.controller.compute_context(spec)
+        first_values = self.controller.statistics_values(spec, first_context)
+
+        second_context = self.controller.compute_context(spec)
+
+        self.assertIsNot(first_context["path_sample"], second_context["path_sample"])
+        for first_segment, second_segment in zip(
+            first_context["path_sample"].segments,
+            second_context["path_sample"].segments,
+        ):
+            self.assertIs(first_segment.intensity, second_segment.intensity)
+        self.assertIs(self.controller.statistics_values(spec, second_context), first_values)
+
     def test_crop_mask_excludes_outside_samples_from_result(self):
         self.source.params.update(crop_k_low=1, crop_k_up=2, crop_e_low=1, crop_e_up=2)
         spec = self.path_spec()
@@ -313,6 +328,9 @@ class PathSliceRecipeTests(unittest.TestCase):
             window.global_refresh = lambda: window._render_active_page()
             page_id = window.path_slice_controller.generate_page()
 
+            self.assertEqual(window.current_render_context["view"], "path_slice")
+            self.assertTrue(window.ax_2d._path_slice_artists)
+            self.assertTrue(window.ax_2d.get_title().startswith("路径切片"))
             for _ in range(2):
                 window.left_workspace.activate_page(source.page_id)
                 self.assertEqual(window.current_render_context["view"], "2d")

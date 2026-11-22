@@ -220,6 +220,11 @@ class TimeIntervalMixin:
             image_state = control_state.get("image") or {}
             image_state.pop("slider_time", None)
         if controller is not None:
+            manager = self.__dict__.get("source_manager")
+            session = manager.active() if manager is not None else None
+            controller.set_fourth_axis_drag(
+                getattr(session, "fourth_axis_drag", None) if session is not None else None
+            )
             controller.set_mode(IntervalEditMode.FULL if enabled else IntervalEditMode.DISABLED)
             controller.bind(space, interval)
         if bar is not None:

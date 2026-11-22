@@ -11,6 +11,7 @@ from bandscope.core.display_style import (
     is_independent,
     resolved_display_style,
 )
+from bandscope.core.opacity_curve import evaluate_opacity_curve
 
 # 折线逼近旧曲线时允许的 α 误差：半个量化步长，保证最终误差不超过 1/255。
 OPACITY_POINT_TOLERANCE = 1.0 / 255.0 / 2.0
@@ -150,13 +151,13 @@ def independent_opacity_values(values, info, style, unit_distance=None):
     """可编辑曲线的最终逐体素 α；``unit_distance`` 是曲线的参考距离。"""
     reference = (DEFAULT_OPACITY_REFERENCE_DISTANCE if unit_distance is None
                  else float(unit_distance))
-    points = np.asarray(
-        resolved_display_style(style, reference_distance=reference)["opacity"]["points"],
-        dtype=np.float64,
-    )
+    opacity = resolved_display_style(style, reference_distance=reference)["opacity"]
     q = normalized_intensity_samples(values, info)
     with np.errstate(invalid="ignore"):
-        return np.interp(q, points[:, 0], points[:, 1])
+        return evaluate_opacity_curve(
+            q, opacity["points"], interpolation=opacity["interpolation"],
+            segments=opacity.get("segments"),
+        )
 
 
 def rebase_opacity(alpha, source_distance, target_distance):

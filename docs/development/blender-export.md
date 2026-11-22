@@ -127,9 +127,9 @@ schema 7–10 工程仍可打开和原位更新：缺少数据体外观时按自
 
 schema 10–11 工程保留四参数不透明度并以显示编辑格式 2 原位更新；需要自由控制点曲线时请重新导出为新版工程。
 
-新工程为 **schema 12、显示编辑格式 3**。`bandscope_edit` 除原色带、三点色阶、锁定范围和旧映射曲线外，还保存独立显示样式（按强度排序的归一化 `(强度, α)` 点列）、已解析强度范围及渲染质量。schema 10 起支持独立显示编辑；schema 7–9 不接受原位启用独立显示或显式质量配置。
+新工程为 **schema 13、显示编辑格式 4**。`bandscope_edit` 除原色带、三点色阶、锁定范围和旧映射曲线外，还保存独立显示样式（稳定排序的归一化 `(强度, α)` 点列、PCHIP／直线模式及平滑曲段系数）、已解析强度范围及渲染质量。schema 10 起支持独立显示编辑；schema 7–9 不接受原位启用独立显示或显式质量配置。schema 12 工程按直线点列回读，并以显示编辑格式 3 原位更新；需要平滑模式或曲段拆分信息时请重新导出。
 
-## schema 12 资产契约
+## schema 13 资产契约
 
 `名称.assets/` 的典型结构为：
 
@@ -156,16 +156,16 @@ schema 10–11 工程保留四参数不透明度并以显示编辑格式 2 原�
 关闭文本预设时不创建 `fonts/`；启用时字体也打包进 `.blend`，但移动、分享和回读仍以完整同名 `.assets/` 为准。
 
 - `scene.json` 是唯一权威编辑配置，按工程和条目记录资产路径、来源、坐标、相机、布局、预设、八薄板材质与参数、十种文本样式、字体、辅助灯、推荐采样及 `bandscope_edit` 编辑状态。`.blend` 内嵌的 `scene_metadata` 仅供生成期诊断，不作为回读依据，更新时也不改写它。
-- 工程级 `project.presets` 只记录五项用户预设，其中 `thin_boxes` 控制全部八块薄板，`text_presets` 控制全部十种文本；`project.layout.preset_owner` 记录唯一持有共享预设对象的首个条目，后续条目的预设配置仅用于兼容回读与原位更新，不对应额外对象；`project.box_layout` 记录布局 ID；`project.box_materials` 以八种材质 ID 为键记录标签、默认参数、所需灯光和推荐采样；`project.text_styles` 与 `project.text_fonts` 记录文本注册表和字体资产；`project.display_edit_format=3` 标记当前显示编辑契约；schema 10–11 工程为格式 2。
+- 工程级 `project.presets` 只记录五项用户预设，其中 `thin_boxes` 控制全部八块薄板，`text_presets` 控制全部十种文本；`project.layout.preset_owner` 记录唯一持有共享预设对象的首个条目，后续条目的预设配置仅用于兼容回读与原位更新，不对应额外对象；`project.box_layout` 记录布局 ID；`project.box_materials` 以八种材质 ID 为键记录标签、默认参数、所需灯光和推荐采样；`project.text_styles` 与 `project.text_fonts` 记录文本注册表和字体资产；`project.display_edit_format=4` 标记当前显示编辑契约；schema 12 工程为格式 3，schema 10–11 工程为格式 2。
 - `project.volume_shading` 保存 `emission`／`hybrid_lit` 模式及生成时解析后的材质参数；`project.render.volume_bounces` 和采样设置记录对应渲染要求。
 - 每个条目的 `volume_lighting` 保存灯组、专用接收者、灯对象及生成时的实际局部位置、尺寸、颜色和功率。用户随后在 Blender 中手调节点或灯光不会回写到这些字段，原位更新会原样保留它们。
-- 每个条目的 `bandscope_edit.display_style` 保存独立／兼容模式、完整范围策略及可编辑不透明度点列，`render_quality` 保存插值与静止质量，`resolved_range` 保存实际已解析强度范围。schema 12 及以上工程可调整点列；schema 10–11 保留四参数不透明度并以格式 2 原位更新，需要自由控制点时重新导出。编辑器不再提供百分位或手动范围选项；读取旧独立显示时忽略受限范围快照并按冻结体完整范围重算，旧锁定也按该完整范围重建。
+- 每个条目的 `bandscope_edit.display_style` 保存独立／兼容模式、完整范围策略、可编辑不透明度点列、`opacity.interpolation` 及平滑曲段系数，`render_quality` 保存体数据插值与静止质量，`resolved_range` 保存实际已解析强度范围。schema 13 及以上工程可调整平滑／直线模式；schema 12 按直线点列回读并保留格式 3；schema 10–11 保留四参数不透明度并以格式 2 原位更新，需要自由控制点时重新导出。编辑器不再提供百分位或手动范围选项；读取旧独立显示时忽略受限范围快照并按冻结体完整范围重算，旧锁定也按该完整范围重建。
 - 每个条目的 `box_presets` 包含八条记录，分别记录 `preset_group=thin_boxes`、`layout_slot=right/front`、`group_height_offset`（右侧 0、前侧 0.175）、实际中心、尺寸、厚度、层间距、统一橙色、是否与数据体相交以及材质参数；`box_lighting` 记录灯组、接收者 Collection 和灯光对象名。
 - 每个条目的 `text_presets` 包含十条记录，统一 `body=A`、`preset_group=text_presets`，并记录样式、字体、材质、两行五列的位置和实际中心；`text_layout` 记录下方布局、相机朝向和 0.12 字高，`text_lighting` 记录独立文本灯组和接收者。
 - `arrays.npz` 保存处理后强度、显示颜色、alpha 和体密度，供复核与重新转换。重新调色以强度数组和编辑参数为准，不从最终 RGB 或 Blender 材质反推科学强度。
 - `volume.vdb` 包含 `density` FloatGrid 和 `color` Vec3SGrid，是 Blender 的实际渲染资产；`density` 为总消光系数，不随外观模式改成散射系数。
 - BandScope 的 0–200 显示空间按 `(display - 100) × 0.01` 映射为居中的 2 个 Blender 单位。ROI、物理坐标、降序坐标及 E 轴相机翻转语义原样保留，E、kx、ky 不解释为毫米。
-- 不透明度曲线按归一化强度分段线性求值，α 定义在完整显示网格的参考距离上；写入 VDB 时按 `σ = -log(1-α) / unit_distance_blender` 换算，并对接近 1 的 α 做有限截断。色阶锁定、gamma、局部增强和插件倍率在导出时只应用一次。
+- 不透明度曲线按归一化强度和实际点位置以 PCHIP 或直线求值，同强度点按原顺序形成垂直阶跃，α 定义在完整显示网格的参考距离上；写入 VDB 时按 `σ = -log(1-α) / unit_distance_blender` 换算，并对接近 1 的 α 做有限截断。色阶锁定、gamma、局部增强和插件倍率在导出时只应用一次。
 - 原位更新保留项目级材质、文本、字体、布局、数据体外观、灯光和条目级 `box_presets`、`volume_lighting`、`text_presets`；只替换修改条目的 VDB、`arrays.npz` 和 `scene.json`，不改写 `.blend` 中的创作。
 
 ## 验收

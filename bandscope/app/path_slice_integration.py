@@ -688,16 +688,22 @@ class PathSliceController:
             return self.__dict__.setdefault(
                 "_empty_levels_statistics", np.asarray([], dtype=np.float64),
             )
-        if (self.__dict__.get("_levels_statistics_sample") is not sample
-                or self.__dict__.get("_levels_statistics_selected") != tuple(model.selected)):
-            arrays = [np.asarray(sample.segments[index].intensity)
-                      for index in model.selected if 0 <= index < len(sample.segments)]
+        arrays = tuple(
+            np.asarray(sample.segments[index].intensity)
+            for index in model.selected if 0 <= index < len(sample.segments)
+        )
+        cached_arrays = self.__dict__.get("_levels_statistics_arrays")
+        cache_hit = (
+            cached_arrays is not None
+            and len(cached_arrays) == len(arrays)
+            and all(cached is current for cached, current in zip(cached_arrays, arrays))
+        )
+        if not cache_hit:
             self._levels_statistics_values = (
                 np.concatenate([value.ravel() for value in arrays]) if arrays
                 else np.asarray([], dtype=np.float64)
             )
-            self._levels_statistics_sample = sample
-            self._levels_statistics_selected = tuple(model.selected)
+            self._levels_statistics_arrays = arrays
         return self._levels_statistics_values
 
     def sync_display_controls(self, spec) -> None:

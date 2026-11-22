@@ -12,7 +12,13 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
-from bandscope.core.axis_interval import AxisSpace
+from bandscope.core.axis_interval import (
+    CONTINUOUS_DOCKING,
+    PAN_FRAMES,
+    AxisInterval,
+    AxisSpace,
+    FourthAxisDragSettings,
+)
 from bandscope.ui import theme
 from bandscope.ui.axis_interval_bar import AxisIntervalControl
 from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
@@ -59,6 +65,54 @@ class DualIntervalMouseTests(unittest.TestCase):
         QApplication.sendEvent(self.slider, press)
         QApplication.sendEvent(self.slider, move)
         QApplication.sendEvent(self.slider, release)
+
+    def _bind_fourth_axis(self, coords, settings=None, interval=None):
+        self.space = AxisSpace("delay", np.asarray(coords, dtype=float))
+        self.controller.set_fourth_axis_drag(settings)
+        self.controller.bind(
+            self.space,
+            interval if interval is not None else self.space.as_interval(),
+        )
+
+    def test_fourth_axis_endpoint_snaps_to_real_samples_in_automatic_mode(self):
+        self._bind_fourth_axis([0.0, 10.0, 30.0])
+        self._drag(self._point("low"), self._point(x=self.slider._x_for(11.0)))
+        self.assertEqual(self.controller.interval.low, 10.0)
+        self.assertEqual(len(self.commits), 1)
+
+    def test_fourth_axis_auto_thirty_samples_allows_fractional_endpoint(self):
+        self._bind_fourth_axis(np.arange(30, dtype=float))
+        self._drag(self._point("low"), self._point(x=self.slider._x_for(1.25)))
+        self.assertAlmostEqual(self.controller.interval.low, 1.25, delta=0.05)
+        self.assertNotIn(self.controller.interval.low, self.space.coords)
+
+    def test_fourth_axis_discrete_center_drag_moves_whole_frame_range(self):
+        coords = np.array([0.0, 10.0, 30.0, 70.0, 140.0])
+        interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+        self._bind_fourth_axis(coords, interval=interval)
+        self._drag(
+            self._point(x=self.slider._x_for(interval.center)),
+            self._point(x=self.slider._x_for(1000.0)),
+        )
+        self.assertEqual((self.controller.interval.low, self.controller.interval.up), (30.0, 140.0))
+        self.assertEqual(self.controller.interval.to_indices(coords), (2, 4))
+
+    def test_fourth_axis_continuous_frame_pan_allows_fractional_endpoints(self):
+        coords = np.array([0.0, 10.0, 30.0, 70.0, 140.0])
+        interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+        self._bind_fourth_axis(
+            coords,
+            FourthAxisDragSettings(CONTINUOUS_DOCKING, PAN_FRAMES),
+            interval,
+        )
+        self._drag(
+            self._point(x=self.slider._x_for(interval.center)),
+            self._point(x=self.slider._x_for(55.0)),
+        )
+        self.assertAlmostEqual(self.controller.interval.low, 22.5, delta=0.5)
+        self.assertAlmostEqual(self.controller.interval.up, 113.75, delta=0.5)
+        low, up = self.controller.interval.to_indices(coords)
+        self.assertEqual(up - low + 1, 3)
 
     def test_endpoint_contact_locks_and_release_commits_once(self):
         self._drag(self._point("up"), self._point("low"))

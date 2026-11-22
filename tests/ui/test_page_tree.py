@@ -17,6 +17,14 @@ from PyQt5.QtGui import QDropEvent, QKeyEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidget
 
+from bandscope.core.axis_interval import (
+    AUTO_DOCKING,
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
+    PAN_FRAMES,
+    PAN_PHYSICAL,
+    FourthAxisDragSettings,
+)
 from bandscope.ui import theme
 from bandscope.ui.page_tree import PAGE_KIND_ICONS, PageTreeEntry, PageTreePanel
 from bandscope.ui.result_workspace import (
@@ -137,6 +145,17 @@ class PageTreeStructureTests(_WorkspaceFixture):
             self.panel._entries["p2"].page_kind,
             self.workspace.page_by_id("p2").page_kind,
         )
+
+    def test_header_icon_follows_page_changes_and_clears_with_the_workspace(self):
+        home_icon = self.workspace.view_icon.icon()
+        self.assertFalse(home_icon.isNull())
+
+        self.workspace.activate_page("p2")
+        self.assertIsNot(self.workspace.view_icon.icon(), home_icon)
+        self.assertFalse(self.workspace.view_icon.icon().isNull())
+
+        self.workspace.detach_all_pages()
+        self.assertTrue(self.workspace.view_icon.icon().isNull())
 
     def test_long_names_are_not_elided_and_the_tooltip_carries_the_full_name(self):
         long_title = "超长的页面名称：沿能量轴积分得到的费米面（验收页眉排版）"
@@ -968,12 +987,64 @@ class PageTreeHelperTests(unittest.TestCase):
             "NVIDIA GPU",
         )
         self.assertFalse(panel.source_card.isHidden())
+        self.assertFalse(panel.source_icon.icon().isNull())
+        self.assertEqual(panel.source_icon.sizeHint(), QSize(15, 15))
         self.assertIn("WSe₂", panel.source_name.text())
         self.assertTrue(panel.source_file.text())
         self.assertEqual(panel.source_file.toolTip(), "WSe2_step.npz")
         self.assertEqual(panel.source_meta.text(), "150 × 150 × 200 × 25 · NVIDIA GPU")
         panel.clear_source_summary()
         self.assertTrue(panel.source_card.isHidden())
+
+    def test_source_card_exposes_and_emits_fourth_axis_settings(self):
+        panel = PageTreePanel()
+        self.addCleanup(panel.deleteLater)
+        panel.set_source_summary(
+            "合成数据",
+            "synthetic.npz",
+            (2, 2, 2, 3),
+            "CPU",
+            fourth_axis_drag=FourthAxisDragSettings(),
+            fourth_axis_count=3,
+        )
+        menu = panel.source_settings_menu
+        self.assertFalse(panel.source_settings_button.isHidden())
+        self.assertEqual(menu.docking_combo.currentData(), AUTO_DOCKING)
+        self.assertIn("离散停靠", menu.docking_combo.itemText(0))
+        self.assertEqual(menu.pan_combo.currentData(), PAN_PHYSICAL)
+
+        changes = []
+        panel.fourth_axis_settings_changed.connect(
+            lambda docking, pan: changes.append((docking, pan))
+        )
+        menu.pan_combo.setCurrentIndex(menu.pan_combo.findData(PAN_FRAMES))
+        menu.docking_combo.setCurrentIndex(menu.docking_combo.findData(CONTINUOUS_DOCKING))
+        self.assertEqual(
+            changes,
+            [(AUTO_DOCKING, PAN_FRAMES), (CONTINUOUS_DOCKING, PAN_FRAMES)],
+        )
+
+        panel.set_source_summary(
+            "合成数据",
+            "synthetic.npz",
+            (2, 2, 2, 30),
+            "CPU",
+            fourth_axis_drag=FourthAxisDragSettings(CONTINUOUS_DOCKING, PAN_FRAMES),
+            fourth_axis_count=30,
+        )
+        self.assertIn("连续拖动", menu.docking_combo.itemText(0))
+        self.assertEqual(menu.pan_combo.currentData(), PAN_FRAMES)
+
+        panel.set_source_summary(
+            "合成数据",
+            "synthetic.npz",
+            (2, 2, 2, 30),
+            "CPU",
+            fourth_axis_drag=FourthAxisDragSettings(DISCRETE_DOCKING, PAN_FRAMES),
+            fourth_axis_count=30,
+        )
+        self.assertEqual(menu.docking_combo.currentData(), DISCRETE_DOCKING)
+        self.assertIn("连续拖动", menu.docking_combo.itemText(0))
 
     def test_empty_panel_shows_nothing_and_locates_nothing(self):
         panel = PageTreePanel()

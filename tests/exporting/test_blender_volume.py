@@ -100,7 +100,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
         )
         self.assertGreaterEqual(hybrid.recommended_samples, 128)
         metadata = self._metadata(hybrid)
-        self.assertEqual(metadata["schema_version"], 12)
+        self.assertEqual(metadata["schema_version"], 13)
         self.assertEqual(metadata["project"]["render"]["samples"], 128)
         self.assertEqual(metadata["project"]["render"]["volume_bounces"], 2)
         self.assertEqual(metadata["project"]["volume_shading"]["mode"], "hybrid_lit")
@@ -150,7 +150,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             blend, metadata = write_fake_blender_project(directory, volume_mode="hybrid_lit")
             project = load_blender_project(blend)
-            self.assertEqual(project.schema_version, 12)
+            self.assertEqual(project.schema_version, 13)
             self.assertEqual(project.volume_shading["mode"], "hybrid_lit")
             self.assertEqual(len(project.metadata["entries"][0]["volume_lighting"]["lights"]), 3)
             original = copy.deepcopy(project.metadata["entries"][0]["volume_lighting"])
@@ -162,7 +162,7 @@ class BlenderVolumeProjectTests(unittest.TestCase):
             project.metadata["project"]["volume_shading"] = custom_shading
             generated = prepare_scene_for_update(project.entries[0].snapshot).metadata()
             merged = merged_project_metadata(project, {"entry-001": generated})
-            self.assertEqual(merged["schema_version"], 12)
+            self.assertEqual(merged["schema_version"], 13)
             self.assertEqual(merged["project"]["volume_shading"], custom_shading)
             self.assertEqual(merged["entries"][0]["volume_lighting"], original)
             self.assertNotEqual(

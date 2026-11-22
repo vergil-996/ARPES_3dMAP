@@ -6,8 +6,8 @@
 
     控件意图 → 模型约束 → 阻断信号统一同步 → 一次性保存/刷新
 
-滑条按物理坐标映射（``SLIDER_STEPS`` 等分整个轴跨度），因此拖动是连续的，
-端点也能停在采样点之间；需要采样下标时由 ``AxisInterval.to_indices`` 映射。
+滑条按物理坐标映射（``SLIDER_STEPS`` 等分整个轴跨度）。普通坐标轴始终连续；
+第四轴可按数据源设置离散停靠，或在连续拖动时选择保持物理宽度／采样帧数。
 """
 
 from __future__ import annotations
@@ -15,7 +15,14 @@ from __future__ import annotations
 from PyQt5 import sip
 from PyQt5.QtCore import QObject, QSignalBlocker, pyqtSignal
 
-from bandscope.core.axis_interval import AxisSpace
+from bandscope.core.axis_interval import (
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
+    PAN_FRAMES,
+    AxisSpace,
+    FourthAxisDragSettings,
+    nearest_index,
+)
 from bandscope.ui import theme
 
 #: 位置类滑条的等分数。滑条本身只认整数，等分整段物理跨度后拖动就是连续的，
@@ -62,6 +69,7 @@ class AxisIntervalController(QObject):
         self._widgets = {}
         self._connected = []
         self._preview_dirty = False
+        self._fourth_axis_drag = FourthAxisDragSettings()
 
     # ------------------------------------------------------------------
     # 装配
@@ -159,6 +167,10 @@ class AxisIntervalController(QObject):
             return
         self._mode = mode
         self.sync_widgets()
+
+    def set_fourth_axis_drag(self, settings):
+        """只改变下一次拖动规则，不改写当前区间或请求图像刷新。"""
+        self._fourth_axis_drag = settings or FourthAxisDragSettings()
 
     def clear(self):
         """当前页面没有可编辑区间：丢掉模型，控件回到中性禁用状态。
@@ -336,6 +348,16 @@ class AxisIntervalController(QObject):
     # 控件意图
     # ------------------------------------------------------------------
     def _on_range_endpoint(self, endpoint, value):
+        docking = self._fourth_axis_docking()
+        if docking is not None and self._interval is not None and self._interval.locked:
+            half_length = self._interval.length / 2.0
+            target_center = value + half_length if endpoint == "low" else value - half_length
+            self._apply(lambda interval: self._translate_fourth_axis(
+                interval, target_center, docking
+            ))
+            return
+        if docking == DISCRETE_DOCKING and self._space is not None:
+            value = float(self._space.coords[nearest_index(self._space.coords, value)])
         if endpoint == "low":
             self._apply(lambda interval: interval.set_low(value))
         else:
@@ -348,7 +370,27 @@ class AxisIntervalController(QObject):
         self._commit_value(operation, value)
 
     def _on_range_center(self, value):
+        docking = self._fourth_axis_docking()
+        if docking is not None:
+            self._apply(lambda interval: self._translate_fourth_axis(interval, value, docking))
+            return
         self._apply(lambda interval: interval.set_center(value))
+
+    def _fourth_axis_docking(self):
+        if self._space is None or self._space.key != "delay":
+            return None
+        return self._fourth_axis_drag.resolved_docking(self._space.sample_count)
+
+    def _translate_fourth_axis(self, interval, value, docking):
+        keep_frames = (
+            docking == DISCRETE_DOCKING
+            or self._fourth_axis_drag.continuous_pan == PAN_FRAMES
+        )
+        if keep_frames:
+            return interval.set_sample_center(
+                self._space.coords, value, continuous=docking == CONTINUOUS_DOCKING
+            )
+        return interval.set_center(value)
 
     def _finish_preview(self):
         if not self._preview_dirty:

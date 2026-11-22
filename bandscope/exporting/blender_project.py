@@ -65,16 +65,18 @@ from bandscope.exporting.blender_texts import (
 from bandscope.exporting.publication_models import PublicationSnapshot
 from bandscope.exporting.publication_renderers import compute_level_info
 
-BLENDER_PROJECT_SCHEMA = 12
+BLENDER_PROJECT_SCHEMA = 13
 BLENDER_PROJECT_BOX_MATERIAL_SCHEMA = 8
 BLENDER_PROJECT_TEXT_SCHEMA = 9
 BLENDER_PROJECT_DISPLAY_SCHEMA = 10
 BLENDER_PROJECT_VOLUME_SCHEMA = 11
 BLENDER_PROJECT_OPACITY_POINTS_SCHEMA = 12
+BLENDER_PROJECT_OPACITY_INTERPOLATION_SCHEMA = 13
 # schema 7–10 回读和原位更新保留原版本及创作内容，不升级为柔和受光。
 BLENDER_PROJECT_MIN_ENTRY_SCHEMA = 7
 BLENDER_PROJECT_FORMAT = "bandscope-blender-project"
 BLENDER_EDIT_FORMAT = BLENDER_DISPLAY_EDIT_FORMAT
+BLENDER_POINTS_EDIT_FORMAT = 3
 BLENDER_LEGACY_EDIT_FORMAT = 2
 BOX_GROUP_PRESET = "thin_boxes"
 PRESET_KEYS = ("coordinates", "guide_frame", "orientation", BOX_GROUP_PRESET, TEXT_GROUP_PRESET)
@@ -306,6 +308,10 @@ class LoadedBlenderProject:
     @property
     def supports_opacity_points(self) -> bool:
         return self.schema_version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
+
+    @property
+    def supports_opacity_interpolation(self) -> bool:
+        return self.schema_version >= BLENDER_PROJECT_OPACITY_INTERPOLATION_SCHEMA
 
     @property
     def volume_shading(self):
@@ -917,8 +923,11 @@ def _validate_text_configuration(metadata):
 
 def _validate_display_configuration(metadata):
     version = int(metadata.get("schema_version", 0) or 0)
-    required_format = (BLENDER_EDIT_FORMAT if version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
-                       else BLENDER_LEGACY_EDIT_FORMAT)
+    required_format = (
+        BLENDER_EDIT_FORMAT if version >= BLENDER_PROJECT_OPACITY_INTERPOLATION_SCHEMA
+        else BLENDER_POINTS_EDIT_FORMAT if version >= BLENDER_PROJECT_OPACITY_POINTS_SCHEMA
+        else BLENDER_LEGACY_EDIT_FORMAT
+    )
     if (metadata.get("project") or {}).get("display_edit_format") != required_format:
         raise BlenderProjectError(f"schema {version} 工程缺少显示编辑格式 {required_format} 配置。")
     for entry in metadata.get("entries") or ():
@@ -1245,6 +1254,7 @@ def _snapshot_from_entry(blend_path, entry, arrays_path, legacy):
                 "frozen_result": True,
                 "display_schema": display_schema,
                 "points_supported": points_supported,
+                "interpolation_supported": int(entry.get("schema_version", 0)) >= BLENDER_PROJECT_OPACITY_INTERPOLATION_SCHEMA,
                 "display_edited": False,
             },
         },
@@ -1334,6 +1344,7 @@ def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range,
     state = snapshot.payload.setdefault("blender_project", {})
     display_schema = bool(state.get("display_schema", False))
     points_supported = bool(state.get("points_supported", False))
+    interpolation_supported = bool(state.get("interpolation_supported", True))
     current = (snapshot.payload.get("display") or {}).get("background_style")
     if display_style is not None:
         selected = display_style
@@ -1358,6 +1369,11 @@ def update_snapshot_display(snapshot, *, cmap_name, levels_params, locked_range,
         raise BlenderProjectError("schema 7–9 工程不能原位启用独立显示，请重新导出 schema 10。")
     if not points_supported and is_independent(selected) and has_opacity_points(selected.get("opacity")):
         raise BlenderProjectError("旧工程以四参数保存不透明度；需要自由控制点时请重新导出为新版工程。")
+    selected_opacity = selected.get("opacity") or {}
+    if (not interpolation_supported and is_independent(selected)
+            and (selected_opacity.get("interpolation") == "smooth"
+                 or selected_opacity.get("segments") is not None)):
+        raise BlenderProjectError("schema 12 工程以直线控制点保存；需要平滑插值时请重新导出为新版工程。")
     quality = resolved_render_quality(
         render_quality if render_quality is not None else snapshot.payload.get("render_quality")
     )
@@ -1414,13 +1430,27 @@ def merge_updated_entry(original, generated):
         opacity.pop("display_mode", None)
         opacity.pop("independent_parameters", None)
     elif int(original.get("schema_version", 0)) < BLENDER_PROJECT_OPACITY_POINTS_SCHEMA:
-        # schema 10–11 原位更新保留原编辑格式与四参数不透明度：新版生成结果里的
-        # 格式 3 字段在这里降回格式 2，避免旧读端把点列当成四参数。
+        # schema 10–11 原位更新保留原编辑格式与四参数不透明度。
         edit = result.setdefault("bandscope_edit", {})
         edit["format_version"] = BLENDER_LEGACY_EDIT_FORMAT
         edit["capabilities"] = [
-            name for name in edit.get("capabilities", []) if name != "opacity_points"
+            name for name in edit.get("capabilities", [])
+            if name not in {"opacity_points", "opacity_interpolation"}
         ]
+    elif int(original.get("schema_version", 0)) < BLENDER_PROJECT_OPACITY_INTERPOLATION_SCHEMA:
+        # schema 12 保留格式 3；旧读端只认识直线点列。
+        edit = result.setdefault("bandscope_edit", {})
+        edit["format_version"] = BLENDER_POINTS_EDIT_FORMAT
+        edit["capabilities"] = [
+            name for name in edit.get("capabilities", []) if name != "opacity_interpolation"
+        ]
+        style = edit.get("display_style") or {}
+        opacity = style.get("opacity") or {}
+        opacity.pop("interpolation", None)
+        opacity.pop("segments", None)
+        parameters = (result.get("opacity") or {}).get("independent_parameters") or {}
+        parameters.pop("interpolation", None)
+        parameters.pop("segments", None)
     previous_edit = original.get("bandscope_edit") or {}
     discarded = list(previous_edit.get("baked_effects") or ())
     if discarded:

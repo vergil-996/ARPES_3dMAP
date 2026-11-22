@@ -23,6 +23,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
 from bandscope.core.analyzer_core import AnalyzerCore
+from bandscope.core.axis_interval import FourthAxisDragSettings
 from bandscope.core.source_session import (
     ENTRY_MAT,
     ENTRY_NPZ,
@@ -443,6 +444,22 @@ class SourceWorkspaceMixin:
             return False
         home_id = session.home_page_id or self.left_workspace.home_page_id
         return any(str(page_id) != str(home_id) for page_id in session.page_ids)
+
+    def on_fourth_axis_settings_changed(self, docking, continuous_pan):
+        manager = self.__dict__.get("source_manager")
+        session = manager.active() if manager is not None else None
+        if session is None:
+            return False
+        try:
+            settings = FourthAxisDragSettings(str(docking), str(continuous_pan))
+        except ValueError:
+            return False
+        session.fourth_axis_drag = settings
+        controller = self.__dict__.get("time_interval_controller")
+        if controller is not None:
+            controller.set_fourth_axis_drag(settings)
+        self._update_statusbar()
+        return True
 
     def on_source_assignment_requested(self):
         assignment = getattr(self.core, "axis_assignment", None)

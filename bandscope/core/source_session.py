@@ -21,6 +21,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from bandscope.core.axis_interval import FourthAxisDragSettings
+
 #: 入口类型：原始 NPZ、经转换的 MAT、视图复现文件。
 ENTRY_NPZ = "npz"
 ENTRY_MAT = "mat"
@@ -84,6 +86,8 @@ class SourceSession:
     #: 切回时应该激活的页面。
     target_page_id: Optional[str] = None
     home_page_id: Optional[str] = None
+    #: 会话级第四轴交互设置；同源页面共享，不写入全局应用设置。
+    fourth_axis_drag: FourthAxisDragSettings = field(default_factory=FourthAxisDragSettings)
 
     @property
     def is_view_recipe(self) -> bool:

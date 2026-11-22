@@ -275,13 +275,22 @@ def accent_qcolor():
     return token_color("ACCENT")
 
 
+_FLUENT_ICON_CACHE = {}
+
+
 def fluent_icon(name, size=16, color=None):
-    from PyQt5.QtCore import QSize
     from PyQt5.QtGui import QIcon
     from siui.core import SiGlobal
 
+    from bandscope.ui.fluent_icon import FluentIconEngine
+
     try:
-        return SiGlobal.siui.iconpack.toIcon(name, QSize(size, size), color or TEXT_2)
+        actual_color = color or TEXT_2
+        cache_key = (name, actual_color)
+        if cache_key not in _FLUENT_ICON_CACHE:
+            svg_bytes = SiGlobal.siui.iconpack.get(name, actual_color)
+            _FLUENT_ICON_CACHE[cache_key] = QIcon(FluentIconEngine(svg_bytes))
+        return _FLUENT_ICON_CACHE[cache_key]
     except Exception:
         return QIcon()
 

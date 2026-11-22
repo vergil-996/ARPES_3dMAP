@@ -36,7 +36,7 @@ def main():
     from scripts.validation._common import arguments
 
     args = arguments(
-        "opacity-curve-control-points", dynamic=True,
+        "opacity-curve-interpolation", dynamic=True,
         default_data=Path(".local/data/WSe2_step.npz"),
     )
     app = QApplication(sys.argv)
@@ -139,8 +139,9 @@ def main():
         QTest.mousePress(curve, Qt.LeftButton, pos=position)
         return position
 
-    def set_points(points, *, flush=True):
+    def set_points(points, *, flush=True, interpolation="linear"):
         page.opacity_editor.set_points(points)
+        page.opacity_editor.set_interpolation(interpolation)
         if flush:
             window.flush_render_levels_refresh()
             wait_ready()
@@ -150,6 +151,10 @@ def main():
           not hasattr(page, "combo_display_mode") and not hasattr(page, "combo_map")
           and not hasattr(page, "btn_apply_map") and not hasattr(page, "display_parameters"))
     check("新页面默认三个控制点", page.opacity_editor.points() == [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
+    check("新页面默认平滑且标题行有双段选择器",
+          page.opacity_editor.interpolation() == "smooth"
+          and page.opacity_editor.interpolation_selector.isVisibleTo(page.grp_opacity)
+          and page.grp_opacity.header.indexOf(page.opacity_editor.interpolation_selector) >= 0)
     check("默认使用含极值的完整强度范围",
           fields["background_range"] == (float(finite.min()), float(finite.max())))
 
@@ -203,6 +208,66 @@ def main():
         gpu_display.set_enabled(False)
         print(f"[SKIP] GPU：{gpu_display.failure_reason()}", flush=True)
     del plateau
+
+    smooth_points = [[0.0, 0.0], [0.25, 0.8], [0.6, 0.2], [1.0, 0.9]]
+    set_points(smooth_points, interpolation="smooth")
+    smooth_samples = np.linspace(0.0, 1.0, 501)
+    smooth_before = np.array([curve.curve_alpha(value) for value in smooth_samples])
+    smooth_alpha = alpha_now()
+    press_rail(0.4)
+    intensity = curve._rail_intensity
+    target = point_for(intensity, curve.curve_alpha(intensity))
+    move_to(target)
+    QTest.mouseRelease(curve, Qt.LeftButton, pos=target)
+    wait_ready()
+    check("平滑曲线加点后保存拆分系数且体图不变",
+          len(page.opacity_editor.points()) == 5
+          and page.get_display_style()["opacity"].get("segments") is not None
+          and np.allclose(alpha_now(), smooth_alpha, rtol=0.0, atol=1e-6))
+    np.testing.assert_allclose(
+        np.array([curve.curve_alpha(value) for value in smooth_samples]),
+        smooth_before, rtol=0.0, atol=1e-12,
+    )
+    checks.append("平滑加点在浮点精度内保持原曲形")
+    points_before_switch = page.opacity_editor.points()
+    page.opacity_editor.interpolation_selector.buttons["linear"].click()
+    wait_ready()
+    check("切到直线保持所有控制点原位", page.opacity_editor.points() == points_before_switch)
+    page.opacity_editor.interpolation_selector.buttons["smooth"].click()
+    wait_ready()
+    np.testing.assert_allclose(alpha_now(), smooth_alpha, rtol=0.0, atol=1e-6)
+    checks.append("直线再切回平滑后体图恢复")
+    window._persist_active_page_state()
+    saved_opacity = copy.deepcopy(page.get_display_style()["opacity"])
+    page.opacity_editor.set_points([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
+    window._restore_page_ui_state(window.active_page_spec)
+    window._restore_enhancement_style()
+    check("保存重开保留平滑模式、点列和拆分信息",
+          page.get_display_style()["opacity"] == saved_opacity)
+    np.testing.assert_allclose(
+        np.array([curve.curve_alpha(value) for value in smooth_samples]),
+        smooth_before, rtol=0.0, atol=1e-12,
+    )
+    checks.append("保存重开后的平滑曲形一致")
+    capture("opacity-smooth-split.png", page.grp_opacity)
+    del smooth_alpha, smooth_before
+
+    set_points([[0.0, 0.0], [0.4, 0.1], [0.4, 0.8], [1.0, 1.0]])
+    check("同强度点形成垂直阶跃且精确位置取最后一点",
+          abs(curve.curve_alpha(np.nextafter(0.4, 0.0)) - 0.1) < 1e-12
+          and curve.curve_alpha(0.4) == 0.8
+          and abs(curve.curve_alpha(np.nextafter(0.4, 1.0)) - 0.8) < 1e-12)
+    step_before = alpha_now()
+    QTest.mousePress(curve, Qt.LeftButton, pos=point_for(0.4, 0.8))
+    move_to(point_for(0.4, 0.3))
+    QTest.mouseRelease(curve, Qt.LeftButton, pos=point_for(0.4, 0.3))
+    wait_ready()
+    check("拖动阶跃点时体图同步反馈且两点不越位",
+          not np.array_equal(alpha_now(), step_before)
+          and page.opacity_editor.points()[1][0] == 0.4
+          and page.opacity_editor.points()[2][0] == 0.4)
+    capture_volume("volume-vertical-step.png")
+    del step_before
 
     set_points([[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
     rail_before = curve._rail_point()
@@ -303,8 +368,10 @@ def main():
     press_rail(0.6)
     move_to(point_for(0.6, 0.8))
     QTest.mouseRelease(curve, Qt.LeftButton, pos=point_for(0.6, 0.8))
-    check("碰到已有点时选中而不重复添加", len(page.opacity_editor.points()) == 6
-          and curve._selected is not None)
+    near_points = page.opacity_editor.points()
+    check("候选强度不同则同一命中半径内仍新增独立点",
+          len(near_points) == 6 + 1 and curve._selected is not None
+          and any(point[0] != 0.6 and abs(point[0] - 0.6) < 0.01 for point in near_points))
 
     set_points([[0.0, 0.0], [0.5, 0.0], [1.0, 1.0]])
     press_rail(0.25)
@@ -357,19 +424,24 @@ def main():
     window._set_theme("light")
     window.resize(1000, 720)
     QTest.qWait(300)
-    capture("opacity-narrow-light.png", page.opacity_editor)
+    capture("opacity-narrow-light.png", page.grp_opacity)
     window._set_theme("dark")
     QTest.qWait(300)
-    capture("opacity-narrow-dark.png", page.opacity_editor)
+    capture("opacity-narrow-dark.png", page.grp_opacity)
     window._set_theme("light")
     window.resize(1280, 800)
     QTest.qWait(300)
 
     from bandscope.core.display_style import new_display_style
+    from bandscope.core.opacity_curve import insert_opacity_point
 
+    region_points, region_segments, _index = insert_opacity_point(
+        [[0.0, 0.0], [0.2, 0.75], [0.55, 0.2], [0.8, 0.8], [1.0, 0.9]],
+        0.4, interpolation="smooth",
+    )
     style = new_display_style(
-        (0.0, 50.0, 100.0), "线性", (0.0, 1.0),
-        [[0.0, 0.0], [0.2, 0.75], [0.55, 0.75], [0.8, 0.2], [1.0, 0.9]],
+        (0.0, 50.0, 100.0), "线性", (0.0, 1.0), region_points,
+        opacity_interpolation="smooth", opacity_segments=region_segments,
     )
     window._select_enhancement_target("")
     window.page_render.set_display_style(style, view="3d")
@@ -380,7 +452,7 @@ def main():
     window._add_enhancement_region()
     wait_ready()
     selected = window._enhancement_selected()
-    check("局部区域使用同一分段线性曲线", selected["style"] == background)
+    check("局部区域保留同一平滑模式与拆分系数", selected["style"] == background)
     set_points([[0.0, 0.0], [0.4, 0.1], [0.7, 0.9], [1.0, 1.0]])
     region_style = window._enhancement_selected()["style"]
     check("局部区域只修改当前目标", state["background"] == background
@@ -443,9 +515,11 @@ def main():
           np.all(np.isfinite(scene.density)))
     del expected_density
     metadata = scene.metadata()
-    check("新版 Blender 工程保存点列并使用 schema 12",
-          metadata["schema_version"] == 12
-          and metadata["bandscope_edit"]["display_style"]["opacity"]["points"] == batch)
+    check("新版 Blender 工程保存点列与插值模式并使用 schema 13",
+          metadata["schema_version"] == 13
+          and metadata["bandscope_edit"]["format_version"] == 4
+          and metadata["bandscope_edit"]["display_style"]["opacity"]["points"] == batch
+          and metadata["bandscope_edit"]["display_style"]["opacity"]["interpolation"] == "linear")
     del scene, metadata
 
     reference = opacity_reference_distance(context.get("full_shape", data.shape))
@@ -483,8 +557,9 @@ def main():
     document["state_digest"] = state_digest(document)
     migrated = ViewRecipeDocument(document).validate().data
     migrated_style = migrated["pages"][0]["params"][STATE_KEY]["background"]
-    check("旧复现文件升级为可编辑点列", migrated["schema_version"] == 5
+    check("旧复现文件升级为直线点列并使用 schema 6", migrated["schema_version"] == 6
           and migrated_style["display_mode"] == INDEPENDENT_MODE
+          and migrated_style["opacity"]["interpolation"] == "linear"
           and "points" in migrated_style["opacity"])
     points = np.asarray(migrated_style["opacity"]["points"], dtype=float)
     low, high = 0.0, 1.0
@@ -510,6 +585,7 @@ def main():
         "data": str(args.data),
         "frame": int(window.timeline_bar.slider_time.value()),
         "points": page.opacity_editor.points(),
+        "interpolation": page.opacity_editor.interpolation(),
         "checks": checks,
         "screenshots": screenshots,
         "gpu_executed": gpu_ran,

@@ -9,10 +9,83 @@ import numpy as np
 from PyQt5 import sip
 from PyQt5.QtCore import QLineF, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
-from PyQt5.QtWidgets import QMenu, QToolTip, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QButtonGroup, QHBoxLayout, QMenu, QToolButton, QToolTip, QVBoxLayout, QWidget,
+)
 
 import bandscope.ui.theme as theme
-from bandscope.core.display_style import MIN_OPACITY_POINT_GAP, normalize_opacity_points
+from bandscope.core.display_style import normalize_opacity_points
+from bandscope.core.opacity_curve import (
+    DEFAULT_OPACITY_INTERPOLATION,
+    OPACITY_LINEAR,
+    OPACITY_SMOOTH,
+    evaluate_opacity_curve,
+    insert_opacity_point,
+    normalize_opacity_interpolation,
+    sanitized_opacity_segments,
+)
+
+
+class OpacityInterpolationSelector(QWidget):
+    interpolationChanged = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons = {}
+        for value, text in ((OPACITY_SMOOTH, "平滑"), (OPACITY_LINEAR, "直线")):
+            button = QToolButton(self)
+            button.setText(text)
+            button.setCheckable(True)
+            button.setFixedSize(44, 24)
+            button.setAccessibleName(f"{text}插值")
+            button.toggled.connect(
+                lambda checked, mode=value: self._on_toggled(mode, checked)
+            )
+            self.group.addButton(button)
+            self.buttons[value] = button
+            layout.addWidget(button)
+        self.set_interpolation(DEFAULT_OPACITY_INTERPOLATION)
+        reference = weakref.ref(self)
+
+        def on_theme_changed(_name):
+            selector = reference()
+            if selector is not None and not sip.isdeleted(selector):
+                selector._sync_style()
+
+        self._theme_listener = on_theme_changed
+        theme.changed.connect(self._theme_listener)
+        self.destroyed.connect(self._disconnect_theme)
+        self._sync_style()
+
+    def _disconnect_theme(self, *_args):
+        theme.changed.disconnect(self._theme_listener)
+
+    def _sync_style(self):
+        self.setStyleSheet(
+            f"QToolButton {{ background: {theme.BG_2}; color: {theme.TEXT_2};"
+            f"border: 1px solid {theme.BORDER_HEX}; padding: 0; font-size: 10px; }}"
+            "QToolButton:checked {"
+            f"background: {theme.ACCENT}; color: {theme.BG_1}; font-weight: 600; }}"
+        )
+
+    def _on_toggled(self, mode, checked):
+        if checked:
+            self.interpolationChanged.emit(mode)
+
+    def interpolation(self):
+        return OPACITY_SMOOTH if self.buttons[OPACITY_SMOOTH].isChecked() else OPACITY_LINEAR
+
+    def set_interpolation(self, value):
+        mode = normalize_opacity_interpolation(value, DEFAULT_OPACITY_INTERPOLATION)
+        for name, button in self.buttons.items():
+            previous = button.blockSignals(True)
+            button.setChecked(name == mode)
+            button.blockSignals(previous)
 
 
 class OpacityCurveCanvas(QWidget):
@@ -48,11 +121,15 @@ class OpacityCurveCanvas(QWidget):
             "右键内部控制点或按 Delete 删除。"
         )
         self._points = [(float(x), float(a)) for x, a in normalize_opacity_points(None)]
+        self._interpolation = DEFAULT_OPACITY_INTERPOLATION
+        self._segments = None
         self._selected = None
         self._hover = None
         self._mode = None
         self._drag_index = None
         self._point_moved = False
+        self._inserted_pending_commit = False
+        self._cycle_position = None
         self._rail_intensity = 0.5
         self._press_y = 0
         self._insert_intensity = 0.5
@@ -87,17 +164,48 @@ class OpacityCurveCanvas(QWidget):
     def points(self):
         return [list(point) for point in self._points]
 
+    def segments(self):
+        return None if self._segments is None else [
+            None if entry is None else list(entry) for entry in self._segments
+        ]
+
+    def interpolation(self):
+        return self._interpolation
+
     def set_points(self, points):
         self._points = self._canonical(points)
-        if self._selected is not None and self._selected >= len(self._points):
-            self._selected = None
+        self._segments = None
+        self._reset_selection()
         self._clamp_rail()
         self.update()
 
+    def set_interpolation(self, value):
+        self._interpolation = normalize_opacity_interpolation(
+            value, DEFAULT_OPACITY_INTERPOLATION,
+        )
+        self.update()
+
+    def set_opacity(self, opacity):
+        opacity = opacity if isinstance(opacity, dict) else {}
+        self._points = self._canonical(opacity.get("points"))
+        self._interpolation = normalize_opacity_interpolation(
+            opacity.get("interpolation"), OPACITY_LINEAR,
+        )
+        self._segments = sanitized_opacity_segments(self._points, opacity.get("segments"))
+        self._reset_selection()
+        self._clamp_rail()
+        self.update()
+
+    def _reset_selection(self):
+        self._selected = None
+        self._hover = None
+        self._cycle_position = None
+
     def curve_alpha(self, intensity):
-        xs = np.asarray([point[0] for point in self._points], dtype=np.float64)
-        alphas = np.asarray([point[1] for point in self._points], dtype=np.float64)
-        return float(np.interp(float(intensity), xs, alphas))
+        return float(evaluate_opacity_curve(
+            float(intensity), self._points, interpolation=self._interpolation,
+            segments=self._segments,
+        ))
 
     def selected_index(self):
         return self._selected
@@ -146,15 +254,32 @@ class OpacityCurveCanvas(QWidget):
     def _clamp_rail(self):
         self._rail_intensity = float(np.clip(self._rail_intensity, 0.0, 1.0))
 
-    def _point_at(self, position):
+    def _point_candidates(self, position):
         target = QPointF(position)
-        best = None
+        candidates = []
         for index, point in enumerate(self._points):
             center = self.point_position(index)
             distance = math.hypot(target.x() - center.x(), target.y() - center.y())
-            if distance <= self.HIT_RADIUS and (best is None or distance < best[0]):
-                best = (distance, index)
-        return None if best is None else best[1]
+            if distance <= self.HIT_RADIUS:
+                candidates.append((distance, index))
+        return [index for _distance, index in sorted(candidates)]
+
+    def _point_at(self, position):
+        candidates = self._point_candidates(position)
+        return candidates[0] if candidates else None
+
+    def _point_for_press(self, position):
+        candidates = self._point_candidates(position)
+        if not candidates:
+            return None
+        can_cycle = (
+            self._cycle_position is not None and self._selected in candidates
+            and math.hypot(position.x() - self._cycle_position.x(),
+                           position.y() - self._cycle_position.y()) <= 2.0
+        )
+        if can_cycle and len(candidates) > 1:
+            return candidates[(candidates.index(self._selected) + 1) % len(candidates)]
+        return candidates[0]
 
     def _rail_hit(self, position):
         rail = self._rail_rect().adjusted(0, -self.RAIL_HIT_PADDING, 0, self.RAIL_HIT_PADDING)
@@ -180,7 +305,8 @@ class OpacityCurveCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
         self.setFocus(Qt.MouseFocusReason)
-        index = self._point_at(event.pos())
+        index = self._point_for_press(event.pos())
+        self._inserted_pending_commit = False
         if index is not None:
             self._selected = index
             self._hover = index
@@ -244,10 +370,13 @@ class OpacityCurveCanvas(QWidget):
             self._mode = None
             self._drag_index = None
             moved = self._point_moved
+            inserted = self._inserted_pending_commit
             self._point_moved = False
+            self._inserted_pending_commit = False
+            self._cycle_position = None if moved else QPointF(event.pos())
             event.accept()
             self._update_hover(event.pos())
-            if moved:
+            if moved or inserted:
                 self.pointsCommitted.emit()
             return
         if self._mode == "rail":
@@ -266,51 +395,58 @@ class OpacityCurveCanvas(QWidget):
 
     def _try_insert(self, position):
         intensity = self._insert_intensity
-        existing = self._point_at(position)
-        if existing is not None:
-            # 碰到已有点：选中并接着拖动该点。
-            self._selected = existing
-            self._drag_index = existing
-            self._mode = "point"
-            self._move_point(existing, position)
-            return
+        target = QPointF(position)
+        for index, (x, _alpha) in enumerate(self._points):
+            if not math.isclose(x, intensity, rel_tol=0.0, abs_tol=1.0e-12):
+                continue
+            center = self.point_position(index)
+            if math.hypot(target.x() - center.x(), target.y() - center.y()) <= self.POINT_RADIUS:
+                self._selected = index
+                self._drag_index = index
+                self._mode = "point"
+                self._point_moved = False
+                return
         curve_alpha = self.curve_alpha(intensity)
         if self._insert_y > self._y(curve_alpha) + 0.5:
-            # 黑点还在底轨与横轴之间或尚未到达曲线。
             return
-        index = next(
-            (position for position, (x, _value) in enumerate(self._points) if x > intensity),
-            len(self._points),
-        )
-        if index <= 0 or index >= len(self._points):
+        try:
+            points, segments, index = insert_opacity_point(
+                self._points, intensity, interpolation=self._interpolation,
+                segments=self._segments,
+            )
+        except ValueError:
             return
-        low = self._points[index - 1][0]
-        high = self._points[index][0]
-        if intensity <= low + MIN_OPACITY_POINT_GAP or intensity >= high - MIN_OPACITY_POINT_GAP:
-            return
-        self._points.insert(index, (float(intensity), float(curve_alpha)))
+        self._points = self._canonical(points)
+        self._segments = segments
         self._selected = index
         self._drag_index = index
         self._mode = "point"
+        self._point_moved = False
+        self._inserted_pending_commit = True
         self._start_backfill(self._insert_origin if self._insert_origin is not None else intensity)
-        # 插入点落在原曲线上，形状不变；选中后继续拖动才提交预览。
         self.update()
 
-    def _move_point(self, index, position):
-        if not 0 <= index < len(self._points):
-            return
-        intensity = self._intensity_at(position.x())
-        alpha = self._alpha_at(position.y())
+    def _bounded_point(self, index, intensity, alpha):
         if index <= 0:
             intensity = 0.0
         elif index >= len(self._points) - 1:
             intensity = 1.0
         else:
             low, high = self._neighbor_bounds(index)
-            intensity = float(np.clip(
-                intensity, low + MIN_OPACITY_POINT_GAP, high - MIN_OPACITY_POINT_GAP,
-            ))
-        self._points[index] = (float(intensity), float(alpha))
+            intensity = float(np.clip(intensity, low, high))
+        return float(intensity), float(np.clip(alpha, 0.0, 1.0))
+
+    def _move_point(self, index, position):
+        if not 0 <= index < len(self._points):
+            return
+        intensity, alpha = self._bounded_point(
+            index, self._intensity_at(position.x()), self._alpha_at(position.y()),
+        )
+        if self._points[index] == (intensity, alpha):
+            return
+        self._points[index] = (intensity, alpha)
+        self._segments = None
+        self._cycle_position = None
         self._point_moved = True
         self.pointsChanged.emit()
         self.update()
@@ -368,16 +504,10 @@ class OpacityCurveCanvas(QWidget):
             intensity += intensity_step / 1000.0
         if alpha_step:
             alpha += alpha_step / 100.0
-        low, high = self._neighbor_bounds(index)
-        if index <= 0:
-            intensity = 0.0
-        elif index >= len(self._points) - 1:
-            intensity = 1.0
-        else:
-            intensity = float(np.clip(
-                intensity, low + MIN_OPACITY_POINT_GAP, high - MIN_OPACITY_POINT_GAP,
-            ))
-        self._points[index] = (float(intensity), float(np.clip(alpha, 0.0, 1.0)))
+        intensity, alpha = self._bounded_point(index, intensity, alpha)
+        self._points[index] = (intensity, alpha)
+        self._segments = None
+        self._cycle_position = None
         self.pointsChanged.emit()
         self.pointsCommitted.emit()
         self.update()
@@ -387,8 +517,10 @@ class OpacityCurveCanvas(QWidget):
         if not self.is_internal(index):
             return False
         self._points.pop(index)
+        self._segments = None
         self._selected = None
         self._hover = None
+        self._cycle_position = None
         self.pointsChanged.emit()
         self.pointsCommitted.emit()
         self.update()
@@ -477,9 +609,26 @@ class OpacityCurveCanvas(QWidget):
         painter.drawLine(QLineF(x, self._y(alpha), x, rail.top()))
 
     def _paint_curve(self, painter):
-        path = QPainterPath(QPointF(self._x(self._points[0][0]), self._y(self._points[0][1])))
-        for intensity, alpha in self._points[1:]:
-            path.lineTo(self._x(intensity), self._y(alpha))
+        first = self._points[0]
+        path = QPainterPath(QPointF(self._x(first[0]), self._y(first[1])))
+        groups = []
+        for left, right in zip(self._points, self._points[1:]):
+            if right[0] <= left[0]:
+                groups.append((right, None))
+                continue
+            count = max(2, min(self._plot_rect().width() * 2,
+                               int(math.ceil((right[0] - left[0]) * self._plot_rect().width() * 2))))
+            groups.append((right, np.linspace(left[0], right[0], count + 1)[1:-1]))
+        nonempty = [samples for _right, samples in groups if samples is not None and samples.size]
+        alphas = iter(evaluate_opacity_curve(
+            np.concatenate(nonempty) if nonempty else np.asarray([]),
+            self._points, interpolation=self._interpolation, segments=self._segments,
+        ))
+        for right, samples in groups:
+            if samples is not None:
+                for intensity in samples:
+                    path.lineTo(self._x(float(intensity)), self._y(float(next(alphas))))
+            path.lineTo(self._x(right[0]), self._y(right[1]))
         painter.setPen(QPen(QColor(theme.ACCENT), 2.0))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(path)
@@ -559,23 +708,62 @@ class OpacityCurveEditor(QWidget):
     valueChanged = pyqtSignal()
     valueCommitted = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, show_interpolation=True):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        self.interpolation_selector = OpacityInterpolationSelector(self)
+        self.interpolation_selector.interpolationChanged.connect(self._on_interpolation_changed)
+        if show_interpolation:
+            header = QHBoxLayout()
+            header.setContentsMargins(0, 0, 0, 4)
+            header.addStretch()
+            header.addWidget(self.interpolation_selector)
+            layout.addLayout(header)
+        else:
+            self.interpolation_selector.hide()
         self.curve = OpacityCurveCanvas(self)
         self.curve.pointsChanged.connect(self.valueChanged)
         self.curve.pointsCommitted.connect(self.valueCommitted)
         layout.addWidget(self.curve)
-        self.setMinimumHeight(self.curve.height())
+        self.setMinimumHeight(self.curve.height() + (28 if show_interpolation else 0))
         self.setAccessibleName("不透明度曲线")
+
+    def _on_interpolation_changed(self, mode):
+        self.curve.set_interpolation(mode)
+        self.valueChanged.emit()
+        self.valueCommitted.emit()
 
     def points(self):
         return self.curve.points()
 
     def set_points(self, points):
         self.curve.set_points(points)
+
+    def interpolation(self):
+        return self.curve.interpolation()
+
+    def set_interpolation(self, value):
+        self.interpolation_selector.set_interpolation(value)
+        self.curve.set_interpolation(value)
+
+    def segments(self):
+        return self.curve.segments()
+
+    def opacity(self):
+        result = {
+            "points": self.points(),
+            "interpolation": self.interpolation(),
+        }
+        segments = self.segments()
+        if segments is not None:
+            result["segments"] = segments
+        return result
+
+    def set_opacity(self, opacity):
+        self.curve.set_opacity(opacity)
+        self.interpolation_selector.set_interpolation(self.curve.interpolation())
 
     def selected_index(self):
         return self.curve.selected_index()

@@ -11,7 +11,15 @@ from PyQt5 import sip
 from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QLabel, QPushButton
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
-from bandscope.core.axis_interval import AxisSpace
+from bandscope.core.axis_interval import (
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
+    PAN_FRAMES,
+    PAN_PHYSICAL,
+    AxisInterval,
+    AxisSpace,
+    FourthAxisDragSettings,
+)
 from bandscope.ui.axis_interval_controller import (
     AxisIntervalController,
     IntervalEditMode,
@@ -362,6 +370,61 @@ class AxisIntervalControllerTests(unittest.TestCase):
         before = len(h.changed)
         old_slider.setValue(500)
         self.assertEqual(len(h.changed), before)
+
+
+class FourthAxisControllerTests(unittest.TestCase):
+    @staticmethod
+    def bind(coords, settings=None, *, interval=None):
+        space = AxisSpace("delay", np.asarray(coords, dtype=float))
+        controller = AxisIntervalController()
+        controller.set_fourth_axis_drag(settings)
+        controller.bind(space, interval or space.as_interval())
+        return controller
+
+    def test_auto_threshold_and_manual_overrides_apply_to_endpoint_drags(self):
+        for count, expected in ((3, 1.0), (29, 1.0), (30, 1.25), (31, 1.25)):
+            with self.subTest(count=count):
+                controller = self.bind(np.arange(count, dtype=float))
+                controller._on_range_endpoint("low", 1.25)
+                self.assertEqual(controller.interval.low, expected)
+
+        continuous = self.bind(
+            [0.0, 1.0, 2.0], FourthAxisDragSettings(CONTINUOUS_DOCKING)
+        )
+        continuous._on_range_endpoint("low", 1.25)
+        self.assertEqual(continuous.interval.low, 1.25)
+
+        discrete = self.bind(
+            np.arange(30, dtype=float), FourthAxisDragSettings(DISCRETE_DOCKING)
+        )
+        discrete._on_range_endpoint("low", 1.25)
+        self.assertEqual(discrete.interval.low, 1.0)
+
+    def test_changing_settings_keeps_selection_until_the_next_drag(self):
+        controller = self.bind([0.0, 1.0, 2.0])
+        controller.interval.set_low(0.25)
+        before = controller.interval.as_dict()
+        controller.set_fourth_axis_drag(FourthAxisDragSettings(CONTINUOUS_DOCKING))
+        self.assertEqual(controller.interval.as_dict(), before)
+        controller._on_range_endpoint("low", 0.75)
+        self.assertEqual(controller.interval.low, 0.75)
+
+    def test_continuous_pan_can_preserve_physical_width_or_frame_count(self):
+        coords = np.array([0.0, 10.0, 30.0, 70.0, 140.0])
+        for pan, expected, expected_length in (
+            (PAN_PHYSICAL, (80.0, 140.0), 60.0),
+            (PAN_FRAMES, (30.0, 140.0), 110.0),
+        ):
+            with self.subTest(pan=pan):
+                interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+                controller = self.bind(
+                    coords,
+                    FourthAxisDragSettings(CONTINUOUS_DOCKING, pan),
+                    interval=interval,
+                )
+                controller._on_range_center(1000.0)
+                self.assertEqual((controller.interval.low, controller.interval.up), expected)
+                self.assertEqual(controller.interval.length, expected_length)
 
 
 if __name__ == "__main__":

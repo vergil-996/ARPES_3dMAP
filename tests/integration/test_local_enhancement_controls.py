@@ -32,6 +32,7 @@ UI_POINTS = [[0.0, 0.0], [1.0, 1.0]]
 def styled(levels, opacity_mode="线性", colormap_range=(0., 1.), points=None):
     return new_display_style(
         levels, opacity_mode, colormap_range, UI_POINTS if points is None else points,
+        opacity_interpolation="linear",
     )
 
 

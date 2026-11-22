@@ -32,7 +32,8 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
-from bandscope.ui.page_tree import PageGroupEntry, PageTreeEntry, PageTreePanel, page_kind_icon
+from bandscope.ui.fluent_icon import FluentIconLabel
+from bandscope.ui.page_tree import PageGroupEntry, PageTreeEntry, PageTreePanel, page_kind_icon_name
 
 #: 页面树初始宽度、最小宽度，以及画布至少保留的宽度。
 NAV_INITIAL_WIDTH = 226
@@ -243,7 +244,7 @@ class ResultWorkspace(QWidget):
         header_layout.setSpacing(10)
         self.header.setFixedHeight(60)
 
-        self.view_icon = QLabel(self.header)
+        self.view_icon = FluentIconLabel(self.header)
         self.view_icon.setFixedSize(30, 30)
         self.view_icon.setAlignment(Qt.AlignCenter)
         self.view_icon.hide()
@@ -894,7 +895,7 @@ class ResultWorkspace(QWidget):
         source_detail = str(spec.source_title or ("原始数据" if spec.page_id == self.home_page_id else "派生分析"))
         self.source_breadcrumb.setText(f"{source_name}  /  {source_detail}")
         self.source_breadcrumb.setToolTip(self.source_breadcrumb.text())
-        self.view_icon.setPixmap(page_kind_icon(spec.page_kind).pixmap(16, 16))
+        self.view_icon.set_fluent_icon(page_kind_icon_name(spec.page_kind), 16, theme.TEXT_2)
         # 工具页（控制面板等）没有页面语义，不提供改名。
         renameable = spec.page_kind != "control_panel"
         self.page_title.setText(title)

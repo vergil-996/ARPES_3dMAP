@@ -6,11 +6,95 @@ import unittest
 import numpy as np
 
 from bandscope.core.axis_interval import (
+    AUTO_DOCKING,
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
     AxisInterval,
     AxisSpace,
+    FourthAxisDragSettings,
     nearest_index,
     physical_decimals,
 )
+
+
+class FourthAxisDragSettingsTests(unittest.TestCase):
+    def test_auto_switches_from_discrete_to_continuous_at_thirty_samples(self):
+        settings = FourthAxisDragSettings()
+        self.assertEqual(settings.docking, AUTO_DOCKING)
+        for count in (3, 29):
+            self.assertEqual(settings.resolved_docking(count), DISCRETE_DOCKING)
+        for count in (30, 31):
+            self.assertEqual(settings.resolved_docking(count), CONTINUOUS_DOCKING)
+
+    def test_manual_docking_overrides_the_sample_count(self):
+        self.assertEqual(
+            FourthAxisDragSettings(CONTINUOUS_DOCKING).resolved_docking(3),
+            CONTINUOUS_DOCKING,
+        )
+        self.assertEqual(
+            FourthAxisDragSettings(DISCRETE_DOCKING).resolved_docking(31),
+            DISCRETE_DOCKING,
+        )
+
+
+class SampleFrameTranslationTests(unittest.TestCase):
+    def test_continuous_frame_pan_preserves_count_on_nonuniform_axes(self):
+        for coords in (
+            np.array([0.0, 10.0, 30.0, 70.0, 140.0]),
+            np.array([140.0, 70.0, 30.0, 10.0, 0.0]),
+        ):
+            with self.subTest(coords=coords):
+                interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+                for target in np.linspace(interval.minimum, interval.maximum, 23):
+                    interval.set_sample_center(coords, target, continuous=True)
+                    low, up = interval.to_indices(coords)
+                    self.assertEqual(up - low + 1, 3)
+                interval.set_sample_center(coords, interval.maximum + 100.0, continuous=True)
+                self.assertEqual((interval.low, interval.up), (30.0, 140.0))
+                self.assertEqual(interval.to_indices(coords), (0, 2) if coords[0] == 140.0 else (2, 4))
+                interval.set_sample_center(coords, interval.minimum - 100.0, continuous=True)
+                self.assertEqual((interval.low, interval.up), (0.0, 30.0))
+                self.assertEqual(interval.length, 30.0)
+
+    def test_continuous_frame_pan_follows_successive_targets_without_reversing(self):
+        for coords in (
+            np.array([0.0, 10.0, 30.0, 70.0, 140.0]),
+            np.array([140.0, 70.0, 30.0, 10.0, 0.0]),
+        ):
+            with self.subTest(coords=coords):
+                interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+                previous_low = interval.low
+                sorted_coords = np.sort(coords)
+                positions = np.arange(coords.size, dtype=float)
+                for target in np.linspace(40.0, 55.0, 7):
+                    interval.set_sample_center(coords, target, continuous=True)
+                    self.assertGreaterEqual(interval.low, previous_low)
+                    previous_low = interval.low
+                    low, up = np.interp(
+                        [interval.low, interval.up], sorted_coords, positions
+                    )
+                    self.assertAlmostEqual(
+                        (low + up) / 2.0,
+                        np.interp(target, sorted_coords, positions),
+                    )
+
+    def test_discrete_frame_pan_snaps_both_endpoints_and_stops_together(self):
+        for coords in (
+            np.array([0.0, 10.0, 30.0, 70.0, 140.0]),
+            np.array([140.0, 70.0, 30.0, 10.0, 0.0]),
+        ):
+            with self.subTest(coords=coords):
+                interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
+                for target in (15.0, 50.0, 100.0, 130.0):
+                    interval.set_sample_center(coords, target)
+                    self.assertIn(interval.low, coords)
+                    self.assertIn(interval.up, coords)
+                    low, up = interval.to_indices(coords)
+                    self.assertEqual(up - low + 1, 3)
+                interval.set_sample_center(coords, 1000.0)
+                self.assertEqual((interval.low, interval.up), (30.0, 140.0))
+                interval.set_sample_center(coords, -1000.0)
+                self.assertEqual((interval.low, interval.up), (0.0, 30.0))
 
 
 class ReverseCoordinateTests(unittest.TestCase):

@@ -4,6 +4,7 @@ from unittest.mock import patch
 import numpy as np
 
 from bandscope.core.display_style import new_display_style, new_render_quality
+from bandscope.core.opacity_curve import insert_opacity_point
 from bandscope.exporting.publication_models import OutputOptions, resolve_style
 from bandscope.exporting.publication_renderers import render_snapshot
 from bandscope.processing.display_transfer import (
@@ -20,7 +21,11 @@ class IndependentPublicationTests(unittest.TestCase):
     @requires_opengl
     def test_frozen_channels_and_fine_mapper_match_main_display(self):
         volume = np.random.default_rng(37).random((8, 6, 5), dtype=np.float32)
-        style = new_display_style()
+        points, segments, _index = insert_opacity_point(
+            [[0.0, 0.0], [0.25, 0.8], [0.5, 0.2], [0.5, 0.7], [1.0, 0.4]],
+            0.35, interpolation="smooth",
+        )
+        style = new_display_style(opacity_points=points, opacity_segments=segments)
         fields = resolve_display(
             {"view": "3d", "data": volume, "full_shape": volume.shape,
              "coords": {key: np.arange(size) for key, size in zip(("X", "Y", "E"), volume.shape)}},

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QCloseEvent, QDesktopServices, QPixmap
 from PyQt5.QtWidgets import QApplication, QGroupBox, QWidget
 
@@ -17,6 +17,7 @@ from bandscope.exporting.blender_materials import MATERIAL_SPECS
 from bandscope.exporting.blender_project import BOX_GROUP_PRESET, PRESET_KEYS, TEXT_GROUP_PRESET
 from bandscope.exporting.blender_project_dialog import BlenderProjectDialog
 from bandscope.exporting.publication_dialog import PublicationExportDialog
+from bandscope.ui.fluent_icon import FluentIconLabel
 from tests.support.blender import make_blender_snapshot, write_fake_blender_project
 from tests.support.publication import MemoryPublicationSettings, _make_2d_snapshot
 
@@ -79,8 +80,20 @@ class BlenderPanelUiTests(unittest.TestCase):
         with patch.object(dialog, "_regenerate_previews"):
             dialog._adopt_snapshot(_make_2d_snapshot())
         self.assertEqual(dialog.btn_export.text(), "导出此预览")
+        self.assertEqual(dialog.btn_update.iconSize(), QSize(15, 15))
+        self.assertEqual(dialog.btn_export.iconSize(), QSize(15, 15))
+        self.assertEqual(dialog.btn_update.property("fluentIconName"), "ic_fluent_arrow_reset_regular")
+        self.assertEqual(dialog.btn_export.property("fluentIconName"), "ic_fluent_arrow_export_regular")
         self.assertIn("截图样式", dialog.windowTitle())
         dialog.reject()
+
+    def test_blender_title_uses_a_live_icon_label(self):
+        self.assertIsInstance(self.dialog.title_icon, FluentIconLabel)
+        self.assertEqual(self.dialog.title_icon.size(), QSize(32, 32))
+        self.assertFalse(self.dialog.title_icon.icon().isNull())
+        self.assertEqual(
+            self.dialog.title_icon.icon().actualSize(QSize(32, 32)), QSize(32, 32)
+        )
 
     def test_page_tree_defaults_to_current_and_presets_all_selected(self):
         candidates = [

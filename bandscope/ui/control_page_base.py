@@ -49,13 +49,22 @@ class CardGroup(QFrame):
             "border: none; padding: 0; font-size: 11px; font-weight: 600; text-align: left; }"
         )
         self.toggle_button.toggled.connect(self._set_expanded)
-        outer.addWidget(self.toggle_button)
+        self.header = QHBoxLayout()
+        self.header.setContentsMargins(0, 0, 0, 0)
+        self.header.setSpacing(6)
+        self.header.addWidget(self.toggle_button, 1)
+        outer.addLayout(self.header)
 
         self.body_host = QWidget(self)
         self.body = QVBoxLayout(self.body_host)
         self.body.setContentsMargins(0, 0, 0, 0)
         self.body.setSpacing(9)
         outer.addWidget(self.body_host)
+
+    def add_header_widget(self, widget):
+        widget.setParent(self)
+        widget.show()
+        self.header.addWidget(widget, 0, Qt.AlignVCenter)
 
     def _set_expanded(self, expanded):
         self.toggle_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)

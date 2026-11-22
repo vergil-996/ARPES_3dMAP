@@ -38,6 +38,7 @@ from bandscope.core.display_style import (
     sanitized_legacy_opacity,
 )
 from bandscope.ui.colormap_selector import COLORMAP_OPTIONS
+from bandscope.ui.fluent_icon import FluentIconLabel
 from bandscope.ui.opacity_controls import OpacityCurveEditor
 
 
@@ -339,14 +340,14 @@ class BlenderProjectEditor(QWidget):
             for name, spin in self.opacity_spins.items():
                 spin.setValue(float(legacy_values[name]))
             if has_opacity_points((style.get("opacity") or {})):
-                self.opacity_curve.set_points(style["opacity"]["points"])
+                self.opacity_curve.set_opacity(style["opacity"])
             quality = resolved_render_quality(snapshot.payload.get("render_quality"))
             index = self.interpolation_combo.findData(quality["interpolation"])
             self.interpolation_combo.setCurrentIndex(max(0, index))
             index = self.resting_combo.findData(quality["resting"])
             self.resting_combo.setCurrentIndex(max(0, index))
             self.display_mode_label.setText(
-                "独立透明度（schema 12 · 控制点）" if independent and points_supported
+                f"独立透明度（schema {self.project.schema_version} · 控制点）" if independent and points_supported
                 else "独立透明度（schema 10 · 四参数）" if independent
                 else "兼容映射"
             )
@@ -357,6 +358,9 @@ class BlenderProjectEditor(QWidget):
     def _project_supports_points(self):
         return bool(self.project and self.project.supports_opacity_points)
 
+    def _project_supports_interpolation(self):
+        return bool(self.project and self.project.supports_opacity_interpolation)
+
     def _sync_display_mode_rows(self):
         style = (self.current_snapshot.payload.get("display") or {}).get("background_style") if self.current_snapshot else None
         independent = bool(self.project and self.project.supports_display_styles and is_independent(style))
@@ -366,6 +370,7 @@ class BlenderProjectEditor(QWidget):
             widget.setVisible(independent and not points_supported)
         self.opacity_curve_label.setVisible(independent and points_supported)
         self.opacity_curve.setVisible(independent and points_supported)
+        self.opacity_curve.interpolation_selector.setEnabled(self._project_supports_interpolation())
         for label, widget in self.independent_rows:
             if (label, widget) in self.opacity_spin_rows or widget is self.opacity_curve:
                 continue
@@ -406,6 +411,8 @@ class BlenderProjectEditor(QWidget):
             if self.project.supports_opacity_points:
                 style = new_display_style(
                     levels, opacity_mode, colormap_range, self.opacity_curve.points(),
+                    opacity_interpolation=self.opacity_curve.interpolation(),
+                    opacity_segments=self.opacity_curve.segments(),
                 )
             else:
                 style = new_display_style(levels, opacity_mode, colormap_range)
@@ -664,14 +671,13 @@ class BlenderProjectDialog(QDialog):
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(10)
         header = QHBoxLayout()
-        title_icon = QLabel(self)
-        title_icon.setFixedSize(32, 32)
-        title_icon.setAlignment(Qt.AlignCenter)
-        title_icon.setPixmap(theme.fluent_icon("ic_fluent_cube_regular", 18, theme.TEXT_2).pixmap(18, 18))
-        title_icon.setStyleSheet(
+        self.title_icon = FluentIconLabel(self, "ic_fluent_cube_regular", 18, theme.TEXT_2)
+        self.title_icon.setFixedSize(32, 32)
+        self.title_icon.setAlignment(Qt.AlignCenter)
+        self.title_icon.setStyleSheet(
             f"background: {theme.BG_3}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px;"
         )
-        header.addWidget(title_icon)
+        header.addWidget(self.title_icon)
         title_column = QVBoxLayout()
         title_column.setSpacing(2)
         self.title_label = QLabel("Blender 工程导出")

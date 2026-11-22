@@ -5,6 +5,7 @@ from pathlib import Path
 
 from bandscope.core.display_style import new_display_style, new_render_quality
 from bandscope.core.local_enhancement import RENDER_QUALITY_KEY, STATE_KEY, create_display_state
+from bandscope.core.opacity_curve import insert_opacity_point
 from bandscope.core.view_recipe import (
     RecipeError,
     ViewRecipeDocument,
@@ -24,8 +25,12 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
 
     def test_schema_1_is_validated_then_migrated_to_current_schema(self):
         migrated = ViewRecipeDocument(self.document).validate().data
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         self.assertEqual(migrated["pages"][0]["params"][STATE_KEY]["background"]["display_mode"], "independent")
+        self.assertEqual(
+            migrated["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["interpolation"],
+            "linear",
+        )
         self.assertEqual(
             migrated["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["points"][0],
             [0.0, 0.0],
@@ -71,7 +76,7 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
             ViewRecipeDocument(tampered).validate()
 
         migrated = ViewRecipeDocument(document).validate().data
-        self.assertEqual(migrated["schema_version"], 5)
+        self.assertEqual(migrated["schema_version"], 6)
         restored_state = migrated["pages"][0]["params"][STATE_KEY]
         self.assertEqual(restored_state["background"]["normalization"], {"mode": "full"})
         self.assertEqual(restored_state["background"]["display_mode"], "independent")
@@ -83,6 +88,57 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
         self.assertTrue(migrated["view_state"]["relock_full_range"])
         self.assertNotIn("level_info", migrated["view_state"])
         self.assertEqual(migrated["state_digest"], state_digest(migrated))
+
+    def test_schema_5_points_restore_as_linear_without_merging_duplicate_steps(self):
+        document = ViewRecipeDocument(self.document).validate().data
+        style = new_display_style()
+        style["opacity"] = {"points": [[0.4, 0.1], [0.4, 0.8]]}
+        page = document["pages"][0]
+        page["params"][STATE_KEY] = create_display_state(style)
+        old_key = page["recipe_id"]
+        node = document["recipes"].pop(old_key)
+        node["params"] = copy.deepcopy(page["params"])
+        new_key = digest(node)
+        document["recipes"][new_key] = node
+        page["recipe_id"] = new_key
+        document["schema_version"] = 5
+        document["state_digest"] = state_digest(document)
+
+        migrated = ViewRecipeDocument(document).validate().data
+        opacity = migrated["pages"][0]["params"][STATE_KEY]["background"]["opacity"]
+        self.assertEqual(migrated["schema_version"], 6)
+        self.assertEqual(opacity["interpolation"], "linear")
+        self.assertEqual(opacity["points"], [
+            [0.0, 0.1], [0.4, 0.1], [0.4, 0.8], [1.0, 0.8],
+        ])
+
+    def test_current_schema_smooth_split_roundtrip_preserves_coefficients(self):
+        document = ViewRecipeDocument(self.document).validate().data
+        points, segments, _index = insert_opacity_point(
+            [[0.0, 0.0], [0.25, 0.8], [0.6, 0.2], [1.0, 0.9]],
+            0.4, interpolation="smooth",
+        )
+        style = new_display_style(
+            opacity_points=points, opacity_interpolation="smooth", opacity_segments=segments,
+        )
+        page = document["pages"][0]
+        page["params"][STATE_KEY] = create_display_state(style)
+        old_key = page["recipe_id"]
+        node = document["recipes"].pop(old_key)
+        node["params"] = copy.deepcopy(page["params"])
+        new_key = digest(node)
+        document["recipes"][new_key] = node
+        page["recipe_id"] = new_key
+        document["state_digest"] = state_digest(document)
+        path = Path(self.temp.name) / "smooth.bsview.json"
+        path.write_text(ViewRecipeDocument(document).dumps(), encoding="utf-8")
+
+        restored = ViewRecipeDocument.load(path).data
+        opacity = restored["pages"][0]["params"][STATE_KEY]["background"]["opacity"]
+        self.assertEqual(restored["schema_version"], 6)
+        self.assertEqual(opacity["interpolation"], "smooth")
+        self.assertEqual(opacity["points"], [list(point) for point in points])
+        self.assertEqual(opacity["segments"], segments)
 
     def test_current_schema_independent_display_roundtrip_is_digest_protected(self):
         document = ViewRecipeDocument(self.document).validate().data
@@ -104,6 +160,7 @@ class ViewRecipeDisplaySchemaTests(unittest.TestCase):
         style = restored["pages"][0]["params"][STATE_KEY]["background"]
         self.assertEqual(style["display_mode"], "independent")
         self.assertEqual(style["opacity"]["points"], [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
+        self.assertEqual(style["opacity"]["interpolation"], "smooth")
         self.assertEqual(tuple(style["colormap_range"]), (0.2, 0.8))
         self.assertEqual(restored["pages"][0]["params"][RENDER_QUALITY_KEY]["interpolation"], "linear")
         restored["pages"][0]["params"][STATE_KEY]["background"]["opacity"]["points"] = [

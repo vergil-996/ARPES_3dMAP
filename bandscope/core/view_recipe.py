@@ -33,10 +33,11 @@ from bandscope.core.local_enhancement import (
 )
 
 FORMAT = "bandscope.view"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 TIME_PAGE_SCHEMA_VERSION = 3
 FULL_RANGE_SCHEMA_VERSION = 4
 OPACITY_POINTS_SCHEMA_VERSION = 5
+OPACITY_INTERPOLATION_SCHEMA_VERSION = 6
 PAGE_KINDS = frozenset({"home", "axis_integral", "axis_integral_crop",
                         "slice_dos", "energy_dos", "edc_curve", "second_derivative",
                         "curve_comparison_1d", "log_curve", "plugin_curve", "plugin_derived", "path_slice"})
@@ -351,8 +352,10 @@ def editable_display_value(value, reference_distance=None):
     return value
 
 
-def _migrate_editable_opacity_document(document):
-    """schema 5：把四参数／兼容曲线统一转换成可编辑的不透明度点列。"""
+def _migrate_editable_opacity_document(
+        document, target_schema=OPACITY_POINTS_SCHEMA_VERSION,
+):
+    """迁移点列与插值字段；旧记录缺少插值模式时明确还原为直线。"""
     result = copy.deepcopy(document)
     reference_distance = document_reference_distance(result)
 
@@ -393,7 +396,7 @@ def _migrate_editable_opacity_document(document):
     result["view_state"] = convert(result.get("view_state") or {})
     if isinstance(result.get("publication"), dict):
         result["publication"] = convert(result["publication"])
-    result["schema_version"] = OPACITY_POINTS_SCHEMA_VERSION
+    result["schema_version"] = target_schema
     result["state_digest"] = state_digest(result)
     return result
 
@@ -572,6 +575,11 @@ class ViewRecipeDocument:
             return self.validate()
         if version == 4:
             self.data = _migrate_editable_opacity_document(d)
+            return self.validate()
+        if version == 5:
+            self.data = _migrate_editable_opacity_document(
+                d, OPACITY_INTERPOLATION_SCHEMA_VERSION,
+            )
             return self.validate()
         return self
 

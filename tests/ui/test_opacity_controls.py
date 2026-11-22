@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import numpy as np
 from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QColor, QContextMenuEvent, QMouseEvent
 from PyQt5.QtTest import QTest
@@ -44,9 +45,10 @@ class OpacityCurveEditorTests(unittest.TestCase):
         QTest.mousePress(curve, Qt.LeftButton, pos=position)
         return curve, position
 
-    def test_defaults_are_three_linear_points(self):
+    def test_defaults_are_three_smooth_points_on_an_identity_curve(self):
         editor = self.make_editor()
         self.assertEqual(editor.points(), [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
+        self.assertEqual(editor.interpolation(), "smooth")
         self.assertAlmostEqual(editor.curve_alpha(0.25), 0.25, places=9)
         self.assertAlmostEqual(editor.curve_alpha(0.75), 0.75, places=9)
 
@@ -219,7 +221,7 @@ class OpacityCurveEditorTests(unittest.TestCase):
         QTest.mousePress(curve, Qt.LeftButton, pos=start)
         drag_to(curve, far_right)
         QTest.mouseRelease(curve, Qt.LeftButton, pos=far_right)
-        self.assertLess(editor.points()[1][0], editor.points()[2][0])
+        self.assertEqual(editor.points()[1][0], editor.points()[2][0])
         self.assertGreater(editor.points()[1][0], 0.3)
 
         curve = editor.curve
@@ -387,6 +389,124 @@ class OpacityCurveEditorTests(unittest.TestCase):
             action.triggered.connect.call_args[0][0]()
         self.assertEqual(len(editor.points()), 3)
         self.assertEqual(editor.points()[1], [0.3, 0.4])
+
+    def test_mode_selector_keeps_points_and_commits_once(self):
+        editor = self.make_editor([[0.0, 0.0], [0.3, 0.8], [0.7, 0.2], [1.0, 1.0]])
+        before = editor.points()
+        changed = Mock()
+        committed = Mock()
+        editor.valueChanged.connect(changed)
+        editor.valueCommitted.connect(committed)
+        editor.interpolation_selector.buttons["linear"].click()
+        self.assertEqual(editor.interpolation(), "linear")
+        self.assertEqual(editor.points(), before)
+        self.assertEqual(changed.call_count, 1)
+        self.assertEqual(committed.call_count, 1)
+        editor.interpolation_selector.buttons["smooth"].click()
+        self.assertEqual(editor.interpolation(), "smooth")
+        self.assertEqual(editor.points(), before)
+
+    def test_mouse_and_keyboard_allow_coincident_points_and_reverse_drag(self):
+        editor = self.make_editor([[0.0, 0.0], [0.3, 0.2], [0.6, 0.6], [1.0, 1.0]])
+        editor.set_interpolation("linear")
+        curve = editor.curve
+        QTest.mousePress(curve, Qt.LeftButton, pos=point_at(0.3, 0.2, curve))
+        drag_to(curve, point_at(0.95, 0.9, curve))
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=point_at(0.95, 0.9, curve))
+        self.assertEqual(editor.points()[1][0], 0.6)
+        self.assertAlmostEqual(editor.points()[1][1], 0.9, delta=0.02)
+
+        QTest.mousePress(curve, Qt.LeftButton, pos=point_at(0.6, 0.9, curve))
+        drag_to(curve, point_at(0.4, 0.7, curve))
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=point_at(0.4, 0.7, curve))
+        self.assertAlmostEqual(editor.points()[1][0], 0.4, delta=0.02)
+        self.assertEqual(editor.points()[2][0], 0.6)
+
+        QTest.mousePress(curve, Qt.LeftButton, pos=point_at(0.4, 0.7, curve))
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=point_at(0.4, 0.7, curve))
+        for _ in range(400):
+            QTest.keyClick(curve, Qt.Key_Right)
+        self.assertEqual(editor.points()[1][0], 0.6)
+        previous_alpha = editor.points()[1][1]
+        QTest.keyClick(curve, Qt.Key_Up)
+        self.assertAlmostEqual(editor.points()[1][1], min(1.0, previous_alpha + 0.01))
+        self.assertEqual(editor.points()[2][0], 0.6)
+
+    def test_internal_point_can_coincide_with_either_endpoint(self):
+        editor = self.make_editor([[0.0, 0.0], [0.4, 0.5], [1.0, 1.0]])
+        editor.set_interpolation("linear")
+        curve = editor.curve
+        QTest.mousePress(curve, Qt.LeftButton, pos=point_at(0.4, 0.5, curve))
+        drag_to(curve, point_at(0.0, 0.3, curve))
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=point_at(0.0, 0.3, curve))
+        self.assertEqual(editor.points()[1][0], 0.0)
+        self.assertEqual(editor.points()[0][0], 0.0)
+        QTest.mousePress(curve, Qt.LeftButton, pos=point_at(0.0, 0.3, curve))
+        drag_to(curve, point_at(1.0, 0.8, curve))
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=point_at(1.0, 0.8, curve))
+        self.assertEqual(editor.points()[1][0], 1.0)
+        self.assertEqual(editor.points()[-1][0], 1.0)
+
+    def test_three_overlapping_points_cycle_and_delete_individually(self):
+        editor = self.make_editor([
+            [0.0, 0.0], [0.4, 0.5], [0.4, 0.5], [0.4, 0.5], [1.0, 1.0],
+        ])
+        editor.set_interpolation("linear")
+        curve = editor.curve
+        position = point_at(0.4, 0.5, curve)
+        selected = []
+        for _ in range(4):
+            QTest.mousePress(curve, Qt.LeftButton, pos=position)
+            QTest.mouseRelease(curve, Qt.LeftButton, pos=position)
+            selected.append(editor.selected_index())
+        self.assertEqual(selected, [1, 2, 3, 1])
+        QTest.mousePress(curve, Qt.LeftButton, pos=position)
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=position)
+        self.assertEqual(editor.selected_index(), 2)
+        self.assertTrue(editor.delete_selected_point())
+        self.assertEqual(len(editor.points()), 4)
+        self.assertEqual(sum(point[0] == 0.4 for point in editor.points()), 2)
+
+    def test_rail_can_insert_a_point_inside_an_existing_hit_radius(self):
+        editor = self.make_editor([[0.0, 0.0], [0.3, 0.4], [1.0, 1.0]])
+        editor.set_interpolation("linear")
+        curve, _rail = self.start_rail(editor, 0.303)
+        intensity = curve._rail_intensity
+        target = point_at(intensity, curve.curve_alpha(intensity), curve)
+        drag_to(curve, target)
+        self.assertEqual(len(editor.points()), 4)
+        inserted = editor.points()[editor.selected_index()][0]
+        self.assertNotEqual(inserted, 0.3)
+        self.assertLess(abs(inserted - 0.3), 0.01)
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=target)
+
+    def test_smooth_insert_commit_mode_switch_and_reopen_preserve_shape(self):
+        editor = self.make_editor([[0.0, 0.0], [0.25, 0.8], [0.6, 0.2], [1.0, 0.9]])
+        curve = editor.curve
+        samples = np.linspace(0.0, 1.0, 501)
+        before = np.array([curve.curve_alpha(value) for value in samples])
+        committed = Mock()
+        editor.valueCommitted.connect(committed)
+        curve, _rail = self.start_rail(editor, 0.4)
+        intensity = curve._rail_intensity
+        target = point_at(intensity, curve.curve_alpha(intensity), curve)
+        drag_to(curve, target)
+        self.assertEqual(len(editor.points()), 5)
+        self.assertEqual(committed.call_count, 0)
+        QTest.mouseRelease(curve, Qt.LeftButton, pos=target)
+        self.assertEqual(committed.call_count, 1)
+        after = np.array([curve.curve_alpha(value) for value in samples])
+        np.testing.assert_allclose(after, before, atol=1.0e-12, rtol=0.0)
+
+        editor.interpolation_selector.buttons["linear"].click()
+        editor.interpolation_selector.buttons["smooth"].click()
+        restored = np.array([curve.curve_alpha(value) for value in samples])
+        np.testing.assert_allclose(restored, before, atol=1.0e-12, rtol=0.0)
+
+        other = self.make_editor()
+        other.set_opacity(editor.opacity())
+        reopened = np.array([other.curve_alpha(value) for value in samples])
+        np.testing.assert_allclose(reopened, before, atol=1.0e-12, rtol=0.0)
 
     def test_backfill_animation_runs_without_emitting_render_signals(self):
         editor = self.make_editor()

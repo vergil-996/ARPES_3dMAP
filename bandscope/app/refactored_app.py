@@ -814,6 +814,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             button.clicked.connect(lambda _checked=False, value=name: self._set_theme(value))
             self.theme_group.addButton(button)
             theme.set_button_icon(button, icon, 14)
+            button.setIconSize(QSize(14, 14))
             theme_row.addWidget(button)
         row.addWidget(self.theme_switch)
 
@@ -992,6 +993,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     assignment_summary=assignment.summary() if assignment is not None else "",
                     needs_confirmation=bool(assignment.needs_confirmation) if assignment is not None else False,
                     warnings=assignment.warnings if assignment is not None else (),
+                    fourth_axis_drag=(
+                        getattr(active_source, "fourth_axis_drag", None)
+                        if active_source is not None else None
+                    ),
+                    fourth_axis_count=(
+                        int(self.core.raw_data.shape[3]) if self.core.raw_data.ndim > 3 else 0
+                    ),
                 )
 
     def _on_canvas_layout_changed(self):
@@ -2135,6 +2143,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         self.left_workspace.page_tree.source_assignment_requested.connect(
             self.on_source_assignment_requested
+        )
+        self.left_workspace.page_tree.fourth_axis_settings_changed.connect(
+            self.on_fourth_axis_settings_changed
         )
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
         self.left_workspace.group_page_activation_requested.connect(

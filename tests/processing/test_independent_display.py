@@ -194,11 +194,54 @@ class IndependentDisplayTests(unittest.TestCase):
         self.assertIs(partial_color, gpu_color)
         np.testing.assert_allclose(partial_alpha, cpu_alpha, rtol=0.0, atol=1e-7)
 
+    def test_smooth_split_and_vertical_steps_match_shared_curve_on_voxels(self):
+        from bandscope.core.opacity_curve import insert_opacity_point
+
+        points = [[0.0, 0.0], [0.25, 0.8], [0.4, 0.2], [0.4, 0.7], [1.0, 0.9]]
+        split, segments, _index = insert_opacity_point(
+            points, 0.3, interpolation="smooth",
+        )
+        self.style["opacity"] = {
+            "points": [list(point) for point in split],
+            "interpolation": "smooth", "segments": segments,
+        }
+        info = display_level_info(np.array([0.0, 1.0]), self.style)
+        samples = np.array([
+            0.0, 0.3, np.nextafter(0.4, 0.0), 0.4, np.nextafter(0.4, 1.0), 1.0,
+        ])
+        actual = independent_opacity_values(samples, info, self.style, 2.0)
+        expected_points = [0.0, split[2][1], 0.2, 0.7, 0.7, 0.9]
+        np.testing.assert_allclose(actual, expected_points, atol=1.0e-14)
+
+    def test_cuda_smooth_split_and_step_mapping_matches_cpu(self):
+        if not gpu_display.set_enabled(True):
+            self.skipTest(f"CUDA display mapping unavailable: {gpu_display.failure_reason()}")
+        self.addCleanup(gpu_display.set_enabled, False)
+        self.addCleanup(gpu_display.reset)
+        from bandscope.core.opacity_curve import insert_opacity_point
+
+        values = np.random.default_rng(31).random((80, 80, 80), dtype=np.float32)
+        points, segments, _index = insert_opacity_point(
+            [[0.0, 0.0], [0.2, 0.8], [0.5, 0.2], [0.5, 0.7], [1.0, 0.4]],
+            0.35, interpolation="smooth",
+        )
+        style = new_display_style(opacity_points=points, opacity_segments=segments)
+        info = display_level_info(values, style)
+        gpu_display.set_enabled(False)
+        cpu_color, cpu_alpha = channels(values, info, "linear", style=style, unit_distance=2.5)
+        gpu_display.set_enabled(True)
+        gpu_color, gpu_alpha = channels(values, info, "linear", style=style, unit_distance=2.5)
+        self.assertTrue(gpu_display.enabled())
+        np.testing.assert_allclose(gpu_color, cpu_color, rtol=0.0, atol=1.0e-7)
+        np.testing.assert_allclose(gpu_alpha, cpu_alpha, rtol=0.0, atol=1.0e-7)
+
     def test_resolved_style_keeps_points_canonical(self):
         self.style["opacity"] = {"points": [[0.9, 0.2], [0.1, 0.6], [0.1, 0.3]]}
         resolved = resolved_display_style(self.style, reference_distance=2.0)
-        self.assertEqual(resolved["opacity"]["points"][0], [0.0, 0.3])
-        self.assertEqual(resolved["opacity"]["points"][-1], [1.0, 0.2])
+        self.assertEqual(resolved["opacity"]["points"], [
+            [0.0, 0.6], [0.1, 0.6], [0.1, 0.3], [0.9, 0.2], [1.0, 0.2],
+        ])
+        self.assertEqual(resolved["opacity"]["interpolation"], "linear")
 
 
 if __name__ == "__main__":

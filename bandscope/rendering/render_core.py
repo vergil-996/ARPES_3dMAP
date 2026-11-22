@@ -385,6 +385,7 @@ class VisualEngine:
     def _apply_3d_colorbar_ticks(plotter, level_info, *, normalized=False):
         try:
             scalar_bar = plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+            scalar_bar.SetTitle("")
             scalar_bar.SetDrawTickLabels(not normalized)
             scalar_bar.SetDrawAnnotations(normalized)
             if normalized:
@@ -1424,7 +1425,6 @@ class VolumeRenderSession:
                 scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
                 lut = VisualEngine._3d_colorbar_lut(cmap, self.level_info)
                 scalar_bar.SetLookupTable(lut)
-                scalar_bar.SetTitle("Background intensity" if display_fields is not None else VisualEngine.COLORBAR_TITLE)
                 VisualEngine._apply_3d_colorbar_ticks(self.plotter, self.level_info, normalized=True)
             except (KeyError, AttributeError):
                 pass
@@ -1439,7 +1439,6 @@ class VolumeRenderSession:
             try:
                 scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
                 scalar_bar.SetLookupTable(self.volume.mapper.lookup_table)
-                scalar_bar.SetTitle(VisualEngine.COLORBAR_TITLE)
             except (KeyError, AttributeError):
                 pass
         self._update_clipping(clip_ranges)

@@ -13,6 +13,7 @@ from bandscope.core.display_style import (
     new_display_style,
 )
 from bandscope.core.local_enhancement import STATE_KEY
+from bandscope.core.opacity_curve import insert_opacity_point
 from bandscope.processing.local_enhancement import cached_finite_range, clear_range_cache, resolve_display
 from bandscope.rendering.render_core import VisualEngine
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
@@ -65,6 +66,32 @@ class DisplayControlStateTests(unittest.TestCase):
         curve.pointsCommitted.emit()
         self.assertEqual(changed.call_count, 1)
         self.assertEqual(committed.call_count, 1)
+
+    def test_header_mode_selector_does_not_toggle_opacity_card(self):
+        expanded = self.page.grp_opacity.toggle_button.isChecked()
+        self.page.opacity_editor.interpolation_selector.buttons["linear"].click()
+        self.assertEqual(self.page.grp_opacity.toggle_button.isChecked(), expanded)
+        self.assertEqual(self.page.get_display_style()["opacity"]["interpolation"], "linear")
+        self.page.opacity_editor.interpolation_selector.buttons["smooth"].click()
+        self.assertEqual(self.page.grp_opacity.toggle_button.isChecked(), expanded)
+        self.assertEqual(self.page.get_display_style()["opacity"]["interpolation"], "smooth")
+
+    def test_page_copy_preserves_smooth_split_coefficients(self):
+        points, segments, _index = insert_opacity_point(
+            [[0.0, 0.0], [0.25, 0.8], [0.6, 0.2], [1.0, 0.9]],
+            0.4, interpolation="smooth",
+        )
+        self.page.opacity_editor.set_opacity({
+            "points": [list(point) for point in points],
+            "interpolation": "smooth", "segments": segments,
+        })
+        saved = self.page.export_state()
+        other = RenderControlPage()
+        self.addCleanup(other.close)
+        self.addCleanup(other.deleteLater)
+        other.restore_state(saved)
+        self.assertEqual(other.get_display_style(), self.page.get_display_style())
+        self.assertEqual(other.opacity_editor.segments(), segments)
 
     def test_color_lock_style_refresh_keeps_button_icon_only(self):
         analyzer = My3DAnalyzer.__new__(My3DAnalyzer)

@@ -9,6 +9,13 @@ from unittest.mock import patch
 import numpy as np
 from PyQt5.QtWidgets import QApplication
 
+from bandscope.core.axis_interval import (
+    AUTO_DOCKING,
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
+    PAN_FRAMES,
+    PAN_PHYSICAL,
+)
 from bandscope.core.source_session import ENTRY_VIEW_RECIPE
 from bandscope.exporting.publication_export import capture_snapshot
 from bandscope.core.view_recipe import ViewRecipeDocument
@@ -190,6 +197,63 @@ class _WorkspaceFixture(unittest.TestCase):
 
         self.assertTrue(self.window.activate_source(second_id))
         self.assertEqual(self.window.timeline_bar.slider_time.value(), 2)
+
+    def test_fourth_axis_settings_are_per_source_and_do_not_move_the_selection(self):
+        window = self.window
+        first_id = self.load_first()
+        interval = window.time_interval
+        interval.set_locked(False)
+        interval.set_low(-0.5)
+        interval.set_up(1.0)
+        before = interval.as_dict()
+        menu = window.left_workspace.page_tree.source_settings_menu
+        with patch.object(window, "apply_axis_assignment") as apply_assignment:
+            menu.pan_combo.setCurrentIndex(menu.pan_combo.findData(PAN_FRAMES))
+            menu.docking_combo.setCurrentIndex(
+                menu.docking_combo.findData(CONTINUOUS_DOCKING)
+            )
+        apply_assignment.assert_not_called()
+        self.assertEqual(window.time_interval.as_dict(), before)
+        self.assertEqual(menu.docking_combo.currentData(), CONTINUOUS_DOCKING)
+        self.assertEqual(menu.pan_combo.currentData(), PAN_FRAMES)
+        first_home = window.left_workspace.home_page_id
+        window.left_workspace.add_page(
+            AnalysisPageSpec(
+                page_id=window._make_page_id(),
+                title="同源另一页",
+                page_kind="energy_dos",
+                source_module="test",
+                source_page_id=first_home,
+                params={},
+            )
+        )
+        self.assertIs(
+            window.time_interval_controller._fourth_axis_drag,
+            window.source_manager.active().fourth_axis_drag,
+        )
+        window.left_workspace.activate_page(first_home)
+        self.assertEqual(window.time_interval.as_dict(), before)
+
+        self.assertTrue(window.load_data(str(self.second_path)))
+        second_id = window.source_manager.active_id
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, AUTO_DOCKING)
+        self.assertEqual(
+            window.source_manager.active().fourth_axis_drag.continuous_pan,
+            PAN_PHYSICAL,
+        )
+        window.on_fourth_axis_settings_changed(DISCRETE_DOCKING, PAN_PHYSICAL)
+
+        self.assertTrue(window.activate_source(first_id))
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, CONTINUOUS_DOCKING)
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.continuous_pan, PAN_FRAMES)
+        self.assertEqual(window.time_interval.as_dict(), before)
+        window.on_fourth_axis_settings_changed(AUTO_DOCKING, PAN_PHYSICAL)
+
+        self.assertTrue(window.activate_source(second_id))
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, DISCRETE_DOCKING)
+        self.assertTrue(window.activate_source(first_id))
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, AUTO_DOCKING)
+        self.assertEqual(menu.docking_combo.currentData(), AUTO_DOCKING)
 
     def test_switching_sources_commits_old_rotation_and_restores_overlay_state(self):
         window = self.window

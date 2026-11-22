@@ -31,7 +31,9 @@ class DisplayStyleTests(unittest.TestCase):
     def test_new_defaults_use_three_control_points(self):
         style = new_display_style()
         self.assertEqual(style["normalization"], {"mode": "full"})
-        self.assertEqual(style["opacity"], {"points": default_opacity_points()})
+        self.assertEqual(style["opacity"], {
+            "points": default_opacity_points(), "interpolation": "smooth",
+        })
         self.assertEqual(style["opacity"]["points"], [list(p) for p in DEFAULT_OPACITY_POINTS])
         self.assertTrue(is_independent(style))
 
@@ -119,18 +121,30 @@ class DisplayStyleTests(unittest.TestCase):
         same = resolved_display_style(style, reference_distance=REFERENCE)
         self.assertEqual(resolved, same)
 
-    def test_resolved_points_are_sorted_clipped_and_endpoint_fixed(self):
+    def test_resolved_points_are_stable_clipped_and_keep_duplicate_steps(self):
         style = new_display_style()
         style["opacity"] = {"points": [[0.8, 0.9], [0.2, 1.7], [0.2, -0.4], [0.5, "x"]]}
-        points = resolved_display_style(style)["opacity"]["points"]
-        self.assertEqual(points[0], [0.0, 0.0])
-        self.assertEqual(points[-1], [1.0, 0.9])
-        self.assertEqual(points[1], [0.2, 0.0])
+        resolved = resolved_display_style(style)
+        points = resolved["opacity"]["points"]
+        self.assertEqual(points, [
+            [0.0, 1.0], [0.2, 1.0], [0.2, 0.0], [0.8, 0.9], [1.0, 0.9],
+        ])
+        self.assertEqual(resolved["opacity"]["interpolation"], "linear")
         intensities = [point[0] for point in points]
         self.assertEqual(intensities, sorted(intensities))
         self.assertTrue(all(0.0 <= point[1] <= 1.0 for point in points))
         self.assertEqual([list(point) for point in normalize_opacity_points([])],
                          [list(point) for point in DEFAULT_OPACITY_POINTS])
+
+    def test_point_order_preserves_two_records_and_arbitrarily_small_gaps(self):
+        points = [[0.4, 0.1], [0.4, 0.8]]
+        normalized = normalize_opacity_points(points)
+        self.assertEqual(normalized[1:3], [tuple(point) for point in points])
+        close = normalize_opacity_points([
+            [0.0, 0.0], [0.00000001, 0.2], [0.00000002, 0.3], [1.0, 1.0],
+        ])
+        self.assertEqual(len(close), 4)
+        self.assertEqual([point[0] for point in close[1:3]], [1.0e-8, 2.0e-8])
 
     def test_colormap_range_survives_mode_switch_and_old_styles_use_full_palette(self):
         old = {"levels": (7, 63, 91), "opacity_mode": "对数"}

@@ -147,16 +147,18 @@ def try_channels(values, info, mode, *, style=None, unit_distance=None, color=No
 
                     reference = (DEFAULT_OPACITY_REFERENCE_DISTANCE
                                  if unit_distance is None else float(unit_distance))
-                    points = resolved_display_style(
+                    opacity = resolved_display_style(
                         style, reference_distance=reference,
-                    )["opacity"]["points"]
-                    curve = np.asarray(points, dtype=np.float64)
+                    )["opacity"]
+                    from bandscope.core.opacity_curve import evaluate_opacity_curve
+
                     span = float(info.get("span", float(info["data_max"]) - float(info["data_min"])))
                     if not np.isfinite(span) or span <= 0.0:
                         span = 1.0
                     q = (device.astype(cp.float64) - float(info["data_min"])) / span
-                    computed_alpha = cp.interp(
-                        q, cp.asarray(curve[:, 0]), cp.asarray(curve[:, 1]),
+                    computed_alpha = evaluate_opacity_curve(
+                        q, opacity["points"], interpolation=opacity["interpolation"],
+                        segments=opacity.get("segments"), xp=cp,
                     )
             elif need_alpha:
                 ramp = np.asarray(OPACITY_MAPS.get(str(mode), OPACITY_MAPS["linear"]), dtype=np.float64)

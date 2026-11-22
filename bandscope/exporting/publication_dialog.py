@@ -21,7 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from PyQt5.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTimer, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -808,8 +808,12 @@ class PublicationExportDialog(QDialog):
         self.btn_update = QPushButton("更新预览")
         self.btn_export = QPushButton("导出此预览")
         self.btn_cancel = QPushButton("取消")
-        self.btn_update.setIcon(theme.fluent_icon("ic_fluent_arrow_reset_regular", 15))
-        self.btn_export.setIcon(theme.fluent_icon("ic_fluent_arrow_export_regular", 15, theme.ACCENT_ON))
+        theme.set_button_icon(self.btn_update, "ic_fluent_arrow_reset_regular", 15)
+        self.btn_update.setIconSize(QSize(15, 15))
+        theme.set_button_icon(
+            self.btn_export, "ic_fluent_arrow_export_regular", 15, on_accent=True
+        )
+        self.btn_export.setIconSize(QSize(15, 15))
         for btn, kind in (
             (self.btn_update, "secondary"),
             (self.btn_export, "primary"),

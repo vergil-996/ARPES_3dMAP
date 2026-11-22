@@ -118,7 +118,8 @@ class RenderControlPage(ControlPageBase):
         self.vbox.addLayout(centered_widget_row(grp_exp, self.MIN_GROUP_WIDTH))
 
         self.grp_opacity, v_opacity = self._create_group("不透明度")
-        self.opacity_editor = OpacityCurveEditor(self)
+        self.opacity_editor = OpacityCurveEditor(self, show_interpolation=False)
+        self.grp_opacity.add_header_widget(self.opacity_editor.interpolation_selector)
         self._adaptive_slider_blocks.append(self.opacity_editor)
         self.opacity_editor.valueChanged.connect(self.display_value_changed)
         self.opacity_editor.valueCommitted.connect(self.display_value_committed)
@@ -192,7 +193,7 @@ class RenderControlPage(ControlPageBase):
                 (self.s_cmap_low, self.s_cmap_high), canonical["colormap_range"],
             ):
                 slider.setValue(int(round(float(value) * 1000.0)))
-            self.opacity_editor.set_points(canonical["opacity"]["points"])
+            self.opacity_editor.set_opacity(canonical["opacity"])
         finally:
             del blockers
         self._display_view = str(view)
@@ -223,6 +224,8 @@ class RenderControlPage(ControlPageBase):
         return new_display_style(
             levels, self._opacity_mode, self.get_colormap_range(),
             self.opacity_editor.points(),
+            opacity_interpolation=self.opacity_editor.interpolation(),
+            opacity_segments=self.opacity_editor.segments(),
         )
 
     def get_opacity_points(self):

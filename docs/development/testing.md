@@ -48,6 +48,8 @@ python scripts/validation/verify_flat_band_alpha.py --bands 5
 python scripts/validation/volume_display_quality.py .local/data/WSe2_step.npz D:/ARPES数据/npz_files/西湖/Au_cut.npz D:/ARPES数据/npz_files/西湖/NiHITP_cut.npz --blender D:/blender/blender.exe
 python scripts/validation/verify_view_recipe.py
 python scripts/validation/verify_ui_themes.py
+python scripts/validation/verify_fluent_icon_dpi.py
+python scripts/validation/verify_fluent_icon_windows.py
 python scripts/validation/verify_levels_and_colormap_range.py .local/data/WSe2_step.npz
 python scripts/validation/verify_independent_opacity_curve.py .local/data/WSe2_step.npz
 python scripts/validation/verify_multi_source_workspaces.py
@@ -72,7 +74,9 @@ python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blende
 
 `verify_ui_themes.py` 使用隔离设置检查新环境默认浅色、深浅主题切换、参数保持，以及主窗口、出版导出、Blender 和设置窗口的真实截图；插件管理与更新设置截图均通过 `window.open_plugin_manager()` 或 `SettingsDialog.select_page('updates')` 选中「设置 → 应用管理」的内嵌页后截取整个主设置窗口，不再创建或关闭独立功能窗口。
 
-`verify_levels_and_colormap_range.py` 默认使用 WSe₂ 数据，驱动累计直方图、黑灰白输入色阶与双端输出色带，检查连续拖动缓存复用、切帧、局部区域、全部显示、二维切片、窄面板和深浅主题；色带切换统一走「输出色带」标题行的新菜单，并核对默认 `magma`、菜单首两项、`coolwarm` 唯一、换色保留输出端点、每次只完成一次精确刷新、重选或取消不刷新、菜单滚动与色样／勾选、标题行色名与渐变条同宽。输出窗口／三维帧缓冲截图、深浅主题色阶卡片、标题行、展开菜单与两组控件截图及 `report.json`。`verify_independent_opacity_curve.py` 在同一真实数据上检查默认三点曲线与旧兼容线性一致、颜色控件不改变 α、下降段与平台的逐体素曲线、拖动曲线点不带动底轨、底轨水平定位与向上加点、黑点脱离外轮廓并连续穿过底轨与横轴间距、拖回底轨重新挂回、碰线前保持空心不回填、原位回填动画、碰线前松手、命中已有点、α＝0 加点、零线编辑与重新打开后保留、右键与 Delete 删除、端点保护、焦点离开后 Delete 无效、深浅主题与窄面板，并核对 CPU／可用 CUDA、出版导出与 Blender 密度的参考距离换算及 schema 4→5 迁移误差；输出曲线控件、窗口、三维帧缓冲和出版图截图。自动化颜色与透明度契约由合成数据测试覆盖，不能用截图替代这些数值断言。
+`verify_fluent_icon_dpi.py` 在 Windows 上以独立进程覆盖 DPR 1、1.25、1.5、1.5625、1.75、2，用真实 `ActionButton` 对照 24 个 Fluent 图标的旧版位图、新引擎和目标物理尺寸 SVG，并覆盖禁用与勾选状态；输出逐像素报告和分倍率对照图。`verify_fluent_icon_windows.py` 使用默认 WSe₂ 数据和隔离设置截取深浅主题下的主窗口、专注模式、出版导出、插件管理及 Blender 标题，报告实际屏幕 DPR 和未执行的跨屏操作。两者默认输出至 `.local/outputs/icon-dpi-audit/`。
+
+`verify_levels_and_colormap_range.py` 默认使用 WSe₂ 数据，驱动累计直方图、黑灰白输入色阶与双端输出色带，检查连续拖动缓存复用、切帧、局部区域、全部显示、二维切片、窄面板和深浅主题；色带切换统一走「输出色带」标题行的新菜单，并核对默认 `magma`、菜单首两项、`coolwarm` 唯一、换色保留输出端点、每次只完成一次精确刷新、重选或取消不刷新、菜单滚动与色样／勾选、标题行色名与渐变条同宽。输出窗口／三维帧缓冲截图、深浅主题色阶卡片、标题行、展开菜单与两组控件截图及 `report.json`。`verify_independent_opacity_curve.py` 在同一真实数据上检查默认三点曲线与旧兼容线性一致、颜色控件不改变 α、下降段与平台的逐体素曲线、拖动曲线点不带动底轨、底轨水平定位与向上加点、黑点脱离外轮廓并连续穿过底轨与横轴间距、拖回底轨重新挂回、碰线前保持空心不回填、原位回填动画、碰线前松手、命中已有点、α＝0 加点、零线编辑与重新打开后保留、右键与 Delete 删除、端点保护、焦点离开后 Delete 无效、深浅主题与窄面板，并核对 CPU／可用 CUDA、出版导出与 Blender 密度的参考距离换算及 schema 4→5 迁移误差；输出曲线控件、窗口、三维帧缓冲和出版图截图。自动化颜色与透明度契约由合成数据测试覆盖，不能用截图替代这些数值断言。2026-11-22 起，该脚本输出至 `.local/outputs/opacity-curve-interpolation/`，并增加标题行「平滑／直线」选择器、PCHIP 精确拆分与保存重开、模式往返、同强度垂直阶跃拖动、schema 6 与 Blender schema 13／编辑格式 4 检查；窄面板截图包含完整标题行。
 
 `verify_path_slice.py` 在真实窗口中用鼠标事件完成等能面选点、双击改名、右键建页和 Shift 跳选，检查分段厚度、标注开关、时间切帧、窄窗口滚动与深浅主题，并输出主窗口截图、完整路径出版图、数值 NPZ 和 `report.json`。
 

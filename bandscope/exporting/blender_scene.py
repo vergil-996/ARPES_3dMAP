@@ -35,8 +35,9 @@ from bandscope.processing.display_transfer import (
 # 10: 独立归一化、颜色／透明度样式与渲染质量；schema 7–9 更新保持旧模式。
 # 11: 可选混合受光数据体材质与逐条目灯光；density 统一描述为总消光系数。
 # 12: 不透明度改为可编辑控制点点列，编辑格式 3；schema 10–11 仍按四参数回读与更新。
-BLENDER_SCENE_SCHEMA = 12
-BLENDER_DISPLAY_EDIT_FORMAT = 3
+# 13: 点列增加 PCHIP／直线模式与平滑曲段系数，编辑格式 4；旧点列按直线回读。
+BLENDER_SCENE_SCHEMA = 13
+BLENDER_DISPLAY_EDIT_FORMAT = 4
 DISPLAY_TO_BLENDER = 0.01
 ALPHA_CAP = 1.0 - 1.0e-6
 DEFAULT_RENDER_LONG_EDGE = 1920
@@ -271,7 +272,8 @@ class BlenderSceneData:
                 "editable": True,
                 "capabilities": [
                     "colormap", "levels", "locked_range", "include_zero", "opacity_mode",
-                    "normalization", "independent_opacity", "opacity_points", "render_quality",
+                    "normalization", "independent_opacity", "opacity_points", "opacity_interpolation",
+                    "render_quality",
                 ],
                 "baked_effects": list(self.baked_effects),
                 "baked_effects_warning": (

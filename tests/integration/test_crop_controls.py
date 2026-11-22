@@ -140,6 +140,23 @@ class CropControlTests(unittest.TestCase):
         self.assertFalse(popup.isVisible())
         parent.close()
 
+    def test_crop_and_erase_use_the_same_cross_cursor(self):
+        canvas, plotter = QWidget(), QWidget()
+        plotter.interactor = plotter
+        host = SimpleNamespace(
+            crop_controller=self.controller,
+            canvas_2d=canvas,
+            plotter=plotter,
+        )
+        self.controller.enabled = True
+        for operation in ("crop", "erase"):
+            self.controller.set_operation(operation)
+            CropInteractionMixin._update_crop_cursor(host)
+            self.assertEqual(canvas.cursor().shape(), Qt.CrossCursor)
+            self.assertEqual(plotter.cursor().shape(), Qt.CrossCursor)
+        canvas.deleteLater()
+        plotter.deleteLater()
+
     def test_range_window_keeps_user_position_and_follows_toggle_state(self):
         parent, controller, host = self._region_host()
         popup = controller.popup

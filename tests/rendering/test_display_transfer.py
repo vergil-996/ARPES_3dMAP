@@ -33,6 +33,19 @@ class DisplayLegendTransferTests(unittest.TestCase):
                 mappable = VisualEngine._colorbar_mappable("magma", info)
                 self.assertAlmostEqual(float(mappable.norm(info["gray_value"])), .5)
 
+    def test_right_3d_colorbar_has_no_title_in_standard_or_enhanced_mode(self):
+        info = level_info((0., 100.), (0, 50, 100))
+        for normalized in (False, True):
+            with self.subTest(normalized=normalized):
+                scalar_bar = Mock()
+                plotter = SimpleNamespace(
+                    scalar_bars={VisualEngine.COLORBAR_TITLE: scalar_bar},
+                )
+                VisualEngine._apply_3d_colorbar_ticks(
+                    plotter, info, normalized=normalized,
+                )
+                scalar_bar.SetTitle.assert_called_once_with("")
+
 
 class PackedDisplayUploadTests(unittest.TestCase):
     def test_interleaved_channels_upload_with_one_contiguous_copy(self):
@@ -168,6 +181,23 @@ class DisplayVolumeTransferTests(unittest.TestCase):
                 self.assertEqual(legend.GetAnnotation(1), VisualEngine._format_level_tick(middle))
                 self._assert_science_unchanged()
         np.testing.assert_array_equal(self.data, original)
+
+    def test_right_colorbar_title_stays_empty_across_display_mode_changes(self):
+        context = dict(view="3d", data=self.data, coords={
+            key: np.arange(size, dtype=float)
+            for key, size in zip(("X", "Y", "E"), self.data.shape)
+        })
+        style = dict(levels=(0, 100, 100), opacity_mode="linear")
+        roi = region(1, (0, 3, 0, 3, 0, 7), view="3d", axes=("X", "Y", "E"), style=style)
+        fields = resolve_display(context, dict(regions=[roi], background=style))
+        for display_fields in (None, fields, None):
+            with self.subTest(enhanced=display_fields is not None):
+                self.session.render(
+                    self.data, style["levels"], style["opacity_mode"],
+                    show_axes=False, display_fields=display_fields,
+                )
+                scalar_bar = self.plotter.scalar_bars[VisualEngine.COLORBAR_TITLE]
+                self.assertEqual(scalar_bar.GetTitle(), "")
 
     def test_plugin_gain_and_style_restore_keep_weak_signal_and_actor(self):
         gains = np.linspace(.2, 2., self.data.shape[2], dtype=np.float32)

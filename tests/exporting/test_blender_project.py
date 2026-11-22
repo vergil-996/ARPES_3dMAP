@@ -102,7 +102,7 @@ class BlenderProjectContractTests(unittest.TestCase):
             metadata["entry_id"] = entry.entry_id
             items.append((entry, metadata))
         metadata = make_project_metadata(items, request, "demo.assets")
-        self.assertEqual(metadata["schema_version"], 12)
+        self.assertEqual(metadata["schema_version"], 13)
         self.assertEqual(metadata["project"]["entry_order"], ["entry-001", "entry-002"])
         self.assertEqual(set(metadata["project"]["presets"]), set(PRESET_KEYS))
         self.assertTrue(all(metadata["project"]["presets"].values()))
@@ -483,8 +483,8 @@ class BlenderProjectUpdateTests(unittest.TestCase):
             self.assertEqual(_sha(blend), blend_hash)
             self.assertEqual(result.project.entries[1].vdb_path.read_bytes(), untouched_vdb)
             self.assertEqual(result.project.entries[0].vdb_path.read_bytes(), b"VDB-updated")
-            self.assertEqual(result.project.schema_version, 12)
-            self.assertEqual(result.project.metadata["entries"][0]["schema_version"], 12)
+            self.assertEqual(result.project.schema_version, 13)
+            self.assertEqual(result.project.metadata["entries"][0]["schema_version"], 13)
             updated = result.project.entries[0].snapshot
             self.assertEqual(updated.cmap_name, "viridis")
             self.assertEqual(updated.levels_params, (5.0, 65.0, 90.0))

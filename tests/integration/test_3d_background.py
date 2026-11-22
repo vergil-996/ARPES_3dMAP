@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+from PyQt5.QtCore import QSize
 from PyQt5.QtWidgets import QApplication
 
 from tests.support.view_recipe import control_window, synthetic_npz
@@ -34,6 +35,28 @@ class View3dBackgroundTests(unittest.TestCase):
         self.assertTrue(window.btn_theme_light.isChecked())
         self.assertFalse(window.btn_theme_dark.isChecked())
         self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
+
+    def test_fluent_buttons_keep_their_logical_icon_sizes(self):
+        window = control_window()
+        self.addCleanup(window.close)
+
+        self.assertEqual(window.btn_theme_dark.iconSize(), QSize(14, 14))
+        self.assertEqual(window.btn_theme_light.iconSize(), QSize(14, 14))
+        self.assertEqual(window.btn_tb_settings.iconSize(), QSize(18, 18))
+        self.assertEqual(window.btn_main_export.iconSize(), QSize(16, 16))
+        self.assertEqual(window.btn_tb_shot.iconSize(), QSize(16, 16))
+        overlay = window.canvas_tool_overlay
+        self.assertEqual(overlay.focus_button.iconSize(), QSize(16, 16))
+        overlay.set_focus_mode(True)
+        self.assertEqual(
+            overlay.focus_button.property("fluentIconName"),
+            "ic_fluent_full_screen_minimize_regular",
+        )
+        overlay.set_focus_mode(False)
+        self.assertEqual(
+            overlay.focus_button.property("fluentIconName"),
+            "ic_fluent_full_screen_maximize_regular",
+        )
 
     def test_loading_data_restores_current_theme_background(self):
         with tempfile.TemporaryDirectory() as temp_dir:
