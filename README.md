@@ -24,7 +24,7 @@ BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工
 验证（Windows、仓库 `.venv`）：
 
 - 全量 `python -m unittest discover -s tests -t .`：**1964 项通过**（2026-11-22，159.199 秒，单进程，日志 `.local/logs/release-1.22.3-full.log`）；`compileall` 通过。
-- `check_release_version.py v1.22.2`、`scripts/validation/verify_plugin_release_flow.py` 与 `git diff --check` 通过。
+- `check_release_version.py v1.22.3`、`scripts/validation/verify_plugin_release_flow.py` 与 `git diff --check` 通过。
 - 真实窗口（`.local/data/WSe2_step.npz` 与合成动态数据）：`verify_integration_context_menu.py` 在视图右键创建链路、深层主题与非法页过滤上通过；`verify_plugin_management.py` 在内嵌三页签、更新设置保存／取消／检查与窄窗滚动上通过。未做人工视觉逐张复核。
 
 ### v1.22.1 更新
