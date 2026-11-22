@@ -14,7 +14,7 @@
 | 画布悬浮工具栏与 Z 轴旋钮（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工复核：旋钮弹层拖动与数值输入手感、低高度布局、路径选段条显隐；高 DPI／多显示器；冻结包与安装器验收 | [画布工具栏与 Z 轴旋钮](../plans/canvas-toolbar-rotation-dial.md) |
 | 色阶调整改造（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：累计直方图、胶囊手柄与输出色带房屋标记在深浅主题和窄栏下的观感；冻结包与安装器验收 | [色阶调整](../plans/levels-and-colormap-range.md) |
 | 三维不透明度曲线（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：底轨加点、零点保留与 Delete 删除手感；真实 Blender 进程渲染对照；冻结包与安装器验收 | [三维不透明度曲线](../plans/opacity-curve-control-points.md) |
-| 分级设置窗口（v1.22.1 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：分级导航与三分类页布局、窄窗滚动、深浅主题；发布后重跑 `verify_plugin_management.py` 并按新入口更新 `verify_ui_themes.py`；冻结包与安装器验收 | [分级设置窗口](settings-dialog-2026-11-21.md) |
+| 分级设置窗口（v1.22.1 已发布；插件管理／更新设置内嵌页随 v1.22.3 发布 GitHub 与 MatElab） | 维护者人工视觉复核：分级导航、两个内嵌页布局、窄窗滚动、深浅主题；完整 `verify_ui_themes.py` 真实数据主题流程；冻结包与安装器验收 | [分级设置窗口](settings-dialog-2026-11-21.md) |
 | 我的分组与页面副本（v1.18.1／v1.19.0 已发布 GitHub 与 MatElab） | 拖动 / 粘贴手感、窄栏与多分组布局、真实数据跨源激活；嵌套子分组的深层布局；冻结包与安装器验收；分组不跨重启保留 | [我的分组与页面副本](page-groups-2026-11-02.md) |
 | Blender 工程导出与八材质薄板（v1.19.0／v1.20.0／v1.21.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核（薄板高光／折射、弱信号与 Append 观感，多视图共享预设的重开与总览）；真实窗口取消按钮；冻结安装包与安装器验收 | [Blender 工程导出](../plans/blender-scene-export.md) · [八材质预设](../plans/blender-box-materials.md) |
 | Blender 数据体两种外观（v1.20.0 已发布 GitHub 与 MatElab） | 维护者人工视觉复核：灰白合成体高光截断、内部连续性、遮蔽、偏色、弱带去噪及多页／Append 观感 | [柔和受光实施与验收](../plans/blender-volume-lighting.md) |
@@ -25,7 +25,7 @@
 | E 轴翻转（2026-10-21 改为显示镜像；v1.17.1 已发布 GitHub 与 MatElab） | 维护者人工确认各视图翻转观感与出版图；冻结包验收 | [E 翻转验收](e-axis-consistency-acceptance.md) |
 | 发行与插件安装（v1.13.0 主记录；v1.14.5 已于 2026-10-19 发布 GitHub 与 MatElab） | CPU/NVIDIA 冻结包、安装器端到端、官方目录在线安装；线上状态在接续发布时核验 | [v1.13.0 发布](v1.13.0-release.md) |
 | 插件管理（v1.12.2 起，按当前源码复核） | C–F 真实窗口交互、旧未签名插件转官方来源的人工复核 | [插件管理实施记录](../plans/plugin-management-entry.md) |
-| EDC 瀑布图插件（v1.13.0 / API 3） | 瀑布样例逐张人工视觉复核 | [EDC 迁移交接](edc-waterfall-migration-2026-10-12.md) |
+| EDC 瀑布图插件（v1.13.0 / API 3；视图右键「处理分析」入口与 1.0.2 随 v1.22.3 发布 GitHub 与 MatElab） | 瀑布样例逐张人工视觉复核；视图右键菜单的人工操作手感 | [EDC 迁移交接](edc-waterfall-migration-2026-10-12.md) |
 | 路径记忆（v1.12.5 起） | 原生文件对话框人工交互验收 | [v1.12.5 剩余检查](v1.12.5-release.md) |
 | 轴积分与 1D 出图（v1.12.4 起） | 轴积分端点 / E 翻转真实窗口视觉验收、PDF 逐页人工检查 | [v1.12.4 剩余验收](v1.12.4-release-2026-10-10.md) |
 | 局部增强（v1.14.3 起：色阶与映射跟随下拉框，「全部显示」时批量调整；2026-10-19 删除入口移至视图右键、下拉框改用 SiliconUI；2026-10-20 新增色带复制/粘贴，v1.15.0） | 人工视觉与拖拽手感验收、实窗 ROI 去噪、冻结包与安装器验收；2026-10-19 的自动化与 2D/3D 实窗命中验证已通过，真实鼠标手测待人工；可编辑下拉框数字键 1-4 冲突已修复；帧时改造已实施（3D 刷新 78.5 → 47.4 ms、空闲 3.9 ms、ROI 去噪后台化），见 [性能计划](../plans/enhancement-render-performance.md) | [控件简化与修复主记录](../plans/enhancement-controls-simplify.md) |
