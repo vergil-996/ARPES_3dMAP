@@ -1,6 +1,6 @@
-"""更新源与 MatElab 账号设置；所有编辑先保留为对话框草稿。"""
+"""更新源与 MatElab 账号设置；所有编辑先保留为面板草稿。"""
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from bandscope.app_metadata import APP_VERSION
@@ -25,11 +26,9 @@ from bandscope.updates.sources import (
 )
 
 
-def _style_dialog(dialog):
-    dialog.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-    dialog.setMinimumWidth(460)
-    dialog.setStyleSheet(
-        f"QDialog {{ background-color: {theme.BG_0}; }}"
+def _style_content(widget, root_selector):
+    widget.setStyleSheet(
+        f"{root_selector} {{ background-color: {theme.BG_0}; }}"
         f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
         f"QGroupBox {{ color: {theme.TEXT_2}; border: 1px solid {theme.BORDER_HEX};"
         " border-radius: 8px; margin-top: 12px; padding: 16px 12px 12px; }"
@@ -44,6 +43,17 @@ def _style_dialog(dialog):
         f" background: {theme.BG_2}; selection-background-color: {theme.ACCENT_SOFT};"
         " selection-color: palette(text); }"
     )
+
+
+def _style_dialog(dialog):
+    dialog.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+    dialog.setMinimumWidth(460)
+    _style_content(dialog, "QDialog")
+
+
+def _style_panel(panel):
+    panel.setObjectName("UpdateSettingsPanel")
+    _style_content(panel, "QWidget#UpdateSettingsPanel")
 
 
 def _style_buttons(buttons, primary):
@@ -107,18 +117,24 @@ class MatelabLoginDialog(QDialog):
         super().accept()
 
 
-class UpdateSettingsDialog(QDialog):
-    """只维护更新设置草稿，由控制器在接受后统一持久化。"""
+class UpdateSettingsPanel(QWidget):
+    """维护更新设置草稿；持久化、检查更新和页面切换由控制器协调。"""
 
-    CheckRequested = QDialog.Accepted + 1
+    save_requested = pyqtSignal()
+    check_requested = pyqtSignal()
+    active_changed = pyqtSignal(bool)
+    busy_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None, *, source=DEFAULT_SOURCE, credentials=None, username=""):
         super().__init__(parent)
-        self.setWindowTitle("更新设置")
-        _style_dialog(self)
+        _style_panel(self)
         self._credentials = credentials
-        self._initial_credentials = credentials
+        self._saved_source = normalize_source(source)
+        self._saved_credentials = credentials
         self._username = credentials.username if credentials is not None else str(username or "")
+        self._saved_username = self._username
+        self._active = False
+        self._busy = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
@@ -127,7 +143,7 @@ class UpdateSettingsDialog(QDialog):
         self.source_combo = QComboBox()
         for source_id, label in SOURCE_LABELS.items():
             self.source_combo.addItem(label, source_id)
-        self.source_combo.setCurrentIndex(self.source_combo.findData(normalize_source(source)))
+        self.source_combo.setCurrentIndex(self.source_combo.findData(self._saved_source))
         form.addRow("更新源", self.source_combo)
         layout.addLayout(form)
         self.source_hint = QLabel()
@@ -171,15 +187,15 @@ class UpdateSettingsDialog(QDialog):
         update_row.addWidget(self.check_updates_button)
         layout.addLayout(update_row)
 
-        hint = QLabel("「保存」或「检查更新」会应用当前修改；取消保留原设置。")
+        hint = QLabel("「保存」或「检查更新」会应用当前修改；取消恢复最近保存的设置。")
         hint.setStyleSheet(f"color: {theme.TEXT_3};")
         layout.addWidget(hint)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Save).setText("保存")
         self.buttons.button(QDialogButtonBox.Cancel).setText("取消")
         _style_buttons(self.buttons, self.buttons.button(QDialogButtonBox.Save))
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
+        self.buttons.accepted.connect(self.request_save)
+        self.buttons.rejected.connect(self.cancel)
         layout.addWidget(self.buttons)
         self.source_combo.currentIndexChanged.connect(self._refresh_source)
         self._refresh_source()
@@ -191,8 +207,66 @@ class UpdateSettingsDialog(QDialog):
     def credentials(self):
         return self._credentials
 
+    def is_active(self):
+        return self._active
+
+    def set_active(self, active):
+        active = bool(active)
+        if active == self._active:
+            return
+        self._active = active
+        self.active_changed.emit(active)
+
+    def is_busy(self):
+        return self._busy
+
+    def set_busy(self, busy):
+        busy = bool(busy)
+        if busy == self._busy:
+            return
+        self._busy = busy
+        enabled = not busy
+        self.source_combo.setEnabled(enabled)
+        self.account_group.setEnabled(enabled)
+        self.buttons.button(QDialogButtonBox.Save).setEnabled(enabled)
+        self.check_updates_button.setEnabled(enabled)
+        self._refresh_account()
+        self.busy_changed.emit(busy)
+
+    def request_save(self):
+        if not self._busy:
+            self.save_requested.emit()
+
     def request_update_check(self):
-        self.done(self.CheckRequested)
+        if not self._busy:
+            self.check_requested.emit()
+
+    def cancel(self):
+        self.restore_saved()
+
+    def mark_saved(self):
+        self._saved_source = self.selected_source()
+        self._saved_credentials = self._credentials
+        self._saved_username = self._username
+        self._refresh_account()
+
+    def restore_saved(self):
+        self.source_combo.setCurrentIndex(self.source_combo.findData(self._saved_source))
+        self._credentials = self._saved_credentials
+        self._username = self._saved_username
+        self._refresh_source()
+        self._refresh_account()
+
+    def set_saved_credentials(self, credentials):
+        self._credentials = credentials
+        self._saved_credentials = credentials
+        self._username = credentials.username if credentials is not None else ""
+        self._saved_username = self._username
+        self._refresh_account()
+
+    def discard_and_deactivate(self):
+        self.restore_saved()
+        self.set_active(False)
 
     def _refresh_source(self):
         matelab = self.selected_source() == SOURCE_MATELAB
@@ -205,13 +279,15 @@ class UpdateSettingsDialog(QDialog):
     def _refresh_account(self):
         credentials = self._credentials
         if credentials is None:
-            text = "未设置账号" if self._initial_credentials is None else "保存后将清除本机账号"
+            text = "未设置账号" if self._saved_credentials is None else "保存后将清除本机账号"
         else:
-            prefix = "已保存账号" if credentials == self._initial_credentials else "待保存账号"
+            prefix = "已保存账号" if credentials == self._saved_credentials else "待保存账号"
             text = f"{prefix}：{credentials.username}"
         self.account_label.setText(text)
         self.edit_account_button.setText("设置账号…" if credentials is None else "更换账号…")
-        self.clear_account_button.setEnabled(credentials is not None or bool(self._username))
+        self.clear_account_button.setEnabled(
+            not self._busy and (credentials is not None or bool(self._username))
+        )
 
     def _edit_account(self):
         dialog = MatelabLoginDialog(self, username=self._username)

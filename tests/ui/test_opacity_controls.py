@@ -90,6 +90,17 @@ class OpacityCurveEditorTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(x, y - int(round(11 * ratio))), background)
         self.assertEqual(image.pixelColor(x, y - int(round(8 * ratio))), background)
 
+    def test_rail_has_no_center_line(self):
+        editor = self.make_editor()
+        curve = editor.curve
+        image = curve.grab().toImage()
+        ratio = image.devicePixelRatio() or 1.0
+        rail = curve._rail_rect()
+        x = int(round(curve._x(0.2) * ratio))
+        for logical_y in (rail.center().y(), rail.center().y() + 1):
+            y = int(round(logical_y * ratio))
+            self.assertEqual(image.pixelColor(x, y), QColor(theme.BG_4))
+
     def test_rail_handle_stays_put_while_dragging_a_curve_point(self):
         editor = self.make_editor([[0.0, 0.0], [0.2, 0.3], [0.6, 0.6], [1.0, 1.0]])
         curve = editor.curve

@@ -463,9 +463,6 @@ class OpacityCurveCanvas(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(theme.BG_4))
         painter.drawRoundedRect(QRectF(rail), rail.height() / 2.0, rail.height() / 2.0)
-        painter.setPen(QPen(QColor(theme.BORDER_HEX), 0.8))
-        painter.drawLine(QLineF(float(rail.left()), rail.center().y() + 0.5,
-                                float(rail.right()), rail.center().y() + 0.5))
 
     def _paint_connector(self, painter):
         rail = self._rail_rect()

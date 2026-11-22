@@ -57,31 +57,35 @@ class RenderControlPage(ControlPageBase):
         self.grp_camera = grp_camera
         self.vbox.addLayout(centered_widget_row(grp_camera, self.MIN_GROUP_WIDTH))
 
-        # 色阶
-        grp_exp, v_exp = self._create_group("色阶")
-
-        # 下拉框选择色阶滑条与强度映射的调整对象；「全部显示」展示所有区域，
-        # 并在调节时同时调整背景与全部区域。锁定色带始终统一生效，
-        # 各对象仍按自己的强度范围归一化。下拉框内可直接编辑文字重命名区域。
+        # 显示对象统领下方色阶与不透明度；「全部显示」下实际调节会同时写入
+        # 背景和全部区域。锁定始终统一冻结各对象自己的强度归一化范围。
+        self.display_target_label = SiLabel("显示对象")
+        self.display_target_label.setStyleSheet(theme.field_label_qss())
+        self.display_target_label.setFixedHeight(22)
+        self._adaptive_row_controls.append(self.display_target_label)
+        self.vbox.addLayout(centered_widget_row(self.display_target_label, self.MIN_CONTROL_ROW_WIDTH))
         self.region_combo = RegionComboBox(self)
         self.region_combo.sync([], None)
         self.btn_lock = AnimatedLockButton(self)
-        self.btn_lock.setAccessibleName("锁定色带")
+        self.btn_lock.setAccessibleName("锁定全部强度范围")
         theme.style_push_button(self.btn_lock, "secondary")
         self.btn_lock.setToolTip(
-            "锁定全部色带：开启后，背景与所有增强区域各自按\n"
-            "当前强度范围锁定归一化，拖动时间轴或生成新结果页时\n"
-            "都按锁定时刻的范围分配颜色，便于逐帧对比；\n"
-            "再次点击全部恢复按每帧数据自动分配。"
+            "锁定全部强度范围：开启后，背景与所有增强区域分别按\n"
+            "各自当前强度范围固定归一化，颜色与不透明度共用该范围。\n"
+            "拖动时间轴或生成新结果页时仍按锁定范围映射，便于逐帧对比；\n"
+            "再次点击恢复按每帧数据自动分配。锁定不会禁止编辑色阶或曲线。"
         )
-        target_row = QWidget(self)
-        target_row_layout = QHBoxLayout(target_row)
+        self.display_target_row = QWidget(self)
+        target_row_layout = QHBoxLayout(self.display_target_row)
         target_row_layout.setContentsMargins(0, 0, 0, 0)
         target_row_layout.setSpacing(8)
         target_row_layout.addWidget(self.region_combo, 1)
         target_row_layout.addWidget(self.btn_lock)
-        self._adaptive_row_controls.append(target_row)
-        v_exp.addLayout(centered_widget_row(target_row, self.MIN_CONTROL_ROW_WIDTH))
+        self._adaptive_row_controls.append(self.display_target_row)
+        self.vbox.addLayout(centered_widget_row(self.display_target_row, self.MIN_CONTROL_ROW_WIDTH))
+
+        # 色阶
+        grp_exp, v_exp = self._create_group("色阶")
 
         input_label = SiLabel("输入色阶 · 累计直方图")
         input_label.setStyleSheet(theme.field_label_qss())
@@ -99,6 +103,9 @@ class RenderControlPage(ControlPageBase):
         # 「输出色带」标题行是主界面唯一的色带选择入口：左侧标题，右侧当前
         # 色带名和下拉箭头，点击展开带色样的单列菜单。
         self.colormap_selector = OutputColormapSelector(self)
+        self.colormap_selector.setToolTip(
+            "全部显示对象共用同一输出色带；点击展开列表，选择后立即刷新当前视图。"
+        )
         self.colormap_selector.colormap_changed.connect(self._on_colormap_selected)
         self._adaptive_slider_blocks.append(self.colormap_selector)
         v_exp.addLayout(centered_widget_row(self.colormap_selector))
@@ -122,8 +129,15 @@ class RenderControlPage(ControlPageBase):
         self._display_view = "3d"
         self.set_display_style(new_display_style(), view="3d")
 
-        # 去噪
+        # 去噪属于当前结果页的数据范围，不随显示对象下拉框切换。
         grp_noise, v_noise = self._create_group("去噪")
+        self.denoise_scope_label = SiLabel("当前数据范围 · 全局共享")
+        self.denoise_scope_label.setStyleSheet(theme.field_label_qss())
+        self.denoise_scope_label.setToolTip(
+            "去噪配置由所有显示对象共享；应用范围由当前结果页的数据范围决定，"
+            "不随显示对象切换。"
+        )
+        v_noise.addWidget(self.denoise_scope_label)
 
         self.combo_n1 = self._create_denoise_combo("一级去噪", self.DENOISE_METHODS)
         self.combo_n2 = self._create_denoise_combo("二级去噪", self.DENOISE_METHODS)

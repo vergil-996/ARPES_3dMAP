@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
-"""阶段 E：插件管理窗口的「官方插件」页。
+"""阶段 E：插件管理面板的「官方插件」页。
 
 目录获取与包下载都用替身客户端驱动；签名用临时密钥，官方来源走的仍是真实的
 验签与安装事务，不绕过任何校验。
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import tempfile
+import threading
 import time
 import unittest
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from PyQt5.QtCore import qInstallMessageHandler
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
@@ -29,7 +33,7 @@ from bandscope.extensions.catalog import (
     FetchedCatalog,
     parse_catalog,
 )
-from bandscope.extensions.plugin_dialog import PluginManagerDialog
+from bandscope.extensions.plugin_dialog import PluginManagerPanel
 from bandscope.extensions.plugin_manager import InstallSource, PluginManager
 from bandscope.extensions.trust import SOURCE_OFFICIAL, build_signature, write_signature_sidecar
 from tests.support.plugins import (
@@ -137,6 +141,24 @@ class _StubClient:
         return self.package
 
 
+class _BlockingDownloadClient(_StubClient):
+    def __init__(self, catalog):
+        super().__init__(catalog)
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.returned = threading.Event()
+
+    def download_package(self, entry, destination_dir, *, progress=None, cancelled=None):
+        self.started.set()
+        try:
+            if not self.release.wait(5):
+                raise RuntimeError("测试下载未及时释放")
+            Path(destination_dir, "late.bsplugin").write_bytes(b"late")
+            return self.package
+        finally:
+            self.returned.set()
+
+
 def make_catalog(entries, *, host_version="1.12.0", api_versions=(1,), revision=2):
     return parse_catalog(
         json.dumps(
@@ -209,9 +231,11 @@ class CatalogDialogTests(unittest.TestCase):
         return manager
 
     def make_dialog(self, manager, client):
-        return PluginManagerDialog(
+        panel = PluginManagerPanel(
             _WindowStub(), SimpleNamespace(manager=manager), catalog_client=client
         )
+        self.addCleanup(panel.shutdown)
+        return panel
 
     def signed_package(self, version="1.0.1", archive_name=None):
         archive = make_plugin_archive(
@@ -294,7 +318,7 @@ class CatalogDialogTests(unittest.TestCase):
             ),
         )
         window = _WindowStub()
-        dialog = PluginManagerDialog(window, SimpleNamespace(manager=manager), catalog_client=client)
+        dialog = PluginManagerPanel(window, SimpleNamespace(manager=manager), catalog_client=client)
         dialog._catalog = catalog
         dialog._render_catalog()
         dialog.catalog_table.selectRow(0)
@@ -393,6 +417,72 @@ class CatalogDialogTests(unittest.TestCase):
         self.app.processEvents()
         return predicate()
 
+    def test_shutdown_cancels_workers_and_cleans_download_directory(self):
+        manager = self.make_manager()
+        dialog = self.make_dialog(manager, _StubClient(None))
+        catalog_thread = mock.Mock()
+        catalog_thread.isRunning.side_effect = [True, False]
+        download_thread = mock.Mock()
+        download_thread.isRunning.side_effect = [True, False]
+        dialog._catalog_thread = catalog_thread
+        dialog._download_thread = download_thread
+        download_dir = Path(self._root.name) / "plugin-download"
+        download_dir.mkdir()
+        (download_dir / "partial.bsplugin").write_bytes(b"partial")
+        dialog._download_dir = download_dir
+        dialog.btn_catalog_refresh.setEnabled(False)
+
+        dialog.shutdown(wait_ms=37)
+        dialog.shutdown(wait_ms=37)
+
+        catalog_thread.requestInterruption.assert_called_once_with()
+        download_thread.requestInterruption.assert_called_once_with()
+        catalog_thread.wait.assert_called_once_with(37)
+        download_thread.wait.assert_called_once_with(37)
+        self.assertIsNone(dialog._catalog_thread)
+        self.assertIsNone(dialog._download_thread)
+        self.assertIsNone(dialog._download_dir)
+        self.assertFalse(download_dir.exists())
+        self.assertTrue(dialog.btn_catalog_refresh.isEnabled())
+
+    def test_shutdown_retains_real_worker_and_cleans_directory_on_finished(self):
+        manager = self.make_manager()
+        catalog = make_catalog([catalog_entry("1.0.1", sha="f" * 64, size=10)])
+        client = _BlockingDownloadClient(catalog)
+        dialog = self.make_dialog(manager, client)
+        self.addCleanup(client.release.set)
+        qt_messages = []
+        previous_handler = qInstallMessageHandler(
+            lambda _mode, _context, message: qt_messages.append(message)
+        )
+        self.addCleanup(qInstallMessageHandler, previous_handler)
+
+        dialog._start_package_download(catalog.entries[0])
+        self.assertTrue(client.started.wait(2))
+        thread = dialog._download_thread
+        download_dir = dialog._download_dir
+        Path(download_dir, "partial.bsplugin").write_bytes(b"partial")
+        worker_ref = weakref.ref(thread)
+
+        dialog.shutdown(wait_ms=0)
+        self.assertTrue(thread.isRunning())
+        del thread
+        gc.collect()
+
+        self.assertIsNotNone(worker_ref())
+        self.assertTrue(worker_ref().isRunning())
+        self.assertFalse(download_dir.exists())
+        client.release.set()
+        self.assertTrue(client.returned.wait(2))
+        self.assertTrue(self.wait_for(lambda: not download_dir.exists()))
+        self.assertTrue(self.wait_for(
+            lambda: worker_ref() not in plugin_dialog_module._RETIRED_WORKERS
+        ))
+        self.assertFalse(any(
+            "QThread" in message and "running" in message.lower()
+            for message in qt_messages
+        ))
+
     def test_opening_the_official_tab_fetches_once(self):
         manager = self.make_manager()
         catalog = make_catalog([catalog_entry("1.0.1", sha="f" * 64, size=10)])
@@ -411,6 +501,30 @@ class CatalogDialogTests(unittest.TestCase):
         dialog.tabs.setCurrentIndex(0)
         dialog.tabs.setCurrentIndex(dialog._catalog_tab_index)
         self.assertEqual(calls, [])
+
+    def test_reopening_the_catalog_tab_fetches_again(self):
+        manager = self.make_manager()
+        catalog = make_catalog([catalog_entry("1.0.1", sha="f" * 64, size=10)])
+        client = _StubClient(catalog)
+        calls = []
+        original_fetch = client.fetch_catalog
+
+        def fetch_catalog(destination_dir=None):
+            calls.append(1)
+            return original_fetch(destination_dir)
+
+        client.fetch_catalog = fetch_catalog
+        dialog = self.make_dialog(manager, client)
+        dialog.show()
+        dialog.tabs.setCurrentIndex(dialog._catalog_tab_index)
+        self.assertTrue(self.wait_for(lambda: len(calls) == 1))
+
+        dialog.close()
+        dialog.show()
+
+        self.assertTrue(self.wait_for(lambda: len(calls) == 2))
+        self.assertTrue(self.wait_for(lambda: dialog.catalog_table.rowCount() == 1))
+        self.assertFalse(dialog._closing)
 
     def test_selection_survives_a_catalog_render(self):
         manager = self.make_manager()

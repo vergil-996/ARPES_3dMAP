@@ -104,6 +104,17 @@ class LevelsEditorTests(unittest.TestCase):
             theme.RANGE_HANDLE_DARK_FILL.lower(),
         )
 
+    def test_gray_to_white_track_has_no_center_line(self):
+        editor = self.make_editor()
+        y = editor._track_rect().center().y()
+        positions = editor._handle_positions()
+        x = (positions["gray"] + positions["white"]) / 2.0
+        above = grab_pixel(editor, x, y - 1)
+        center = grab_pixel(editor, x, y)
+        below = grab_pixel(editor, x, y + 1)
+        self.assertEqual(center, above)
+        self.assertEqual(center, below)
+
     def test_output_range_handles_use_timeline_fills(self):
         editor = ColormapRangeEditor("gray")
         editor.resize(300, editor.height())

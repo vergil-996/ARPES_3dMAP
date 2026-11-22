@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """插件管理「插件设置」页：通用两个操作与默认值持久化。
 
-用真实对话框 + 测试替身会话驱动：面板由插件提供，宿主只负责挂载、默认值
+用真实管理面板 + 测试替身会话驱动：设置控件由插件提供，宿主只负责挂载、默认值
 读写与「应用当前瀑布图」的结果页归属校验。
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,7 +17,7 @@ from PyQt5.QtWidgets import QApplication, QWidget
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.extensions import plugin_dialog as plugin_dialog_module
-from bandscope.extensions.plugin_dialog import PluginManagerDialog
+from bandscope.extensions.plugin_dialog import PluginManagerPanel
 
 configure_qt_plugin_path()
 
@@ -46,6 +47,8 @@ class _Session:
         self.manager = manager
         self.plugin = plugin
         self.defaults = {}
+        self.released = []
+        self.shutdown = mock.Mock()
         self.errors = lambda: {}
 
     def settings_plugin_ids(self):
@@ -58,6 +61,7 @@ class _Session:
         return self.plugin.create_settings_panel(self)
 
     def release_settings_panel(self, plugin_id):
+        self.released.append(plugin_id)
         self.plugin.panel = None
 
     def plugin_settings_state(self, plugin_id):
@@ -110,8 +114,9 @@ class PluginSettingsDialogTests(unittest.TestCase):
         plugin = _SettingsPlugin()
         window = _WindowStub()
         session = _Session(_Manager(plugin), plugin)
-        dialog = PluginManagerDialog(window, session)
+        dialog = PluginManagerPanel(window, session)
         self.addCleanup(dialog.deleteLater)
+        self.addCleanup(dialog.shutdown)
         return dialog, window, session, plugin
 
     def test_settings_tab_lists_panels_and_defaults_round_trip(self):
@@ -137,6 +142,27 @@ class PluginSettingsDialogTests(unittest.TestCase):
         dialog.on_settings_apply("edc_test")
         self.assertEqual(plugin.applied, [{"enabled": True}])
         self.assertTrue(any("已应用" in title for title, _ in window.messages))
+
+    def test_shutdown_releases_settings_and_show_recreates_the_panel(self):
+        dialog, _window, session, plugin = self.make_dialog()
+        dialog.tabs.setCurrentIndex(dialog._settings_tab_index)
+        first_panel = plugin.panel
+        self.assertIsNotNone(first_panel)
+
+        dialog.shutdown()
+        dialog.shutdown()
+
+        self.assertEqual(session.released, ["edc_test"])
+        self.assertEqual(dialog._settings_sections, {})
+        self.assertIsNone(plugin.panel)
+        session.shutdown.assert_not_called()
+
+        dialog.show()
+
+        self.assertIn("edc_test", dialog._settings_sections)
+        self.assertIsNotNone(plugin.panel)
+        self.assertIsNot(plugin.panel, first_panel)
+        session.shutdown.assert_not_called()
 
     def test_failed_apply_reports_the_reason(self):
         dialog, window, session, plugin = self.make_dialog()

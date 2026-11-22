@@ -13,6 +13,7 @@ from PyQt5.QtWidgets import QApplication
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.core.axis_interval import AxisSpace
+from bandscope.ui import theme
 from bandscope.ui.axis_interval_bar import AxisIntervalControl
 from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
 
@@ -169,6 +170,18 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertLess(QColor(image.pixel(low_x, y)).lightness(), 60)
         self.assertGreater(QColor(image.pixel(up_x, y)).lightness(), 200)
 
+    def test_selected_track_has_no_center_line(self):
+        QApplication.processEvents()
+        image = self.slider.grab().toImage()
+        ratio = image.devicePixelRatio()
+        x = int(((self.slider.handle_center("low") + self.slider.handle_center("up")) / 2) * ratio)
+        y = int(self.slider.TRACK_Y * ratio)
+        above = QColor(image.pixel(x, y - 1))
+        center = QColor(image.pixel(x, y))
+        below = QColor(image.pixel(x, y + 1))
+        self.assertEqual(center, above)
+        self.assertEqual(center, below)
+
     def test_track_is_centered_with_title_and_length_box(self):
         self.control.resize(720, 60)
         QApplication.processEvents()
@@ -181,12 +194,16 @@ class DualIntervalMouseTests(unittest.TestCase):
         )
 
     def test_lock_badge_stays_clear_of_the_handle(self):
+        previous_style = self.app.styleSheet()
+        self.app.setStyleSheet(theme.application_qss())
+        self.addCleanup(self.app.setStyleSheet, previous_style)
         self.controller.set_locked(True)
         self.controller.sync_widgets()
         self.control.resize(720, 60)
         QApplication.processEvents()
         badge = self.slider.lock_badge
         self.assertTrue(badge.isVisible())
+        self.assertEqual(badge.height(), 16)
         # 合拢时手柄多画 4px 外圈，徽标底边仍要留出间隙。
         handle_top = self.slider.TRACK_Y - (self.slider.HANDLE_HEIGHT + 4) / 2
         self.assertLessEqual(badge.geometry().bottom(), handle_top - 1)

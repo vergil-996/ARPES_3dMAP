@@ -16,15 +16,11 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.extensions import plugin_dialog as plugin_dialog_module
-from bandscope.extensions.plugin_dialog import (
-    PluginManagerDialog,
-    open_plugin_manager,
-    status_text,
-)
+from bandscope.extensions.plugin_dialog import PluginManagerPanel, status_text
 from bandscope.extensions.plugin_manager import InstallSource, PluginManager
 from bandscope.extensions.trust import SOURCE_LOCAL
 from tests.support.plugins import (
@@ -147,7 +143,9 @@ class PluginDialogSelectionTests(unittest.TestCase):
 
     def _dialog(self, manager=None):
         manager = manager or self.make_manager()
-        return PluginManagerDialog(_WindowStub(), SimpleNamespace(manager=manager))
+        panel = PluginManagerPanel(_WindowStub(), SimpleNamespace(manager=manager))
+        self.addCleanup(panel.shutdown)
+        return panel
 
     def test_buttons_start_disabled_without_a_selection(self):
         dialog = self._dialog()
@@ -205,7 +203,7 @@ class PluginDialogSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manager = PluginManager(root=Path(directory) / "extensions")
             manager.scan()
-            dialog = PluginManagerDialog(_WindowStub(), SimpleNamespace(manager=manager))
+            dialog = PluginManagerPanel(_WindowStub(), SimpleNamespace(manager=manager))
 
         self.assertEqual(dialog.table.rowCount(), 0)
         self.assertFalse(dialog.btn_uninstall.isEnabled())
@@ -285,7 +283,7 @@ class PluginDialogSelectionTests(unittest.TestCase):
     def test_install_selects_the_new_plugin(self):
         manager = self.make_manager()
         window = _WindowStub()
-        dialog = PluginManagerDialog(window, SimpleNamespace(manager=manager))
+        dialog = PluginManagerPanel(window, SimpleNamespace(manager=manager))
         archive = make_plugin_archive(
             self.root / "gamma.bsplugin", manifest=manifest_payload(FOURTH_PLUGIN_ID)
         )
@@ -311,7 +309,7 @@ class PluginDialogSelectionTests(unittest.TestCase):
     def test_install_asks_before_cancelling_a_pending_uninstall(self):
         manager = self.make_manager()
         window = _WindowStub()
-        dialog = PluginManagerDialog(window, SimpleNamespace(manager=manager))
+        dialog = PluginManagerPanel(window, SimpleNamespace(manager=manager))
         manager.note_removal(SECOND_PLUGIN_ID)
         dialog.refresh()
         archive = make_plugin_archive(
@@ -390,15 +388,36 @@ class PluginDialogSelectionTests(unittest.TestCase):
         self.assertFalse(dialog.btn_install.isEnabled())
         self.assertEqual(dialog.table.rowCount(), 0)
 
-    def test_open_plugin_manager_reuses_the_window(self):
+    def test_done_closes_the_outer_settings_window(self):
         manager = self.make_manager()
-        window = _WindowStub()
-        session = SimpleNamespace(manager=manager)
+        outer = QWidget()
+        self.addCleanup(outer.deleteLater)
+        panel = PluginManagerPanel(outer, SimpleNamespace(manager=manager))
+        self.addCleanup(panel.shutdown)
+        outer.show()
+        panel.show()
 
-        first = open_plugin_manager(window, session)
-        second = open_plugin_manager(window, session)
+        panel.btn_relaunch.click()
 
-        self.assertIs(first, second)
+        self.assertFalse(outer.isVisible())
+
+    def test_close_and_reopen_restores_the_same_panel(self):
+        manager = self.make_manager()
+        session = SimpleNamespace(manager=manager, shutdown=mock.Mock())
+        panel = PluginManagerPanel(_WindowStub(), session)
+        self.addCleanup(panel.deleteLater)
+        panel.show()
+        self.assertEqual(panel.table.rowCount(), 2)
+
+        panel.close()
+        panel.shutdown()
+        self.assertTrue(panel._closing)
+
+        panel.show()
+
+        self.assertFalse(panel._closing)
+        self.assertEqual(panel.table.rowCount(), 2)
+        session.shutdown.assert_not_called()
 
 
 class StatusTextTests(unittest.TestCase):

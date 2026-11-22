@@ -9,9 +9,14 @@ from tests.support.view_recipe import control_window
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QPoint, Qt
-from PyQt5.QtWidgets import QApplication, QWidget
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.extensions.plugin_dialog import PluginManagerPanel
+from bandscope.ui.settings_dialog import SettingsDialog
+from bandscope.updates.sources import SOURCE_GITHUB, SOURCE_MATELAB
+from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
 
 
 class SettingsWindowTests(unittest.TestCase):
@@ -25,26 +30,54 @@ class SettingsWindowTests(unittest.TestCase):
         for key in ("rendering/quality", "compute_backend"):
             self.addCleanup(window.settings.remove, key)
         window.request_refresh = Mock()
-        with patch.object(window, "open_plugin_manager") as plugins:
-            window.btn_tb_settings.click()
-            dialog = window.settings_dialog
-            nav = dialog.navigation
-            self.assertEqual(nav.currentItem().text(0), "计算后端")
-            self.assertFalse(hasattr(window.page_render, "combo_backend"))
-            self.assertFalse(hasattr(window.page_render, "grp_quality"))
-            if not window.backend_manager.gpu_available:
-                self.assertFalse(dialog.backend.model().item(2).isEnabled())
-                self.assertIn("CUDA", dialog.backend.itemData(2, Qt.ToolTipRole))
-            dialog.backend.setCurrentText("CPU")
-            self.assertEqual(window.backend_manager.mode, "CPU")
-            nav.setCurrentItem(nav.topLevelItem(2).child(0))
-            dialog.plugins.click()
-            plugins.assert_called_once_with()
-            nav.setCurrentItem(nav.topLevelItem(2).child(1))
-            dialog.updates.click()
-            window.update_controller.open_settings.assert_called_once_with()
+        window.btn_tb_settings.click()
+        dialog = window.settings_dialog
+        self.assertIsInstance(dialog, SettingsDialog)
+        nav = dialog.navigation
+        self.assertEqual(nav.currentItem().text(0), "计算后端")
+        self.assertFalse(hasattr(window.page_render, "combo_backend"))
+        self.assertFalse(hasattr(window.page_render, "grp_quality"))
+        if not window.backend_manager.gpu_available:
+            self.assertFalse(dialog.backend.model().item(2).isEnabled())
+            self.assertIn("CUDA", dialog.backend.itemData(2, Qt.ToolTipRole))
+        dialog.backend.setCurrentText("CPU")
+        self.assertEqual(window.backend_manager.mode, "CPU")
+
+        nav.setCurrentItem(nav.topLevelItem(2).child(0))
+        plugins = dialog.plugins
+        self.assertIsInstance(plugins, PluginManagerPanel)
+        self.assertTrue(plugins.isVisible())
+        self.assertFalse(plugins.isWindow())
+        self.assertIs(plugins.window(), dialog)
+        self.assertNotIn(plugins, QApplication.topLevelWidgets())
+        self.assertEqual(plugins.tabs.count(), 3)
+        self.assertEqual(
+            [plugins.tabs.tabText(index) for index in range(plugins.tabs.count())],
+            ["已安装", "官方插件", "插件设置"],
+        )
+        self.assertTrue(plugins.btn_install.isVisible())
+        self.assertIs(window.open_plugin_manager(), plugins)
+        self.assertIs(window.open_plugin_manager(), plugins)
+        self.assertIs(dialog.plugins, plugins)
+        self.assertTrue(plugins.isVisible())
+
+        nav.setCurrentItem(nav.topLevelItem(2).child(1))
+        updates = dialog.updates
+        self.assertIsInstance(updates, UpdateSettingsPanel)
+        self.assertTrue(updates.isVisible())
+        self.assertTrue(updates.is_active())
+        self.assertFalse(updates.isWindow())
+        self.assertIs(updates.window(), dialog)
+        self.assertNotIn(updates, QApplication.topLevelWidgets())
+        self.assertIs(window.update_controller.create_settings_panel(), updates)
+        self.assertTrue(updates.source_combo.isVisible())
+        self.assertTrue(updates.version_label.isVisible())
+        self.assertTrue(updates.check_updates_button.isVisible())
+        self.assertTrue(updates.buttons.button(QDialogButtonBox.Save).isVisible())
+        self.assertTrue(updates.buttons.button(QDialogButtonBox.Cancel).isVisible())
 
         nav.setCurrentItem(nav.topLevelItem(0).child(1))
+        self.assertFalse(updates.is_active())
         self.assertEqual(nav.currentItem().text(0), "3D渲染质量")
         dialog.mode.setCurrentIndex(dialog.mode.findData("legacy"))
         self.assertFalse(dialog.interpolation.isEnabled())
@@ -70,6 +103,65 @@ class SettingsWindowTests(unittest.TestCase):
         window.request_refresh.assert_called_once_with(
             RefreshCause.TRANSFER_FUNCTION, RenderQuality.EXACT, immediate=True
         )
+
+    def test_reject_and_escape_cleanup_panels_and_restore_state_on_reopen(self):
+        window = control_window()
+        self.addCleanup(window.close)
+        dialog = window.open_settings()
+        nav = dialog.navigation
+        updates_item = nav.topLevelItem(2).child(1)
+        quality_item = nav.topLevelItem(0).child(1)
+        nav.setCurrentItem(updates_item)
+        plugins = dialog.plugins
+        updates = dialog.updates
+        saved_source = updates.selected_source()
+        draft_source = SOURCE_MATELAB if saved_source != SOURCE_MATELAB else SOURCE_GITHUB
+
+        with patch.object(plugins, "shutdown", wraps=plugins.shutdown) as shutdown:
+            updates.source_combo.setCurrentIndex(updates.source_combo.findData(draft_source))
+            self.assertNotEqual(updates.selected_source(), saved_source)
+            dialog.reject()
+            self.app.processEvents()
+
+            self.assertFalse(dialog.isVisible())
+            self.assertEqual(updates.selected_source(), saved_source)
+            self.assertFalse(updates.is_active())
+            shutdown.assert_called_once_with()
+            dialog.reject()
+            shutdown.assert_called_once_with()
+
+            self.assertIs(window.open_settings(), dialog)
+            self.app.processEvents()
+            self.assertTrue(dialog.isVisible())
+            self.assertIs(dialog.plugins, plugins)
+            self.assertIs(dialog.updates, updates)
+            self.assertIs(nav.currentItem(), updates_item)
+            self.assertTrue(updates.is_active())
+            self.assertEqual(updates.selected_source(), saved_source)
+
+            nav.setCurrentItem(quality_item)
+            self.assertFalse(updates.is_active())
+            updates.source_combo.setCurrentIndex(updates.source_combo.findData(draft_source))
+            QTest.keyClick(dialog, Qt.Key_Escape)
+            self.app.processEvents()
+
+            self.assertFalse(dialog.isVisible())
+            self.assertEqual(updates.selected_source(), saved_source)
+            self.assertFalse(updates.is_active())
+            self.assertEqual(shutdown.call_count, 2)
+
+            self.assertIs(window.open_settings(), dialog)
+            self.app.processEvents()
+            self.assertIs(dialog.plugins, plugins)
+            self.assertIs(dialog.updates, updates)
+            self.assertIs(nav.currentItem(), quality_item)
+            self.assertFalse(updates.is_active())
+            self.assertEqual(updates.selected_source(), saved_source)
+            dialog.select_page("plugins")
+            self.assertTrue(plugins.isVisible())
+            self.assertFalse(updates.is_active())
+            dialog.select_page("updates")
+            self.assertTrue(updates.is_active())
 
     def test_denoise_details_follow_source_and_edits(self):
         window = control_window()

@@ -1,7 +1,7 @@
 """应用设置窗口。页面切换只改变导航，用户编辑时才向宿主发送信号。"""
 from PyQt5.QtCore import Qt, QSignalBlocker, pyqtSignal
 from PyQt5.QtWidgets import (
-    QDialog, QFormLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QDialog, QFormLayout, QHBoxLayout, QLabel, QScrollArea,
     QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -13,13 +13,14 @@ from bandscope.ui.settings_popups import DenoiseSettingsPanel
 class SettingsDialog(QDialog):
     backend_changed = pyqtSignal(str)
     quality_changed = pyqtSignal(dict)
-    plugins_requested = pyqtSignal()
-    updates_requested = pyqtSignal()
 
-    def __init__(self, backend, quality, denoise_controls, parent=None):
+    def __init__(self, backend, quality, denoise_controls, parent=None, *,
+                 plugin_panel=None, update_panel=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(790, 540)
+        self.resize(1040, 680)
+        self._page_items = {}
+        self._panels_need_cleanup = False
         self.navigation = QTreeWidget()
         self.navigation.setHeaderHidden(True)
         self.navigation.setAccessibleName("设置分类")
@@ -70,16 +71,17 @@ class SettingsDialog(QDialog):
         denoise_page.addWidget(self.denoise)
 
         app = self._category("应用管理")
-        plugins_page = self._page(app, "插件管理")
-        self.plugins = QPushButton("打开插件管理…")
-        plugins_page.addWidget(self.plugins, 0, Qt.AlignLeft)
-        plugins_page.addStretch()
-        update_page = self._page(app, "更新设置")
-        self.updates = QPushButton("打开更新设置…")
-        update_page.addWidget(self.updates, 0, Qt.AlignLeft)
-        update_page.addStretch()
-        self.plugins.clicked.connect(self.plugins_requested)
-        self.updates.clicked.connect(self.updates_requested)
+        plugins_page = self._page(app, "插件管理", key="plugins", scroll=False)
+        self.plugins = plugin_panel or self._unavailable_panel(
+            "插件管理不可用：扩展模块未能初始化。"
+        )
+        plugins_page.addWidget(self.plugins, 1)
+        update_page = self._page(app, "更新设置", key="updates")
+        self.updates = update_panel or self._unavailable_panel(
+            "更新设置不可用：更新控制器未能初始化。"
+        )
+        update_page.addWidget(self.updates)
+        update_page.addStretch(1)
         self.backend.currentTextChanged.connect(self.backend_changed)
         self.navigation.expandAll()
         self.navigation.currentItemChanged.connect(self._select_page)
@@ -93,10 +95,8 @@ class SettingsDialog(QDialog):
         item.setFont(0, font)
         return item
 
-    def _page(self, category, title):
+    def _page(self, category, title, *, key=None, scroll=True):
         item = QTreeWidgetItem(category, [title])
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(18, 14, 18, 14)
@@ -104,13 +104,90 @@ class SettingsDialog(QDialog):
         heading = QLabel(title)
         heading.setStyleSheet("font-size: 20px; font-weight: 600;")
         layout.addWidget(heading)
-        scroll.setWidget(page)
-        item.setData(0, Qt.UserRole, self.stack.addWidget(scroll))
+        if scroll:
+            container = QScrollArea()
+            container.setWidgetResizable(True)
+            container.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            container.setWidget(page)
+        else:
+            container = page
+        item.setData(0, Qt.UserRole, self.stack.addWidget(container))
+        if key is not None:
+            self._page_items[key] = item
         return layout
+
+    @staticmethod
+    def _unavailable_panel(message):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        label = QLabel(message)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        layout.addStretch()
+        return panel
+
+    def select_page(self, key):
+        item = self._page_items[key]
+        if not item.flags() & Qt.ItemIsEnabled:
+            return False
+        self.navigation.setCurrentItem(item)
+        self._select_page(item, None)
+        return True
+
+    def set_page_available(self, key, available, tooltip=""):
+        item = self._page_items[key]
+        flags = item.flags()
+        if available:
+            flags |= Qt.ItemIsEnabled
+        else:
+            flags &= ~Qt.ItemIsEnabled
+        item.setFlags(flags)
+        item.setToolTip(0, tooltip)
+        page = self.stack.widget(item.data(0, Qt.UserRole))
+        page.setEnabled(available)
+        page.setToolTip(tooltip)
+        panel = getattr(self, key, None)
+        if panel is not None:
+            panel.setEnabled(available)
+            panel.setToolTip(tooltip)
 
     def _select_page(self, item, _previous):
         if item is not None and item.parent() is not None:
             self.stack.setCurrentIndex(item.data(0, Qt.UserRole))
+            set_active = getattr(self.updates, "set_active", None)
+            if callable(set_active):
+                set_active(item is self._page_items.get("updates"))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._panels_need_cleanup = True
+        item = self.navigation.currentItem()
+        set_active = getattr(self.updates, "set_active", None)
+        if callable(set_active):
+            set_active(item is self._page_items.get("updates"))
+
+    def _cleanup_panels(self):
+        if not self._panels_need_cleanup:
+            return
+        self._panels_need_cleanup = False
+        shutdown = getattr(self.plugins, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
+        discard = getattr(self.updates, "discard_and_deactivate", None)
+        if callable(discard):
+            discard()
+
+    def hideEvent(self, event):
+        self._cleanup_panels()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self._cleanup_panels()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._cleanup_panels()
+        super().reject()
 
     @staticmethod
     def _combo(form, title, options):

@@ -99,6 +99,15 @@ class _Plotter(QWidget):
 
 def control_window():
     """Keep real controls and loading; replace only GPU drawing/network updates."""
+    update_panel = None
+
+    def create_update_panel(parent=None):
+        nonlocal update_panel
+        if update_panel is None:
+            from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
+            update_panel = UpdateSettingsPanel(parent)
+        return update_panel
+
     def refresh(window):
         if window.core.raw_data is not None:
             window.current_render_context = window._compute_render_context(window.left_workspace.current_spec())
@@ -107,11 +116,12 @@ def control_window():
         if not window._syncing_controls:
             refresh(window)
     with patch("bandscope.app.refactored_app.QtInteractor", _Plotter), \
-         patch("bandscope.app.refactored_app.UpdateController"), \
+         patch("bandscope.app.refactored_app.UpdateController") as update_controller, \
          patch.object(My3DAnalyzer, "_reset_3d_camera_to_default"), \
          patch.object(My3DAnalyzer, "_sync_gpu_display_backend"), \
          patch.object(My3DAnalyzer, "request_refresh", request), \
          patch.object(My3DAnalyzer, "global_refresh", refresh):
+        update_controller.return_value.create_settings_panel.side_effect = create_update_panel
         window = My3DAnalyzer()
     from bandscope.processing.local_enhancement import cumulative_histogram, finite_range
 

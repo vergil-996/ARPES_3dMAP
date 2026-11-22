@@ -649,14 +649,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         right_vbox.setContentsMargins(16, 8, 16, 8)
         right_vbox.setSpacing(0)
 
-        inspector_header = QHBoxLayout()
-        inspector_header.setContentsMargins(0, 0, 0, 0)
-        self.control_panel_title = QLabel("视图设置", self.right_panel)
-        self.control_panel_title.setStyleSheet(theme.card_title_qss())
-        inspector_header.addWidget(self.control_panel_title, 1)
-        # 「重置视角」只保留画布工具条上的入口；右侧面板标题区不再放重复按钮。
-        right_vbox.addLayout(inspector_header)
-
         self.page_container = QStackedWidget()
         self.page_render = RenderControlPage()
         self.page_container.addWidget(self.page_render)
@@ -1921,27 +1913,26 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         """插件管理入口：只有管理器自身无法构造时才禁用。
 
         登记表损坏、迁移失败或单个插件加载失败都不该挡住管理入口——这些正是
-        需要进管理窗口看诊断、做恢复的情况。
+        需要进设置页看诊断、做恢复的情况。
         """
         dialog = self.settings_dialog
         if dialog is None:
             return
         available = self.__dict__.get("plugin_session") is not None
-        action = dialog.plugins
-        action.setEnabled(available)
-        if available:
-            action.setToolTip("安装、卸载及启用/停用插件")
-        else:
-            action.setToolTip("插件管理不可用：扩展模块未能初始化。")
+        tooltip = (
+            "安装、卸载及启用/停用插件"
+            if available else "插件管理不可用：扩展模块未能初始化。"
+        )
+        dialog.set_page_available("plugins", available, tooltip)
 
     def open_plugin_manager(self):
-        """打开插件管理面板（安装 / 启用停用 / 卸载 / 恢复）。"""
+        """在设置窗口中打开插件管理面板（安装 / 启用停用 / 卸载 / 恢复）。"""
         session = self.__dict__.get("plugin_session")
         if session is None:
             return None
-        from bandscope.extensions.plugin_dialog import open_plugin_manager
-
-        return open_plugin_manager(self, session)
+        dialog = self.open_settings()
+        dialog.select_page("plugins")
+        return dialog.plugins
 
     def add_plugin_result_page(self, *, title, source_page_id, source_title, data_scope_id, params):
         """插件分析结果页：唯一标题、挂在来源页下、**不切换**当前页。
@@ -2553,8 +2544,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.request_refresh(RefreshCause.DATA_SOURCE, interactive=True)
 
     def on_toggle_color_lock(self, checked):
-        """「色阶」里「锁定色带」开关：全局生效——同时冻结/恢复背景与全部增强区域
-        的归一化范围（每个区域锁定自己的强度范围，不共用同一归一化）。"""
+        """全局冻结/恢复背景与全部增强区域各自的强度归一化范围。"""
         if self._syncing_controls:
             return
         if checked:
@@ -2563,8 +2553,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 self._restore_color_lock_button(False)
                 self._update_color_lock_button_style()
                 self._show_message(
-                    "无法锁定色带",
-                    "请先加载数据并完成一次渲染，再锁定当前色带。",
+                    "无法锁定强度范围",
+                    "请先加载数据并完成一次渲染，再锁定当前强度范围。",
                     QMessageBox.Information,
                 )
                 return
@@ -2581,7 +2571,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
 
     def _update_color_lock_button_style(self):
-        """按锁定状态切换「色阶」里锁定按钮的配色。"""
+        """按锁定状态切换显示对象行中锁定按钮的配色。"""
         page = getattr(self, "page_render", None)
         btn = getattr(page, "btn_lock", None) if page is not None else None
         if btn is None:
@@ -3662,12 +3652,23 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def open_settings(self):
         if self.settings_dialog is None:
-            dialog = SettingsDialog(self.backend_manager, self.render_quality, self.page_control_blank, self)
+            session = self.__dict__.get("plugin_session")
+            plugin_panel = None
+            if session is not None:
+                from bandscope.extensions.plugin_dialog import PluginManagerPanel
+
+                plugin_panel = PluginManagerPanel(self, session)
+            dialog = SettingsDialog(
+                self.backend_manager,
+                self.render_quality,
+                self.page_control_blank,
+                self,
+                plugin_panel=plugin_panel,
+                update_panel=self.update_controller.create_settings_panel(),
+            )
             self.settings_dialog = dialog
             dialog.backend_changed.connect(self.on_backend_mode_changed)
             dialog.quality_changed.connect(self.set_render_quality)
-            dialog.plugins_requested.connect(self.open_plugin_manager)
-            dialog.updates_requested.connect(lambda: self.update_controller.open_settings())
         self._update_plugin_button_state()
         self.settings_dialog.show()
         self.settings_dialog.raise_()
@@ -7862,8 +7863,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             manager.unregister_page(page_id)
 
     def closeEvent(self, event):
-        if self.settings_dialog is not None:
-            self.settings_dialog.close()
+        settings_dialog = self.settings_dialog
+        if settings_dialog is not None:
+            self.settings_dialog = None
+            settings_dialog.close()
+            settings_dialog.deleteLater()
         theme.changed.disconnect(self._on_theme_changed)
         self._clear_enhancement_interaction()
         self._save_splitter_sizes()

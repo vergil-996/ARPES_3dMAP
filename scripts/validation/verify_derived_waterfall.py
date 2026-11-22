@@ -105,10 +105,16 @@ def main() -> int:
 
     class NoUpdates:
         def __init__(self, *a, **k):
-            pass
+            self._settings_panel = None
 
         def check_automatically(self):
             pass
+
+        def create_settings_panel(self, parent=None):
+            if self._settings_panel is None:
+                from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
+                self._settings_panel = UpdateSettingsPanel(parent)
+            return self._settings_panel
 
         def shutdown(self, **k):
             pass
@@ -459,13 +465,18 @@ def main() -> int:
         """真实窗口里走一遍「插件管理 → 插件设置」：面板、两个按钮与默认值生效。"""
         from PyQt5.QtWidgets import QComboBox, QDoubleSpinBox
 
-        dialog = window.open_plugin_manager()
-        if dialog is None:
+        manager = window.open_plugin_manager()
+        if manager is None:
             record("插件管理可打开", False, "会话不可用")
             finish()
             return
-        dialog.tabs.setCurrentIndex(dialog._settings_tab_index)
-        sections = dict(dialog._settings_sections)
+        settings = window.settings_dialog
+        record(
+            "插件管理内嵌于主设置窗口",
+            settings is not None and settings.isVisible() and manager.window() is settings,
+        )
+        manager.tabs.setCurrentIndex(manager._settings_tab_index)
+        sections = dict(manager._settings_sections)
         record("设置页列出已加载插件", "edc_waterfall" in sections, "、".join(sections))
         section = sections.get("edc_waterfall")
         if section is None:
@@ -490,7 +501,7 @@ def main() -> int:
 
         def after_layout():
             # 等事件循环把新面板布局完成后再抓图，否则抓到的是空容器。
-            dialog.grab().save(str(args.output_dir / "settings_dialog.png"))
+            settings.grab().save(str(args.output_dir / "settings_dialog.png"))
             # 新页立即使用保存后的默认值；「应用当前瀑布图」把它提交给当前页。
             window.timeline_bar.switch_flip.setChecked(False)
             previous = window.left_workspace.current_spec()
@@ -512,16 +523,16 @@ def main() -> int:
                     report["error"] or json.dumps((created.params if created is not None else {}).get("derived_params") or {}, ensure_ascii=False),
                 )
                 if not valid:
-                    dialog.close()
+                    settings.close()
                     finish()
                     return
-                dialog.on_settings_apply("edc_waterfall")
+                manager.on_settings_apply("edc_waterfall")
                 record(
                     "应用当前瀑布图提交到当前页",
                     abs(float((created.params.get("derived_params") or {}).get("k_step", 0.0)) - target_step) < 1e-9,
                     "",
                 )
-                dialog.close()
+                settings.close()
                 finish()
 
             create_from_page_menu(

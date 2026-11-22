@@ -690,8 +690,10 @@ class PageTreePanel(QWidget):
         header_layout.addWidget(group_label, 1)
         self.new_group_button = QToolButton(group_header)
         self.new_group_button.setObjectName("new_group_button")
-        self.new_group_button.setText("+")
+        theme.set_button_icon(self.new_group_button, "ic_fluent_folder_add_regular", 20)
+        self.new_group_button.setIconSize(QSize(20, 20))
         self.new_group_button.setToolTip("新建分组")
+        self.new_group_button.setAccessibleName("新建分组")
         self.new_group_button.setCursor(Qt.PointingHandCursor)
         self.new_group_button.setFixedSize(24, 24)
         self.new_group_button.clicked.connect(self.group_create_requested)
@@ -806,8 +808,12 @@ class PageTreePanel(QWidget):
                 background-color: %(BG3)s;
                 color: %(T2)s;
                 border: none;
-                border-radius: 5px;
-                font-size: 16px;
+                border-radius: 8px;
+                min-width: 24px;
+                max-width: 24px;
+                min-height: 24px;
+                max-height: 24px;
+                padding: 0;
             }
             QToolButton#new_group_button:hover {
                 background-color: %(ACC_SOFT)s;

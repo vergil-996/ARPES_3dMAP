@@ -163,6 +163,43 @@ class ControlPageStateTests(unittest.TestCase):
         titles = [group.toggle_button.text() for group in page._adaptive_groups]
         self.assertEqual(titles[:4], ["视角", "色阶", "不透明度", "去噪"])
 
+    def test_display_target_row_precedes_levels_card_with_explicit_scopes(self):
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        page.resize(page._min_content_width, 900)
+        page.show()
+        QApplication.processEvents()
+
+        levels_card = page.levels_editor.parentWidget()
+        while levels_card is not None and levels_card.metaObject().className() != "CardGroup":
+            levels_card = levels_card.parentWidget()
+        self.assertIsNotNone(levels_card)
+        self.assertIs(page.display_target_row.parentWidget(), levels_card.parentWidget())
+        self.assertFalse(levels_card.isAncestorOf(page.display_target_row))
+        self.assertLess(page.display_target_label.y(), page.display_target_row.y())
+        self.assertLess(page.display_target_row.y(), levels_card.y())
+        self.assertEqual(page.display_target_label.text(), "显示对象")
+        self.assertEqual(page.region_combo.accessibleName(), "显示对象")
+        self.assertEqual(page.region_combo._title, "")
+        for index in range(page.region_combo.count()):
+            page.region_combo.setCurrentIndex(index)
+            edit = page.region_combo.lineEdit()
+            remaining = edit._calcTextRect().width() - edit.fontMetrics().horizontalAdvance(edit.text())
+            self.assertGreaterEqual(remaining, 72)
+        self.assertTrue(page.display_target_row.rect().contains(page.btn_lock.geometry()))
+
+        self.assertEqual(page.denoise_scope_label.text(), "当前数据范围 · 全局共享")
+        self.assertIn("不随显示对象切换", page.denoise_scope_label.toolTip())
+        self.assertIn("全部显示对象共用同一输出色带", page.colormap_selector.toolTip())
+
+    def test_view_settings_header_is_removed(self):
+        from tests.support.view_recipe import control_window
+
+        window = control_window()
+        self.addCleanup(window.close)
+        self.assertFalse(hasattr(window, "control_panel_title"))
+        self.assertEqual(window.right_panel.layout().indexOf(window.page_container), 0)
+
     def test_colormap_header_fits_the_longest_name_in_a_narrow_card(self):
         page = RenderControlPage()
         self.addCleanup(page.deleteLater)

@@ -80,7 +80,9 @@ class AnimatedLockButtonTests(unittest.TestCase):
 
         self.assertIsInstance(page.btn_lock, AnimatedLockButton)
         self.assertEqual(page.btn_lock.attachment().text(), "")
-        self.assertEqual(page.btn_lock.accessibleName(), "锁定色带")
+        self.assertEqual(page.btn_lock.accessibleName(), "锁定全部强度范围")
+        self.assertIn("颜色与不透明度共用该范围", page.btn_lock.toolTip())
+        self.assertIn("不会禁止编辑色阶或曲线", page.btn_lock.toolTip())
         self.assertIsNone(page.btn_lock.property("fluentIconName"))
         self.assertNotIn(page.btn_lock, page._adaptive_buttons)
 

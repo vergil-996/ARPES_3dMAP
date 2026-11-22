@@ -4,7 +4,8 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QDialog, QMenu, QWidget
+from PyQt5.QtCore import QThread
+from PyQt5.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMenu, QWidget
 
 from bandscope.updates.matelab_source import MatelabCredentials, MatelabReleaseClient
 from bandscope.updates.sources import (
@@ -19,7 +20,7 @@ from bandscope.updates.update_controller import (
     UpdateController,
 )
 from bandscope.updates.update_service import GitHubReleaseClient
-from bandscope.updates.update_settings_dialog import UpdateSettingsDialog
+from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
 
 
 def _settings(values=None):
@@ -39,10 +40,22 @@ class UpdateSourceSwitchTests(unittest.TestCase):
     def _controller(self, values=None):
         window = QWidget()
         self.addCleanup(window.deleteLater)
+        settings_dialog = QWidget(window)
+        settings_dialog.select_page = Mock()
+        settings_dialog.exec_ = Mock()
+        window.open_settings = Mock(return_value=settings_dialog)
         settings = _settings(values)
         controller = UpdateController(window, settings)
         controller._show_message = Mock(return_value=False)
         return controller, settings
+
+    def _panel(self, controller):
+        panel = controller.create_settings_panel()
+        self.addCleanup(panel.deleteLater)
+        return panel
+
+    def _save(self, panel):
+        panel.buttons.button(QDialogButtonBox.Save).click()
 
     def test_default_source_is_github(self):
         controller, _ = self._controller()
@@ -63,7 +76,6 @@ class UpdateSourceSwitchTests(unittest.TestCase):
         settings.setValue.assert_any_call(SOURCE_SETTING, SOURCE_MATELAB)
         self.assertEqual(controller.current_source(), SOURCE_MATELAB)
         self.assertIsInstance(controller.client, MatelabReleaseClient)
-        # 无凭证时切换会请求登录。
         controller._prompt_matelab_login.assert_called_once()
 
         controller.set_source(SOURCE_GITHUB)
@@ -90,42 +102,37 @@ class UpdateSourceSwitchTests(unittest.TestCase):
 
         self._assert_previous_result_cleared(controller)
 
-    def test_accepted_settings_can_replace_account_without_switching_source(self):
+    def test_saved_settings_can_replace_account_without_switching_source(self):
         controller, settings = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
         old_credentials = MatelabCredentials("old-user", "old-password")
         new_credentials = MatelabCredentials("new-user", "new-password")
         controller._store_matelab_credentials(old_credentials)
         old_client = controller.client
         self._seed_previous_result(controller)
+        panel = self._panel(controller)
+        self.assertEqual(panel.credentials(), old_credentials)
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-            dialog = dialog_cls.return_value
-            dialog.exec_.return_value = QDialog.Accepted
-            dialog.selected_source.return_value = SOURCE_MATELAB
-            dialog.credentials.return_value = new_credentials
-
-            controller.open_settings()
+        with patch("bandscope.updates.update_settings_dialog.MatelabLoginDialog") as login_cls:
+            login_cls.return_value.exec_.return_value = QDialog.Accepted
+            login_cls.return_value.credentials.return_value = new_credentials
+            panel.edit_account_button.click()
+            self._save(panel)
 
         self.assertEqual(controller.current_source(), SOURCE_MATELAB)
         self.assertEqual(controller._stored_matelab_credentials(), new_credentials)
         self.assertIsInstance(controller.client, MatelabReleaseClient)
         self.assertIsNot(controller.client, old_client)
         self._assert_previous_result_cleared(controller)
-        self.assertEqual(dialog_cls.call_args.kwargs["credentials"], old_credentials)
         self.assertEqual(settings.value(MATELAB_USERNAME_SETTING), "new-user")
 
-    def test_accepted_settings_clear_saved_account(self):
+    def test_saved_settings_clear_saved_account(self):
         controller, settings = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
         controller._store_matelab_credentials(MatelabCredentials("user", "password"))
         self._seed_previous_result(controller)
+        panel = self._panel(controller)
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-            dialog = dialog_cls.return_value
-            dialog.exec_.return_value = QDialog.Accepted
-            dialog.selected_source.return_value = SOURCE_MATELAB
-            dialog.credentials.return_value = None
-
-            controller.open_settings()
+        panel.clear_account_button.click()
+        self._save(panel)
 
         self.assertIsNone(controller._stored_matelab_credentials())
         self.assertEqual(settings.value(MATELAB_USERNAME_SETTING, ""), "")
@@ -139,20 +146,19 @@ class UpdateSourceSwitchTests(unittest.TestCase):
         old_client = controller.client
         self._seed_previous_result(controller)
         previous_release = controller._active_release
+        panel = self._panel(controller)
+        panel.source_combo.setCurrentIndex(panel.source_combo.findData(SOURCE_GITHUB))
+        panel.clear_account_button.click()
         settings.reset_mock()
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-            dialog = dialog_cls.return_value
-            dialog.exec_.return_value = QDialog.Rejected
-            dialog.selected_source.return_value = SOURCE_GITHUB
-            dialog.credentials.return_value = None
-
-            controller.open_settings()
+        panel.buttons.button(QDialogButtonBox.Cancel).click()
 
         settings.setValue.assert_not_called()
         settings.remove.assert_not_called()
         self.assertEqual(controller.current_source(), SOURCE_MATELAB)
         self.assertEqual(controller._stored_matelab_credentials(), credentials)
+        self.assertEqual(panel.selected_source(), SOURCE_MATELAB)
+        self.assertEqual(panel.credentials(), credentials)
         self.assertIs(controller.client, old_client)
         self.assertIs(controller._active_release, previous_release)
 
@@ -160,14 +166,10 @@ class UpdateSourceSwitchTests(unittest.TestCase):
         controller, _ = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
         credentials = MatelabCredentials("user", "password")
         controller._store_matelab_credentials(credentials)
+        panel = self._panel(controller)
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-            dialog = dialog_cls.return_value
-            dialog.exec_.return_value = QDialog.Accepted
-            dialog.selected_source.return_value = SOURCE_GITHUB
-            dialog.credentials.return_value = credentials
-
-            controller.open_settings()
+        panel.source_combo.setCurrentIndex(panel.source_combo.findData(SOURCE_GITHUB))
+        self._save(panel)
 
         self.assertEqual(controller.current_source(), SOURCE_GITHUB)
         self.assertIsInstance(controller.client, GitHubReleaseClient)
@@ -176,81 +178,155 @@ class UpdateSourceSwitchTests(unittest.TestCase):
     def test_settings_can_save_matelab_without_account_and_prompt_on_manual_check(self):
         controller, _ = self._controller()
         controller._prompt_matelab_login = Mock(return_value=None)
+        panel = self._panel(controller)
+        panel.source_combo.setCurrentIndex(panel.source_combo.findData(SOURCE_MATELAB))
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-            dialog = dialog_cls.return_value
-            dialog.exec_.return_value = QDialog.Accepted
-            dialog.selected_source.return_value = SOURCE_MATELAB
-            dialog.credentials.return_value = None
-
-            controller.open_settings()
+        self._save(panel)
 
         self.assertEqual(controller.current_source(), SOURCE_MATELAB)
         controller._prompt_matelab_login.assert_not_called()
         with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
-            controller.check_for_updates(manual=True)
+            panel.check_updates_button.click()
             controller._prompt_matelab_login.assert_called_once()
             thread_cls.assert_not_called()
 
-    def test_check_updates_from_settings_saves_then_starts_after_dialog_closes(self):
+    def test_check_updates_from_settings_saves_then_starts_without_closing(self):
         controller, _settings = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
         controller._store_matelab_credentials(MatelabCredentials("user", "password"))
+        panel = self._panel(controller)
+        panel.show()
         controller.check_for_updates = Mock(
-            side_effect=lambda manual: self.assertIsNone(controller._settings_dialog)
+            side_effect=lambda manual: self.assertTrue(panel.isVisible())
         )
 
-        def request_check(dialog):
-            dialog.clear_account_button.click()
-            dialog.check_updates_button.click()
-            return dialog.result()
+        panel.clear_account_button.click()
+        panel.check_updates_button.click()
 
-        with patch.object(UpdateSettingsDialog, "exec_", request_check):
-            accepted = controller.open_settings()
-
-        self.assertTrue(accepted)
         self.assertIsNone(controller._stored_matelab_credentials())
         controller.check_for_updates.assert_called_once_with(manual=True)
+        self.assertTrue(panel.isVisible())
+        panel.cancel()
+        self.assertIsNone(panel.credentials())
 
-    def test_busy_update_blocks_settings_and_source_changes(self):
+    def test_open_settings_selects_embedded_page_and_returns_same_panel(self):
+        controller, _ = self._controller()
+        panel = self._panel(controller)
+
+        returned = controller.open_settings()
+
+        self.assertIs(returned, panel)
+        controller.window.open_settings.assert_called_once_with()
+        controller.window.open_settings.return_value.select_page.assert_called_once_with("updates")
+        controller.window.open_settings.return_value.exec_.assert_not_called()
+        self.assertTrue(panel.is_active())
+        self.assertFalse(hasattr(controller, "_settings_dialog"))
+
+    def test_busy_update_opens_read_only_panel_and_blocks_source_changes(self):
         for thread_attribute in ("_check_thread", "_download_thread"):
             for running in (True, False):
-                # run() 已结束但 finished 尚未清理的引用，也必须阻止修改。
                 with self.subTest(thread=thread_attribute, running=running):
                     controller, settings = self._controller()
                     setattr(controller, thread_attribute, Mock(isRunning=Mock(return_value=running)))
                     old_client = controller.client
-                    settings.reset_mock()
 
-                    with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls:
-                        controller.open_settings()
-                        dialog_cls.assert_not_called()
+                    panel = controller.open_settings()
+                    settings.reset_mock()
+                    controller._save_settings_panel(panel)
                     controller.set_source(SOURCE_MATELAB)
 
+                    self.assertIsInstance(panel, UpdateSettingsPanel)
+                    self.assertTrue(panel.is_busy())
+                    self.assertFalse(panel.source_combo.isEnabled())
+                    self.assertFalse(panel.account_group.isEnabled())
+                    self.assertFalse(panel.buttons.button(QDialogButtonBox.Save).isEnabled())
+                    self.assertFalse(panel.check_updates_button.isEnabled())
                     settings.setValue.assert_not_called()
                     settings.remove.assert_not_called()
                     self.assertEqual(controller.current_source(), SOURCE_GITHUB)
                     self.assertIs(controller.client, old_client)
                     controller._show_message.assert_called()
 
-    def test_automatic_check_waits_until_settings_dialog_is_closed(self):
+    def test_thread_finished_restores_panel_controls(self):
+        for thread_attribute, finished in (
+            ("_check_thread", "_on_check_thread_finished"),
+            ("_download_thread", "_on_download_thread_finished"),
+        ):
+            with self.subTest(thread=thread_attribute):
+                controller, _ = self._controller()
+                panel = self._panel(controller)
+                thread = Mock()
+                setattr(controller, thread_attribute, thread)
+                controller._sync_settings_panel_busy()
+                self.assertTrue(panel.is_busy())
+
+                with patch.object(controller, "sender", return_value=thread):
+                    getattr(controller, finished)()
+
+                self.assertIsNone(getattr(controller, thread_attribute))
+                self.assertFalse(panel.is_busy())
+                self.assertTrue(panel.source_combo.isEnabled())
+                self.assertTrue(panel.buttons.button(QDialogButtonBox.Save).isEnabled())
+                self.assertTrue(panel.check_updates_button.isEnabled())
+                thread.deleteLater.assert_called_once_with()
+
+    def test_finished_thread_reference_blocks_another_check(self):
+        for thread_attribute in ("_check_thread", "_download_thread"):
+            for manual in (True, False):
+                with self.subTest(thread=thread_attribute, manual=manual):
+                    controller, _ = self._controller()
+                    old_thread = QThread(controller)
+                    self.assertFalse(old_thread.isRunning())
+                    setattr(controller, thread_attribute, old_thread)
+
+                    with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
+                        controller.check_for_updates(manual=manual)
+
+                    thread_cls.assert_not_called()
+                    self.assertIs(getattr(controller, thread_attribute), old_thread)
+                    if manual:
+                        controller._show_message.assert_called_once()
+                    else:
+                        controller._show_message.assert_not_called()
+
+    def test_stale_finished_signal_does_not_clear_new_thread(self):
+        for thread_attribute, finished in (
+            ("_check_thread", "_on_check_thread_finished"),
+            ("_download_thread", "_on_download_thread_finished"),
+        ):
+            with self.subTest(thread=thread_attribute):
+                controller, _ = self._controller()
+                panel = self._panel(controller)
+                old_thread = QThread(controller)
+                old_thread.finished.connect(getattr(controller, finished))
+                new_thread = QThread(controller)
+                setattr(controller, thread_attribute, new_thread)
+                controller._sync_settings_panel_busy()
+                self.assertTrue(panel.is_busy())
+
+                old_thread.finished.emit()
+
+                self.assertIs(getattr(controller, thread_attribute), new_thread)
+                self.assertTrue(panel.is_busy())
+
+    def test_automatic_check_pauses_only_while_settings_panel_is_active(self):
         controller, _ = self._controller()
+        panel = self._panel(controller)
+        panel.set_active(True)
 
-        with patch("bandscope.updates.update_controller.UpdateSettingsDialog") as dialog_cls, patch(
-            "bandscope.updates.update_controller.ReleaseCheckThread"
-        ) as thread_cls:
-            def edit_settings():
-                # 模态对话框仍会派发启动时的自动检查计时器事件。
-                controller.check_automatically()
-                thread_cls.assert_not_called()
-                return QDialog.Rejected
-
-            dialog_cls.return_value.exec_.side_effect = edit_settings
-            controller.open_settings()
-
+        with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
             controller.check_automatically()
+            thread_cls.assert_not_called()
 
+            controller.check_for_updates(manual=True)
             thread_cls.assert_called_once()
             thread_cls.return_value.start.assert_called_once()
+
+        controller, _ = self._controller()
+        panel = self._panel(controller)
+        panel.set_active(False)
+        with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
+            controller.check_automatically()
+            thread_cls.assert_called_once()
 
     def test_credentials_round_trip(self):
         controller, settings = self._controller()
@@ -258,25 +334,20 @@ class UpdateSourceSwitchTests(unittest.TestCase):
         controller._store_matelab_credentials(credentials)
         restored = controller._stored_matelab_credentials()
         self.assertEqual(restored, credentials)
-        # 存储值不可读明文。
         stored = settings.value(MATELAB_PASSWORD_SETTING, "")
         self.assertNotIn("p@ss word", stored)
         self.assertEqual(settings.value(MATELAB_USERNAME_SETTING, ""), "张三")
 
     def test_automatic_matelab_check_without_credentials_skips_quietly(self):
         controller, _ = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
-        with patch(
-            "bandscope.updates.update_controller.ReleaseCheckThread"
-        ) as thread_cls:
+        with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
             controller.check_for_updates(manual=False)
             thread_cls.assert_not_called()
 
     def test_manual_matelab_check_prompts_login_and_respects_cancel(self):
         controller, _ = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
         controller._prompt_matelab_login = Mock(return_value=None)
-        with patch(
-            "bandscope.updates.update_controller.ReleaseCheckThread"
-        ) as thread_cls:
+        with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
             controller.check_for_updates(manual=True)
             controller._prompt_matelab_login.assert_called_once()
             thread_cls.assert_not_called()
@@ -286,15 +357,33 @@ class UpdateSourceSwitchTests(unittest.TestCase):
         controller._store_matelab_credentials(
             MatelabCredentials(username="zhangsan", password="secret")
         )
-        with patch(
-            "bandscope.updates.update_controller.ReleaseCheckThread"
-        ) as thread_cls:
+        with patch("bandscope.updates.update_controller.ReleaseCheckThread") as thread_cls:
             thread = thread_cls.return_value
             controller.check_for_updates(manual=True)
             thread_cls.assert_called_once()
             client = thread_cls.call_args[0][0]
             self.assertIsInstance(client, MatelabReleaseClient)
             thread.start.assert_called_once()
+
+    def test_successful_manual_login_updates_panel_and_saved_baseline(self):
+        controller, settings = self._controller({SOURCE_SETTING: SOURCE_MATELAB})
+        panel = self._panel(controller)
+        credentials = MatelabCredentials("new-user", "new-password")
+
+        with patch("bandscope.updates.update_controller.MatelabLoginDialog") as login_cls, patch(
+            "bandscope.updates.update_controller.ReleaseCheckThread"
+        ) as thread_cls:
+            login_cls.return_value.exec_.return_value = QDialog.Accepted
+            login_cls.return_value.credentials.return_value = credentials
+            panel.check_updates_button.click()
+
+        self.assertEqual(panel.credentials(), credentials)
+        self.assertEqual(controller._stored_matelab_credentials(), credentials)
+        self.assertEqual(settings.value(MATELAB_USERNAME_SETTING), "new-user")
+        thread_cls.return_value.start.assert_called_once()
+        panel.clear_account_button.click()
+        panel.cancel()
+        self.assertEqual(panel.credentials(), credentials)
 
     def test_settings_menu_action_opens_settings(self):
         controller, _ = self._controller()

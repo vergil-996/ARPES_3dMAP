@@ -36,10 +36,16 @@ def main():
 
     class _NullUpdateController:
         def __init__(self, *a, **k):
-            pass
+            self._settings_panel = None
 
         def check_automatically(self):
             pass
+
+        def create_settings_panel(self, parent=None):
+            if self._settings_panel is None:
+                from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
+                self._settings_panel = UpdateSettingsPanel(parent)
+            return self._settings_panel
 
         def shutdown(self, **kwargs):
             pass
@@ -53,27 +59,20 @@ def main():
     dialogs = []
 
     def step_plugin_dialog():
-        log("[audit] open plugin manager dialog")
-        window.open_plugin_manager()
-        dlg = getattr(window, "_plugin_dialog", None)
-        if dlg is None:
-            # 找顶层窗口里的插件管理
-            from PyQt5.QtWidgets import QApplication as _q
-            for w in _q.topLevelWidgets():
-                if w.windowTitle() == "插件管理" and w.isVisible():
-                    dlg = w
-                    break
-        dialogs.append(dlg)
-        if dlg is not None:
-            dlg.raise_()
-            dlg.activateWindow()
-        QTimer.singleShot(800, lambda: grab(dlg, "dialog_plugin_installed", step_catalog_tab))
+        log("[audit] open plugin page in main settings")
+        settings = window.open_settings()
+        settings.select_page("plugins")
+        panel = settings.plugins
+        dialogs.append(settings)
+        settings.raise_()
+        settings.activateWindow()
+        QTimer.singleShot(800, lambda: grab(panel.window(), "dialog_plugin_installed", step_catalog_tab))
 
     def step_catalog_tab():
-        dlg = dialogs[-1]
-        if dlg is not None and hasattr(dlg, "tabs"):
-            dlg.tabs.setCurrentIndex(1)
-        QTimer.singleShot(600, lambda: grab(dialogs[-1], "dialog_plugin_catalog", step_denoise_popup))
+        settings = dialogs[-1]
+        if settings is not None:
+            settings.plugins.tabs.setCurrentIndex(1)
+        QTimer.singleShot(600, lambda: grab(settings, "dialog_plugin_catalog", step_denoise_popup))
 
     def step_denoise_popup():
         for d in dialogs:
@@ -93,9 +92,7 @@ def main():
     def step_update_box():
         for d in dialogs:
             if d is not None:
-                # 只关不删：插件管理对话框的后台线程可能还在跑，deleteLater
-                # 会让 QThread 在运行中被析构，直接崩进程。脚本很快退出，
-                # 交给进程收尾即可。
+                # 内嵌插件页通过外层设置窗口关闭，由 closeEvent 清理后台资源。
                 d.close()
         log("[audit] open a QMessageBox sample (update prompt style)")
         from PyQt5.QtWidgets import QMessageBox

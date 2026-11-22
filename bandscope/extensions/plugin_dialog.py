@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
-"""插件管理界面：安装、启用/停用、卸载与失败恢复。
+"""插件管理面板：安装、启用/停用、卸载与失败恢复。
 
 安装根目录固定为 ``%LOCALAPPDATA%\\BandScope\\extensions``，与基础软件安装目录
-分离。所有插件管理操作都在这个「插件管理」窗口内完成——顶部工具栏齿轮菜单打开、
-重复选择激活同一个窗口；安装、启用/停用、卸载与恢复都**重启后生效**：正在使用
-的文件在 Windows 上删不掉，正在运行的插件代码也不该在半途被换掉，界面会把这一
-点说清楚。
+分离。安装、启用/停用、卸载与恢复都**重启后生效**：正在使用的文件在 Windows 上
+删不掉，正在运行的插件代码也不该在半途被换掉，界面会把这一点说清楚。
 
-界面只调用 ``PluginManager`` 的公开方法；包校验、兼容性判断、路径解析和登记表
+面板只调用 ``PluginManager`` 的公开方法；包校验、兼容性判断、路径解析和登记表
 事务都在下层完成，这里不做任何路径拼接。选中项按插件 id 定位，列表刷新重排不会
 让操作落到别的插件上。
 """
@@ -21,8 +19,8 @@ from PyQt5.QtCore import QModelIndex, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAbstractItemView,
-    QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -91,6 +89,25 @@ CATALOG_SOURCE_CACHE = "cache"
 
 RESTART_HINT = "安装、启用/停用或卸载后，请重启 BandScope 使设置完整生效。"
 
+# 启动即持有强引用并连接清理，避免 shutdown 与 finished 之间出现无人持有的窗口。
+_RETIRED_WORKERS = set()
+_RETIRED_DOWNLOAD_DIRS = {}
+
+
+def _retain_worker(thread):
+    _RETIRED_WORKERS.add(thread)
+    thread.finished.connect(lambda: _release_retired_worker(thread))
+
+
+def _release_retired_worker(thread):
+    if thread not in _RETIRED_WORKERS:
+        return
+    _RETIRED_WORKERS.remove(thread)
+    download_dir = _RETIRED_DOWNLOAD_DIRS.pop(thread, None)
+    if download_dir is not None:
+        shutil.rmtree(download_dir, ignore_errors=True)
+    thread.deleteLater()
+
 
 def restore_target_version(record):
     """“恢复上一版本”会选中的版本；没有可恢复的版本时返回 None。
@@ -135,24 +152,16 @@ def status_text(record) -> str:
     return "待重启加载"
 
 
-class PluginManagerDialog(QDialog):
-    """单实例插件管理面板。"""
+class PluginManagerPanel(QWidget):
+    """可嵌入设置窗口的插件管理面板。"""
 
     def __init__(self, window, session, *, catalog_client=None):
-        # 父窗口只用于定位与提示；不是 QWidget 时（测试桩）退化成无父窗口，
-        # 免得整个面板因为一个可选参数构造不出来。
+        # 宿主只用于提示；不是 QWidget 时（测试桩）退化成无父控件。
         super().__init__(window if isinstance(window, QWidget) else None)
-        self.window = window
+        self._host_window = window
         self.session = session
         self.manager: PluginManager = session.manager
-        self.setWindowTitle("插件管理")
-        self.setModal(False)
-        # QDialog 在 Windows 默认带标题栏「这是什么？」问号按钮；本面板没有
-        # 任何 whats-this 文案，点它只会进入空帮助模式，直接去掉。
-        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        self.resize(800, 600)
         self.setStyleSheet(
-            f"QDialog {{ background-color: {theme.BG_0}; }}"
             f"QLabel {{ color: {theme.TEXT_1}; background: transparent; }}"
             f"QTableWidget {{ color: {theme.TEXT_1}; background-color: {theme.BG_2};"
             f" gridline-color: {theme.BORDER_HEX}; border: 1px solid {theme.BORDER_HEX};"
@@ -164,8 +173,9 @@ class PluginManagerDialog(QDialog):
             f"QHeaderView::section {{ color: {theme.TEXT_2}; background-color: {theme.BG_3};"
             f" border: none; padding: 6px; }}"
         )
-        # 官方目录：后台线程取，主线程更新界面；关闭窗口时取消。
+        # 官方目录：后台线程取，主线程更新界面；外层容器关闭时取消。
         self.catalog_client = catalog_client or CatalogClient()
+        self._closing = False
         self._catalog = None
         self._catalog_source = ""
         self._catalog_error = ""
@@ -188,29 +198,6 @@ class PluginManagerDialog(QDialog):
         layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(10)
 
-        title_row = QHBoxLayout()
-        plugin_icon = QLabel(self)
-        plugin_icon.setPixmap(theme.fluent_icon("ic_fluent_puzzle_piece_regular", 18, theme.TEXT_2).pixmap(18, 18))
-        plugin_icon.setFixedSize(32, 32)
-        plugin_icon.setAlignment(Qt.AlignCenter)
-        plugin_icon.setStyleSheet(
-            f"background-color: {theme.BG_3}; border: 1px solid {theme.BORDER_HEX}; border-radius: 7px;"
-        )
-        title_row.addWidget(plugin_icon)
-        self.plugin_icon = plugin_icon
-        title_text = QVBoxLayout()
-        title_text.setSpacing(2)
-        title = QLabel("插件管理")
-        title.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {theme.TEXT_1};"
-        )
-        title_text.addWidget(title)
-        subtitle = QLabel("用独立模块扩展你的分析工作流", self)
-        subtitle.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 10px;")
-        title_text.addWidget(subtitle)
-        title_row.addLayout(title_text, 1)
-        layout.addLayout(title_row)
-
         self.location_label = QLabel(f"安装位置：{self.manager.root}")
         self.location_label.setStyleSheet(f"color: {theme.TEXT_3}; font-size: 11px;")
         self.location_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -232,27 +219,30 @@ class PluginManagerDialog(QDialog):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self.tabs, 1)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
+        buttons = QGridLayout()
+        buttons.setHorizontalSpacing(8)
+        buttons.setVerticalSpacing(8)
         self.btn_install = self._button("安装插件…", "secondary", self.on_install)
         self.btn_toggle = self._button("启用 / 停用", "secondary", self.on_toggle)
         self.btn_uninstall = self._button("卸载", "danger", self.on_uninstall)
         self.btn_retry = self._button("重试加载", "secondary", self.on_retry)
         self.btn_restore = self._button("恢复上一版本", "secondary", self.on_restore)
-        self.btn_relaunch = self._button("完成", "primary", self.close)
-        buttons.addWidget(self.btn_install)
-        buttons.addWidget(self.btn_toggle)
-        buttons.addWidget(self.btn_uninstall)
-        buttons.addWidget(self.btn_retry)
-        buttons.addWidget(self.btn_restore)
-        buttons.addStretch(1)
-        buttons.addWidget(self.btn_relaunch)
+        self.btn_relaunch = self._button("完成", "primary", self._close_window)
+        for index, button in enumerate((
+            self.btn_install,
+            self.btn_toggle,
+            self.btn_uninstall,
+            self.btn_retry,
+            self.btn_restore,
+            self.btn_relaunch,
+        )):
+            buttons.addWidget(button, index // 3, index % 3)
         layout.addLayout(buttons)
 
+    def _close_window(self):
+        self.window().close()
+
     def apply_theme(self):
-        self.plugin_icon.setPixmap(
-            theme.fluent_icon("ic_fluent_puzzle_piece_regular", 18, theme.TEXT_2).pixmap(18, 18)
-        )
         icon = theme.fluent_icon("ic_fluent_puzzle_piece_regular", 16, theme.TEXT_2)
         for table_name in ("table", "catalog_table"):
             table = getattr(self, table_name, None)
@@ -872,7 +862,7 @@ class PluginManagerDialog(QDialog):
     def _report(self, title, text, *, warning=True):
         # 主窗口的 _show_message 走非模态 Toast；测试桩或精简宿主没有这个方法时
         # 回退到模态对话框。
-        show = getattr(self.window, "_show_message", None)
+        show = getattr(self._host_window, "_show_message", None)
         if callable(show):
             show(title, text, QMessageBox.Warning if warning else QMessageBox.Information)
             return
@@ -883,6 +873,12 @@ class PluginManagerDialog(QDialog):
         box.exec_()
 
     # ------------------------------------------------------------------ 官方目录
+    def _worker_is_current(self, attribute):
+        sender = self.sender()
+        return not self._closing and (
+            not isinstance(sender, QThread) or sender is getattr(self, attribute)
+        )
+
     def _load_cached_catalog(self):
         """开面板时先用缓存填一遍：断网也能浏览上次验证通过的目录。"""
         cached = read_cached_catalog()
@@ -909,6 +905,8 @@ class PluginManagerDialog(QDialog):
         self._start_catalog_fetch()
 
     def _start_catalog_fetch(self):
+        if self._closing:
+            return
         thread = self._catalog_thread
         if thread is not None and thread.isRunning():
             return
@@ -920,9 +918,12 @@ class PluginManagerDialog(QDialog):
         thread.failed.connect(self._on_catalog_failed)
         thread.finished.connect(self._on_catalog_thread_finished)
         self._catalog_thread = thread
+        _retain_worker(thread)
         thread.start()
 
     def _on_catalog_fetched(self, fetched):
+        if not self._worker_is_current("_catalog_thread"):
+            return
         stored = store_cached_catalog(
             fetched.catalog,
             fetched.payload,
@@ -940,16 +941,19 @@ class PluginManagerDialog(QDialog):
         self._render_catalog()
 
     def _on_catalog_failed(self, message):
+        if not self._worker_is_current("_catalog_thread"):
+            return
         self._catalog_error = message
         # 取新目录失败不影响浏览缓存；但若本机没有任何可用目录，就不能安装。
         self._render_catalog()
 
     def _on_catalog_thread_finished(self):
-        thread = self._catalog_thread
-        self._catalog_thread = None
-        if thread is not None:
-            thread.deleteLater()
-        self.btn_catalog_refresh.setEnabled(True)
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            thread = self._catalog_thread
+        if thread is self._catalog_thread:
+            self._catalog_thread = None
+            self.btn_catalog_refresh.setEnabled(True)
 
     def _installed_record(self, plugin_id):
         return self.manager.record(plugin_id)
@@ -1105,6 +1109,8 @@ class PluginManagerDialog(QDialog):
         return box.clickedButton() is accept
 
     def _start_package_download(self, entry):
+        if self._closing:
+            return
         thread = self._download_thread
         if thread is not None and thread.isRunning():
             self._report("下载进行中", "已有插件包正在下载，请稍候。")
@@ -1121,9 +1127,12 @@ class PluginManagerDialog(QDialog):
         thread.failed.connect(self._on_download_failed)
         thread.finished.connect(self._on_download_thread_finished)
         self._download_thread = thread
+        _retain_worker(thread)
         thread.start()
 
     def _on_download_progress(self, received, total):
+        if not self._worker_is_current("_download_thread"):
+            return
         if total:
             text = f"正在下载插件包… {received / (1024 ** 2):.1f} / {total / (1024 ** 2):.1f} MiB"
         else:
@@ -1131,6 +1140,8 @@ class PluginManagerDialog(QDialog):
         self.catalog_status.setText(text)
 
     def _on_download_completed(self, package):
+        if not self._worker_is_current("_download_thread"):
+            return
         entry = package.entry
         source = self.catalog_client.install_source(entry, verified=package.verified)
         try:
@@ -1157,22 +1168,79 @@ class PluginManagerDialog(QDialog):
         )
 
     def _on_download_failed(self, message):
+        if not self._worker_is_current("_download_thread"):
+            return
         if message != "下载已取消。":
             self._report("下载失败", message)
         self._render_catalog()
 
     def _on_download_thread_finished(self):
-        thread = self._download_thread
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            thread = self._download_thread
+        if thread is self._download_thread:
+            self._download_thread = None
+            self._update_catalog_buttons()
+
+    # ------------------------------------------------------------------ 生命周期
+    @staticmethod
+    def _disconnect_worker(thread):
+        # finished 必须保留：模块级强引用与对象释放只由这一条路径处理。
+        for name in ("completed", "failed", "progress_changed"):
+            signal = getattr(thread, name, None)
+            if signal is None:
+                continue
+            try:
+                signal.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+
+    def _stop_worker(self, thread, wait_ms):
+        self._disconnect_worker(thread)
+        if thread.isRunning():
+            # 网络调用可能尚未返回。退休对象已有强引用与 finished 清理，这里只
+            # 脱离面板父对象并协作式取消，不强制终止正在写文件的下载线程。
+            thread.setParent(None)
+            thread.requestInterruption()
+            thread.wait(wait_ms)
+            return thread.isRunning()
+        return False
+
+    def shutdown(self, wait_ms: int = 2000) -> None:
+        """释放短期资源；可重复调用，面板再次显示后可继续使用。
+
+        目录与下载线程采用协作式取消和有界等待，不关闭 ``PluginSession``。
+        """
+        self._closing = True
+        wait_ms = max(0, int(wait_ms))
+        catalog_thread = self._catalog_thread
+        download_thread = self._download_thread
+        self._catalog_thread = None
         self._download_thread = None
-        if thread is not None:
-            thread.deleteLater()
-        self._update_catalog_buttons()
+        download_dir = self._download_dir
+        self._download_dir = None
+        if download_thread in _RETIRED_WORKERS and download_dir is not None:
+            _RETIRED_DOWNLOAD_DIRS[download_thread] = download_dir
+        if catalog_thread is not None:
+            self._stop_worker(catalog_thread, wait_ms)
+        if download_thread is not None:
+            self._stop_worker(download_thread, wait_ms)
+        if download_dir is not None:
+            shutil.rmtree(download_dir, ignore_errors=True)
+        self._catalog_requested = False
+        self._clear_settings_tab()
+        self.btn_catalog_refresh.setEnabled(True)
 
     # ------------------------------------------------------------------ 事件
     def showEvent(self, event):
+        self._closing = False
         self.refresh()
-        if self.tabs.currentIndex() == self._settings_tab_index:
+        index = self.tabs.currentIndex()
+        if index == self._settings_tab_index:
             self.refresh_settings_tab()
+        elif index == self._catalog_tab_index and not self._catalog_requested:
+            self._catalog_requested = True
+            self._start_catalog_fetch()
         super().showEvent(event)
 
     def changeEvent(self, event):
@@ -1183,14 +1251,7 @@ class PluginManagerDialog(QDialog):
         super().changeEvent(event)
 
     def closeEvent(self, event):
-        """关窗即取消下载与目录请求：不留后台线程，也不留临时文件。"""
-        for thread in (self._catalog_thread, self._download_thread):
-            if thread is not None and thread.isRunning():
-                thread.requestInterruption()
-                thread.wait(2000)
-        if self._download_dir is not None:
-            shutil.rmtree(self._download_dir, ignore_errors=True)
-            self._download_dir = None
+        self.shutdown()
         super().closeEvent(event)
 
 
@@ -1261,20 +1322,3 @@ class _PackageDownloadThread(QThread):
             self.failed.emit("下载已取消。")
             return
         self.completed.emit(package)
-
-
-def open_plugin_manager(window, session) -> PluginManagerDialog:
-    """打开（或复用）插件管理面板。"""
-    existing = getattr(window, "_plugin_dialog", None)
-    if existing is not None:
-        try:
-            existing.show()
-            existing.raise_()
-            existing.activateWindow()
-            return existing
-        except RuntimeError:
-            pass
-    dialog = PluginManagerDialog(window, session)
-    window._plugin_dialog = dialog
-    dialog.show()
-    return dialog

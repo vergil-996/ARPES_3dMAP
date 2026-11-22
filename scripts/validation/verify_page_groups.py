@@ -3,7 +3,7 @@
 
 验证点：
 1. 「我的分组」区域常驻页面树下方，新建分组后出现标题且初始为空；
-2. 「+」按钮新建分组走真实控件路径，重名自动编号；
+2. 「新建分组」图标按钮新建分组走真实控件路径，重名自动编号；
 3. 把来源树页面复制到分组会生成带新 ``page_id`` 的深拷贝副本，标题追加「 副本」；
 4. 原页面留在来源树，副本出现在分组树；激活副本后页眉、画布与树选中行同步；
 5. 副本参数与来源页面互不影响；
@@ -166,7 +166,7 @@ def main():
         check("主页已在来源树中", state["home"] in panel_._items)
         check("分组区域可见", panel_.group_tree.isVisible())
         check("初始没有分组", panel_.group_tree.topLevelItemCount() == 0)
-        check("「+」新建分组按钮可见", panel_.new_group_button.isVisible())
+        check("「新建分组」图标按钮可见", panel_.new_group_button.isVisible())
         QTimer.singleShot(200, guarded(step_create_group))
 
     def step_create_group():

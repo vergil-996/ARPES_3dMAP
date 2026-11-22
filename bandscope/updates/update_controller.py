@@ -25,7 +25,7 @@ from bandscope.app_metadata import (
 from bandscope.extensions.catalog import CatalogClient
 from bandscope.extensions.upgrade import evaluate_upgrade, format_impact
 from bandscope.updates.matelab_source import MatelabCredentials, MatelabReleaseClient
-from bandscope.updates.update_settings_dialog import MatelabLoginDialog, UpdateSettingsDialog
+from bandscope.updates.update_settings_dialog import MatelabLoginDialog, UpdateSettingsPanel
 from bandscope.updates.sources import (
     DEFAULT_SOURCE,
     SOURCE_LABELS,
@@ -133,7 +133,7 @@ class UpdateController(QObject):
         self.client = self._active_client()
         self._check_thread = None
         self._download_thread = None
-        self._settings_dialog = None
+        self._settings_panel = None
         self._progress_dialog = None
         self._manual_check = False
         self._active_release = None
@@ -192,40 +192,57 @@ class UpdateController(QObject):
         action.triggered.connect(lambda _checked=False: self.open_settings())
         return action
 
+    def create_settings_panel(self, parent=None):
+        if self._settings_panel is None:
+            panel = UpdateSettingsPanel(
+                parent,
+                source=self.current_source(),
+                credentials=self._stored_matelab_credentials(),
+                username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
+            )
+            panel.save_requested.connect(lambda: self._save_settings_panel(panel))
+            panel.check_requested.connect(lambda: self._check_updates_from_settings(panel))
+            panel.destroyed.connect(self._on_settings_panel_destroyed)
+            self._settings_panel = panel
+            panel.set_busy(self._updates_busy())
+        return self._settings_panel
+
     def open_settings(self):
-        if self._settings_dialog is not None:
-            self._settings_dialog.raise_()
-            self._settings_dialog.activateWindow()
-            return False
+        settings_dialog = self.window.open_settings()
+        panel = self.create_settings_panel(settings_dialog)
+        settings_dialog.select_page("updates")
+        panel.set_active(True)
+        return panel
+
+    def _save_settings_panel(self, panel):
+        self._sync_settings_panel_busy()
         if self._updates_busy():
             self._show_settings_busy_message()
             return False
-        dialog = UpdateSettingsDialog(
-            self.window,
-            source=self.current_source(),
-            credentials=self._stored_matelab_credentials(),
-            username=self.settings.value(MATELAB_USERNAME_SETTING, ""),
-        )
-        self._settings_dialog = dialog
-        result = QDialog.Rejected
-        try:
-            result = dialog.exec_()
-            if result not in (QDialog.Accepted, UpdateSettingsDialog.CheckRequested):
-                return False
-            self.settings.setValue(SOURCE_SETTING, dialog.selected_source())
-            credentials = dialog.credentials()
-            if credentials is None:
-                self.settings.remove(MATELAB_USERNAME_SETTING)
-                self.settings.remove(MATELAB_PASSWORD_SETTING)
-            else:
-                self._store_matelab_credentials(credentials)
-            self._reset_source_state()
-        finally:
-            self._settings_dialog = None
-            dialog.deleteLater()
-        if result == UpdateSettingsDialog.CheckRequested:
-            self.check_for_updates(manual=True)
+        self.settings.setValue(SOURCE_SETTING, panel.selected_source())
+        credentials = panel.credentials()
+        if credentials is None:
+            self.settings.remove(MATELAB_USERNAME_SETTING)
+            self.settings.remove(MATELAB_PASSWORD_SETTING)
+        else:
+            self._store_matelab_credentials(credentials)
+        self._reset_source_state()
+        panel.mark_saved()
         return True
+
+    def _check_updates_from_settings(self, panel):
+        if self._save_settings_panel(panel):
+            self.check_for_updates(manual=True)
+
+    def _on_settings_panel_destroyed(self):
+        self._settings_panel = None
+
+    def _settings_panel_active(self):
+        return self._settings_panel is not None and self._settings_panel.is_active()
+
+    def _sync_settings_panel_busy(self):
+        if self._settings_panel is not None:
+            self._settings_panel.set_busy(self._updates_busy())
 
     # -- MatElab 凭证 -----------------------------------------------------------
 
@@ -257,6 +274,8 @@ class UpdateController(QObject):
             if credentials is None:
                 return None
             self._store_matelab_credentials(credentials)
+            if self._settings_panel is not None:
+                self._settings_panel.set_saved_credentials(credentials)
             return credentials
         finally:
             dialog.deleteLater()
@@ -294,14 +313,14 @@ class UpdateController(QObject):
             self.check_for_updates(manual=False)
 
     def check_for_updates(self, manual=True):
-        # 模态设置窗口仍会处理计时器事件；编辑期间不启动后台检查。
-        if self._settings_dialog is not None:
+        # 更新页处于活动状态时只暂停自动检查；用户仍可明确发起手动检查。
+        if not manual and self._settings_panel_active():
             return
-        if self._check_thread is not None and self._check_thread.isRunning():
+        if self._check_thread is not None:
             if manual:
                 self._show_message("检查更新", "正在检查更新，请稍候。")
             return
-        if self._download_thread is not None and self._download_thread.isRunning():
+        if self._download_thread is not None:
             if manual:
                 self._show_message("更新进行中", "新版安装包正在下载。")
             return
@@ -325,11 +344,17 @@ class UpdateController(QObject):
         thread.failed.connect(self._on_check_failed)
         thread.finished.connect(self._on_check_thread_finished)
         self._check_thread = thread
+        self._sync_settings_panel_busy()
         thread.start()
 
     def _on_check_thread_finished(self):
-        thread = self._check_thread
+        thread = self.sender()
+        if thread is not self._check_thread:
+            if thread is not None:
+                thread.deleteLater()
+            return
         self._check_thread = None
+        self._sync_settings_panel_busy()
         if thread is not None:
             thread.deleteLater()
 
@@ -499,6 +524,7 @@ class UpdateController(QObject):
 
         self._progress_dialog = dialog
         self._download_thread = thread
+        self._sync_settings_panel_busy()
         dialog.show()
         thread.start()
 
@@ -581,8 +607,13 @@ class UpdateController(QObject):
         QApplication.quit()
 
     def _on_download_thread_finished(self):
-        thread = self._download_thread
+        thread = self.sender()
+        if thread is not self._download_thread:
+            if thread is not None:
+                thread.deleteLater()
+            return
         self._download_thread = None
+        self._sync_settings_panel_busy()
         if thread is not None:
             thread.deleteLater()
         dialog = self._progress_dialog

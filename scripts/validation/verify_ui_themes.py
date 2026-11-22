@@ -19,10 +19,16 @@ from PyQt5.QtWidgets import QApplication
 
 class _NullUpdateController:
     def __init__(self, *args, **kwargs):
-        pass
+        self._settings_panel = None
 
     def check_automatically(self):
         pass
+
+    def create_settings_panel(self, parent=None):
+        if self._settings_panel is None:
+            from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
+            self._settings_panel = UpdateSettingsPanel(parent)
+        return self._settings_panel
 
     def shutdown(self, **kwargs):
         pass
@@ -43,8 +49,6 @@ def main():
 
     import bandscope.app.refactored_app as refactored_app
     from bandscope.ui import theme
-    from bandscope.updates.update_settings_dialog import UpdateSettingsDialog
-
     refactored_app.UpdateController = _NullUpdateController
     window = refactored_app.My3DAnalyzer()
     window._save_splitter_sizes = lambda *_args: None
@@ -128,14 +132,16 @@ def main():
         capture(dialog, args.output_dir / f"publication-{theme.current_theme()}.png")
         dialog.close()
         plugin = window.open_plugin_manager()
-        assert plugin is not None, "扩展管理窗口未创建"
-        plugin.show()
+        assert plugin is not None and plugin.isVisible(), "主设置窗口的扩展管理页未显示"
+        assert plugin.window() is window.settings_dialog, "扩展管理未内嵌于主设置窗口"
         QTimer.singleShot(1200, lambda: guard(lambda: capture_plugin(plugin)))
 
     def capture_plugin(plugin):
-        assert plugin.isVisible(), "扩展管理窗口未显示"
-        capture(plugin, args.output_dir / f"plugins-{theme.current_theme()}.png")
-        plugin.close()
+        assert plugin.isVisible(), "主设置窗口的扩展管理页未显示"
+        settings = window.settings_dialog
+        assert settings is not None and settings.isVisible(), "主设置窗口未显示"
+        capture(settings, args.output_dir / f"plugins-{theme.current_theme()}.png")
+        settings.close()
         assert window.open_blender_project_dialog(), "Blender 工程窗口未打开"
         QTimer.singleShot(1200, lambda: guard(capture_blender))
 
@@ -144,15 +150,16 @@ def main():
         assert dialog is not None and dialog.isVisible(), "Blender 工程窗口未显示"
         capture(dialog, args.output_dir / f"blender-{theme.current_theme()}.png")
         dialog.reject()
-        settings = UpdateSettingsDialog(window)
-        settings.show()
+        settings = window.open_settings()
+        assert settings.select_page("updates"), "无法选择主设置窗口的更新设置页"
+        assert settings.updates.isVisible(), "主设置窗口的更新设置页未显示"
         QTimer.singleShot(600, lambda: guard(lambda: capture_settings(settings)))
 
     def capture_settings(settings):
+        assert settings is window.settings_dialog and settings.updates.isVisible()
         capture(settings, args.output_dir / f"settings-{theme.current_theme()}.png")
-        settings.reject()
-        settings.deleteLater()
-        results.append(f"次级窗口 {theme.current_theme()}：出版、扩展、Blender、更新设置")
+        settings.close()
+        results.append(f"窗口与设置页 {theme.current_theme()}：出版、Blender、主设置窗口插件/更新页")
         index = 1 if theme.current_theme() == "dark" else 2
         QTimer.singleShot(300, lambda: guard(lambda: run_theme(index)))
 

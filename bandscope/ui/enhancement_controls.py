@@ -10,14 +10,15 @@ SHOW_ALL_REGIONS_ID = "__show_all__"
 
 
 class RegionComboBox(SiCapsuleComboBox):
-    """区域选择下拉框：选择调整对象；编辑文字提交即重命名当前区域。"""
+    """显示对象下拉框：选择调整对象；编辑文字提交即重命名当前区域。"""
 
     target_changed = pyqtSignal(str)
     rename_committed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setTitle("区域")
+        self.setTitle("")
+        self.setAccessibleName("显示对象")
         self.setFixedHeight(30)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setEditable(True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from matplotlib import colormaps
 from PyQt5 import sip
-from PyQt5.QtCore import QPointF, QRect, QRectF, Qt
+from PyQt5.QtCore import QRect, QRectF, Qt
 from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import QLabel, QSlider, QToolTip, QWidget
 
@@ -341,10 +341,7 @@ class LevelsEditor(_HandleEditor):
                 QRectF(selected_left, track.top(), selected_width, track.height()),
                 2.5, 2.5,
             )
-        painter.setPen(QPen(QColor(theme.BORDER_HEX), 1.0))
-        painter.drawLine(QPointF(track.left(), track.center().y()),
-                         QPointF(track.right(), track.center().y()))
-        # 黑场到灰场之间保持纯黑，并覆盖中轴线，避免被中轴灰线切成浅色。
+        # 黑场到灰场之间保持纯黑。
         black_width = max(0.0, positions["gray"] - positions["black"])
         if black_width > 0.0:
             painter.setPen(Qt.NoPen)

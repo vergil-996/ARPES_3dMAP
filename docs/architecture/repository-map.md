@@ -14,7 +14,7 @@
 | `bandscope/updates/` | `update_service` 网络及安装包校验；`update_controller` 更新交互；`update_settings_dialog` 更新源与账号设置草稿；`sources` 更新源抽象；`matelab_source` MatElab 更新源 |
 | `bandscope/app_metadata.py` | 应用名称、版本、构建类型与更新元信息 |
 
-本轮保留原有实现和主要模块名。导出对话框与插件管理对话框跟随各自功能模块；其余通用控件放 `ui`。主窗口仍负责跨模块集成，进一步拆分另开任务。
+本轮保留原有实现和主要模块名。导出对话框与插件管理面板跟随各自功能模块；其余通用控件放 `ui`。主窗口仍负责跨模块集成，进一步拆分另开任务。
 
 ```mermaid
 flowchart LR

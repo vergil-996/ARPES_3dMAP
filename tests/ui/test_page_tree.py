@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QEvent, QItemSelectionModel, QMimeData, QPoint, Qt
+from PyQt5.QtCore import QEvent, QItemSelectionModel, QMimeData, QPoint, QSize, Qt
 from PyQt5.QtGui import QDropEvent, QKeyEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QAbstractItemView, QApplication, QMenu, QTreeWidget
@@ -751,6 +751,16 @@ class PageTreeRenameTests(_WorkspaceFixture):
 
 
 class PageGroupTests(_WorkspaceFixture):
+    def test_new_group_button_uses_the_folder_add_icon(self):
+        button = self.panel.new_group_button
+
+        self.assertEqual(button.text(), "")
+        self.assertEqual(button.property("fluentIconName"), "ic_fluent_folder_add_regular")
+        self.assertEqual(button.iconSize(), QSize(20, 20))
+        self.assertEqual(button.size(), QSize(24, 24))
+        self.assertFalse(button.icon().isNull())
+        self.assertEqual(button.toolTip(), "新建分组")
+
     def test_new_group_button_creates_a_separate_area_without_changing_the_source_tree(self):
         before = self.panel.visible_page_ids()
         with patch(

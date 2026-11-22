@@ -42,6 +42,7 @@ def verify_volume_quality(source):
 
     QSettings("ARPES", "ARPES_3dMAP").setValue("compute_backend", "CPU")
     window = My3DAnalyzer()
+    window.update_controller.automatic_check_due = lambda: False
     window.resize(1020, 670)
     window.show()
     app.processEvents()
@@ -98,12 +99,13 @@ def main() -> int:
     )
     print(f"已安装 {outcome.manifest.name} {outcome.manifest.version} -> {outcome.digest[:12]}…")
 
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QScrollArea
 
     app = QApplication.instance() or QApplication([])
     from bandscope.app.refactored_app import My3DAnalyzer
 
     window = My3DAnalyzer()
+    window.update_controller.automatic_check_due = lambda: False
     window.show()
     app.processEvents()
 
@@ -115,7 +117,7 @@ def main() -> int:
     button.click()
     settings = window.settings_dialog
     nav = settings.navigation
-    plugin_action = settings.plugins
+    plugin_panel = settings.plugins
     check("齿轮按钮存在且可用", button.isEnabled())
     check("齿轮按钮提示正确", button.toolTip() == "设置")
     check(
@@ -128,8 +130,8 @@ def main() -> int:
          for i in range(nav.topLevelItemCount())]
         == [["计算后端", "3D渲染质量"], ["去噪参数"], ["插件管理", "更新设置"]],
     )
-    check("插件管理动作可用", plugin_action.isEnabled())
-    check("插件管理动作提示正确", plugin_action.toolTip() == "安装、卸载及启用/停用插件")
+    check("插件管理页可用", plugin_panel.isEnabled())
+    check("插件管理页提示正确", plugin_panel.toolTip() == "安装、卸载及启用/停用插件")
     check("底部保留版本号", window.status_version.text().startswith("v"))
 
     # 插件按 v2 登记表加载，并在面板挂载成功后写入健康记录。
@@ -172,56 +174,106 @@ def main() -> int:
     check("画布计算状态浮层已移除", not hasattr(window, "render_status_label"))
     check("底部状态栏显示就绪", "就绪" in window.status_state.text())
 
-    # 未加载数据即可通过菜单打开；开启裁剪后也能进入。
+    # 未加载数据即可通过导航打开；开启裁剪后也能进入。
     nav.setCurrentItem(nav.topLevelItem(2).child(0))
-    plugin_action.click()
-    dialog = window.__dict__.get("_plugin_dialog")
-    check("管理窗口打开", dialog is not None and dialog.isVisible())
-    check("窗口标题为「插件管理」", dialog.windowTitle() == "插件管理")
-    check("窗口非模态", not dialog.isModal())
-    check("重复打开复用同一窗口", window.open_plugin_manager() is dialog)
-    check("列表显示已安装插件", dialog.table.rowCount() == 1)
-    check("状态列显示运行中", "运行中" in dialog.table.item(0, 2).text())
-    check("安装按钮文案", dialog.btn_install.text() == "安装插件…")
-    dialog.grab().save(str(OUT_DIR / "manager_window.png"))
-    dialog.close()
+    app.processEvents()
+    check("选择导航直接显示内嵌插件管理", plugin_panel.isVisible() and settings.isVisible())
+    check("插件管理内嵌于设置窗口", plugin_panel.window() is settings)
+    check("外层窗口标题为「设置」", settings.windowTitle() == "设置")
+    check("设置窗口非模态", not settings.isModal())
+    check(
+        "重复打开复用同一设置窗口和插件面板",
+        window.open_plugin_manager() is plugin_panel and window.settings_dialog is settings,
+    )
+    check(
+        "插件管理包含已安装、官方插件和插件设置三页签",
+        plugin_panel.tabs.count() == 3
+        and [plugin_panel.tabs.tabText(i) for i in range(plugin_panel.tabs.count())]
+        == ["已安装", "官方插件", "插件设置"],
+    )
+    check("列表显示已安装插件", plugin_panel.table.rowCount() == 1)
+    check("状态列显示运行中", "运行中" in plugin_panel.table.item(0, 2).text())
+    check("安装按钮文案", plugin_panel.btn_install.text() == "安装插件…")
+    settings.grab().save(str(OUT_DIR / "manager_window.png"))
 
     nav.setCurrentItem(nav.topLevelItem(1).child(0))
     check("去噪参数直接显示在设置中", settings.denoise.isVisible())
     settings.grab().save(str(OUT_DIR / "denoise_settings.png"))
 
-    from PyQt5.QtCore import QTimer
     from PyQt5.QtTest import QTest
-    from bandscope.updates.update_settings_dialog import UpdateSettingsDialog
-
-    def inspect_update_dialog():
-        update_dialog = app.activeModalWidget()
-        check("从设置打开更新配置", isinstance(update_dialog, UpdateSettingsDialog))
-        if update_dialog is not None:
-            check("更新设置包含检查更新按钮", update_dialog.check_updates_button.isVisible())
-            update_dialog.grab().save(str(OUT_DIR / "update_settings.png"))
-            update_dialog.reject()
 
     nav.setCurrentItem(nav.topLevelItem(2).child(1))
-    QTimer.singleShot(100, inspect_update_dialog)
-    settings.updates.click()
+    app.processEvents()
+    update_panel = settings.updates
+    check("选择导航直接显示更新配置", update_panel.isVisible())
+    check("更新设置内嵌于设置窗口", update_panel.window() is settings)
+    check("更新设置包含检查更新按钮", update_panel.check_updates_button.isVisible())
+    check(
+        "更新设置包含保存和取消按钮",
+        all(button.isVisible() for button in update_panel.buttons.buttons()),
+    )
+    settings.grab().save(str(OUT_DIR / "update_settings.png"))
 
     window.btn_tb_crop.setChecked(True)
     app.processEvents()
-    dialog_in_crop = window.open_plugin_manager()
-    check("裁剪模式下仍可进入插件管理", dialog_in_crop is not None and dialog_in_crop.isVisible())
-    dialog_in_crop.close()
+    panel_in_crop = window.open_plugin_manager()
+    check(
+        "裁剪模式下仍可进入插件管理",
+        panel_in_crop is plugin_panel and plugin_panel.isVisible() and settings.isVisible(),
+    )
     window.btn_tb_crop.setChecked(False)
     app.processEvents()
 
-    nav.setCurrentItem(nav.topLevelItem(0).child(1))
     settings.resize(646, 400)
     for palette in ("dark", "light"):
+        nav.setCurrentItem(nav.topLevelItem(0).child(1))
         window._set_theme(palette)
         QTest.qWait(150)
         check(f"{palette} 主题窄窗下静止质量控件完整可见",
               settings.resting.visibleRegion().boundingRect() == settings.resting.rect())
         settings.grab().save(str(OUT_DIR / f"settings_{palette}.png"))
+
+        settings.select_page("plugins")
+        app.processEvents()
+        check(f"{palette} 主题窄窗下插件管理页可见", plugin_panel.isVisible())
+        plugin_actions = (
+            plugin_panel.btn_install,
+            plugin_panel.btn_toggle,
+            plugin_panel.btn_uninstall,
+            plugin_panel.btn_retry,
+            plugin_panel.btn_restore,
+            plugin_panel.btn_relaunch,
+        )
+        for action in plugin_actions:
+            check(
+                f"{palette} 主题窄窗下插件操作「{action.text()}」不裁切",
+                action.isVisible() and action.visibleRegion().boundingRect() == action.rect(),
+            )
+        settings.grab().save(str(OUT_DIR / f"settings_plugins_{palette}.png"))
+
+        settings.select_page("updates")
+        app.processEvents()
+        check(f"{palette} 主题窄窗下更新设置页可见", update_panel.isVisible())
+        update_scroll = update_panel.parentWidget()
+        while update_scroll is not None and not isinstance(update_scroll, QScrollArea):
+            update_scroll = update_scroll.parentWidget()
+        check(f"{palette} 主题窄窗下更新设置页位于滚动区", update_scroll is not None)
+        update_actions = [update_panel.check_updates_button] + update_panel.buttons.buttons()
+        initial_scroll = update_scroll.verticalScrollBar().value() if update_scroll is not None else 0
+        for action in update_actions:
+            if update_scroll is not None:
+                update_scroll.ensureWidgetVisible(action)
+                app.processEvents()
+            check(
+                f"{palette} 主题窄窗下更新操作「{action.text()}」不裁切",
+                update_scroll is not None
+                and action.isVisible()
+                and action.visibleRegion().boundingRect() == action.rect(),
+            )
+        if update_scroll is not None:
+            update_scroll.verticalScrollBar().setValue(initial_scroll)
+            app.processEvents()
+        settings.grab().save(str(OUT_DIR / f"settings_updates_{palette}.png"))
 
     settings.close()
     window.close()

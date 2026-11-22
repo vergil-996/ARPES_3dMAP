@@ -142,6 +142,7 @@ class LockBadge(QToolButton):
         super().__init__(parent)
         self._open_progress = 0.0
         self.setFixedSize(24, 16)
+        self.setStyleSheet("QToolButton { min-width: 0; min-height: 0; padding: 0; }")
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("解锁区间；随后向左拖黑端、向右拖白端")
         self.setAccessibleName("解锁切片区间")
@@ -388,8 +389,6 @@ class DualRangeSlider(QWidget):
         painter.setBrush(theme.token_color("ACCENT_DIM"))
         if selected.width() > 0:
             painter.drawRoundedRect(selected, 2.5, 2.5)
-        painter.setPen(QPen(QColor(theme.BORDER_HEX), 1))
-        painter.drawLine(QPointF(left, self.TRACK_Y), QPointF(right, self.TRACK_Y))
 
         collapsed = self._interval.locked and self._interval.length == 0.0
         if collapsed:
