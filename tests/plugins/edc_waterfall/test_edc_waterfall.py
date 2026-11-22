@@ -229,7 +229,7 @@ class PluginEntryTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.0.2")
 
     def test_action_registration_and_compute_delegation(self):
         plugin = EdcWaterfallPlugin()

@@ -1,7 +1,7 @@
 {
   "id": "edc_waterfall",
   "name": "EDC 瀑布图",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "api_version": 3,
   "requires_app": ">=1.13.0,<2.0.0",
   "entry_point": "entry:EdcWaterfallPlugin",
