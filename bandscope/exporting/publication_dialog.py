@@ -488,7 +488,7 @@ class PublicationExportDialog(QDialog):
         self.combo_cbar_pos = QComboBox()
         self.combo_cbar_pos.addItems(["右侧", "左侧", "顶部", "底部"])
         self.combo_cbar_tick = QComboBox()
-        self.combo_cbar_tick.addItems(["真实数值", "仅端点", "Low/High", "无文字"])
+        self.combo_cbar_tick.addItems(["真实数值", "仅端点", "Min/Max", "无文字"])
         self.spin_cbar_nticks = QSpinBox()
         self.spin_cbar_nticks.setRange(2, 8)
         self.spin_cbar_nticks.setValue(3)

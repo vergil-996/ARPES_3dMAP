@@ -116,6 +116,10 @@ class ColorbarPositionTests(unittest.TestCase):
                      "colorbar_tick_mode": "lowhigh"}
         low = self._render(overrides, dpi=100)
         high = self._render(overrides, dpi=600)
+        low_axis = self._assert_complete_colorbar_inside(low)
+        self.assertEqual(
+            [label.get_text() for label in low_axis.get_xticklabels()], ["Min", "Max"]
+        )
         low_rect, low_bounds = colorbar_preview_geometry(low)
         high_rect, high_bounds = colorbar_preview_geometry(high)
         np.testing.assert_allclose(low_rect, high_rect, atol=1e-10)

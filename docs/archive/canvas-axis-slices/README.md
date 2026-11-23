@@ -44,3 +44,8 @@
 - 真实窗口脚本 `scripts/validation/verify_canvas_axis_slices.py` 使用 `.local/data/WSe2_step.npz`，10 项检查通过；截图与 `report.json` 位于 `.local/outputs/canvas-axis-slices/`，覆盖深浅主题、三行窄屏、独立浮框截图和暂停在 70 ms 的开锁动画帧。
 - 同一真实数据下，`verify_path_slice.py` 全部通过，`verify_derived_waterfall.py` 23／23 通过且正常退出，覆盖新画布入口、折线路径、EDC 来源冻结、E 翻转、出版图与数值导出一致性。
 - 最终全量 `python -m unittest discover -s tests -t . -v`：**1800 项通过**（213.409 秒），日志 `.local/logs/canvas-axis-slices-unittest-final.log`；`compileall` 与 `git diff --check` 通过。
+
+## 后续修订（2026-11-23，v1.22.6）
+
+- 区间整体平移改为拖动轨道中点下方的圆点（半径 4 px、虚线短杆连接轨道），轨道中段与选中线段不再触发平移；端点与合拢手柄的命中改为胶囊外接矩形（端点左右各留 2 px，合拢手柄含 4 px 外扩描边），取代原 15 px 距离判定。合拢锁定后的合并手柄平移、锁定浮标与开锁动画不变。
+- 自动化新增／更新中点拖动、轨道中段不触发、端点命中范围与主题绘制用例；全量回归 2106 项通过。真实窗口 `verify_canvas_axis_slices.py` 10 项与一次性交互脚本 3 项通过。发布细节见 [v1.22.6 发布说明](../releases/v1.22.6.md)。

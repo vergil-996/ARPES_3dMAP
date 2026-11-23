@@ -214,6 +214,10 @@ class DualRangeSlider(QWidget):
     TRACK_Y = 30
     HANDLE_WIDTH = 10
     HANDLE_HEIGHT = 16
+    HANDLE_HIT_PADDING = 2
+    CENTER_HANDLE_Y = 49
+    CENTER_HANDLE_RADIUS = 4
+    CENTER_HANDLE_HIT_PADDING = 3
     SIDE_MARGIN = 10
 
     def __init__(self, parent=None):
@@ -228,7 +232,8 @@ class DualRangeSlider(QWidget):
         self.setMinimumSize(170, 60)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
-        self.setCursor(Qt.PointingHandCursor)
+        self.setCursor(Qt.ArrowCursor)
+        self.setToolTip("拖动黑白端点调整区间；拖动中点下方圆点整体平移")
         self.lock_badge = LockBadge(self)
         self.lock_badge.clicked.connect(lambda: self.lockRequested.emit(False))
         self.lock_badge.hide()
@@ -276,37 +281,79 @@ class DualRangeSlider(QWidget):
             return 0.0
         return self._x_for(self._interval.low if endpoint == "low" else self._interval.up)
 
-    def _endpoint_at(self, x):
+    def center_handle_center(self):
+        x = (self.handle_center("low") + self.handle_center("up")) / 2.0
+        return QPointF(x, self.CENTER_HANDLE_Y)
+
+    def _has_center_handle(self):
+        return self._interval is not None and self._interval.length > 0.0
+
+    def _handle_rect(self, x, collapsed=False):
+        outline = 4 if collapsed else 0
+        return QRectF(
+            x - (self.HANDLE_WIDTH + outline) / 2,
+            self.TRACK_Y - (self.HANDLE_HEIGHT + outline) / 2,
+            self.HANDLE_WIDTH + outline,
+            self.HANDLE_HEIGHT + outline,
+        )
+
+    def _endpoint_at(self, position):
         if self._interval is None:
             return None
+        point = QPointF(position)
         low_x = self.handle_center("low")
         up_x = self.handle_center("up")
+        collapsed = self._interval.locked and self._interval.length == 0.0
         if abs(low_x - up_x) < 1.0:
-            if abs(x - low_x) > 18:
+            hit_rect = self._handle_rect(low_x, collapsed).adjusted(
+                -self.HANDLE_HIT_PADDING, -self.HANDLE_HIT_PADDING,
+                self.HANDLE_HIT_PADDING, self.HANDLE_HIT_PADDING,
+            )
+            if not hit_rect.contains(point):
                 return None
-            return "low" if x < low_x else "up"
-        candidates = [(abs(x - low_x), "low"), (abs(x - up_x), "up")]
-        distance, endpoint = min(candidates)
-        return endpoint if distance <= 15 else None
+            return "low" if point.x() < low_x else "up"
+        candidates = []
+        for endpoint, x in (("low", low_x), ("up", up_x)):
+            hit_rect = self._handle_rect(x).adjusted(
+                -self.HANDLE_HIT_PADDING, -self.HANDLE_HIT_PADDING,
+                self.HANDLE_HIT_PADDING, self.HANDLE_HIT_PADDING,
+            )
+            if hit_rect.contains(point):
+                candidates.append((abs(point.x() - x), endpoint))
+        if not candidates:
+            return None
+        return min(candidates)[1]
+
+    def _center_handle_at(self, position):
+        if not self._has_center_handle():
+            return False
+        center = self.center_handle_center()
+        radius = self.CENTER_HANDLE_RADIUS + self.CENTER_HANDLE_HIT_PADDING
+        hit_rect = QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
+        return hit_rect.contains(QPointF(position))
+
+    def _target_at(self, position):
+        if self._center_handle_at(position):
+            return "center"
+        return self._endpoint_at(position)
 
     def mousePressEvent(self, event):
         if not self.isEnabled() or self._interval is None or event.button() != Qt.LeftButton:
             return
-        endpoint = self._endpoint_at(event.pos().x())
-        if self._interval.locked and endpoint is not None:
+        target = self._target_at(event.pos())
+        if target is None:
+            return
+        if target == "center" or self._interval.locked:
             self._drag_mode = "center"
             self._popup_endpoint = "low"
-            self._show_popup("low")
-        elif endpoint is not None:
-            self._drag_mode = endpoint
-            self._popup_endpoint = endpoint
-            self._show_popup(endpoint)
+            if self._interval.locked:
+                self._show_popup("low")
+            else:
+                self.coordinate_popup.hide()
         else:
-            low_x = self.handle_center("low")
-            up_x = self.handle_center("up")
-            if not (min(low_x, up_x) <= event.pos().x() <= max(low_x, up_x)):
-                return
-            self._drag_mode = "center"
+            self._drag_mode = target
+            self._popup_endpoint = target
+            self._show_popup(target)
         self._drag_origin = self._value_for(event.pos().x())
         self._drag_center = self._interval.center
         event.accept()
@@ -320,18 +367,19 @@ class DualRangeSlider(QWidget):
                 self.centerPreview.emit(self._drag_center + value - self._drag_origin)
                 # 合拢/锁定后拖的是整体平移，浮框也要跟着手柄走。以前这条
                 # 分支只发预览，浮框停在按下时的位置和坐标，看起来像“跟不上”。
-                if self._interval.locked or self.coordinate_popup.isVisible():
-                    self._show_popup("low" if self._interval.locked else self._popup_endpoint)
+                if self._interval.locked:
+                    self._show_popup("low")
             else:
                 self.endpointPreview.emit(self._drag_mode, value)
                 self._show_popup(self._drag_mode)
             event.accept()
             return
-        endpoint = self._endpoint_at(event.pos().x())
-        if endpoint != self._hovered:
-            self._hovered = endpoint
-            if endpoint is not None:
-                self._popup_endpoint = "low" if self._interval.locked else endpoint
+        target = self._target_at(event.pos())
+        if target != self._hovered:
+            self._hovered = target
+            self.setCursor(Qt.PointingHandCursor if target is not None else Qt.ArrowCursor)
+            if target in ("low", "up") or (target == "center" and self._interval.locked):
+                self._popup_endpoint = "low" if self._interval.locked else target
                 self._show_popup(self._popup_endpoint)
             else:
                 self.coordinate_popup.schedule_hide()
@@ -346,6 +394,7 @@ class DualRangeSlider(QWidget):
 
     def leaveEvent(self, event):
         self._hovered = None
+        self.setCursor(Qt.ArrowCursor)
         if self._drag_mode is None:
             self.coordinate_popup.schedule_hide()
         super().leaveEvent(event)
@@ -397,16 +446,29 @@ class DualRangeSlider(QWidget):
         else:
             self._draw_handle(painter, low_x, "low")
             self._draw_handle(painter, up_x, "up")
+        if self._has_center_handle():
+            self._draw_center_handle(painter)
         self._position_lock_badge()
 
-    def _draw_handle(self, painter, x, endpoint, collapsed=False):
-        outline = 4 if collapsed else 0
-        outer = QRectF(
-            x - (self.HANDLE_WIDTH + outline) / 2,
-            self.TRACK_Y - (self.HANDLE_HEIGHT + outline) / 2,
-            self.HANDLE_WIDTH + outline,
-            self.HANDLE_HEIGHT + outline,
+    def _draw_center_handle(self, painter):
+        center = self.center_handle_center()
+        stem_pen = QPen(QColor(theme.TEXT_3), 1, Qt.DashLine, Qt.RoundCap)
+        painter.setPen(stem_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawLine(
+            QPointF(center.x(), self.TRACK_Y + 4),
+            QPointF(center.x(), center.y() - self.CENTER_HANDLE_RADIUS),
         )
+        active = self._hovered == "center" or self._drag_mode == "center"
+        light = theme.current_theme() == "light"
+        fill = theme.RANGE_HANDLE_LIGHT_FILL if light else theme.RANGE_HANDLE_DARK_FILL
+        border = theme.RANGE_HANDLE_DARK_FILL if light else theme.RANGE_HANDLE_LIGHT_FILL
+        painter.setBrush(QColor(fill))
+        painter.setPen(QPen(QColor(border), 1.5 if active else 1))
+        painter.drawEllipse(center, self.CENTER_HANDLE_RADIUS, self.CENTER_HANDLE_RADIUS)
+
+    def _draw_handle(self, painter, x, endpoint, collapsed=False):
+        outer = self._handle_rect(x, collapsed)
         white = endpoint == "up"
         fill = QColor(theme.RANGE_HANDLE_LIGHT_FILL if white
                       else theme.RANGE_HANDLE_DARK_FILL)

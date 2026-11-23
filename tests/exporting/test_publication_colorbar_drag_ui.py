@@ -64,6 +64,11 @@ class ColorbarDragControlTests(unittest.TestCase):
         ):
             self.assertEqual(widget.toolTip(), "")
 
+    def test_min_max_tick_option_keeps_lowhigh_mode(self):
+        self.assertEqual(self.dialog.combo_cbar_tick.itemText(2), "Min/Max")
+        self.dialog.combo_cbar_tick.setCurrentIndex(2)
+        self.assertEqual(self.dialog._draft_overrides["colorbar_tick_mode"], "lowhigh")
+
     def test_worker_delivers_colorbar_layer_and_cached_preview_is_draggable(self):
         key, _revision, payload, layers = self._render_worker_preview()
         self.assertIn("colorbar", layers)

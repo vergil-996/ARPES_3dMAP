@@ -736,7 +736,7 @@ def _draw_colorbar(
 
     if tick_mode == "lowhigh":
         ends = [low, high] if high > low else [low]
-        labels = ["Low", "High"] if high > low else [format_tick_labels([low], low, high)[0][0]]
+        labels = ["Min", "Max"] if high > low else [format_tick_labels([low], low, high)[0][0]]
         colorbar.set_ticks(ends)
         colorbar.set_ticklabels(labels)
     elif tick_mode == "none":

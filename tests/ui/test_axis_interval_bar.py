@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, QPoint, Qt
 from PyQt5.QtGui import QColor, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
@@ -53,9 +53,10 @@ class DualIntervalMouseTests(unittest.TestCase):
 
     def _point(self, endpoint=None, x=None):
         if x is not None:
-            from PyQt5.QtCore import QPoint
             return QPoint(int(x), self.slider.TRACK_Y)
-        from PyQt5.QtCore import QPoint
+        if endpoint == "center":
+            center = self.slider.center_handle_center()
+            return QPoint(int(center.x()), int(center.y()))
         return QPoint(int(self.slider.handle_center(endpoint)), self.slider.TRACK_Y)
 
     def _drag(self, start, end):
@@ -91,7 +92,7 @@ class DualIntervalMouseTests(unittest.TestCase):
         interval = AxisInterval.from_indices(coords, 1, 3, locked=True)
         self._bind_fourth_axis(coords, interval=interval)
         self._drag(
-            self._point(x=self.slider._x_for(interval.center)),
+            self._point("center"),
             self._point(x=self.slider._x_for(1000.0)),
         )
         self.assertEqual((self.controller.interval.low, self.controller.interval.up), (30.0, 140.0))
@@ -106,7 +107,7 @@ class DualIntervalMouseTests(unittest.TestCase):
             interval,
         )
         self._drag(
-            self._point(x=self.slider._x_for(interval.center)),
+            self._point("center"),
             self._point(x=self.slider._x_for(55.0)),
         )
         self.assertAlmostEqual(self.controller.interval.low, 22.5, delta=0.5)
@@ -144,14 +145,49 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertFalse(self.controller.interval.locked)
         self.assertGreater(self.controller.interval.length, 0.0)
 
-    def test_middle_drag_preserves_length_and_stops_at_axis_edge(self):
-        center = (self.slider.handle_center("low") + self.slider.handle_center("up")) / 2
-        self._drag(self._point(x=center), self._point(x=self.slider.width() + 100))
+    def test_center_handle_drag_preserves_length_and_stops_at_axis_edge(self):
+        start = self._point("center")
+        self._drag(start, QPoint(self.slider.width() + 100, start.y()))
 
         interval = self.controller.interval
         self.assertAlmostEqual(interval.length, 1.0)
         self.assertAlmostEqual(interval.low, 0.0)
         self.assertAlmostEqual(interval.up, 1.0)
+
+    def test_close_endpoints_do_not_block_center_handle_drag(self):
+        self.control.input_length.setValue(0.04)
+        self.control.input_length.editingFinished.emit()
+        original_center = self.controller.interval.center
+        self.commits.clear()
+        start = self._point("center")
+
+        self._drag(start, QPoint(start.x() + 60, start.y()))
+
+        interval = self.controller.interval
+        self.assertAlmostEqual(interval.length, 0.04)
+        self.assertGreater(interval.center, original_center)
+        self.assertFalse(interval.locked)
+        self.assertEqual(len(self.commits), 1)
+
+    def test_selected_track_itself_does_not_start_center_drag(self):
+        center_x = self.slider.center_handle_center().x()
+        original_center = self.controller.interval.center
+
+        self._drag(self._point(x=center_x), self._point(x=center_x + 60))
+
+        self.assertAlmostEqual(self.controller.interval.center, original_center)
+        self.assertEqual(self.commits, [])
+
+    def test_endpoint_hit_region_stays_on_the_track(self):
+        original_low = self.controller.interval.low
+        start = QPoint(
+            int(self.slider.handle_center("low")), self.slider.CENTER_HANDLE_Y
+        )
+
+        self._drag(start, QPoint(start.x() + 60, start.y()))
+
+        self.assertAlmostEqual(self.controller.interval.low, original_low)
+        self.assertEqual(self.commits, [])
 
     def test_locked_merged_handle_browses_single_layer(self):
         self.controller.interval.set_up(-0.5)
@@ -223,6 +259,50 @@ class DualIntervalMouseTests(unittest.TestCase):
 
         self.assertLess(QColor(image.pixel(low_x, y)).lightness(), 60)
         self.assertGreater(QColor(image.pixel(up_x, y)).lightness(), 200)
+
+    def test_separated_interval_paints_dashed_stem_and_theme_contrasting_center_handle(self):
+        previous_theme = theme.current_theme()
+        self.addCleanup(theme.set_theme, previous_theme)
+        for name in ("light", "dark"):
+            with self.subTest(theme=name):
+                theme.set_theme(name)
+                self.slider.update()
+                QApplication.processEvents()
+                image = self.slider.grab().toImage()
+                ratio = image.devicePixelRatio()
+                center = self.slider.center_handle_center()
+                x = int(center.x() * ratio)
+                y = int(center.y() * ratio)
+
+                fill = QColor(image.pixel(x, y))
+                outline_samples = [
+                    QColor(image.pixel(
+                        int((center.x() + dx) * ratio),
+                        int((center.y() + dy) * ratio),
+                    ))
+                    for dx, dy in (
+                        (-4, 0), (4, 0), (0, -4), (0, 4),
+                        (-3, 0), (3, 0), (0, -3), (0, 3),
+                    )
+                ]
+                stem_colors = {
+                    QColor(image.pixel(x, int(stem_y * ratio))).rgba()
+                    for stem_y in range(
+                        self.slider.TRACK_Y + 4,
+                        self.slider.CENTER_HANDLE_Y - self.slider.CENTER_HANDLE_RADIUS,
+                    )
+                }
+                if name == "light":
+                    self.assertGreater(fill.lightness(), 200)
+                    self.assertLess(min(color.lightness() for color in outline_samples), 100)
+                else:
+                    self.assertLess(fill.lightness(), 60)
+                    self.assertGreater(max(color.lightness() for color in outline_samples), 200)
+                self.assertGreater(len(stem_colors), 1)
+
+        self.controller.interval.set_up(self.controller.interval.low)
+        self.controller.sync_widgets()
+        self.assertFalse(self.slider._has_center_handle())
 
     def test_selected_track_has_no_center_line(self):
         QApplication.processEvents()
