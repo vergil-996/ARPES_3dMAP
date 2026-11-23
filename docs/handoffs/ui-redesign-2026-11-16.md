@@ -1,6 +1,6 @@
 # 界面重做：深浅双主题与布局
 
-日期：2026-11-16。状态：源码、自动化与真实窗口主题脚本已通过，随 **v1.21.0** 发布到 GitHub 与 MatElab（2026-11-16）；v1.21.1 的入口与主题修正随 **v1.21.1** 发布到 GitHub 与 MatElab（2026-11-17）；维护者人工视觉复核与冻结包验收未执行。本文是本事项唯一状态主记录。
+日期：2026-11-16。状态：源码、自动化与真实窗口主题脚本已通过，随 **v1.21.0** 发布到 GitHub 与 MatElab（2026-11-16）；v1.21.1 的入口与主题修正随 **v1.21.1** 发布到 GitHub 与 MatElab（2026-11-17）；顶栏昼夜动画开关与不透明度插值动画开关随 **v1.22.5** 发布到 GitHub 与 MatElab（2026-11-23）；维护者人工视觉复核与冻结包验收未执行。本文是本事项唯一状态主记录。
 
 ## 目标与约束
 
@@ -40,18 +40,25 @@ v1.21.0 之后按实际使用反馈修正入口与主题细节，不改数据格
 - 验证：全量 1728 项通过（2026-11-17，218.983 秒，日志 `.local/logs/release-1.21.1-full.log`）；`verify_ui_themes.py` PASS（0）；`verify_plugin_management.py` 全部通过；`compileall`、`check_release_version.py v1.21.1`、`verify_plugin_release_flow.py` 与 `git diff --check` 通过。`verify_color_lock.py` 的默认百分位归一化会让各帧 P99.5 端点相同，已在脚本内切到完整范围后复验，3D／2D 锁定与解锁全部通过。
 - 发布：GitHub Release CI（run 44009625220，26m59s）成功，共 12 个资产；`check_for_update` 从 1.21.0 发现 1.21.1，CPU／NVIDIA 完整下载并按 SHA-256 校验，插件包与目录 Ed25519 验签通过。MatElab 发布记录「BandScope v1.21.1」（uid `bandscope-release-1.21.1`）建于「BandScope发布」记录本；只读元数据核对两个 flavor 均发现 1.21.1、文件名与大小一致，按约定未做回传下载复验。
 
-## 昼夜动画开关（2026-11-23，未发布）
+## 昼夜动画开关（v1.22.5 已发布 GitHub 与 MatElab，2026-11-23）
 
 - 顶栏原「深色／浅色」双按钮替换为 `bandscope/ui/day_night_switch.py` 的 96×38 自绘开关：浅色显示太阳与云层，深色显示月亮与星空；主题过渡为 560 ms，另含悬停回弹、焦点与禁用状态。鼠标、空格与外部主题变更共用原有主题入口，仍保存 `ui/theme`，不重建页面或请求数据重渲染。
 - 自动化：`tests.ui.test_day_night_switch` 13 项、`tests.integration.test_3d_background` 7 项通过，覆盖鼠标／键盘、动画中点与终点、双层光晕、星场、云层、状态恢复、参数与主题持久化。
 - 集成回归：`PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -t . -v` 共 2071 项通过（184.466 秒，日志 `.local/logs/day-night-switch-full-utf8.log`）；`python -m compileall -q bandscope plugins scripts tests start.py` 通过。
 - 真实窗口：`QT_QPA_PLATFORM=windows python scripts/validation/verify_fluent_icon_windows.py` 使用 WSe₂ 在 Windows、DPR 1.25 下通过，深浅主题、专注模式和次级窗口截图位于 `.local/outputs/icon-dpi-audit/windows/`；开关最终独立的浅色／中间帧／深色渲染位于 `.local/outputs/day-night-switch-final/`。跨屏移动未执行。
 - `verify_ui_themes.py` 的新开关与主题断言已通过并生成深色主窗口截图，但完整脚本仍在既有相机预设步骤失败：有效 3D 场景下调用 `_set_camera_view_preset("xy")` 后所有预设按钮均未保持勾选。本轮未修改该无关相机逻辑，因此不能把本次完整主题脚本记为通过。
+- 发布：随 v1.22.5 发布到 GitHub 与 MatElab（2026-11-23）；本版全量 2101 项通过、`verify_fluent_icon_windows.py` 在单屏 DPR 1.25 下通过。发布资产与客户端校验见 [v1.22.5 发布说明](../../archive/releases/v1.22.5.md)。
+
+## 不透明度插值动画开关（v1.22.5 已发布 GitHub 与 MatElab，2026-11-23）
+
+- 把「不透明度」标题行右侧的「平滑／直线」文字双段选择器换成 `bandscope/ui/opacity_interpolation_switch.py` 的 72×28 自绘滑块：左端为扭曲三角函数曲线、右端为三段折线图标，带纵深导槽与滑块切换动画；点击即切换并保持控制点原位，外部模式变更与保存重开同步滑块位置。
+- 自动化：`tests.ui.test_opacity_interpolation_switch` 与 `tests.ui.test_opacity_controls` 的开关用例通过；`verify_independent_opacity_curve.py` 50 项通过（CUDA 实际执行），报告在 `.local/outputs/opacity-curve-interpolation/`。
+- 未执行：维护者人工视觉复核（动画时长与手感、窄栏与深浅主题观感）。
 
 ## 已知边界与下一步
 
 - 主题切换在满载页面实测约 3 秒（Windows 实窗、约 2.7k 控件；应用级样式表重设与逐控件重着色各约一半），不是即时反馈；后续如需更快，可按可见窗口分批重着色，本次未改。
-- 维护者人工视觉未执行：两主题的对比度与整体观感、折叠分组与窄栏／多分组布局、画布工具条与专注模式、滚轮微调手感、出版／扩展／Blender／更新设置窗口的实际观感。
+- 维护者人工视觉未执行：两主题的对比度与整体观感、折叠分组与窄栏／多分组布局、画布工具条与专注模式、滚轮微调手感、出版／扩展／Blender／更新设置窗口的实际观感、昼夜开关与不透明度插值开关的动画手感与窄栏观感。
 - 高 DPI 与多显示器、深色系统主题下的原生菜单栏与文件对话框未专门验收。
 - 冻结安装包与安装器的人工安装验收未执行，以 CI 产物为准（见 [v1.21.0 发布说明](../archive/releases/v1.21.0.md)）。
 - 插件面板若在自身代码里硬编码颜色，不会随主题变化；本版未修改插件 API，后续按需在插件内改用 `theme` 令牌。

@@ -3,7 +3,7 @@
 本索引只列尚待设计或实施的工作；按任务选择对应计划，不批量读取本目录。
 
 - [BandScope 按钮图标高 DPI 优化交接计划](fluent-icon-high-dpi.md)（已实施；2012 项全量回归、多倍率像素与单屏实窗验收通过；真实双屏跨屏移动待验；v1.22.4 已发布 GitHub 与 MatElab）
-- [BandScope 自动轴分配与加载后重设](axis-assignment.md)（已实施；自动化与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab）
+- [BandScope 自动轴分配与加载后重设](axis-assignment.md)（已实施；自动化与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab；2026-11-23 扫描滑块设置移入轴分配窗口，v1.22.5 已发布 GitHub 与 MatElab）
 - [BandScope 画布工具栏与 Z 轴旋钮改造](canvas-toolbar-rotation-dial.md)（已实施；定向测试与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab）
 - [色阶调整：累计直方图、三滑块与色带截断](levels-and-colormap-range.md)（已实施；2026-11-21 视觉返工后分段全量回归与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab，单进程全量的既有区间崩溃已在该版修复）
 - [将色带选择并入“输出色带”](output-colormap-selector.md)（已实施；自动化与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab，人工视觉复核未执行）
