@@ -211,6 +211,11 @@ def main():
         )
         dialog.scan_name.setText("样品温度")
         dialog.scan_unit.setText("K")
+        record("重设窗口提供扫描轴滑块设置",
+               dialog.docking_combo.isEnabled() and dialog.pan_combo.isEnabled()
+               and "仅作用于扫描轴" in dialog.drag_scope_label.text())
+        dialog.docking_combo.setCurrentIndex(dialog.docking_combo.findData("continuous"))
+        dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData("frames"))
         capture("temperature-axis-dialog.png", dialog)
         dialog.button_box.button(QDialogButtonBox.Ok).click()
 
@@ -223,6 +228,10 @@ def main():
         )
 
     def step_curve():
+        drag = window.source_manager.active().fourth_axis_drag
+        record("轴重设应用扫描滑块设置",
+               drag.docking == "continuous" and drag.continuous_pan == "frames",
+               drag)
         expected = np.arange(3 * 2 * 4 * 4, dtype=np.float32).reshape(3, 2, 4, 4).transpose(3, 2, 1, 0)
         record("卡片重设交换原始维度", np.array_equal(window.core.raw_data, expected),
                window.core.axis_assignment.summary())

@@ -2,13 +2,14 @@ import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
-from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt5.QtCore import QAbstractAnimation, QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QColor, QContextMenuEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.ui import theme
 from bandscope.ui.opacity_controls import OpacityCurveEditor
+from bandscope.ui.opacity_interpolation_switch import OpacityInterpolationSwitch
 
 
 def drag_to(widget, position):
@@ -390,21 +391,107 @@ class OpacityCurveEditorTests(unittest.TestCase):
         self.assertEqual(len(editor.points()), 3)
         self.assertEqual(editor.points()[1], [0.3, 0.4])
 
-    def test_mode_selector_keeps_points_and_commits_once(self):
+    def test_mode_selector_exposes_only_the_interpolation_switch(self):
+        editor = self.make_editor()
+        selector = editor.interpolation_selector
+        self.assertIsInstance(selector.switch, OpacityInterpolationSwitch)
+        self.assertEqual(selector.layout().count(), 1)
+        self.assertIs(selector.layout().itemAt(0).widget(), selector.switch)
+        self.assertTrue(selector.switch.isVisibleTo(selector))
+        self.assertEqual(selector.interpolation(), "smooth")
+        self.assertTrue(selector.buttons["smooth"].isChecked())
+        self.assertFalse(selector.buttons["linear"].isChecked())
+        for button in selector.buttons.values():
+            self.assertFalse(button.isVisibleTo(selector))
+
+    def test_mode_switch_keeps_points_and_commits_once_per_roundtrip(self):
         editor = self.make_editor([[0.0, 0.0], [0.3, 0.8], [0.7, 0.2], [1.0, 1.0]])
         before = editor.points()
         changed = Mock()
         committed = Mock()
         editor.valueChanged.connect(changed)
         editor.valueCommitted.connect(committed)
-        editor.interpolation_selector.buttons["linear"].click()
+        selector = editor.interpolation_selector
+        QTest.mouseClick(selector.switch, Qt.LeftButton)
         self.assertEqual(editor.interpolation(), "linear")
+        self.assertTrue(selector.buttons["linear"].isChecked())
+        self.assertFalse(selector.buttons["smooth"].isChecked())
         self.assertEqual(editor.points(), before)
         self.assertEqual(changed.call_count, 1)
         self.assertEqual(committed.call_count, 1)
-        editor.interpolation_selector.buttons["smooth"].click()
+        QTest.mouseClick(selector.switch, Qt.LeftButton)
         self.assertEqual(editor.interpolation(), "smooth")
+        self.assertTrue(selector.buttons["smooth"].isChecked())
+        self.assertFalse(selector.buttons["linear"].isChecked())
         self.assertEqual(editor.points(), before)
+        self.assertEqual(changed.call_count, 2)
+        self.assertEqual(committed.call_count, 2)
+
+    def test_legacy_mode_buttons_still_animate_and_commit_once(self):
+        editor = self.make_editor()
+        selector = editor.interpolation_selector
+        changed = Mock()
+        committed = Mock()
+        editor.valueChanged.connect(changed)
+        editor.valueCommitted.connect(committed)
+        with patch.object(
+            selector.switch, "set_interpolation", wraps=selector.switch.set_interpolation,
+        ) as set_interpolation:
+            selector.buttons["linear"].click()
+            self.assertEqual(editor.interpolation(), "linear")
+            self.assertEqual(changed.call_count, 1)
+            self.assertEqual(committed.call_count, 1)
+            selector.buttons["smooth"].click()
+            self.assertEqual(editor.interpolation(), "smooth")
+            self.assertEqual(changed.call_count, 2)
+            self.assertEqual(committed.call_count, 2)
+        self.assertEqual(set_interpolation.call_count, 2)
+        set_interpolation.assert_called_with("smooth", animate=True)
+
+    def test_state_restore_stops_animation_without_committing(self):
+        editor = self.make_editor()
+        selector = editor.interpolation_selector
+        changed = Mock()
+        committed = Mock()
+        editor.valueChanged.connect(changed)
+        editor.valueCommitted.connect(committed)
+        QTest.mouseClick(selector.switch, Qt.LeftButton)
+        self.assertEqual(editor.interpolation(), "linear")
+        animations = selector.switch.findChildren(QAbstractAnimation)
+        self.assertTrue(any(
+            animation.state() == QAbstractAnimation.Running for animation in animations
+        ))
+        changed.reset_mock()
+        committed.reset_mock()
+
+        with patch.object(
+            selector.switch, "set_interpolation", wraps=selector.switch.set_interpolation,
+        ) as set_interpolation:
+            editor.set_opacity({"points": editor.points(), "interpolation": "smooth"})
+            set_interpolation.assert_called_once_with("smooth", animate=False)
+        self.assertEqual(editor.interpolation(), "smooth")
+        self.assertTrue(selector.buttons["smooth"].isChecked())
+        self.assertFalse(selector.buttons["linear"].isChecked())
+        self.assertEqual(changed.call_count, 0)
+        self.assertEqual(committed.call_count, 0)
+        self.assertFalse(any(
+            animation.state() == QAbstractAnimation.Running for animation in animations
+        ))
+
+        with patch.object(
+            selector.switch, "set_interpolation", wraps=selector.switch.set_interpolation,
+        ) as set_interpolation:
+            editor.set_interpolation("linear")
+            set_interpolation.assert_called_once_with("linear", animate=False)
+        self.assertEqual(editor.interpolation(), "linear")
+        self.assertTrue(selector.buttons["linear"].isChecked())
+        self.assertFalse(selector.buttons["smooth"].isChecked())
+        self.assertEqual(changed.call_count, 0)
+        self.assertEqual(committed.call_count, 0)
+        self.assertFalse(any(
+            animation.state() == QAbstractAnimation.Running
+            for animation in selector.switch.findChildren(QAbstractAnimation)
+        ))
 
     def test_mouse_and_keyboard_allow_coincident_points_and_reverse_drag(self):
         editor = self.make_editor([[0.0, 0.0], [0.3, 0.2], [0.6, 0.6], [1.0, 1.0]])

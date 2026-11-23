@@ -170,16 +170,94 @@ class SettingsWindowTests(unittest.TestCase):
         nav = dialog.navigation
         nav.setCurrentItem(nav.topLevelItem(1).child(0))
         detail = window.page_control_blank
+        panel = dialog.denoise
         saved = detail.export_state()
-        detail.wavelet_level_box.setValue(4)
-        dialog.denoise.wavelet_level_box.setValue(2)
-        dialog.denoise.wavelet_level_box.editingFinished.emit()
-        self.assertEqual(detail.get_wavelet_params()["level"], 2)
-        dialog.denoise.wavelet_strength_box.setValue(0.987654321)
-        dialog.denoise.wavelet_strength_box.editingFinished.emit()
-        self.assertEqual(detail.get_wavelet_params()["strength"], 0.987654321)
+
+        group_layout = panel.layout()
+        self.assertEqual(
+            [group_layout.itemAt(index).widget().title() for index in range(6)],
+            ["高斯平滑", "中值滤波", "Savitzky-Golay滤波", "小波去噪", "非局部均值", "低秩 SVD"],
+        )
+        spin_cases = (
+            ("gaussian_sigma_kx_box", 2.25, 0.75),
+            ("gaussian_sigma_ky_box", 1.75, 0.5),
+            ("gaussian_sigma_e_box", 1.25, 0.0),
+            ("median_size_kx_box", 5, 3),
+            ("median_size_ky_box", 7, 1),
+            ("median_size_e_box", 5, 3),
+            ("sg_window_box", 7, 9),
+            ("sg_polyorder_box", 1, 3),
+            ("wavelet_level_box", 2, 4),
+            ("wavelet_strength_box", 0.987654321, 0.123456789),
+            ("wavelet_noise_sigma_box", 0.125, 0.0),
+            ("nlmeans_patch_size_box", 7, 5),
+            ("nlmeans_patch_distance_box", 5, 3),
+            ("nlmeans_h_scale_box", 1.75, 0.75),
+            ("nlmeans_noise_sigma_box", 0.125, 0.0),
+            ("low_rank_rank_box", 2, 4),
+        )
+        for name, popup_value, source_value in spin_cases:
+            with self.subTest(control=name):
+                editor = getattr(panel, name)
+                source = getattr(detail, name)
+                self.assertEqual(editor.minimum(), source.minimum())
+                self.assertEqual(editor.maximum(), source.maximum())
+                self.assertEqual(editor.singleStep(), source.singleStep())
+                editor.setValue(popup_value)
+                editor.editingFinished.emit()
+                self.assertEqual(source.value(), popup_value)
+                self.assertEqual(editor.value(), source.value())
+                source.setValue(source_value)
+                source.editingFinished.emit()
+                self.assertEqual(editor.value(), source_value)
+                self.assertEqual(editor.minimum(), source.minimum())
+                self.assertEqual(editor.maximum(), source.maximum())
+
+        self.assertEqual(panel.wavelet_strength_box.decimals(), 10)
+        for name in (
+            "gaussian_sigma_kx_box", "gaussian_sigma_ky_box", "gaussian_sigma_e_box",
+            "wavelet_noise_sigma_box", "nlmeans_h_scale_box", "nlmeans_noise_sigma_box",
+        ):
+            with self.subTest(precision=name):
+                self.assertGreaterEqual(getattr(panel, name).decimals(), 6)
+        for group_name, editor_name in (
+            ("group_wavelet", "wavelet_noise_sigma_box"),
+            ("group_nlmeans", "nlmeans_noise_sigma_box"),
+        ):
+            with self.subTest(noise_sigma_units=editor_name):
+                group = getattr(panel, group_name)
+                label = group.layout().labelForField(getattr(panel, editor_name))
+                self.assertIsNotNone(label)
+                self.assertIn("数据强度单位", label.text())
+                self.assertNotIn("无量纲", label.text())
+
+        combo_cases = (
+            ("sg_axis_combo", 0, 1),
+            ("wavelet_combo", 0, 1),
+            ("wavelet_threshold_rule_combo", 2, 1),
+            ("wavelet_threshold_mode_combo", 1, 0),
+        )
+        for name, popup_index, source_index in combo_cases:
+            with self.subTest(control=name):
+                editor = getattr(panel, name)
+                source = getattr(detail, name)
+                editor.setCurrentIndex(popup_index)
+                self.assertEqual(source.currentIndex(), popup_index)
+                source.setCurrentIndex(source_index)
+                self.assertEqual(editor.currentIndex(), source_index)
+
+        detail.sg_window_box.setValue(3)
+        detail.sg_window_box.editingFinished.emit()
+        self.assertEqual(detail.sg_polyorder_box.maximum(), 2)
+        self.assertEqual(panel.sg_polyorder_box.maximum(), 2)
+
         detail.restore_state(saved)
-        self.assertEqual(dialog.denoise.wavelet_level_box.value(), detail.wavelet_level_box.value())
+        for name, _popup_value, _source_value in spin_cases:
+            with self.subTest(restored=name):
+                self.assertEqual(getattr(panel, name).value(), getattr(detail, name).value())
+        for name, _popup_index, _source_index in combo_cases:
+            with self.subTest(restored=name):
+                self.assertEqual(getattr(panel, name).currentIndex(), getattr(detail, name).currentIndex())
 
     def test_canvas_menu_no_longer_contains_moved_settings_entries(self):
         owner = QWidget()

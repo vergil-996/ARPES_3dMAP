@@ -25,6 +25,14 @@ from bandscope.core.axis_assignment import (
     default_scan_name,
     validate_assignment,
 )
+from bandscope.core.axis_interval import (
+    AUTO_DOCKING,
+    CONTINUOUS_DOCKING,
+    DISCRETE_DOCKING,
+    PAN_FRAMES,
+    PAN_PHYSICAL,
+    FourthAxisDragSettings,
+)
 from bandscope.ui import theme
 
 
@@ -41,18 +49,22 @@ class AxisAssignmentDialog(QDialog):
         candidates,
         *,
         candidate_units=None,
+        fourth_axis_drag=None,
         as_new_source=False,
         parent=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("重新分配轴")
         self.setModal(True)
-        self.resize(760, 470)
+        self.resize(760, 550)
         self._current = assignment.clone()
         self._automatic = automatic.clone()
         self._candidates = dict(candidates)
         self._candidate_units = candidate_units or {}
+        self._initial_fourth_axis_drag = fourth_axis_drag or FourthAxisDragSettings()
+        self._as_new_source = bool(as_new_source)
         self._loading = False
+        self._assignment_dirty = False
         self._rows = {}
 
         root = QVBoxLayout(self)
@@ -91,7 +103,7 @@ class AxisAssignmentDialog(QDialog):
                 lambda _index, selected_role=role: self._on_dimension_changed(selected_role)
             )
             coordinate.currentIndexChanged.connect(
-                lambda _index, selected_role=role: self._update_preview(selected_role)
+                lambda _index, selected_role=role: self._on_coordinate_changed(selected_role)
             )
         grid.setColumnStretch(2, 1)
         grid.setColumnStretch(3, 1)
@@ -112,8 +124,31 @@ class AxisAssignmentDialog(QDialog):
         scan_form.addRow("扫描类型", self.scan_kind)
         scan_form.addRow("显示名称", self.scan_name)
         scan_form.addRow("单位", self.scan_unit)
+
+        self.docking_combo = QComboBox(self)
+        self.docking_combo.setAccessibleName("滑块停靠")
+        self.docking_combo.setToolTip("仅影响扫描轴滑块，不改变 Kx、Ky、E 轴或当前选区")
+        self.docking_combo.addItem("", AUTO_DOCKING)
+        self.docking_combo.addItem("离散停靠", DISCRETE_DOCKING)
+        self.docking_combo.addItem("连续拖动", CONTINUOUS_DOCKING)
+        self.pan_combo = QComboBox(self)
+        self.pan_combo.setAccessibleName("连续拖动时整段平移")
+        self.pan_combo.setToolTip("仅影响连续拖动扫描轴选区时的整段平移方式")
+        self.pan_combo.addItem("保持物理宽度", PAN_PHYSICAL)
+        self.pan_combo.addItem("保持帧数", PAN_FRAMES)
+        docking_index = self.docking_combo.findData(self._initial_fourth_axis_drag.docking)
+        pan_index = self.pan_combo.findData(self._initial_fourth_axis_drag.continuous_pan)
+        self.docking_combo.setCurrentIndex(max(0, docking_index))
+        self.pan_combo.setCurrentIndex(max(0, pan_index))
+        scan_form.addRow("滑块停靠", self.docking_combo)
+        scan_form.addRow("连续拖动时整段平移", self.pan_combo)
         root.addLayout(scan_form)
         self.scan_kind.currentIndexChanged.connect(self._on_scan_kind_changed)
+        self.scan_name.textChanged.connect(self._on_scan_metadata_changed)
+        self.scan_unit.textChanged.connect(self._on_scan_metadata_changed)
+        self.drag_scope_label = QLabel("滑块停靠与整段平移仅作用于扫描轴，不改变当前选区。", self)
+        self.drag_scope_label.setStyleSheet(f"color: {theme.TEXT_2};")
+        root.addWidget(self.drag_scope_label)
 
         self.warning_label = QLabel(self)
         self.warning_label.setWordWrap(True)
@@ -148,6 +183,9 @@ class AxisAssignmentDialog(QDialog):
             f"border: 1px solid {theme.BORDER}; border-radius: 5px; padding: 6px 12px; }}"
         )
         self._set_assignment(self._current)
+        self.docking_combo.currentIndexChanged.connect(self._update_ok_button)
+        self.pan_combo.currentIndexChanged.connect(self._update_ok_button)
+        self._update_ok_button()
 
     def _set_assignment(self, assignment):
         self._loading = True
@@ -179,7 +217,9 @@ class AxisAssignmentDialog(QDialog):
             self.warning_label.setText("；".join(assignment.warnings))
         finally:
             self._loading = False
+        self._assignment_dirty = False
         self._update_scan_enabled()
+        self._update_ok_button()
 
     def _selected_dimension(self, role):
         return self._rows[role]["dimension"].currentData()
@@ -226,13 +266,64 @@ class AxisAssignmentDialog(QDialog):
             row["preview"].setText("–")
 
     def _on_dimension_changed(self, role):
-        if not self._loading:
-            self._update_coordinates(role)
+        if self._loading:
+            return
+        self._update_coordinates(role)
+        self._mark_assignment_dirty()
+
+    def _on_coordinate_changed(self, role):
+        self._update_preview(role)
+        self._mark_assignment_dirty()
+
+    def _mark_assignment_dirty(self):
+        if self._loading:
+            return
+        self._assignment_dirty = True
+        self._update_ok_button()
 
     def _update_scan_enabled(self):
         enabled = self._selected_dimension("T") not in (_STATIC, None)
-        for widget in (self.scan_kind, self.scan_name, self.scan_unit):
+        for widget in (
+            self.scan_kind,
+            self.scan_name,
+            self.scan_unit,
+            self.docking_combo,
+            self.pan_combo,
+        ):
             widget.setEnabled(enabled)
+        axis = self._selected_dimension("T")
+        sample_count = int(self._current.original_shape[axis]) if enabled else 0
+        automatic = FourthAxisDragSettings().resolved_docking(sample_count)
+        automatic_text = "离散停靠" if automatic == DISCRETE_DOCKING else "连续拖动"
+        current = self.fourth_axis_drag().resolved_docking(sample_count)
+        current_text = "离散停靠" if current == DISCRETE_DOCKING else "连续拖动"
+        self.docking_combo.setItemText(0, f"自动（当前：{automatic_text}）")
+        self.docking_combo.setToolTip(
+            f"仅影响扫描轴；{int(sample_count)} 个采样点，"
+            f"自动为{automatic_text}，当前为{current_text}"
+        )
+
+    def fourth_axis_drag(self):
+        return FourthAxisDragSettings(
+            str(self.docking_combo.currentData()), str(self.pan_combo.currentData())
+        )
+
+    def assignment_changed(self):
+        return self._assignment_dirty
+
+    def fourth_axis_drag_changed(self):
+        return self.fourth_axis_drag() != self._initial_fourth_axis_drag
+
+    def _update_ok_button(self, *_args):
+        button_box = getattr(self, "button_box", None)
+        if button_box is None:
+            return
+        settings_only = self.fourth_axis_drag_changed() and not self._assignment_dirty
+        create_new = self._as_new_source and not settings_only
+        text = "作为新数据源打开" if create_new else "应用"
+        button = button_box.button(QDialogButtonBox.Ok)
+        button.setText(text)
+        button.setAccessibleName("作为新数据源打开" if create_new else "应用轴分配")
 
     def _on_scan_kind_changed(self):
         if self._loading:
@@ -240,10 +331,15 @@ class AxisAssignmentDialog(QDialog):
         kind = self.scan_kind.currentData()
         key = self._rows["T"]["coordinate"].currentData() or None
         self.scan_name.setText(default_scan_name(kind, key))
+        self._mark_assignment_dirty()
+
+    def _on_scan_metadata_changed(self, *_args):
+        self._mark_assignment_dirty()
 
     def restore_automatic(self):
         self._current = self._automatic.clone()
         self._set_assignment(self._automatic)
+        self._mark_assignment_dirty()
 
     def assignment(self):
         updated = self._current.clone()

@@ -15,7 +15,7 @@ configure_qt_high_dpi()
 configure_qt_plugin_path()
 
 import numpy as np
-from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt5.QtCore import QAbstractAnimation, QEvent, QPoint, QPointF, Qt
 from PyQt5.QtGui import QContextMenuEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
@@ -98,6 +98,7 @@ def main():
     wait_ready()
     page = window.page_render
     curve = page.opacity_editor.curve
+    selector = page.opacity_editor.interpolation_selector
     context = window.current_render_context
     data = np.asarray(context["data"])
     fields = window._enhancement_cache[1]
@@ -151,10 +152,11 @@ def main():
           not hasattr(page, "combo_display_mode") and not hasattr(page, "combo_map")
           and not hasattr(page, "btn_apply_map") and not hasattr(page, "display_parameters"))
     check("新页面默认三个控制点", page.opacity_editor.points() == [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]])
-    check("新页面默认平滑且标题行有双段选择器",
+    check("新页面默认平滑且标题行有曲线／三段折线图标动画开关",
           page.opacity_editor.interpolation() == "smooth"
-          and page.opacity_editor.interpolation_selector.isVisibleTo(page.grp_opacity)
-          and page.grp_opacity.header.indexOf(page.opacity_editor.interpolation_selector) >= 0)
+          and selector.isVisibleTo(page.grp_opacity)
+          and selector.switch.isVisibleTo(selector)
+          and page.grp_opacity.header.indexOf(selector) >= 0)
     check("默认使用含极值的完整强度范围",
           fields["background_range"] == (float(finite.min()), float(finite.max())))
 
@@ -230,10 +232,14 @@ def main():
     )
     checks.append("平滑加点在浮点精度内保持原曲形")
     points_before_switch = page.opacity_editor.points()
-    page.opacity_editor.interpolation_selector.buttons["linear"].click()
+    QTest.mouseClick(selector.switch, Qt.LeftButton)
+    check("插值开关点击后播放滑块切换动画",
+          selector.switch._animation.state() == QAbstractAnimation.Running
+          or 0.05 < selector.switch.progress < 0.95)
+    capture("opacity-interpolation-switch-midpoint.png", selector.switch)
     wait_ready()
     check("切到直线保持所有控制点原位", page.opacity_editor.points() == points_before_switch)
-    page.opacity_editor.interpolation_selector.buttons["smooth"].click()
+    QTest.mouseClick(selector.switch, Qt.LeftButton)
     wait_ready()
     np.testing.assert_allclose(alpha_now(), smooth_alpha, rtol=0.0, atol=1e-6)
     checks.append("直线再切回平滑后体图恢复")

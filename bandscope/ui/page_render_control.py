@@ -20,7 +20,10 @@ from bandscope.ui.control_layout_utils import (
 )
 from bandscope.ui.control_page_base import ControlPageBase
 from bandscope.ui.ui_controls import AnimatedLockButton
-from bandscope.processing.denoise_config import DENOISE_METHODS as CONFIG_DENOISE_METHODS
+from bandscope.processing.denoise_config import (
+    DENOISE_METHODS as CONFIG_DENOISE_METHODS,
+    canonical_method_name,
+)
 from bandscope.core.display_style import (
     INDEPENDENT_MODE,
     is_independent,
@@ -410,7 +413,13 @@ class RenderControlPage(ControlPageBase):
                 ("combo_n2", self.combo_n2, "None"),
                 ("combo_n3", self.combo_n3, "None"),
             ):
-                index = combo_index_for_text(combo, state.get(combo_name, default))
+                try:
+                    method_name = canonical_method_name(state.get(combo_name, default))
+                except ValueError:
+                    method_name = "None"
+                index = combo_index_for_text(combo, method_name)
+                if index < 0:
+                    index = combo_index_for_text(combo, "None")
                 if index >= 0:
                     combo.setCurrentIndex(index)
             if "display_style" in state:

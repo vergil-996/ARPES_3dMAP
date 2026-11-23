@@ -181,6 +181,7 @@ class SourceWorkspaceMixin:
         state["workspace"] = workspace.export_source_state()
         state["camera"] = self._current_3d_camera_position()
         state["plugin_panel"] = self._plugin_panel_state()
+        state["denoise_controls"] = self._capture_global_denoise_control_state()
         from bandscope.rendering.render_core import VisualEngine
 
         state["locked_range"] = VisualEngine.locked_data_range()
@@ -194,6 +195,22 @@ class SourceWorkspaceMixin:
             if value is not _MISSING:
                 setattr(self, name, value)
         self.left_workspace.install_source_state(state.get("workspace") or {})
+        denoise_state = state.get("denoise_controls")
+        if denoise_state is not None:
+            self.page_render.restore_state(
+                self._render_state_with_global_denoise(
+                    self.page_render.export_state(),
+                    denoise_state,
+                ),
+                block_signals=True,
+            )
+            self.page_control_blank.restore_state(
+                self._detail_state_with_global_denoise(
+                    self.page_control_blank.export_state(),
+                    denoise_state,
+                ),
+                block_signals=True,
+            )
         spec = self.left_workspace.current_spec()
         self.active_page_spec = spec
         if spec is not None and spec.page_kind != "control_panel":
@@ -468,11 +485,14 @@ class SourceWorkspaceMixin:
             return False
         from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
 
+        manager = self.__dict__.get("source_manager")
+        active = manager.active() if manager is not None else None
         dialog = AxisAssignmentDialog(
             assignment,
             automatic,
             self.core.coordinate_candidates,
             candidate_units=self.core.coordinate_candidate_units,
+            fourth_axis_drag=getattr(active, "fourth_axis_drag", None),
             as_new_source=self._current_source_has_analysis(),
             parent=self,
         )
@@ -483,7 +503,11 @@ class SourceWorkspaceMixin:
         except (TypeError, ValueError) as exc:
             self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
             return False
-        return self.apply_axis_assignment(updated)
+        settings = dialog.fourth_axis_drag()
+        settings_only = dialog.fourth_axis_drag_changed() and not dialog.assignment_changed()
+        if not settings_only and not self.apply_axis_assignment(updated):
+            return False
+        return self.on_fourth_axis_settings_changed(settings.docking, settings.continuous_pan)
 
     def apply_axis_assignment(self, assignment, *, as_new_source=None):
         try:

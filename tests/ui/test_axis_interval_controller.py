@@ -400,6 +400,20 @@ class FourthAxisControllerTests(unittest.TestCase):
         discrete._on_range_endpoint("low", 1.25)
         self.assertEqual(discrete.interval.low, 1.0)
 
+    def test_spatial_axis_ignores_scan_docking_and_frame_pan_settings(self):
+        controller = AxisIntervalController()
+        controller.set_fourth_axis_drag(
+            FourthAxisDragSettings(DISCRETE_DOCKING, PAN_FRAMES)
+        )
+        space = AxisSpace("kx", np.asarray([0.0, 10.0, 30.0, 70.0]))
+        controller.bind(space, space.as_interval(low=0.0, up=30.0))
+
+        controller._on_range_endpoint("low", 11.0)
+        self.assertEqual(controller.interval.low, 11.0)
+        controller.interval.set_locked(True)
+        controller._on_range_center(25.0)
+        self.assertEqual((controller.interval.low, controller.interval.up), (15.5, 34.5))
+
     def test_changing_settings_keeps_selection_until_the_next_drag(self):
         controller = self.bind([0.0, 1.0, 2.0])
         controller.interval.set_low(0.25)

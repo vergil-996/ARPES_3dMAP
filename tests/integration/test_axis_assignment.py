@@ -7,9 +7,11 @@ from unittest.mock import patch
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QDialog
 
+from bandscope.core.axis_interval import CONTINUOUS_DOCKING, PAN_FRAMES
 from bandscope.core.view_recipe import ViewRecipeDocument
 from bandscope.exporting.publication_export import capture_snapshot, render_and_save
 from bandscope.exporting.publication_models import OutputOptions, resolve_style
+from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from tests.support.view_recipe import control_window
 
@@ -98,6 +100,60 @@ class AxisAssignmentIntegrationTests(unittest.TestCase):
         self.assertEqual(calls, [False, True])
         self.assertIs(w.core, original)
         self.assertEqual(len(w.source_manager), 1)
+
+    def test_slider_only_changes_keep_source_and_pages_when_analysis_exists(self):
+        w = self.window
+        self.load()
+        source_id = w.source_manager.active_id
+        original_core = w.core
+        before_interval = w.time_interval.as_dict()
+        w.left_workspace.add_page(AnalysisPageSpec(
+            w._make_page_id(), "分析", "energy_dos", "test",
+            source_page_id=w.left_workspace.home_page_id, params={"t_index": 0},
+        ))
+
+        def accept_slider_changes(dialog):
+            dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData(PAN_FRAMES))
+            dialog.docking_combo.setCurrentIndex(
+                dialog.docking_combo.findData(CONTINUOUS_DOCKING)
+            )
+            return QDialog.Accepted
+
+        with patch.object(AxisAssignmentDialog, "exec_", accept_slider_changes), patch.object(
+            w, "apply_axis_assignment"
+        ) as apply_assignment:
+            self.assertTrue(w.on_source_assignment_requested())
+        apply_assignment.assert_not_called()
+        self.assertEqual(w.source_manager.active_id, source_id)
+        self.assertEqual(len(w.source_manager), 1)
+        self.assertIs(w.core, original_core)
+        self.assertEqual(w.time_interval.as_dict(), before_interval)
+        self.assertEqual(w.source_manager.active().fourth_axis_drag.docking, CONTINUOUS_DOCKING)
+        self.assertEqual(w.source_manager.active().fourth_axis_drag.continuous_pan, PAN_FRAMES)
+
+    def test_combined_axis_and_slider_changes_apply_to_the_new_source(self):
+        w = self.window
+        self.load()
+        first_id = w.source_manager.active_id
+        w.left_workspace.add_page(AnalysisPageSpec(
+            w._make_page_id(), "分析", "energy_dos", "test",
+            source_page_id=w.left_workspace.home_page_id, params={"t_index": 0},
+        ))
+
+        def accept_combined_changes(dialog):
+            dialog.scan_kind.setCurrentIndex(dialog.scan_kind.findData("temperature"))
+            dialog.docking_combo.setCurrentIndex(
+                dialog.docking_combo.findData(CONTINUOUS_DOCKING)
+            )
+            return QDialog.Accepted
+
+        with patch.object(AxisAssignmentDialog, "exec_", accept_combined_changes):
+            self.assertTrue(w.on_source_assignment_requested())
+        self.assertEqual(len(w.source_manager), 2)
+        self.assertNotEqual(w.source_manager.active_id, first_id)
+        self.assertEqual(w.core.scan_kind, "temperature")
+        self.assertEqual(w.source_manager.active().fourth_axis_drag.docking, CONTINUOUS_DOCKING)
+        self.assertEqual(w.source_manager.get(first_id).fourth_axis_drag.docking, "auto")
 
     def test_invalid_assignment_failure_keeps_current_workspace(self):
         w = self.window

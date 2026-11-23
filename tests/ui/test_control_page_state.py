@@ -163,6 +163,20 @@ class ControlPageStateTests(unittest.TestCase):
         titles = [group.toggle_button.text() for group in page._adaptive_groups]
         self.assertEqual(titles[:4], ["视角", "色阶", "不透明度", "去噪"])
 
+    def test_card_toggle_buttons_are_left_aligned_like_opacity(self):
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        page.set_camera_view_visible(True, animate=False)
+        page.resize(420, 900)
+        page.show()
+        QApplication.processEvents()
+
+        groups = {group.toggle_button.text(): group for group in page._adaptive_groups}
+        opacity_left = groups["不透明度"].toggle_button.x()
+        for title in ("视角", "色阶", "去噪"):
+            with self.subTest(title=title):
+                self.assertEqual(groups[title].toggle_button.x(), opacity_left)
+
     def test_display_target_row_precedes_levels_card_with_explicit_scopes(self):
         page = RenderControlPage()
         self.addCleanup(page.deleteLater)

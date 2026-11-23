@@ -8,6 +8,13 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QDialogButtonBox
 
 from bandscope.core.analyzer_core import AnalyzerCore
+from bandscope.core.axis_interval import (
+    AUTO_DOCKING,
+    CONTINUOUS_DOCKING,
+    PAN_FRAMES,
+    PAN_PHYSICAL,
+    FourthAxisDragSettings,
+)
 from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
 from bandscope.ui.page_tree import SourceSummaryCard
 
@@ -37,12 +44,13 @@ class AxisAssignmentDialogTests(unittest.TestCase):
         success, info = self.core.load_npz(path)
         self.assertTrue(success, info)
 
-    def dialog(self, *, as_new_source=False):
+    def dialog(self, *, as_new_source=False, fourth_axis_drag=None):
         dialog = AxisAssignmentDialog(
             self.core.axis_assignment,
             self.core.auto_axis_assignment,
             self.core.coordinate_candidates,
             candidate_units=self.core.coordinate_candidate_units,
+            fourth_axis_drag=fourth_axis_drag,
             as_new_source=as_new_source,
         )
         self.addCleanup(dialog.deleteLater)
@@ -96,6 +104,66 @@ class AxisAssignmentDialogTests(unittest.TestCase):
         restored = dialog.assignment()
         self.assertEqual(restored.axis_roles, self.core.auto_axis_assignment.axis_roles)
         self.assertEqual(restored.coord_keys, self.core.auto_axis_assignment.coord_keys)
+
+    def test_scan_slider_settings_live_in_dialog_without_marking_axes_dirty(self):
+        dialog = self.dialog()
+        self.assertEqual(dialog.docking_combo.currentData(), AUTO_DOCKING)
+        self.assertIn("离散停靠", dialog.docking_combo.itemText(0))
+        self.assertEqual(dialog.pan_combo.currentData(), PAN_PHYSICAL)
+        self.assertFalse(dialog.assignment_changed())
+        self.assertFalse(dialog.fourth_axis_drag_changed())
+
+        dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData(PAN_FRAMES))
+        dialog.docking_combo.setCurrentIndex(
+            dialog.docking_combo.findData(CONTINUOUS_DOCKING)
+        )
+        self.assertEqual(
+            dialog.fourth_axis_drag(),
+            FourthAxisDragSettings(CONTINUOUS_DOCKING, PAN_FRAMES),
+        )
+        self.assertTrue(dialog.fourth_axis_drag_changed())
+        self.assertFalse(dialog.assignment_changed())
+
+        dialog.restore_automatic()
+        self.assertEqual(dialog.docking_combo.currentData(), CONTINUOUS_DOCKING)
+        self.assertEqual(dialog.pan_combo.currentData(), PAN_FRAMES)
+
+    def test_slider_auto_mode_tracks_selected_scan_dimension_length(self):
+        assignment = self.core.axis_assignment.clone()
+        automatic = self.core.auto_axis_assignment.clone()
+        assignment.original_shape = (30, 3, 4, 5)
+        automatic.original_shape = (30, 3, 4, 5)
+        candidates = dict(self.core.coordinate_candidates)
+        candidates["time"] = np.arange(30)
+        candidates["stage"] = np.arange(30)
+        dialog = AxisAssignmentDialog(
+            assignment,
+            automatic,
+            candidates,
+            candidate_units=self.core.coordinate_candidate_units,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.assertIn("连续拖动", dialog.docking_combo.itemText(0))
+
+        scan_dimension = dialog._rows["T"]["dimension"]
+        scan_dimension.setCurrentIndex(scan_dimension.findData(1))
+        self.assertIn("离散停靠", dialog.docking_combo.itemText(0))
+
+    def test_static_data_disables_scan_slider_settings(self):
+        dialog = self.dialog()
+        scan_dimension = dialog._rows["T"]["dimension"]
+        scan_dimension.setCurrentIndex(scan_dimension.findData(-1))
+        self.assertFalse(dialog.docking_combo.isEnabled())
+        self.assertFalse(dialog.pan_combo.isEnabled())
+
+    def test_slider_only_action_does_not_announce_a_new_source(self):
+        dialog = self.dialog(as_new_source=True)
+        ok = dialog.button_box.button(QDialogButtonBox.Ok)
+        self.assertEqual(ok.text(), "作为新数据源打开")
+        dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData(PAN_FRAMES))
+        self.assertEqual(ok.text(), "应用")
+        dialog.scan_kind.setCurrentIndex(dialog.scan_kind.findData("temperature"))
+        self.assertEqual(ok.text(), "作为新数据源打开")
 
     def test_source_card_emits_for_mouse_and_keyboard(self):
         card = SourceSummaryCard()

@@ -79,8 +79,10 @@ def main():
         QTimer.singleShot(2200, lambda: guard(lambda: capture_main(name, index)))
 
     def capture_main(name, index):
-        assert window.btn_theme_dark.iconSize() == QSize(14, 14)
-        assert window.btn_theme_light.iconSize() == QSize(14, 14)
+        assert window.theme_switch.theme_name() == name
+        assert window.theme_switch.isChecked() == (name == "dark")
+        assert window.theme_switch.size() == QSize(96, 38)
+        assert not window.theme_switch.grab().isNull()
         assert window.btn_tb_settings.iconSize() == QSize(18, 18)
         assert not window.left_workspace.page_tree.source_icon.icon().isNull()
         assert not window.left_workspace.view_icon.icon().isNull()

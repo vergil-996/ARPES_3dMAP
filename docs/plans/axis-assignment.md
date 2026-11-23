@@ -14,8 +14,8 @@
 ## 卡片与重设
 
 - 卡片摘要显示当前分配和待确认状态。点击整张卡片或用键盘激活「重新分配轴」，打开当前数据源的分配窗口。即使正在查看裁剪页，窗口也显示**原始数组**的维度和长度。
-- 每个分析槽位可选择原始维度，以及等长的文件坐标或索引。扫描轴另外可选时间、角度、温度或自定义，并可编辑名称与单位。窗口预览坐标首末值，支持恢复自动分配，提交前校验维度唯一、坐标有效且长度匹配。
-- 只有原始主页、没有裁剪或派生分析时，在当前源应用修改。有裁剪、ROI 或派生页时，按钮明确显示「作为新数据源打开」。应用后切到新源，原分析可从源切换器返回。取消或应用失败都保留原工作区。重排基于原始强度数组的转置视图，避免为同一大数据体再复制整块内存。
+- 每个分析槽位可选择原始维度，以及等长的文件坐标或索引。扫描轴另外可选时间、角度、温度或自定义，并可编辑名称与单位；同一区域提供只作用于扫描轴的滑块停靠与连续拖动时整段平移设置。窗口预览坐标首末值，支持恢复自动分配，提交前校验维度唯一、坐标有效且长度匹配。
+- 只有原始主页、没有裁剪或派生分析时，在当前源应用修改。有裁剪、ROI 或派生页时，按钮明确显示「作为新数据源打开」。只改滑块设置时仍更新当前源，不重新应用轴分配或新建数据源；取消保留原滑块设置。应用后切到新源，原分析可从源切换器返回。取消或应用失败都保留原工作区。重排基于原始强度数组的转置视图，避免为同一大数据体再复制整块内存。
 
 ## 分析、导出与复现
 
@@ -40,3 +40,4 @@
 - 真实 Windows 窗口：`scripts/validation/verify_axis_assignment.py --synthetic-only` 的 11 项检查通过，实际写出出版 PNG、数值 NPZ、对话框／窗口截图和 `.local/outputs/axis-assignment/report.json`；中文扫描名与底条标题已复核。WSe₂ 文件 `.local/data/WSe2_step.npz` 及约定原始路径均不存在，真实时间数据验收未执行。
 - `python -m compileall -q bandscope plugins scripts tests start.py` 与 `git diff --check` 通过。最终全量 `python -m unittest discover -s tests -t . -v` 已执行：共 1895 项，3 项失败、4 项跳过；本计划 25 项全部通过。`tests.exporting.test_orientation_preview.OrientationPreviewTests.test_hover_cursor_and_disabled_interaction` 独立复跑通过；`tests.integration.test_crop_controls` 的两个弹窗位置用例独立复跑仍失败，相关源码与测试不在本任务改动范围，未修改无关逻辑。完整输出见 `.local/logs/axis-assignment-unittest-final.log`。
 - 2026-11-21 补做 WSe₂ 真实窗口验收：`python scripts/validation/verify_axis_assignment.py .local/data/WSe2_step.npz` 18 项检查通过（`report.json` 的 `wse2_executed: true`、`passed: true`），覆盖 WSe₂ 自动识别为时间扫描并保持缺省 `fs`、帧数 `150×150×200×25`、数据源卡片摘要（Kx:维1 · Ky:维2 · E:维3 · 时间:维4）、卡片打开原始轴窗口并显示原始维度、取消重设保留当前来源，以及降序温度扫描首帧、等长 Kx/Ky 待确认说明、卡片重设交换原始维度、强度曲线与出版图使用「样品温度 (K)」、数值导出含扫描元数据。报告与截图在 `.local/outputs/axis-assignment/`。
+- 2026-11-23 将滑块停靠与整段平移控制从数据源卡片菜单移入本窗口，设置只作用于扫描轴；仅改设置不重建轴或数据源，取消不生效，同时改轴时随重设事务写入目标源。聚焦 6 个测试模块 165 项、全量 2020 项与真实 Windows 窗口 20 项均通过，已复核 WSe₂／温度对话框截图；`compileall` 和 `git diff --check` 通过。日志为 `.local/logs/axis-slider-dialog-unittest.log`、`.local/logs/axis-slider-dialog-validation.log`。

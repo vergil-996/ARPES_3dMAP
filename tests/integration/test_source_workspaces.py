@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QDialog
 
 from bandscope.core.axis_interval import (
     AUTO_DOCKING,
@@ -20,6 +20,7 @@ from bandscope.core.source_session import ENTRY_VIEW_RECIPE
 from bandscope.exporting.publication_export import capture_snapshot
 from bandscope.core.view_recipe import ViewRecipeDocument
 from bandscope.processing.compute_backends import recommended_host_cache_budget
+from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from tests.support.view_recipe import control_window, synthetic_npz
 
@@ -206,16 +207,34 @@ class _WorkspaceFixture(unittest.TestCase):
         interval.set_low(-0.5)
         interval.set_up(1.0)
         before = interval.as_dict()
-        menu = window.left_workspace.page_tree.source_settings_menu
-        with patch.object(window, "apply_axis_assignment") as apply_assignment:
-            menu.pan_combo.setCurrentIndex(menu.pan_combo.findData(PAN_FRAMES))
-            menu.docking_combo.setCurrentIndex(
-                menu.docking_combo.findData(CONTINUOUS_DOCKING)
+
+        def reject_with_changes(dialog):
+            dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData(PAN_FRAMES))
+            dialog.docking_combo.setCurrentIndex(
+                dialog.docking_combo.findData(CONTINUOUS_DOCKING)
             )
+            return QDialog.Rejected
+
+        with patch.object(AxisAssignmentDialog, "exec_", reject_with_changes):
+            self.assertFalse(window.on_source_assignment_requested())
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, AUTO_DOCKING)
+        self.assertEqual(window.time_interval.as_dict(), before)
+
+        def accept_with_changes(dialog):
+            dialog.pan_combo.setCurrentIndex(dialog.pan_combo.findData(PAN_FRAMES))
+            dialog.docking_combo.setCurrentIndex(
+                dialog.docking_combo.findData(CONTINUOUS_DOCKING)
+            )
+            return QDialog.Accepted
+
+        with patch.object(AxisAssignmentDialog, "exec_", accept_with_changes), patch.object(
+            window, "apply_axis_assignment"
+        ) as apply_assignment:
+            self.assertTrue(window.on_source_assignment_requested())
         apply_assignment.assert_not_called()
         self.assertEqual(window.time_interval.as_dict(), before)
-        self.assertEqual(menu.docking_combo.currentData(), CONTINUOUS_DOCKING)
-        self.assertEqual(menu.pan_combo.currentData(), PAN_FRAMES)
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, CONTINUOUS_DOCKING)
+        self.assertEqual(window.source_manager.active().fourth_axis_drag.continuous_pan, PAN_FRAMES)
         first_home = window.left_workspace.home_page_id
         window.left_workspace.add_page(
             AnalysisPageSpec(
@@ -253,7 +272,6 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, DISCRETE_DOCKING)
         self.assertTrue(window.activate_source(first_id))
         self.assertEqual(window.source_manager.active().fourth_axis_drag.docking, AUTO_DOCKING)
-        self.assertEqual(menu.docking_combo.currentData(), AUTO_DOCKING)
 
     def test_switching_sources_commits_old_rotation_and_restores_overlay_state(self):
         window = self.window
@@ -390,6 +408,101 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertIn(second_copy.page_id, workspace.page_specs)
         self.assertEqual(workspace.page_tree.group_page_ids(group.group_id), [second_copy.page_id])
         self.assertEqual([item.title for item in workspace.groups], ["全局分组"])
+
+    def test_denoise_drafts_and_applied_pipeline_survive_source_roundtrips(self):
+        from bandscope.processing.denoise_engines import DenoiseEngines
+
+        window = self.window
+        first_drafts = {
+            "gaussian": {"sigma_kx": 0.75, "sigma_ky": 1.25, "sigma_e": 0.5},
+            "median": {"size_kx": 3, "size_ky": 5, "size_e": 1},
+            "sg": {"window_length": 5, "polyorder": 2, "smoothing_axis": "kx"},
+            "wavelet": {
+                "wavelet": "sym4",
+                "level": 1,
+                "threshold_rule": "bayes",
+                "threshold_mode": "hard",
+                "strength": 0.8,
+                "noise_sigma": 0.15,
+            },
+            "nlmeans": {
+                "patch_size": 3,
+                "patch_distance": 4,
+                "h_scale": 1.3,
+                "noise_sigma": 0.2,
+            },
+            "low_rank": {"rank": 2},
+        }
+        second_drafts = {
+            "gaussian": {"sigma_kx": 1.5, "sigma_ky": 0.5, "sigma_e": 1.0},
+            "median": {"size_kx": 1, "size_ky": 3, "size_e": 5},
+            "sg": {"window_length": 7, "polyorder": 3, "smoothing_axis": "e"},
+            "wavelet": {
+                "wavelet": "db2",
+                "level": 2,
+                "threshold_rule": "universal",
+                "threshold_mode": "soft",
+                "strength": 1.2,
+                "noise_sigma": 0.05,
+            },
+            "nlmeans": {
+                "patch_size": 5,
+                "patch_distance": 7,
+                "h_scale": 0.9,
+                "noise_sigma": 0.1,
+            },
+            "low_rank": {"rank": 4},
+        }
+
+        def configure_and_apply(drafts, selected):
+            window.page_control_blank.restore_state(drafts)
+            for combo, method in zip(
+                (window.page_render.combo_n1, window.page_render.combo_n2, window.page_render.combo_n3),
+                selected,
+            ):
+                index = combo.findText(method)
+                self.assertGreaterEqual(index, 0)
+                combo.setCurrentIndex(index)
+            methods = window._normalize_denoise_methods(
+                window.page_control_blank.build_method_specs(
+                    window.page_render.get_denoise_settings(),
+                    data_shape=window.original_raw_data.shape,
+                )
+            )
+            processed = DenoiseEngines.apply_pipeline(
+                window.original_raw_data,
+                methods,
+                max_workers=1,
+            )
+            window._commit_shared_denoise(methods, processed)
+            return window._capture_global_denoise_control_state(), methods, processed
+
+        def assert_source_state(expected):
+            controls, methods, processed = expected
+            self.assertEqual(window._capture_global_denoise_control_state(), controls)
+            self.assertEqual(window.global_denoise_methods, methods)
+            np.testing.assert_array_equal(window.shared_denoised_raw_data, processed)
+
+        first_id = self.load_first()
+        first_expected = configure_and_apply(
+            first_drafts,
+            [DenoiseEngines.GAUSSIAN_METHOD_NAME, DenoiseEngines.SG_METHOD_NAME, "None"],
+        )
+
+        self.assertTrue(window.load_data(str(self.second_path)))
+        second_id = window.source_manager.active_id
+        saved_first = window.source_manager.get(first_id).state["denoise_controls"]
+        self.assertEqual(saved_first, first_expected[0])
+        self.assertNotIn("second_derivative", saved_first)
+        second_expected = configure_and_apply(
+            second_drafts,
+            [DenoiseEngines.MEDIAN_METHOD_NAME, DenoiseEngines.LOW_RANK_METHOD_NAME, "None"],
+        )
+
+        self.assertTrue(window.activate_source(first_id))
+        assert_source_state(first_expected)
+        self.assertTrue(window.activate_source(second_id))
+        assert_source_state(second_expected)
 
     def test_switching_clears_pending_denoise_but_keeps_the_configuration(self):
         from bandscope.processing.denoise_engines import DenoiseEngines

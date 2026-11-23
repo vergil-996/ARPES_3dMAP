@@ -32,16 +32,14 @@ class View3dBackgroundTests(unittest.TestCase):
         self.addCleanup(window._set_theme, "light")
 
         self.assertEqual(theme.current_theme(), "light")
-        self.assertTrue(window.btn_theme_light.isChecked())
-        self.assertFalse(window.btn_theme_dark.isChecked())
+        self.assertEqual(window.theme_switch.theme_name(), "light")
+        self.assertFalse(window.theme_switch.isChecked())
         self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
 
     def test_fluent_buttons_keep_their_logical_icon_sizes(self):
         window = control_window()
         self.addCleanup(window.close)
 
-        self.assertEqual(window.btn_theme_dark.iconSize(), QSize(14, 14))
-        self.assertEqual(window.btn_theme_light.iconSize(), QSize(14, 14))
         self.assertEqual(window.btn_tb_settings.iconSize(), QSize(18, 18))
         self.assertEqual(window.btn_main_export.iconSize(), QSize(16, 16))
         self.assertEqual(window.btn_tb_shot.iconSize(), QSize(16, 16))
@@ -77,12 +75,13 @@ class View3dBackgroundTests(unittest.TestCase):
         window._set_theme("dark")
         window.page_render.s_gamma.setValue(37)
 
-        window._set_theme("light")
+        window.theme_switch.click()
 
         self.assertEqual(window.settings.value("ui/theme"), "light")
         self.assertEqual(window.page_render.s_gamma.value(), 37)
         self.assertEqual(window.plotter.background_setting, theme.CANVAS_BG)
-        self.assertTrue(window.btn_theme_light.isChecked())
+        self.assertEqual(window.theme_switch.theme_name(), "light")
+        self.assertFalse(window.theme_switch.isChecked())
         self.assertIn("palette(highlight)", window.btn_main_export.styleSheet())
         self.assertIn("palette(base)", window.styleSheet() + QApplication.instance().styleSheet())
 

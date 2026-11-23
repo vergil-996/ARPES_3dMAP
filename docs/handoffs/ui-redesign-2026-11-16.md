@@ -13,14 +13,14 @@
 ## 相关文件
 
 - `bandscope/ui/theme.py`：两套色板、`set_theme`／`initialize_theme`、控件与调色板重着色、`assets/ui/check-*.svg` 勾选图标。
-- `bandscope/app/refactored_app.py`：顶部深色／浅色按钮、画布工具条、专注画布、单数据源徽标、结果页标题与状态栏。
+- `bandscope/app/refactored_app.py`：顶部 `DayNightSwitch` 昼夜动画开关、画布工具条、专注画布、单数据源徽标、结果页标题与状态栏。
 - `bandscope/ui/control_page_base.py`：可折叠扁平参数分组与折叠后的滚动区重排；同时修复折叠标题 QSS 多一个右括号（非 f-string 的 `}}`）导致 Qt 拒绝整条样式的问题。
 - `bandscope/ui/page_tree.py`、`bandscope/ui/result_workspace.py`：工作区标题、数据源摘要卡片、视图类型标签与面包屑。
 - `bandscope/ui/ui_controls.py`：开关按主题重着色。
 - `bandscope/rendering/render_core.py`：2D 预览背景、坐标轴、刻度与标题跟随主题。
 - `bandscope/exporting/publication_dialog.py`、`blender_project_dialog.py`、`bandscope/extensions/plugin_dialog.py`：次级窗口布局与样式。
 - `packaging/pyinstaller/ARPES_3dMAP.spec`、`ARPES_3dMAP_gpu.spec`：收集 `assets/ui`。
-- `tests/ui/test_theme.py`、`tests/ui/test_canvas_overlay.py`、`tests/ui/test_numeric_wheel.py`、`tests/integration/test_3d_background.py`；`scripts/validation/verify_ui_themes.py` 为真实窗口验收脚本。
+- `tests/ui/test_theme.py`、`tests/ui/test_day_night_switch.py`、`tests/ui/test_canvas_overlay.py`、`tests/ui/test_numeric_wheel.py`、`tests/integration/test_3d_background.py`；`scripts/validation/verify_ui_themes.py` 为真实窗口验收脚本。
 
 ## 验证
 
@@ -39,6 +39,14 @@ v1.21.0 之后按实际使用反馈修正入口与主题细节，不改数据格
 - 主题刷新改用 `palette(...)` 角色与逐控件调色板：浅色主题下列表/菜单文字保持黑色；2D 标题、坐标轴、刻度、图例、色条与裁剪选择框，3D 标量条与坐标轴随主题更新；切换主题不触发数据重渲染，参数与相机保持不变。
 - 验证：全量 1728 项通过（2026-11-17，218.983 秒，日志 `.local/logs/release-1.21.1-full.log`）；`verify_ui_themes.py` PASS（0）；`verify_plugin_management.py` 全部通过；`compileall`、`check_release_version.py v1.21.1`、`verify_plugin_release_flow.py` 与 `git diff --check` 通过。`verify_color_lock.py` 的默认百分位归一化会让各帧 P99.5 端点相同，已在脚本内切到完整范围后复验，3D／2D 锁定与解锁全部通过。
 - 发布：GitHub Release CI（run 44009625220，26m59s）成功，共 12 个资产；`check_for_update` 从 1.21.0 发现 1.21.1，CPU／NVIDIA 完整下载并按 SHA-256 校验，插件包与目录 Ed25519 验签通过。MatElab 发布记录「BandScope v1.21.1」（uid `bandscope-release-1.21.1`）建于「BandScope发布」记录本；只读元数据核对两个 flavor 均发现 1.21.1、文件名与大小一致，按约定未做回传下载复验。
+
+## 昼夜动画开关（2026-11-23，未发布）
+
+- 顶栏原「深色／浅色」双按钮替换为 `bandscope/ui/day_night_switch.py` 的 96×38 自绘开关：浅色显示太阳与云层，深色显示月亮与星空；主题过渡为 560 ms，另含悬停回弹、焦点与禁用状态。鼠标、空格与外部主题变更共用原有主题入口，仍保存 `ui/theme`，不重建页面或请求数据重渲染。
+- 自动化：`tests.ui.test_day_night_switch` 13 项、`tests.integration.test_3d_background` 7 项通过，覆盖鼠标／键盘、动画中点与终点、双层光晕、星场、云层、状态恢复、参数与主题持久化。
+- 集成回归：`PYTHONIOENCODING=utf-8 python -m unittest discover -s tests -t . -v` 共 2071 项通过（184.466 秒，日志 `.local/logs/day-night-switch-full-utf8.log`）；`python -m compileall -q bandscope plugins scripts tests start.py` 通过。
+- 真实窗口：`QT_QPA_PLATFORM=windows python scripts/validation/verify_fluent_icon_windows.py` 使用 WSe₂ 在 Windows、DPR 1.25 下通过，深浅主题、专注模式和次级窗口截图位于 `.local/outputs/icon-dpi-audit/windows/`；开关最终独立的浅色／中间帧／深色渲染位于 `.local/outputs/day-night-switch-final/`。跨屏移动未执行。
+- `verify_ui_themes.py` 的新开关与主题断言已通过并生成深色主窗口截图，但完整脚本仍在既有相机预设步骤失败：有效 3D 场景下调用 `_set_camera_view_preset("xy")` 后所有预设按钮均未保持勾选。本轮未修改该无关相机逻辑，因此不能把本次完整主题脚本记为通过。
 
 ## 已知边界与下一步
 

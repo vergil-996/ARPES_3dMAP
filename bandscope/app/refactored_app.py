@@ -4,6 +4,7 @@ import re
 import time
 import traceback
 import uuid
+from collections.abc import Mapping
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 
@@ -15,7 +16,6 @@ from PyQt5.QtCore import QEvent, QSettings, QSize, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -57,6 +57,7 @@ from bandscope.ui.camera_view_controls import (
     vectors_from_pose,
 )
 from bandscope.ui.crop_controls import CropController
+from bandscope.ui.day_night_switch import DayNightSwitch
 from bandscope.app.crop_integration import CropInteractionMixin
 from bandscope.app.path_slice_integration import PathSliceController
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
@@ -139,6 +140,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     PATH_SLICE_PAGE_KIND = "path_slice"
     GLOBAL_DENOISE_PAGE_ID = "__global_denoise__"
     SCOPE_DENOISE_PAGE_PREFIX = "__scope_denoise__:"
+    DENOISE_CONTROL_STATE_KEYS = (
+        "gaussian",
+        "median",
+        "sg",
+        "wavelet",
+        "nlmeans",
+        "low_rank",
+    )
     FULL_SCOPE_ID = "full"
     ROTATION_CACHE_LIMIT = 4
     #: 持有焦点时方向键留给文本编辑，不用于逐帧。
@@ -787,35 +796,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         row.addWidget(self.source_switcher_bar)
         row.addStretch(1)
 
-        self.theme_switch = QFrame(self.toolbar)
+        self.theme_switch = DayNightSwitch(self.toolbar)
         self.theme_switch.setObjectName("theme_switch")
-        self.theme_switch.setStyleSheet(
-            f"QFrame#theme_switch {{ background: {theme.BG_1};"
-            f"border: 1px solid {theme.BORDER_HEX}; border-radius: 7px; }}"
-        )
-        theme_row = QHBoxLayout(self.theme_switch)
-        theme_row.setContentsMargins(3, 3, 3, 3)
-        theme_row.setSpacing(2)
-        self.btn_theme_dark = ActionButton(self.theme_switch)
-        self.btn_theme_dark.setText("深色")
-        self.btn_theme_dark.setCheckable(True)
-        self.btn_theme_light = ActionButton(self.theme_switch)
-        self.btn_theme_light.setText("浅色")
-        self.btn_theme_light.setCheckable(True)
-        self.theme_group = QButtonGroup(self)
-        self.theme_group.setExclusive(True)
-        for button, name, icon in (
-            (self.btn_theme_dark, "dark", "ic_fluent_weather_moon_regular"),
-            (self.btn_theme_light, "light", "ic_fluent_weather_sunny_regular"),
-        ):
-            button.setFixedSize(68, 26)
-            button.setStyleSheet(theme.nav_tab_qss())
-            button.setChecked(theme.current_theme() == name)
-            button.clicked.connect(lambda _checked=False, value=name: self._set_theme(value))
-            self.theme_group.addButton(button)
-            theme.set_button_icon(button, icon, 14)
-            button.setIconSize(QSize(14, 14))
-            theme_row.addWidget(button)
+        self.theme_switch.set_theme(theme.current_theme(), animate=False)
+        self.theme_switch.theme_requested.connect(self._set_theme)
         row.addWidget(self.theme_switch)
 
         self.btn_tb_shot = _make_tb_btn("截图样式", "secondary", 92)
@@ -859,8 +843,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         theme.set_theme(name)
 
     def _on_theme_changed(self, name):
-        self.btn_theme_dark.setChecked(name == "dark")
-        self.btn_theme_light.setChecked(name == "light")
+        self.theme_switch.set_theme(name)
         self.CONTEXT_MENU_STYLE = theme.context_menu_qss()
         self._apply_feedback_styles()
         self.left_display_stack.setStyleSheet(
@@ -993,13 +976,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     assignment_summary=assignment.summary() if assignment is not None else "",
                     needs_confirmation=bool(assignment.needs_confirmation) if assignment is not None else False,
                     warnings=assignment.warnings if assignment is not None else (),
-                    fourth_axis_drag=(
-                        getattr(active_source, "fourth_axis_drag", None)
-                        if active_source is not None else None
-                    ),
-                    fourth_axis_count=(
-                        int(self.core.raw_data.shape[3]) if self.core.raw_data.ndim > 3 else 0
-                    ),
                 )
 
     def _on_canvas_layout_changed(self):
@@ -2144,9 +2120,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.left_workspace.page_tree.source_assignment_requested.connect(
             self.on_source_assignment_requested
         )
-        self.left_workspace.page_tree.fourth_axis_settings_changed.connect(
-            self.on_fourth_axis_settings_changed
-        )
         self.left_workspace.page_activated.connect(self.on_result_page_activated)
         self.left_workspace.group_page_activation_requested.connect(
             self._on_group_page_activation_requested
@@ -2361,11 +2334,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def _capture_global_denoise_control_state(self):
         detail_state = self.page_control_blank.export_state()
-        return {
-            "methods": list(self.page_render.get_denoise_settings()),
-            "sg": self._copy_state(detail_state.get("sg") or {}),
-            "wavelet": self._copy_state(detail_state.get("wavelet") or {}),
-        }
+        state = {"methods": list(self.page_render.get_denoise_settings())}
+        for key in self.DENOISE_CONTROL_STATE_KEYS:
+            state[key] = self._copy_state(detail_state.get(key) or {})
+        return state
 
     def _render_state_with_global_denoise(self, render_state, denoise_state):
         merged = self._copy_state(render_state) or {}
@@ -2378,8 +2350,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     def _detail_state_with_global_denoise(self, detail_state, denoise_state):
         merged = self._copy_state(detail_state) or {}
         denoise_state = denoise_state or {}
-        merged["sg"] = self._copy_state(denoise_state.get("sg") or {})
-        merged["wavelet"] = self._copy_state(denoise_state.get("wavelet") or {})
+        for key in self.DENOISE_CONTROL_STATE_KEYS:
+            merged[key] = self._copy_state(denoise_state.get(key) or {})
         return merged
 
     def _store_control_state(self, spec, control_state):
@@ -2635,24 +2607,20 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         from bandscope.processing.denoise_engines import DenoiseEngines
 
         for method_spec in self._normalize_denoise_methods(methods):
-            method_name, params = DenoiseEngines._parse_method_spec(method_spec)
-            if not DenoiseEngines._is_savgol_method(method_name):
-                continue
+            method_name = method_spec
+            params = {}
             try:
-                DenoiseEngines._validated_savgol_params(
+                method_name, params = DenoiseEngines._parse_method_spec(method_spec)
+                DenoiseEngines.validate_method(
+                    method_name,
+                    params,
                     descriptor.compact_shape,
-                    params.get(
-                        "window_length",
-                        DenoiseEngines.DEFAULT_SG_PARAMS["window_length"],
-                    ),
-                    params.get("polyorder", DenoiseEngines.DEFAULT_SG_PARAMS["polyorder"]),
-                    params.get(
-                        "smoothing_axis",
-                        DenoiseEngines.DEFAULT_SG_PARAMS["smoothing_axis"],
-                    ),
                 )
             except ValueError as exc:
-                raise ValueError(f"{descriptor.label}: {exc}") from exc
+                context = f"{descriptor.label} · {method_name}"
+                if isinstance(params, Mapping) and "level" in params:
+                    context += f"（级别 {params['level']}）"
+                raise ValueError(f"{context}: {exc}") from exc
 
     def _validate_denoise_for_scopes(self, methods, extra_descriptor=None):
         for descriptor in self._referenced_scope_descriptors(extra=extra_descriptor):
@@ -5940,7 +5908,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 data_shape=self.original_raw_data.shape,
             )
         except ValueError as exc:
-            self._show_message("Savitzky-Golay 参数无效", str(exc), QMessageBox.Warning)
+            self._show_message("去噪参数无效", str(exc), QMessageBox.Warning)
             return
 
         methods = self._normalize_denoise_methods(methods)
@@ -5948,7 +5916,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             self._validate_denoise_for_scopes(methods)
         except ValueError as exc:
             self._show_message(
-                "Savitzky-Golay 参数与数据范围不兼容",
+                "去噪参数与数据范围不兼容",
                 str(exc),
                 QMessageBox.Warning,
             )

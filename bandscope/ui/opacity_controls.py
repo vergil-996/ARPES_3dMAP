@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
+from bandscope.ui.opacity_interpolation_switch import OpacityInterpolationSwitch
 from bandscope.core.display_style import normalize_opacity_points
 from bandscope.core.opacity_curve import (
     DEFAULT_OPACITY_INTERPOLATION,
@@ -27,6 +28,8 @@ from bandscope.core.opacity_curve import (
 
 
 class OpacityInterpolationSelector(QWidget):
+    """可见的动画开关，以及供既有调用方使用的隐藏按钮接口。"""
+
     interpolationChanged = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -34,6 +37,8 @@ class OpacityInterpolationSelector(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        self.switch = OpacityInterpolationSwitch(self)
+        layout.addWidget(self.switch)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons = {}
@@ -48,44 +53,32 @@ class OpacityInterpolationSelector(QWidget):
             )
             self.group.addButton(button)
             self.buttons[value] = button
-            layout.addWidget(button)
-        self.set_interpolation(DEFAULT_OPACITY_INTERPOLATION)
-        reference = weakref.ref(self)
+            button.hide()
+        self.switch.interpolationChanged.connect(self._on_switch_changed)
+        self.set_interpolation(DEFAULT_OPACITY_INTERPOLATION, animate=False)
 
-        def on_theme_changed(_name):
-            selector = reference()
-            if selector is not None and not sip.isdeleted(selector):
-                selector._sync_style()
-
-        self._theme_listener = on_theme_changed
-        theme.changed.connect(self._theme_listener)
-        self.destroyed.connect(self._disconnect_theme)
-        self._sync_style()
-
-    def _disconnect_theme(self, *_args):
-        theme.changed.disconnect(self._theme_listener)
-
-    def _sync_style(self):
-        self.setStyleSheet(
-            f"QToolButton {{ background: {theme.BG_2}; color: {theme.TEXT_2};"
-            f"border: 1px solid {theme.BORDER_HEX}; padding: 0; font-size: 10px; }}"
-            "QToolButton:checked {"
-            f"background: {theme.ACCENT}; color: {theme.BG_1}; font-weight: 600; }}"
-        )
-
-    def _on_toggled(self, mode, checked):
-        if checked:
-            self.interpolationChanged.emit(mode)
-
-    def interpolation(self):
-        return OPACITY_SMOOTH if self.buttons[OPACITY_SMOOTH].isChecked() else OPACITY_LINEAR
-
-    def set_interpolation(self, value):
-        mode = normalize_opacity_interpolation(value, DEFAULT_OPACITY_INTERPOLATION)
+    def _set_buttons(self, mode):
         for name, button in self.buttons.items():
             previous = button.blockSignals(True)
             button.setChecked(name == mode)
             button.blockSignals(previous)
+
+    def _on_switch_changed(self, mode):
+        self._set_buttons(mode)
+        self.interpolationChanged.emit(mode)
+
+    def _on_toggled(self, mode, checked):
+        if checked:
+            self.set_interpolation(mode, animate=True)
+            self.interpolationChanged.emit(mode)
+
+    def interpolation(self):
+        return self.switch.interpolation()
+
+    def set_interpolation(self, value, animate=True):
+        mode = normalize_opacity_interpolation(value, DEFAULT_OPACITY_INTERPOLATION)
+        self.switch.set_interpolation(mode, animate=animate)
+        self._set_buttons(mode)
 
 
 class OpacityCurveCanvas(QWidget):
@@ -745,7 +738,7 @@ class OpacityCurveEditor(QWidget):
         return self.curve.interpolation()
 
     def set_interpolation(self, value):
-        self.interpolation_selector.set_interpolation(value)
+        self.interpolation_selector.set_interpolation(value, animate=False)
         self.curve.set_interpolation(value)
 
     def segments(self):
@@ -763,7 +756,9 @@ class OpacityCurveEditor(QWidget):
 
     def set_opacity(self, opacity):
         self.curve.set_opacity(opacity)
-        self.interpolation_selector.set_interpolation(self.curve.interpolation())
+        self.interpolation_selector.set_interpolation(
+            self.curve.interpolation(), animate=False,
+        )
 
     def selected_index(self):
         return self.curve.selected_index()

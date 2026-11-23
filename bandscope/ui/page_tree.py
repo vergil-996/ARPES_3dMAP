@@ -16,12 +16,10 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from PyQt5.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QSignalBlocker, QTimer, pyqtSignal
+from PyQt5.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -34,17 +32,8 @@ from PyQt5.QtWidgets import (
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
-    QWidgetAction,
 )
 
-from bandscope.core.axis_interval import (
-    AUTO_DOCKING,
-    CONTINUOUS_DOCKING,
-    DISCRETE_DOCKING,
-    PAN_FRAMES,
-    PAN_PHYSICAL,
-    FourthAxisDragSettings,
-)
 import bandscope.ui.theme as theme
 from bandscope.ui.fluent_icon import FluentIconLabel
 
@@ -602,57 +591,6 @@ class SourceSummaryCard(QFrame):
         super().keyPressEvent(event)
 
 
-class FourthAxisSettingsMenu(QMenu):
-    settings_changed = pyqtSignal(str, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("fourth_axis_settings_menu")
-        content = QWidget(self)
-        layout = QFormLayout(content)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setHorizontalSpacing(12)
-        layout.setVerticalSpacing(8)
-        self.docking_combo = QComboBox(content)
-        self.docking_combo.setAccessibleName("滑块停靠")
-        self.docking_combo.addItem("", AUTO_DOCKING)
-        self.docking_combo.addItem("离散停靠", DISCRETE_DOCKING)
-        self.docking_combo.addItem("连续拖动", CONTINUOUS_DOCKING)
-        self.pan_combo = QComboBox(content)
-        self.pan_combo.setAccessibleName("连续拖动时整段平移")
-        self.pan_combo.addItem("保持物理宽度", PAN_PHYSICAL)
-        self.pan_combo.addItem("保持帧数", PAN_FRAMES)
-        layout.addRow("滑块停靠", self.docking_combo)
-        layout.addRow("连续拖动时整段平移", self.pan_combo)
-        action = QWidgetAction(self)
-        action.setDefaultWidget(content)
-        self.addAction(action)
-        self.docking_combo.currentIndexChanged.connect(self._emit_settings)
-        self.pan_combo.currentIndexChanged.connect(self._emit_settings)
-
-    def sync(self, settings, sample_count):
-        settings = settings or FourthAxisDragSettings()
-        automatic = FourthAxisDragSettings().resolved_docking(sample_count)
-        automatic_text = "离散停靠" if automatic == DISCRETE_DOCKING else "连续拖动"
-        current_text = (
-            "离散停靠" if settings.resolved_docking(sample_count) == DISCRETE_DOCKING
-            else "连续拖动"
-        )
-        self.docking_combo.setItemText(0, f"自动（当前：{automatic_text}）")
-        blockers = [QSignalBlocker(self.docking_combo), QSignalBlocker(self.pan_combo)]
-        self.docking_combo.setCurrentIndex(max(0, self.docking_combo.findData(settings.docking)))
-        self.pan_combo.setCurrentIndex(max(0, self.pan_combo.findData(settings.continuous_pan)))
-        del blockers
-        self.setToolTip(
-            f"第四轴 {int(sample_count)} 个采样点；自动为{automatic_text}，当前为{current_text}"
-        )
-
-    def _emit_settings(self, *_args):
-        self.settings_changed.emit(
-            str(self.docking_combo.currentData()), str(self.pan_combo.currentData())
-        )
-
-
 class PageTreePanel(QWidget):
     """常驻页面树面板：搜索框 + 来源树 + 独立分组区域 + 数据源摘要。"""
 
@@ -668,7 +606,6 @@ class PageTreePanel(QWidget):
     group_delete_requested = pyqtSignal(str)
     group_copy_page_requested = pyqtSignal(str, str)
     source_assignment_requested = pyqtSignal()
-    fourth_axis_settings_changed = pyqtSignal(str, str)
 
     MAX_DEPTH = 64
 
@@ -793,19 +730,8 @@ class PageTreePanel(QWidget):
         self.source_name.setObjectName("source_summary_name")
         self.source_state = QLabel("● 已载入", self.source_card)
         self.source_state.setObjectName("source_summary_state")
-        self.source_settings_button = QToolButton(self.source_card)
-        self.source_settings_button.setObjectName("source_drag_settings")
-        self.source_settings_button.setText("滑块")
-        self.source_settings_button.setToolTip("第四轴滑块设置")
-        self.source_settings_button.setAccessibleName("第四轴滑块设置")
-        self.source_settings_button.setFixedSize(32, 20)
-        self.source_settings_button.setPopupMode(QToolButton.InstantPopup)
-        self.source_settings_menu = FourthAxisSettingsMenu(self.source_settings_button)
-        self.source_settings_button.setMenu(self.source_settings_menu)
-        self.source_settings_menu.settings_changed.connect(self.fourth_axis_settings_changed)
         source_header.addWidget(source_icon)
         source_header.addWidget(self.source_name, 1)
-        source_header.addWidget(self.source_settings_button)
         source_header.addWidget(self.source_state)
         card_layout.addLayout(source_header)
         self.source_file = QLabel(self.source_card)
@@ -905,17 +831,6 @@ class PageTreePanel(QWidget):
                 color: %(SUCCESS)s;
                 font-size: 9px;
             }
-            QToolButton#source_drag_settings {
-                background-color: %(BG3)s;
-                color: %(T2)s;
-                border: none;
-                border-radius: 4px;
-                font-size: 9px;
-            }
-            QToolButton#source_drag_settings:hover {
-                background-color: %(ACC_SOFT)s;
-                color: %(T1)s;
-            }
             QLabel#source_summary_file {
                 color: %(T2)s;
                 font-size: 10px;
@@ -956,8 +871,6 @@ class PageTreePanel(QWidget):
         assignment_summary="",
         needs_confirmation=False,
         warnings=(),
-        fourth_axis_drag=None,
-        fourth_axis_count=0,
     ):
         title = str(title or "当前数据源")
         filename = str(filename or "实验数据")
@@ -980,12 +893,9 @@ class PageTreePanel(QWidget):
             f"color: {theme.WARNING if needs_confirmation else theme.SUCCESS};"
         )
         self.source_card.setToolTip("重新分配轴\n" + "\n".join(item for item in tooltip if item))
-        self.source_settings_button.setVisible(int(fourth_axis_count) > 0)
-        self.source_settings_menu.sync(fourth_axis_drag, fourth_axis_count)
         self.source_card.show()
 
     def clear_source_summary(self):
-        self.source_settings_menu.hide()
         self.source_card.hide()
 
     def set_pages(

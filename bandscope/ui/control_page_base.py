@@ -52,7 +52,7 @@ class CardGroup(QFrame):
         self.header = QHBoxLayout()
         self.header.setContentsMargins(0, 0, 0, 0)
         self.header.setSpacing(6)
-        self.header.addWidget(self.toggle_button, 1)
+        self.header.addWidget(self.toggle_button, 1, Qt.AlignLeft)
         outer.addLayout(self.header)
 
         self.body_host = QWidget(self)

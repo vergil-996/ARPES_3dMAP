@@ -11,7 +11,7 @@ from bandscope.app.qt_bootstrap import configure_qt_high_dpi, configure_qt_plugi
 configure_qt_high_dpi()
 configure_qt_plugin_path()
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QSize, QTimer
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
@@ -106,15 +106,17 @@ def main():
         expected_background = tuple(round(value, 3) for value in QColor(theme.CANVAS_BG).getRgbF()[:3])
         assert actual_background == expected_background, (actual_background, expected_background)
         assert window.page_render.s_gamma.value() == 50
-        assert window.btn_theme_dark.isChecked() == (name == "dark")
-        assert window.btn_theme_light.isChecked() == (name == "light")
+        assert window.theme_switch.theme_name() == name
+        assert window.theme_switch.isChecked() == (name == "dark")
+        assert window.theme_switch.size() == QSize(96, 38)
+        assert not window.theme_switch.grab().isNull()
         assert "palette(highlight)" in window.btn_main_export.styleSheet()
         actual_accent = QApplication.instance().palette().color(QPalette.Highlight).name().upper()
         assert actual_accent == theme.ACCENT, (actual_accent, theme.ACCENT)
         capture(window, args.output_dir / f"main-{name}.png")
         window.plotter.screenshot(str(args.output_dir / f"volume-{name}.png"))
         QTimer.singleShot(200, lambda: guard(check_camera_presets))
-        results.append(f"主窗口 {name}：背景、按钮、参数保持")
+        results.append(f"主窗口 {name}：背景、主题开关、参数保持")
 
     def check_camera_presets():
         window._set_camera_view_preset("xy")
