@@ -1,5 +1,6 @@
 import os
 import unittest
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -14,6 +15,15 @@ from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.extensions.plugin_dialog import PluginManagerPanel
+from bandscope.processing.denoise_config import (
+    GAUSSIAN_METHOD_NAME,
+    LOW_RANK_METHOD_NAME,
+    MEDIAN_METHOD_NAME,
+    NLM_METHOD_NAME,
+    SG_METHOD_NAME,
+    WAVELET_METHOD_NAME,
+)
+from bandscope.ui.denoise_pipeline import DenoisePipelineWidget
 from bandscope.ui.settings_dialog import SettingsDialog
 from bandscope.updates.sources import SOURCE_GITHUB, SOURCE_MATELAB
 from bandscope.updates.update_settings_dialog import UpdateSettingsPanel
@@ -43,7 +53,7 @@ class SettingsWindowTests(unittest.TestCase):
         dialog.backend.setCurrentText("CPU")
         self.assertEqual(window.backend_manager.mode, "CPU")
 
-        nav.setCurrentItem(nav.topLevelItem(2).child(0))
+        self.assertTrue(dialog.select_page("plugins"))
         plugins = dialog.plugins
         self.assertIsInstance(plugins, PluginManagerPanel)
         self.assertTrue(plugins.isVisible())
@@ -61,7 +71,7 @@ class SettingsWindowTests(unittest.TestCase):
         self.assertIs(dialog.plugins, plugins)
         self.assertTrue(plugins.isVisible())
 
-        nav.setCurrentItem(nav.topLevelItem(2).child(1))
+        self.assertTrue(dialog.select_page("updates"))
         updates = dialog.updates
         self.assertIsInstance(updates, UpdateSettingsPanel)
         self.assertTrue(updates.isVisible())
@@ -109,9 +119,9 @@ class SettingsWindowTests(unittest.TestCase):
         self.addCleanup(window.close)
         dialog = window.open_settings()
         nav = dialog.navigation
-        updates_item = nav.topLevelItem(2).child(1)
+        self.assertTrue(dialog.select_page("updates"))
+        updates_item = nav.currentItem()
         quality_item = nav.topLevelItem(0).child(1)
-        nav.setCurrentItem(updates_item)
         plugins = dialog.plugins
         updates = dialog.updates
         saved_source = updates.selected_source()
@@ -168,96 +178,139 @@ class SettingsWindowTests(unittest.TestCase):
         self.addCleanup(window.close)
         dialog = window.open_settings()
         nav = dialog.navigation
-        nav.setCurrentItem(nav.topLevelItem(1).child(0))
-        detail = window.page_control_blank
-        panel = dialog.denoise
-        saved = detail.export_state()
-
-        group_layout = panel.layout()
         self.assertEqual(
-            [group_layout.itemAt(index).widget().title() for index in range(6)],
-            ["高斯平滑", "中值滤波", "Savitzky-Golay滤波", "小波去噪", "非局部均值", "低秩 SVD"],
+            [nav.topLevelItem(index).text(0) for index in range(nav.topLevelItemCount())],
+            ["计算与显示", "应用管理"],
         )
+        page_titles = [
+            nav.topLevelItem(category).child(page).text(0)
+            for category in range(nav.topLevelItemCount())
+            for page in range(nav.topLevelItem(category).childCount())
+        ]
+        self.assertEqual(page_titles, ["计算后端", "3D渲染质量", "插件管理", "更新设置"])
+        self.assertFalse(any("去噪" in title for title in page_titles))
+
+        pipeline = window.page_render.denoise_pipeline
+        self.assertIsInstance(pipeline, DenoisePipelineWidget)
+        node_specs = (
+            ("gaussian-first", GAUSSIAN_METHOD_NAME),
+            ("gaussian-second", GAUSSIAN_METHOD_NAME),
+            ("median", MEDIAN_METHOD_NAME),
+            ("sg", SG_METHOD_NAME),
+            ("wavelet", WAVELET_METHOD_NAME),
+            ("nlmeans", NLM_METHOD_NAME),
+            ("low-rank", LOW_RANK_METHOD_NAME),
+        )
+        pipeline.restore_state({"nodes": [
+            {"id": node_id, "label": label} for node_id, label in node_specs
+        ]})
+        saved = deepcopy(pipeline.export_state())
+        dialogs = {
+            node_id: pipeline.open_parameter_dialog(node_id)
+            for node_id, _label in node_specs
+        }
+        self.assertIsNot(dialogs["gaussian-first"], dialogs["gaussian-second"])
+        for parameter_dialog in dialogs.values():
+            self.assertFalse(parameter_dialog.isModal())
+
         spin_cases = (
-            ("gaussian_sigma_kx_box", 2.25, 0.75),
-            ("gaussian_sigma_ky_box", 1.75, 0.5),
-            ("gaussian_sigma_e_box", 1.25, 0.0),
-            ("median_size_kx_box", 5, 3),
-            ("median_size_ky_box", 7, 1),
-            ("median_size_e_box", 5, 3),
-            ("sg_window_box", 7, 9),
-            ("sg_polyorder_box", 1, 3),
-            ("wavelet_level_box", 2, 4),
-            ("wavelet_strength_box", 0.987654321, 0.123456789),
-            ("wavelet_noise_sigma_box", 0.125, 0.0),
-            ("nlmeans_patch_size_box", 7, 5),
-            ("nlmeans_patch_distance_box", 5, 3),
-            ("nlmeans_h_scale_box", 1.75, 0.75),
-            ("nlmeans_noise_sigma_box", 0.125, 0.0),
-            ("low_rank_rank_box", 2, 4),
+            ("gaussian-first", "sigma_kx", 2.25, 0.0, 20.0, 0.1),
+            ("gaussian-second", "sigma_kx", 4.5, 0.0, 20.0, 0.1),
+            ("gaussian-first", "sigma_ky", 1.75, 0.0, 20.0, 0.1),
+            ("gaussian-first", "sigma_e", 1.25, 0.0, 20.0, 0.1),
+            ("median", "size_kx", 5, 1, 31, 2),
+            ("median", "size_ky", 7, 1, 31, 2),
+            ("median", "size_e", 5, 1, 31, 2),
+            ("sg", "window_length", 7, 3, 9999, 2),
+            ("sg", "polyorder", 1, 0, 4, 1),
+            ("wavelet", "level", 2, 1, 6, 1),
+            ("wavelet", "strength", 0.987654, 0.0, 10.0, 0.1),
+            ("wavelet", "noise_sigma", 0.125, 0.0, 1.0e9, 0.01),
+            ("nlmeans", "patch_size", 7, 1, 15, 2),
+            ("nlmeans", "patch_distance", 5, 1, 20, 1),
+            ("nlmeans", "h_scale", 1.75, 0.01, 100.0, 0.05),
+            ("nlmeans", "noise_sigma", 0.125, 0.0, 1.0e9, 0.01),
+            ("low-rank", "rank", 2, 1, 9999, 1),
         )
-        for name, popup_value, source_value in spin_cases:
-            with self.subTest(control=name):
-                editor = getattr(panel, name)
-                source = getattr(detail, name)
-                self.assertEqual(editor.minimum(), source.minimum())
-                self.assertEqual(editor.maximum(), source.maximum())
-                self.assertEqual(editor.singleStep(), source.singleStep())
-                editor.setValue(popup_value)
-                editor.editingFinished.emit()
-                self.assertEqual(source.value(), popup_value)
-                self.assertEqual(editor.value(), source.value())
-                source.setValue(source_value)
-                source.editingFinished.emit()
-                self.assertEqual(editor.value(), source_value)
-                self.assertEqual(editor.minimum(), source.minimum())
-                self.assertEqual(editor.maximum(), source.maximum())
-
-        self.assertEqual(panel.wavelet_strength_box.decimals(), 10)
-        for name in (
-            "gaussian_sigma_kx_box", "gaussian_sigma_ky_box", "gaussian_sigma_e_box",
-            "wavelet_noise_sigma_box", "nlmeans_h_scale_box", "nlmeans_noise_sigma_box",
-        ):
-            with self.subTest(precision=name):
-                self.assertGreaterEqual(getattr(panel, name).decimals(), 6)
-        for group_name, editor_name in (
-            ("group_wavelet", "wavelet_noise_sigma_box"),
-            ("group_nlmeans", "nlmeans_noise_sigma_box"),
-        ):
-            with self.subTest(noise_sigma_units=editor_name):
-                group = getattr(panel, group_name)
-                label = group.layout().labelForField(getattr(panel, editor_name))
-                self.assertIsNotNone(label)
-                self.assertIn("数据强度单位", label.text())
-                self.assertNotIn("无量纲", label.text())
-
         combo_cases = (
-            ("sg_axis_combo", 0, 1),
-            ("wavelet_combo", 0, 1),
-            ("wavelet_threshold_rule_combo", 2, 1),
-            ("wavelet_threshold_mode_combo", 1, 0),
+            ("sg", "smoothing_axis", "kx"),
+            ("wavelet", "wavelet", "haar"),
+            ("wavelet", "threshold_rule", "bayes"),
+            ("wavelet", "threshold_mode", "hard"),
         )
-        for name, popup_index, source_index in combo_cases:
-            with self.subTest(control=name):
-                editor = getattr(panel, name)
-                source = getattr(detail, name)
-                editor.setCurrentIndex(popup_index)
-                self.assertEqual(source.currentIndex(), popup_index)
-                source.setCurrentIndex(source_index)
-                self.assertEqual(editor.currentIndex(), source_index)
+        self.assertIsNone(window.original_raw_data)
+        window.request_refresh = Mock()
+        with patch.object(
+            window.refresh_coordinator,
+            "submit_compute",
+            wraps=window.refresh_coordinator.submit_compute,
+        ) as submit_compute:
+            for node_id, key, value, minimum, maximum, step in spin_cases:
+                with self.subTest(node=node_id, control=key):
+                    editor = dialogs[node_id]._controls[key]
+                    self.assertEqual(editor.minimum(), minimum)
+                    self.assertEqual(editor.maximum(), maximum)
+                    self.assertEqual(editor.singleStep(), step)
+                    if isinstance(value, float):
+                        self.assertEqual(editor.decimals(), 6)
+                    before = pipeline.export_state()["nodes"]
+                    editor.setValue(value)
+                    editor.editingFinished.emit()
+                    expected = deepcopy(before)
+                    edited_node = next(node for node in expected if node["id"] == node_id)
+                    edited_node["params"][key] = value
+                    self.assertEqual(pipeline.export_state()["nodes"], expected)
 
-        detail.sg_window_box.setValue(3)
-        detail.sg_window_box.editingFinished.emit()
-        self.assertEqual(detail.sg_polyorder_box.maximum(), 2)
-        self.assertEqual(panel.sg_polyorder_box.maximum(), 2)
+            nodes = pipeline.export_state()["nodes"]
+            self.assertEqual(nodes[0]["params"]["sigma_kx"], 2.25)
+            self.assertEqual(nodes[1]["params"]["sigma_kx"], 4.5)
 
-        detail.restore_state(saved)
-        for name, _popup_value, _source_value in spin_cases:
-            with self.subTest(restored=name):
-                self.assertEqual(getattr(panel, name).value(), getattr(detail, name).value())
-        for name, _popup_index, _source_index in combo_cases:
-            with self.subTest(restored=name):
-                self.assertEqual(getattr(panel, name).currentIndex(), getattr(detail, name).currentIndex())
+            for node_id, key, value in combo_cases:
+                with self.subTest(node=node_id, control=key):
+                    editor = dialogs[node_id]._controls[key]
+                    index = editor.findData(value)
+                    self.assertGreaterEqual(index, 0)
+                    before = pipeline.export_state()["nodes"]
+                    editor.setCurrentIndex(index)
+                    expected = deepcopy(before)
+                    edited_node = next(node for node in expected if node["id"] == node_id)
+                    edited_node["params"][key] = value
+                    self.assertEqual(pipeline.export_state()["nodes"], expected)
+                    self.assertFalse(dialogs[node_id]._debounce.isActive())
+
+            window_control = dialogs["sg"]._controls["window_length"]
+            window_control.setValue(3)
+            window_control.editingFinished.emit()
+            self.assertEqual(dialogs["sg"]._controls["polyorder"].maximum(), 2)
+            sg_node = next(
+                node for node in pipeline.export_state()["nodes"] if node["id"] == "sg"
+            )
+            self.assertEqual(sg_node["params"]["window_length"], 3)
+
+            window.request_refresh.assert_not_called()
+            submit_compute.assert_not_called()
+            self.assertEqual(pipeline._execution_state, "idle")
+            self.assertFalse(pipeline.error_panel.isVisible())
+
+            pipeline.restore_state(saved)
+            self.app.processEvents()
+            self.assertEqual(pipeline.export_state(), saved)
+            window.request_refresh.assert_not_called()
+            submit_compute.assert_not_called()
+
+        saved_nodes = {node["id"]: node for node in saved["nodes"]}
+        restored_dialogs = {
+            node_id: pipeline.open_parameter_dialog(node_id)
+            for node_id, _label in node_specs
+        }
+        for node_id, key, _value, _minimum, _maximum, _step in spin_cases:
+            with self.subTest(restored=f"{node_id}.{key}"):
+                editor = restored_dialogs[node_id]._controls[key]
+                self.assertEqual(editor.value(), saved_nodes[node_id]["params"][key])
+        for node_id, key, _value in combo_cases:
+            with self.subTest(restored=f"{node_id}.{key}"):
+                editor = restored_dialogs[node_id]._controls[key]
+                self.assertEqual(editor.currentData(), saved_nodes[node_id]["params"][key])
 
     def test_canvas_menu_no_longer_contains_moved_settings_entries(self):
         owner = QWidget()

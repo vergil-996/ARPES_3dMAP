@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
@@ -42,6 +42,9 @@ _UNSET = object()
 
 
 class AxisAssignmentDialog(QDialog):
+    calibration_requested = pyqtSignal()
+    CALIBRATION_APPLIED = QDialog.Accepted + 1
+
     def __init__(
         self,
         assignment,
@@ -160,6 +163,13 @@ class AxisAssignmentDialog(QDialog):
         self.restore_button = QPushButton("恢复自动分配", self)
         self.restore_button.clicked.connect(self.restore_automatic)
         buttons_row.addWidget(self.restore_button)
+        self.calibration_button = QPushButton("Kx / Ky 定标", self)
+        self.calibration_button.setAccessibleName("Kx / Ky 两点距离定标")
+        self.calibration_button.setToolTip(
+            "在 XY 切片上选择两点并输入实际间距；统一缩放 Kx / Ky，不旋转或平移数据。"
+        )
+        self.calibration_button.clicked.connect(self.calibration_requested.emit)
+        buttons_row.addWidget(self.calibration_button)
         buttons_row.addStretch(1)
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self

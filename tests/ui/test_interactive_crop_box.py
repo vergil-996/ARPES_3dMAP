@@ -5,7 +5,7 @@ from matplotlib.backend_bases import KeyEvent, MouseEvent
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
-from bandscope.ui.interactive_crop_box import InteractiveCropBox
+from bandscope.ui.interactive_crop_box import CropBoxGestureCoordinator, InteractiveCropBox
 
 
 class InteractiveCropBoxTests(unittest.TestCase):
@@ -118,12 +118,101 @@ class InteractiveCropBoxTests(unittest.TestCase):
         self.drag((2, 3), (1, 2))
         np.testing.assert_allclose(self.box.extents, (1, 8, 2, 7))
 
+    def test_press_activates_before_release_callback(self):
+        activated = []
+        self.box.dispose()
+        self.box = InteractiveCropBox(
+            self.axes,
+            lambda a, b: self.selected.append((a.xdata, b.xdata, a.ydata, b.ydata)),
+            (2, 8, 3, 7),
+            on_activate=lambda: activated.append(True),
+        )
+
+        self.drag((2, 3), (1, 2))
+
+        self.assertEqual(activated, [True])
+        self.assertEqual(len(self.selected), 1)
+
     def test_dispose_removes_artists_and_callbacks(self):
         artists = self.box.artists
         self.box.dispose()
         self.assertTrue(all(a.axes is None for a in artists))
         self.drag((2, 3), (1, 2))
         self.assertEqual(self.selected, [])
+
+
+class OverlappingInteractiveCropBoxTests(unittest.TestCase):
+    def setUp(self):
+        self.figure = Figure(figsize=(6, 5), dpi=100)
+        self.canvas = FigureCanvasAgg(self.figure)
+        self.axes = self.figure.add_subplot()
+        self.axes.set(xlim=(0, 10), ylim=(0, 10))
+        self.activated = []
+        self.selected = {"lower": [], "upper": []}
+        self.coordinator = CropBoxGestureCoordinator()
+        self.lower = self.make_box("lower", (2, 8, 3, 7))
+        self.upper = self.make_box("upper", (2, 8, 3, 7))
+        self.coordinator.set_selectors([self.lower, self.upper])
+        self.canvas.draw()
+
+    def tearDown(self):
+        self.upper.dispose()
+        self.lower.dispose()
+
+    def make_box(self, name, bounds):
+        return InteractiveCropBox(
+            self.axes,
+            lambda a, b, name=name: self.selected[name].append(
+                (a.xdata, b.xdata, a.ydata, b.ydata)),
+            bounds,
+            on_activate=lambda: self.activated.append(name),
+            coordinator=self.coordinator,
+        )
+
+    def drag(self, start, end):
+        for name, xy in (("button_press_event", start),
+                         ("motion_notify_event", end),
+                         ("button_release_event", end)):
+            x, y = self.axes.transData.transform(xy)
+            self.canvas.callbacks.process(
+                name, MouseEvent(name, self.canvas, x, y, button=1))
+
+    def test_identical_boxes_only_move_topmost_then_allow_next_gesture(self):
+        self.drag((5, 5), (9, 9))
+
+        np.testing.assert_allclose(self.lower.extents, (2, 8, 3, 7))
+        np.testing.assert_allclose(self.upper.extents, (4, 10, 6, 10))
+        self.assertEqual(self.activated, ["upper"])
+        self.assertEqual(self.selected["lower"], [])
+        self.assertEqual(len(self.selected["upper"]), 1)
+
+        self.drag((2.5, 3.5), (1.5, 2.5))
+
+        np.testing.assert_allclose(self.lower.extents, (1, 7, 2, 6))
+        np.testing.assert_allclose(self.upper.extents, (4, 10, 6, 10))
+        self.assertEqual(self.activated, ["upper", "lower"])
+        self.assertEqual(len(self.selected["lower"]), 1)
+        self.assertEqual(len(self.selected["upper"]), 1)
+
+    def test_nested_boxes_only_move_topmost_then_allow_next_gesture(self):
+        self.lower.sync_bounds((1, 9, 1, 9))
+        self.upper.sync_bounds((3, 7, 3, 7))
+
+        self.drag((5, 5), (6, 6))
+
+        np.testing.assert_allclose(self.lower.extents, (1, 9, 1, 9))
+        np.testing.assert_allclose(self.upper.extents, (4, 8, 4, 8))
+        self.assertEqual(self.activated, ["upper"])
+        self.assertEqual(self.selected["lower"], [])
+        self.assertEqual(len(self.selected["upper"]), 1)
+
+        self.drag((2, 2), (1, 1))
+
+        np.testing.assert_allclose(self.lower.extents, (0, 8, 0, 8))
+        np.testing.assert_allclose(self.upper.extents, (4, 8, 4, 8))
+        self.assertEqual(self.activated, ["upper", "lower"])
+        self.assertEqual(len(self.selected["lower"]), 1)
+        self.assertEqual(len(self.selected["upper"]), 1)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 """Crop interaction wiring for the analyzer's VTK and Matplotlib canvases.
 
-范围窗口（``CropPopup``）的显隐跟着工具栏的裁剪 / 裁空开关走：开关打开就
-打开窗口，开关关闭就收起窗口；右键仍可把窗口移到光标处。
+主框选开关控制全部选区，裁剪 / 裁空开关只控制活动选区的数值范围窗口。
 """
 import copy
 from dataclasses import replace
@@ -14,12 +13,14 @@ from bandscope.core.axis_interval import nearest_index
 from bandscope.core.crop_model import apply_selection
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.ui.result_workspace import AnalysisPageSpec
-from bandscope.ui.interactive_crop_box import InteractiveCropBox
+from bandscope.ui.interactive_crop_box import CropBoxGestureCoordinator, InteractiveCropBox
 from bandscope.rendering.render_core import VisualEngine
 
 
 def _crop_mode_button(host, operation):
     key = "btn_tb_erase" if operation == "erase" else "btn_tb_crop"
+    if hasattr(host, "__dict__"):
+        return host.__dict__.get(key)
     return getattr(host, key, None)
 
 
@@ -44,7 +45,6 @@ def _request_axis_title_menu(host, owner, global_pos):
 
 
 def _sync_crop_popup_visibility(host, context):
-    """开关打开期间保持范围窗口可见；离开可裁剪的内容时收起。"""
     controller = getattr(host, "crop_controller", None)
     if controller is None:
         return
@@ -52,8 +52,13 @@ def _sync_crop_popup_visibility(host, context):
     if not controller.enabled or controller.selection is None or context is None:
         popup.hide()
         return
+    operation_button = _crop_mode_button(host, controller.operation)
+    operation_checked = operation_button is None or operation_button.isChecked()
+    if not operation_checked:
+        popup.hide()
+        return
     if not popup.isVisible():
-        popup.show_near(_crop_mode_button(host, controller.operation))
+        popup.show_near(operation_button)
 
 
 class CropInteractionMixin:
@@ -138,7 +143,9 @@ class CropInteractionMixin:
     def on_toggle_erase(self, checked):
         self._toggle_region_mode("erase", checked)
 
-    def _toggle_region_mode(self, operation, checked):
+    def _set_selection_mode(self, checked):
+        controller = self.crop_controller
+        checked = bool(checked)
         if checked:
             path_controller = self.__dict__.get("path_slice_controller")
             if path_controller is not None:
@@ -146,32 +153,84 @@ class CropInteractionMixin:
             clear_enhancement = getattr(self, "_clear_enhancement_interaction", None)
             if clear_enhancement is not None:
                 clear_enhancement()
-            other = self.btn_tb_crop if operation == "erase" else self.btn_tb_erase
-            other.blockSignals(True)
-            other.setChecked(False)
-            other.blockSignals(False)
-            self.crop_controller.set_operation(operation)
-        self.crop_controller.enabled = bool(checked)
-        if not checked:
-            self.crop_controller.popup.hide()
+        else:
+            for button in (self.btn_tb_crop, self.btn_tb_erase):
+                button.blockSignals(True)
+                button.setChecked(False)
+                button.blockSignals(False)
+            controller.popup.hide()
+        controller.enabled = checked
+        if checked and self.left_workspace.current_spec() is not None and self.current_render_context is not None:
+            self._activate_crop_context(
+                self.left_workspace.current_spec(), self.current_render_context
+            )
         if checked and self._can_show_interactive_box():
             self._rebuild_interactive_box()
         else:
             self._restore_volume_opacity_if_dimmed()
             self._clear_interactive_box()
-        self._refresh_axis_crop_interaction(self.left_workspace.current_spec(), self.current_render_context)
+        self._refresh_axis_crop_interaction(
+            self.left_workspace.current_spec(), self.current_render_context
+        )
         self._update_crop_cursor()
+        self.plotter.render()
+
+    def on_selection_toggled(self, checked):
+        self._set_selection_mode(checked)
+
+    def _on_new_region_requested(self):
+        selection_id = self.crop_controller.add_selection()
+        if selection_id is None:
+            return None
+        if self._can_show_interactive_box():
+            self._rebuild_interactive_box()
+        self._refresh_axis_crop_interaction(
+            self.left_workspace.current_spec(), self.current_render_context
+        )
+        self.plotter.render()
+        return selection_id
+
+    def _toggle_region_mode(self, operation, checked):
+        overlay = self.__dict__.get("canvas_tool_overlay")
+        selection_button = getattr(overlay, "selection_button", None)
+        if checked:
+            if selection_button is not None and not selection_button.isChecked():
+                selection_button.setChecked(True)
+            else:
+                CropInteractionMixin._set_selection_mode(self, True)
+            other = self.btn_tb_crop if operation == "erase" else self.btn_tb_erase
+            other.blockSignals(True)
+            other.setChecked(False)
+            other.blockSignals(False)
+            self.crop_controller.set_operation(operation)
+        elif selection_button is None:
+            CropInteractionMixin._set_selection_mode(self, False)
+        self.crop_controller.popup.hide()
         if checked:
             _show_crop_popup_on_toggle(self, operation)
-        self.plotter.render()
+
+    def _activate_crop_selection(self, selection_id):
+        controller = self.crop_controller
+        if not hasattr(controller, "activate_selection"):
+            return selection_id in (None, 0)
+        if controller.active_selection_id != selection_id:
+            if not controller.activate_selection(selection_id):
+                return False
+        elif selection_id not in dict(controller.selections_for_page()):
+            return False
+        if controller.selection.operation != controller.operation:
+            controller.set_selection(
+                replace(controller.selection, operation=controller.operation), notify=False
+            )
+        return True
 
     def _can_show_interactive_box(self):
         context = self.current_render_context
         return bool(self._crop_enabled() and context and context.get("view") == "3d"
                     and not context.get("crop_empty") and self.left_display_stack.currentIndex() == 0)
 
-    def _crop_logical_bounds(self):
-        selection = self.crop_controller.selection
+    def _crop_logical_bounds(self, selection=None):
+        selection = self.crop_controller.selection if selection is None else selection
         if selection is None or selection.view != "3d":
             return None
         result = []
@@ -193,33 +252,50 @@ class CropInteractionMixin:
         # range with available samples only when the user applies the action.
         return self.core.logical_to_render_bounds(bounds, shape, clamp=False)
 
-    def _sync_slice_edits_from_logical_bounds(self, logical_bounds=None):
+    def _sync_slice_edits_from_logical_bounds(self, logical_bounds=None, selection_id=None):
         if self.core.raw_data is None:
             return
         bounds = logical_bounds if logical_bounds is not None else self._get_full_logical_bounds()
         if bounds is None:
             return
-        self.precise_logical_bounds = list(bounds)
+        controller = self.__dict__.get("crop_controller")
+        active_id = getattr(controller, "active_selection_id", None)
+        if selection_id is None and controller is not None:
+            selection_id = active_id
+        selections = (
+            dict(controller.selections_for_page())
+            if controller is not None and hasattr(controller, "selections_for_page")
+            else {}
+        )
+        selection = selections.get(selection_id)
+        if selection is None and controller is not None and selection_id == active_id:
+            selection = controller.selection
+        is_active = controller is None or selection_id == active_id
+        if is_active:
+            self.precise_logical_bounds = list(bounds)
+            self.last_synced_slice_texts = self._logical_bounds_to_texts(bounds)
         flipped = self.timeline_bar.switch_flip.isChecked()
         # E 翻转由相机镜像整个场景，逻辑下标与物理坐标一一对应，不再镜像。
         physical = self.core.logical_bounds_to_physical_bounds(bounds, clamp=False)
         physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
-        self.last_synced_slice_texts = self._logical_bounds_to_texts(bounds)
-        controller = self.__dict__.get("crop_controller")
-        if controller is not None and controller.selection is not None and controller.selection.view == "3d":
+        if selection is not None and selection.view == "3d":
             try:
-                controller.set_selection(replace(controller.selection, bounds=physical, e_flip=flipped), notify=False)
+                updated = replace(selection, bounds=physical, e_flip=flipped)
             except ValueError:
                 # A zero-thickness VTK handle gesture on multiple axes is not a
                 # valid slice. Keep the last valid draft instead.
                 return
+            if selection_id is not None and hasattr(controller, "update_selection"):
+                controller.update_selection(selection_id, updated, notify=False)
+            elif is_active:
+                controller.set_selection(updated, notify=False)
 
-    def _sync_slice_edits_from_render_bounds(self, render_bounds):
+    def _sync_slice_edits_from_render_bounds(self, render_bounds, selection_id=None):
         shape = self._full_domain_spatial_shape()
         if shape is None:
             return
         bounds = self.core.render_to_logical_bounds(render_bounds, shape, clamp=False)
-        self._sync_slice_edits_from_logical_bounds(bounds)
+        self._sync_slice_edits_from_logical_bounds(bounds, selection_id=selection_id)
 
     def _update_slice_source_range(self, spec, *, axis_index=None):
         """Update only the normal range of a cropped slice, preserving its 2D tail."""
@@ -291,27 +367,58 @@ class CropInteractionMixin:
 
     def _refresh_axis_crop_interaction(self, spec, context):
         self._clear_axis_crop_overlay(redraw=False)
-        selection = self.crop_controller.selection
-        if (self._crop_enabled() and self._supports_axis_crop_context(spec, context)
-                and selection is not None):
-            selector = self.axis_crop_selector
-            # A full axes.clear() detaches artists even if the selector still
-            # exists (e.g. a preview render that could not use the fast path).
-            if selector is not None and selector.artists[0] not in self.ax_2d.patches:
-                self._clear_axis_crop_selector()
-                selector = None
+        controller = self.crop_controller
+        if hasattr(controller, "selections_for_page"):
+            selections = list(controller.selections_for_page())
+        else:
+            selections = [(0, controller.selection)] if controller.selection is not None else []
+        selectors = self.__dict__.setdefault("axis_crop_selectors", {})
+        coordinator = self.__dict__.setdefault(
+            "axis_crop_gesture_coordinator", CropBoxGestureCoordinator()
+        )
+        visible = self._crop_enabled() and self._supports_axis_crop_context(spec, context)
+        wanted = {selection_id for selection_id, selection in selections
+                  if visible and selection is not None and selection.view != "3d"}
+        for selection_id in list(selectors):
+            selector = selectors[selection_id]
+            detached = (not selector.artists
+                        or selector.artists[0] not in self.ax_2d.patches)
+            if selection_id not in wanted or detached:
+                selector.dispose()
+                selectors.pop(selection_id, None)
+        for selection_id, selection in selections:
+            if selection_id not in wanted:
+                continue
+            selector = selectors.get(selection_id)
             if selector is None:
-                self.axis_crop_selector = InteractiveCropBox(
-                    self.ax_2d, self._on_axis_crop_selected, selection.bounds)
+                selector = InteractiveCropBox(
+                    self.ax_2d,
+                    lambda eclick, erelease, sid=selection_id: self._on_axis_crop_selected(
+                        eclick, erelease, selection_id=sid
+                    ),
+                    selection.bounds,
+                    on_activate=lambda sid=selection_id: self._activate_crop_selection(sid),
+                    coordinator=coordinator,
+                )
+                selectors[selection_id] = selector
             else:
                 selector.sync_bounds(selection.bounds)
-        else:
-            self._clear_axis_crop_selector()
+        coordinator.set_selectors(selectors.values())
+        active_id = getattr(controller, "active_selection_id", None)
+        self.axis_crop_selector = selectors.get(active_id)
+        if self.axis_crop_selector is None and len(selectors) == 1:
+            self.axis_crop_selector = next(iter(selectors.values()))
         if self.left_display_stack.currentIndex() == 1:
             self.canvas_2d.draw_idle()
 
-    def _on_axis_crop_selected(self, eclick, erelease):
-        selection = self.crop_controller.selection
+    def _on_axis_crop_selected(self, eclick, erelease, selection_id=None):
+        controller = self.crop_controller
+        if selection_id is None:
+            selection_id = getattr(controller, "active_selection_id", None)
+        if hasattr(controller, "selections_for_page"):
+            selection = dict(controller.selections_for_page()).get(selection_id)
+        else:
+            selection = controller.selection
         if selection is None or selection.view == "3d":
             return
         values = (eclick.xdata, erelease.xdata, eclick.ydata, erelease.ydata)
@@ -319,9 +426,13 @@ class CropInteractionMixin:
             return
         bounds = (*sorted(values[:2]), *sorted(values[2:]))
         try:
-            self.crop_controller.set_selection(replace(selection, bounds=bounds))
+            updated = replace(selection, bounds=bounds)
         except ValueError:
             return
+        if selection_id is not None and hasattr(controller, "update_selection"):
+            controller.update_selection(selection_id, updated)
+        else:
+            controller.set_selection(updated)
 
     def on_cut(self):
         controller = self.crop_controller

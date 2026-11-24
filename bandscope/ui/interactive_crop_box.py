@@ -13,8 +13,48 @@ from matplotlib.widgets import RectangleSelector
 from bandscope.ui import theme
 
 
+class CropBoxGestureCoordinator:
+    def __init__(self):
+        self._selectors = []
+        self._press_event = None
+        self._target = None
+
+    def set_selectors(self, selectors):
+        self._selectors = list(selectors)
+        if self._target not in self._selectors:
+            self._press_event = None
+            self._target = None
+
+    def remove(self, selector):
+        self._selectors = [candidate for candidate in self._selectors
+                           if candidate is not selector]
+        if self._target is selector:
+            self._press_event = None
+            self._target = None
+
+    def claim_press(self, selector, event):
+        if self._press_event is not event:
+            self._press_event = event
+            self._target = None
+            for candidate in reversed(self._selectors):
+                if candidate._matches_press(event):
+                    self._target = candidate
+                    break
+        return self._target is selector
+
+    def owns_gesture(self, selector):
+        return self._target is selector
+
+    def end_gesture(self, selector):
+        if self._target is selector:
+            self._press_event = None
+            self._target = None
+
+
 class InteractiveCropBox(RectangleSelector):
-    def __init__(self, ax, onselect, bounds):
+    def __init__(self, ax, onselect, bounds, on_activate=None, coordinator=None):
+        self._on_activate = on_activate
+        self._gesture_coordinator = coordinator
         super().__init__(
             ax, onselect, useblit=True, button=[1], interactive=True,
             drag_from_anywhere=True, ignore_event_outside=True, grab_range=10,
@@ -58,13 +98,57 @@ class InteractiveCropBox(RectangleSelector):
         y0, y1 = sorted((y0, y1))
         self._selection_artist.set_bounds(x0, y0, x1 - x0, y1 - y0)
 
+    def _handle_at(self, event):
+        c_idx, c_dist = self._corner_handles.closest(event.x, event.y)
+        e_idx, e_dist = self._edge_handles.closest(event.x, event.y)
+        m_idx, m_dist = self._center_handle.closest(event.x, event.y)
+        if 'move' in self._state:
+            return 'C'
+        if m_dist < self.grab_range * 2:
+            return 'C'
+        if c_dist > self.grab_range and e_dist > self.grab_range:
+            if self.drag_from_anywhere and self._contains(event):
+                return 'C'
+            return None
+        if c_dist < e_dist:
+            return self._corner_order[c_idx]
+        return self._edge_order[e_idx]
+
+    def _matches_press(self, event):
+        return not self.ignore(event) and self._handle_at(event) is not None
+
     def press(self, event):
+        coordinator = self._gesture_coordinator
+        if coordinator is not None and not coordinator.claim_press(self, event):
+            return False
         if self.ignore(event):
+            if coordinator is not None:
+                coordinator.end_gesture(self)
             return False
         self._set_active_handle(event)
         if self._active_handle is None:
+            if coordinator is not None:
+                coordinator.end_gesture(self)
             return False
+        if self._on_activate is not None:
+            self._on_activate()
         return super().press(event)
+
+    def onmove(self, event):
+        coordinator = self._gesture_coordinator
+        if coordinator is not None and not coordinator.owns_gesture(self):
+            return False
+        return super().onmove(event)
+
+    def release(self, event):
+        coordinator = self._gesture_coordinator
+        if coordinator is not None and not coordinator.owns_gesture(self):
+            return False
+        try:
+            return super().release(event)
+        finally:
+            if coordinator is not None:
+                coordinator.end_gesture(self)
 
     def ignore(self, event):
         ignored = super().ignore(event)
@@ -74,8 +158,7 @@ class InteractiveCropBox(RectangleSelector):
                 and self._eventpress is None and self.get_visible()):
             # Full-range handles sit on the axes border. Pixel rounding can
             # put the press just outside it; retain their normal grab radius.
-            self._set_active_handle(event)
-            return self._active_handle is None
+            return self._handle_at(event) is None
         return ignored
 
     def _clean_event(self, event):
@@ -131,6 +214,8 @@ class InteractiveCropBox(RectangleSelector):
         pass
 
     def dispose(self):
+        if self._gesture_coordinator is not None:
+            self._gesture_coordinator.remove(self)
         self.set_active(False)
         self.set_visible(False)
         self.disconnect_events()

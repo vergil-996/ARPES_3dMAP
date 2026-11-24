@@ -65,7 +65,18 @@ assert isinstance(settings, SettingsDialog)
 assert settings.isVisible() and not settings.isModal()
 nav = settings.navigation
 assert nav.currentItem().text(0) == "计算后端"
-plugin_item = nav.topLevelItem(2).child(0)
+nav_items = [nav.topLevelItem(index) for index in range(nav.topLevelItemCount())]
+nav_texts = []
+while nav_items:
+    item = nav_items.pop()
+    nav_texts.append(item.text(0))
+    nav_items.extend(item.child(index) for index in range(item.childCount()))
+assert "去噪参数" not in nav_texts, nav_texts
+assert not hasattr(settings, "denoise")
+plugin_item = nav.topLevelItem(1).child(0)
+update_item = nav.topLevelItem(1).child(1)
+assert plugin_item.text(0) == "插件管理"
+assert update_item.text(0) == "更新设置"
 nav.setCurrentItem(plugin_item)
 dialog = settings.plugins
 assert isinstance(dialog, PluginManagerPanel)
@@ -100,11 +111,13 @@ assert window.settings_dialog is settings
 assert settings.isVisible() and dialog.isVisible()
 assert dialog.window() is settings
 
-nav.setCurrentItem(nav.topLevelItem(1).child(0))
-assert settings.denoise.isVisible()
+nav.setCurrentItem(update_item)
+assert settings.updates.isVisible() and settings.updates.isEnabled()
+assert not settings.updates.isWindow()
+assert settings.updates.window() is settings
 settings.close()
 settings_button.click()
-assert window.settings_dialog is settings and settings.denoise.isVisible()
+assert window.settings_dialog is settings and settings.updates.isVisible()
 
 # 只有管理器自身无法构造时禁用插件导航项。
 saved_session = window.plugin_session

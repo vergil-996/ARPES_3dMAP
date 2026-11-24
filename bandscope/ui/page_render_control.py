@@ -15,15 +15,11 @@ from bandscope.ui.opacity_controls import OpacityCurveEditor
 from bandscope.ui.control_layout_utils import (
     animate_widget_visibility,
     centered_widget_row,
-    combo_index_for_text,
     set_widget_visibility_instant,
 )
 from bandscope.ui.control_page_base import ControlPageBase
+from bandscope.ui.denoise_pipeline import DenoisePipelineWidget
 from bandscope.ui.ui_controls import AnimatedLockButton
-from bandscope.processing.denoise_config import (
-    DENOISE_METHODS as CONFIG_DENOISE_METHODS,
-    canonical_method_name,
-)
 from bandscope.core.display_style import (
     INDEPENDENT_MODE,
     is_independent,
@@ -36,7 +32,6 @@ from bandscope.core.display_style import (
 class RenderControlPage(ControlPageBase):
     #: 色带顺序的兼容引用；权威列表在 ``colormap_selector``，Blender 导出窗口共用同一份。
     CMAP_OPTIONS = COLORMAP_OPTIONS
-    DENOISE_METHODS = CONFIG_DENOISE_METHODS
 
     #: CardGroup 的左右内边距（control_page_base.CardGroup 构造参数）。
     CARD_HORIZONTAL_PADDING = 14
@@ -50,6 +45,8 @@ class RenderControlPage(ControlPageBase):
     colormap_changed = pyqtSignal()
     display_value_changed = pyqtSignal()
     display_value_committed = pyqtSignal()
+    denoise_edited = pyqtSignal()
+    denoise_committed = pyqtSignal()
 
     def build_body(self):
         # 视角：只在有效 3D 场景出现，由主窗口按当前视图平滑收放。
@@ -139,20 +136,16 @@ class RenderControlPage(ControlPageBase):
         self.denoise_scope_label.setStyleSheet(theme.field_label_qss())
         self.denoise_scope_label.setToolTip(
             "去噪配置由所有显示对象共享；应用范围由当前结果页的数据范围决定，"
-            "不随显示对象切换。"
+            "不随显示对象切换。节点按顺序处理，结构与参数修改自动生效。"
         )
         v_noise.addWidget(self.denoise_scope_label)
 
-        self.combo_n1 = self._create_denoise_combo("一级去噪", self.DENOISE_METHODS)
-        self.combo_n2 = self._create_denoise_combo("二级去噪", self.DENOISE_METHODS)
-        self.combo_n3 = self._create_denoise_combo("三级去噪", self.DENOISE_METHODS)
-
-        self.btn_apply_noise = self._create_btn("应用设置", "primary")
-
-        v_noise.addLayout(centered_widget_row(self.combo_n1, self.MIN_CONTROL_ROW_WIDTH))
-        v_noise.addLayout(centered_widget_row(self.combo_n2, self.MIN_CONTROL_ROW_WIDTH))
-        v_noise.addLayout(centered_widget_row(self.combo_n3, self.MIN_CONTROL_ROW_WIDTH))
-        v_noise.addLayout(centered_widget_row(self.btn_apply_noise, self.BUTTON_WIDTH))
+        self.denoise_pipeline = DenoisePipelineWidget(grp_noise)
+        self.denoise_pipeline.pipeline_edited.connect(self.denoise_edited)
+        self.denoise_pipeline.pipeline_committed.connect(self.denoise_committed)
+        self.denoise_pipeline.pipeline_edited.connect(self.relayout_scroll_content)
+        self._adaptive_slider_blocks.append(self.denoise_pipeline)
+        v_noise.addLayout(centered_widget_row(self.denoise_pipeline))
 
         self.vbox.addLayout(centered_widget_row(grp_noise, self.MIN_GROUP_WIDTH))
 
@@ -334,12 +327,10 @@ class RenderControlPage(ControlPageBase):
         super().closeEvent(event)
 
     def get_denoise_settings(self):
-        """ 获取当前选中的三级去噪配置 """
-        return [
-            self.combo_n1.currentText(),
-            self.combo_n2.currentText(),
-            self.combo_n3.currentText()
-        ]
+        return self.denoise_pipeline.get_denoise_settings()
+
+    def set_denoise_execution_state(self, state, message=""):
+        self.denoise_pipeline.set_execution_state(state, message)
 
     def export_state(self):
         return {
@@ -369,9 +360,7 @@ class RenderControlPage(ControlPageBase):
                 "maximum": int(self.s_cmap_high.maximum()),
                 "value": int(self.s_cmap_high.value()),
             },
-            "combo_n1": self.combo_n1.currentText(),
-            "combo_n2": self.combo_n2.currentText(),
-            "combo_n3": self.combo_n3.currentText(),
+            "denoise_pipeline": self.denoise_pipeline.export_state(),
             "display_style": self.get_display_style(),
             "display_range": self._resolved_range,
         }
@@ -384,9 +373,6 @@ class RenderControlPage(ControlPageBase):
             self.s_up,
             self.s_cmap_low,
             self.s_cmap_high,
-            self.combo_n1,
-            self.combo_n2,
-            self.combo_n3,
             *self._display_style_widgets(),
         ]
         blockers = [QSignalBlocker(widget) for widget in widgets] if block_signals else []
@@ -408,20 +394,19 @@ class RenderControlPage(ControlPageBase):
 
             # 色带按名称恢复：列表重排不影响选中项，也不触发用户选色的刷新。
             self._restore_colormap(state.get("combo_cmap", DEFAULT_COLORMAP))
-            for combo_name, combo, default in (
-                ("combo_n1", self.combo_n1, "None"),
-                ("combo_n2", self.combo_n2, "None"),
-                ("combo_n3", self.combo_n3, "None"),
-            ):
-                try:
-                    method_name = canonical_method_name(state.get(combo_name, default))
-                except ValueError:
-                    method_name = "None"
-                index = combo_index_for_text(combo, method_name)
-                if index < 0:
-                    index = combo_index_for_text(combo, "None")
-                if index >= 0:
-                    combo.setCurrentIndex(index)
+            if "denoise_pipeline" in state:
+                denoise_state = state.get("denoise_pipeline") or {"nodes": []}
+            else:
+                denoise_state = {
+                    "methods": [
+                        state.get(combo_name, "None")
+                        for combo_name in ("combo_n1", "combo_n2", "combo_n3")
+                    ],
+                    "legacy_controls": state.get("legacy_controls") or {},
+                }
+            self.denoise_pipeline.restore_state(
+                denoise_state, block_signals=block_signals,
+            )
             if "display_style" in state:
                 style = state["display_style"]
             else:

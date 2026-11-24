@@ -19,6 +19,8 @@ python -m unittest discover -s tests -t . -v
 python -m unittest discover -s tests/extensions -t . -v
 python -m unittest tests.core.test_axis_mapping -v
 python -m unittest tests.core.test_axis_assignment tests.ui.test_axis_assignment_dialog tests.integration.test_axis_assignment -v
+python -m unittest tests.processing.test_momentum_calibration tests.core.test_momentum_calibration tests.ui.test_momentum_calibration_dialog tests.exporting.test_calibrated_source tests.integration.test_momentum_calibration tests.integration.test_axis_assignment -v
+python -m unittest tests.integration.test_edc_integration tests.integration.test_multi_region_interaction tests.processing.test_edc -v
 python -m compileall -q bandscope plugins scripts tests start.py
 ```
 
@@ -43,6 +45,9 @@ python scripts/validation/verify_2d_aspect.py .local/data/NiHITP_calibrated_2.np
 python scripts/validation/verify_camera_view_panel.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_time_axis_visibility.py .local/data/scan07_dynamic.npz .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_axis_assignment.py .local/data/WSe2_step.npz
+python scripts/validation/verify_momentum_calibration.py .local/data/WSe2_step.npz
+python scripts/validation/verify_momentum_calibration.py --synthetic-only
+python scripts/validation/verify_multi_region_edc.py .local/data/WSe2_step.npz
 python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_flat_band_alpha.py --bands 5
 python scripts/validation/volume_display_quality.py .local/data/WSe2_step.npz D:/ARPES数据/npz_files/西湖/Au_cut.npz D:/ARPES数据/npz_files/西湖/NiHITP_cut.npz --blender D:/blender/blender.exe
@@ -82,11 +87,15 @@ python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blende
 
 `verify_axis_assignment.py` 默认用 WSe₂ 复核时间轴兼容性，再生成降序非均匀温度扫描，通过数据源卡片交换等长 Kx/Ky、修改扫描名称，并检查「重新分配轴」窗口内的扫描轴滑块停靠／整段平移设置随重设生效，实际生成强度曲线、出版 PNG 和数值 NPZ；输出窗口／对话框截图及 `report.json`。缺少 WSe₂ 时可显式使用 `--synthetic-only` 只验收温度流程，报告会记录 `wse2_executed: false`，不能据此宣称时间真实数据验收已通过。
 
+`verify_momentum_calibration.py` 默认用 WSe₂，从数据体卡片进入真实轴分配与两点定标窗口，在 XY 切片上鼠标选点、调整能量切片、输入实际间距并应用；随后通过同一个独立保存按钮依次导出完整 NPZ 与 MAT，NPZ 直接回读，MAT 经 `data_trans.convert` 转换后回读，分别用 `AnalyzerCore` 核对强度、坐标、轴分配和扫描信息。脚本截取包含切片、选点、距离及两个固定动作按钮的定标窗口与主窗口深浅主题图。输出至 `.local/outputs/momentum-calibration/`，`report.json` 分项记录实际执行与未执行内容；`--synthetic-only` 使用小型非均匀、降序坐标合成数据，不代表真实 WSe₂ 已验收，也不把自动截图记为人工视觉复核通过。
+
+`verify_multi_region_edc.py` 使用真实窗口，从画布右侧「框选范围」主按钮及左侧次级栏完成验收：重复收起次级裁剪／裁空浮窗后草稿仍在，多个 2D 选框与 3D 盒可分别激活，裁剪／裁空只作用活动选区；随后在 3D 主页和 E（Z）轴积分的 kx–ky 页面直接生成 EDC，核对单选区 `edc_curve`、多选区同页比较、各盒不同 E 范围，以及 MAT／NPZ 中 `E_1`／`intensity_1` 等逐曲线字段。还应确认视图右键「处理分析」不再含内置单条 EDC；真实窗口截图和鼠标手感仍需人工复核，不能只用离屏集成测试代替。
+
 `verify_canvas_axis_slices.py` 从 3D 画布新建 XY 切片，核对四分位端点、零长度锁定、开锁动画、重复建页与 3D 返回，截取深浅主题、窄窗口、悬浮坐标框和动画帧，并输出 `report.json`。
 
 `verify_canvas_rotation_dial.py` 在真实窗口中驱动画布图标开关、负小数输入、跨零拖动、单次精确提交和归零，检查宽窗等分、窄窗两行、低高度工具条、系统缩放及路径选段条独立显隐；输出主窗口、原生旋钮弹层和桌面区域截图及 `report.json`。默认数据为 WSe₂，也可用其他含时间轴的 NPZ 做布局与交互验收。
 
-`verify_integration_context_menu.py` 使用真实 `QMenu` 验证「视图右键 → 处理分析」，覆盖四个内置动作与 EDC 插件动作、非法父页和深浅主题，并检查页面树入口与 `Ctrl+2` 已消失。脚本在右键前激活目标父页，再操作 2D／3D 视图的真实菜单；真实桌面验收必须实际从菜单创建结果，核对父页、数值／冻结参数、创建后选中和插件面板，并另用静态数据确认切片内强度积分项不显示；不能用直接调用 `_on_page_create_requested()` 的集成测试代替这项菜单与视觉验收。
+`verify_integration_context_menu.py` 使用真实 `QMenu` 验证「视图右键 → 处理分析」，覆盖三个内置动作与 EDC 插件动作、非法父页和深浅主题，并检查页面树入口与 `Ctrl+2` 已消失。脚本在右键前激活目标父页，再操作 2D／3D 视图的真实菜单；真实桌面验收必须实际从菜单创建结果，核对父页、数值／冻结参数、创建后选中和插件面板，并另用静态数据确认切片内强度积分项不显示；不能用直接调用 `_on_page_create_requested()` 的集成测试代替这项菜单与视觉验收。
 
 `verify_plugin_management.py` 用真实构建的插件包驱动「设置 → 应用管理 → 插件管理／更新设置」内嵌页，检查选中二级页直接显示、三页签与原有操作、更新设置保存／取消／检查更新控件及滚动可达性，以及深浅主题和窄窗布局；截图对象为主设置窗口，不再按独立插件管理或更新设置窗口验收。另加 `--volume` 单独用默认 WSe₂ 验证真实三维标准／精细采样距离（均需要 OpenGL 与桌面环境）；`verify_plugin_release_flow.py` 不需要窗口，用临时测试密钥把「打包 → 签名 → 生成目录 → 验签 → 官方来源安装」整条链路跑一遍，不联网也不发布任何内容。冻结包链路另用 `scripts/validation/verify_frozen_plugin_flow.py <可执行文件>`；Blender 冻结验收覆盖导出、回读、显示编辑与原位更新，并检查五种 Matplotlib／DejaVu 字体资源随包可用、十种文本已打包且保持独立。`blender_dialog_acceptance.py --multi` 重复加载同一文件并跨两个数据源导出，同时检查统一薄层预设、默认开启的十种文本预设、材质与布局设置区移除及八块默认橙色薄板的实际产物。`blender_recipe_acceptance.py` 使用默认 WSe₂ 数据和真实 Blender 进程检查同源两页配套导出、显示覆写原位更新、独立配置加载、强制选源次数、逐页数值与导出草稿恢复；报告和截图输出到 `.local/outputs/blender-recipe-acceptance/`。`blender_project_roundtrip.py` 检查多视图只生成一组共享预设与文本、后续纯数据视图沿 +X 无重叠排列、关闭开关后的文本／字体／灯组缺席、目录搬移、Append 及原位更新后的文本保护。`blender_volume_lighting.py` 对比自发光与柔和受光，检查实际体积系数连接、三灯链接、开关灯、移动灯、多页、Append、手调后原位更新及 WSe₂ 128／256 采样图像和耗时。`blender_material_acceptance.py` 逐个重开并渲染八种薄板材质，另覆盖统一预设、混合材质、两种内部验收布局、数据漫透射采样与纯数据照明、透射滤色、多页独立灯光和 Append 后灯光链接；它和冻结包、人工视觉复核分开记录。`verify_derived_waterfall.py` 会把真实构建的 `edc_waterfall` 插件装进隔离扩展根，再用真实窗口验证视图右键的创建动作、冻结空间来源、逐页时间区间、采样复算、E 翻转前后屏幕/出版图/数值导出一致以及「插件设置」的两个操作。
 

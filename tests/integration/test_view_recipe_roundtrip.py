@@ -49,44 +49,39 @@ class RecipeRoundtripTests(unittest.TestCase):
         path.write_text(ViewRecipeDocument(snapshot.view_recipe).dumps(), encoding="utf-8")
         return path, snapshot
 
-    def _set_denoise_drafts(self, window):
-        controls = window.page_control_blank
-        controls.gaussian_sigma_kx_box.setValue(0.0)
-        controls.gaussian_sigma_ky_box.setValue(1.25)
-        controls.gaussian_sigma_e_box.setValue(0.75)
-        controls.median_size_kx_box.setValue(1)
-        controls.median_size_ky_box.setValue(3)
-        controls.median_size_e_box.setValue(5)
-        controls.sg_window_box.setValue(7)
-        controls.sg_polyorder_box.setValue(3)
-        controls.sg_axis_combo.setCurrentIndex(controls.sg_axis_combo.findText("Ky轴"))
-        controls.wavelet_combo.setCurrentIndex(controls.wavelet_combo.findText("haar"))
-        controls.wavelet_level_box.setValue(1)
-        controls.wavelet_threshold_rule_combo.setCurrentIndex(
-            controls.wavelet_threshold_rule_combo.findText("sure")
-        )
-        controls.wavelet_threshold_mode_combo.setCurrentIndex(
-            controls.wavelet_threshold_mode_combo.findText("hard")
-        )
-        controls.wavelet_strength_box.setValue(1.5)
-        controls.wavelet_noise_sigma_box.setValue(0.25)
-        controls.nlmeans_patch_size_box.setValue(3)
-        controls.nlmeans_patch_distance_box.setValue(2)
-        controls.nlmeans_h_scale_box.setValue(0.85)
-        controls.nlmeans_noise_sigma_box.setValue(0.25)
-        controls.low_rank_rank_box.setValue(2)
-
     @staticmethod
-    def _denoise_params(window):
-        controls = window.page_control_blank
+    def _denoise_params():
         return {
-            GAUSSIAN_METHOD_NAME: controls.get_gaussian_params(),
-            MEDIAN_METHOD_NAME: controls.get_median_params(),
-            SG_METHOD_NAME: controls.get_savgol_params(),
-            WAVELET_METHOD_NAME: controls.get_wavelet_params(),
-            NLM_METHOD_NAME: controls.get_nlmeans_params(),
-            LOW_RANK_METHOD_NAME: controls.get_low_rank_params(),
+            GAUSSIAN_METHOD_NAME: {"sigma_kx": 0.0, "sigma_ky": 1.25, "sigma_e": 0.75},
+            MEDIAN_METHOD_NAME: {"size_kx": 1, "size_ky": 3, "size_e": 5},
+            SG_METHOD_NAME: {"window_length": 7, "polyorder": 3, "smoothing_axis": "ky"},
+            WAVELET_METHOD_NAME: {
+                "wavelet": "haar", "level": 1, "threshold_rule": "sure",
+                "threshold_mode": "hard", "strength": 1.5, "noise_sigma": 0.25,
+            },
+            NLM_METHOD_NAME: {
+                "patch_size": 3, "patch_distance": 2, "h_scale": 0.85, "noise_sigma": 0.25,
+            },
+            LOW_RANK_METHOD_NAME: {"rank": 2},
         }
+
+    @classmethod
+    def _denoise_nodes(cls, methods=None):
+        return [
+            {
+                "id": f"node-{index}",
+                "label": method,
+                "params": copy.deepcopy(params),
+                "enabled": True,
+            }
+            for index, (method, params) in enumerate(cls._denoise_params().items())
+            if methods is None or method in methods
+        ]
+
+    def _set_denoise_drafts(self, window, methods=None):
+        window.page_render.denoise_pipeline.restore_state({
+            "nodes": self._denoise_nodes(methods),
+        })
 
     def test_home_roundtrip_controls_camera_titles_and_relocation(self):
         w = self.window
@@ -246,7 +241,7 @@ class RecipeRoundtripTests(unittest.TestCase):
     def test_global_denoise_restored_independently_of_page_snapshot(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
         w = self.window
-        w.page_render.combo_n1.setCurrentIndex(1)
+        self._set_denoise_drafts(w, [GAUSSIAN_METHOD_NAME])
         methods = w._normalize_denoise_methods(w.page_render.get_denoise_settings())
         self.assertTrue(methods)
         expected = DenoiseEngines.apply_pipeline(w.original_raw_data, methods)
@@ -254,52 +249,57 @@ class RecipeRoundtripTests(unittest.TestCase):
         path, before = self.save()
         other = control_window()
         self.addCleanup(other.close)
-        other._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path))
+        with (
+            patch.object(other, "on_apply_denoise") as auto_apply,
+            patch.object(DenoiseEngines, "apply_pipeline", wraps=DenoiseEngines.apply_pipeline) as evaluate,
+        ):
+            self.assertTrue(other._load_view_recipe(
+                path, confirm=False, relocate=lambda _: str(self.path),
+            ))
+        auto_apply.assert_not_called()
+        self.assertEqual(evaluate.call_count, 1)
         self.assertEqual(other.global_denoise_methods, methods)
+        self.assertEqual(other.page_render.get_denoise_settings(), methods)
         np.testing.assert_allclose(other.current_render_context["data"], before.payload["volume"], rtol=1e-6)
 
     def test_all_denoise_parameter_drafts_roundtrip_without_applying(self):
         w = self.window
         self._set_denoise_drafts(w)
-        expected_params = {
-            GAUSSIAN_METHOD_NAME: {"sigma_kx": 0.0, "sigma_ky": 1.25, "sigma_e": 0.75},
-            MEDIAN_METHOD_NAME: {"size_kx": 1, "size_ky": 3, "size_e": 5},
-            SG_METHOD_NAME: {"window_length": 7, "polyorder": 3, "smoothing_axis": "ky"},
-            WAVELET_METHOD_NAME: {
-                "wavelet": "haar", "level": 1, "threshold_rule": "sure",
-                "threshold_mode": "hard", "strength": 1.5, "noise_sigma": 0.25,
-            },
-            NLM_METHOD_NAME: {
-                "patch_size": 3, "patch_distance": 2, "h_scale": 0.85, "noise_sigma": 0.25,
-            },
-            LOW_RANK_METHOD_NAME: {"rank": 2},
-        }
-        self.assertEqual(self._denoise_params(w), expected_params)
+        expected_params = self._denoise_params()
         selected = [GAUSSIAN_METHOD_NAME, NLM_METHOD_NAME, LOW_RANK_METHOD_NAME]
-        for combo, method in zip(
-            (w.page_render.combo_n1, w.page_render.combo_n2, w.page_render.combo_n3),
-            selected,
-        ):
-            combo.setCurrentIndex(combo.findText(method))
+        nodes = w.page_render.denoise_pipeline.export_state()["nodes"]
+        for node in nodes:
+            node["enabled"] = node["label"] in selected
+        w.page_render.denoise_pipeline.restore_state({"nodes": nodes})
+        expected_methods = w.page_render.get_denoise_settings()
+        self.assertEqual([method["label"] for method in expected_methods], selected)
         expected_controls = w._capture_global_denoise_control_state()
-        self.assertEqual(
-            set(expected_controls),
-            {"methods", "gaussian", "median", "sg", "wavelet", "nlmeans", "low_rank"},
-        )
+        self.assertEqual(set(expected_controls), {"nodes", "methods", "legacy_controls"})
+        self.assertEqual(expected_controls["nodes"], nodes)
+        self.assertEqual(expected_controls["methods"], expected_methods)
 
-        path, _ = self.save()
+        path, snapshot = self.save()
+        self.assertEqual(snapshot.view_recipe["environment"]["denoise_controls"]["nodes"], nodes)
+        self.assertEqual(snapshot.view_recipe["environment"]["denoise_methods"], [])
         other = control_window()
         self.addCleanup(other.close)
-        self.assertTrue(other._load_view_recipe(path, confirm=False, relocate=lambda _: str(self.path)))
+        with patch.object(other, "on_apply_denoise") as auto_apply:
+            self.assertTrue(other._load_view_recipe(
+                path, confirm=False, relocate=lambda _: str(self.path),
+            ))
+        auto_apply.assert_not_called()
         self.assertEqual(other.global_denoise_methods, [])
-        self.assertEqual(other.page_render.get_denoise_settings(), selected)
+        self.assertEqual(other.page_render.get_denoise_settings(), expected_methods)
         self.assertEqual(other._capture_global_denoise_control_state(), expected_controls)
-        self.assertEqual(self._denoise_params(other), expected_params)
+        restored = other.page_render.denoise_pipeline.export_state()["nodes"]
+        self.assertEqual(restored, nodes)
+        self.assertEqual({node["label"]: node["params"] for node in restored}, expected_params)
 
     def test_all_denoise_methods_and_params_roundtrip_in_applied_pipeline(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
 
         w = self.window
+        expected_params = self._denoise_params()
         for method in (
             GAUSSIAN_METHOD_NAME,
             MEDIAN_METHOD_NAME,
@@ -309,15 +309,16 @@ class RecipeRoundtripTests(unittest.TestCase):
             LOW_RANK_METHOD_NAME,
         ):
             with self.subTest(method=method):
-                self._set_denoise_drafts(w)
-                expected_params = self._denoise_params(w)
-                for combo in (w.page_render.combo_n1, w.page_render.combo_n2, w.page_render.combo_n3):
-                    combo.setCurrentIndex(combo.findText("None"))
-                w.page_render.combo_n1.setCurrentIndex(w.page_render.combo_n1.findText(method))
-                methods = w._normalize_denoise_methods(w.page_control_blank.build_method_specs(
-                    w.page_render.get_denoise_settings(), data_shape=w.original_raw_data.shape,
-                ))
+                node = {
+                    "id": "applied-node",
+                    "label": method,
+                    "params": copy.deepcopy(expected_params[method]),
+                    "enabled": True,
+                }
+                w.page_render.denoise_pipeline.restore_state({"nodes": [node]})
+                methods = w._normalize_denoise_methods(w.page_render.get_denoise_settings())
                 self.assertEqual(len(methods), 1)
+                self.assertEqual(methods[0]["id"], "applied-node")
                 self.assertEqual(methods[0]["label"], method)
                 self.assertEqual(methods[0]["params"], expected_params[method])
 
@@ -332,7 +333,8 @@ class RecipeRoundtripTests(unittest.TestCase):
                 ))
                 self.assertEqual(other.global_denoise_methods, methods)
                 self.assertEqual(other._capture_global_denoise_control_state(), expected_controls)
-                self.assertEqual(self._denoise_params(other), expected_params)
+                restored = other.page_render.denoise_pipeline.export_state()["nodes"]
+                self.assertEqual(restored, [node])
                 np.testing.assert_allclose(
                     other.shared_denoised_raw_data, processed, rtol=1e-6, atol=1e-7, equal_nan=True,
                 )
@@ -340,6 +342,49 @@ class RecipeRoundtripTests(unittest.TestCase):
                     other.current_render_context["data"], before.payload["volume"],
                     rtol=1e-6, atol=1e-7, equal_nan=True,
                 )
+
+    def test_repeated_denoise_nodes_keep_independent_params_and_disabled_nodes_in_recipe(self):
+        from bandscope.processing.denoise_engines import DenoiseEngines
+
+        w = self.window
+        params = self._denoise_params()
+        first_params = {**params[GAUSSIAN_METHOD_NAME], "sigma_kx": 0.5, "sigma_ky": 0.0}
+        second_params = {**params[GAUSSIAN_METHOD_NAME], "sigma_kx": 2.5, "sigma_ky": 0.0}
+        disabled_params = {**params[WAVELET_METHOD_NAME], "level": 99}
+        nodes = [
+            {"id": "first", "label": GAUSSIAN_METHOD_NAME, "params": first_params, "enabled": True},
+            {"id": "second", "label": GAUSSIAN_METHOD_NAME, "params": second_params, "enabled": True},
+            {"id": "disabled", "label": WAVELET_METHOD_NAME, "params": disabled_params, "enabled": False},
+        ]
+        w.page_render.denoise_pipeline.restore_state({"nodes": nodes})
+        methods = w.page_render.get_denoise_settings()
+        self.assertEqual([method["id"] for method in methods], ["first", "second"])
+        self.assertEqual(methods[0]["params"], first_params)
+        self.assertEqual(methods[1]["params"], second_params)
+        processed = DenoiseEngines.apply_pipeline(w.original_raw_data, methods)
+        w._commit_shared_denoise(methods, processed)
+
+        path, before = self.save()
+        document = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(document["environment"]["denoise_controls"]["nodes"], nodes)
+        self.assertEqual(document["environment"]["denoise_methods"], methods)
+        other = control_window()
+        self.addCleanup(other.close)
+        with patch.object(other, "on_apply_denoise") as auto_apply:
+            self.assertTrue(other._load_view_recipe(
+                path, confirm=False, relocate=lambda _: str(self.path),
+            ))
+        auto_apply.assert_not_called()
+        self.assertEqual(other.page_render.denoise_pipeline.export_state(), {"nodes": nodes})
+        self.assertEqual(other.page_render.get_denoise_settings(), methods)
+        self.assertEqual(other.global_denoise_methods, methods)
+        np.testing.assert_allclose(
+            other.shared_denoised_raw_data, processed, rtol=1e-6, atol=1e-7, equal_nan=True,
+        )
+        np.testing.assert_allclose(
+            other.current_render_context["data"], before.payload["volume"],
+            rtol=1e-6, atol=1e-7, equal_nan=True,
+        )
 
     def test_legacy_and_mojibake_denoise_aliases_restore_current_algorithms(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
@@ -384,9 +429,10 @@ class RecipeRoundtripTests(unittest.TestCase):
         for alias, canonical, parameter_group, params in cases:
             with self.subTest(alias=alias):
                 document = copy.deepcopy(snapshot.view_recipe)
-                controls = copy.deepcopy(document["environment"].get("denoise_controls") or {})
-                controls["methods"] = [alias, "None", "None"]
-                controls[parameter_group] = copy.deepcopy(params)
+                controls = {
+                    "methods": [alias, "None", "None"],
+                    parameter_group: copy.deepcopy(params),
+                }
                 document["environment"]["denoise_methods"] = [
                     {"label": alias, "params": copy.deepcopy(params)}
                 ]
@@ -401,9 +447,14 @@ class RecipeRoundtripTests(unittest.TestCase):
                 self.assertTrue(other._load_view_recipe(
                     path, confirm=False, relocate=lambda _: str(self.path),
                 ))
-                self.assertEqual(
-                    other.page_render.get_denoise_settings(), [canonical, "None", "None"]
-                )
+                restored = other.page_render.denoise_pipeline.export_state()["nodes"]
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(restored[0]["label"], canonical)
+                self.assertEqual(restored[0]["params"], params)
+                self.assertTrue(restored[0]["enabled"])
+                self.assertEqual(other.page_render.get_denoise_settings(), [{
+                    "id": restored[0]["id"], "label": canonical, "params": params,
+                }])
                 np.testing.assert_allclose(
                     other.shared_denoised_raw_data, expected,
                     rtol=1e-6, atol=1e-7, equal_nan=True,
@@ -411,17 +462,14 @@ class RecipeRoundtripTests(unittest.TestCase):
 
     def test_sg_canonical_axis_keys_restore_in_recipe_controls(self):
         path, snapshot = self.save()
-        for axis_key, axis_label in (("kx", "Kx轴"), ("ky", "Ky轴"), ("e", "E轴")):
+        for axis_key in ("kx", "ky", "e"):
             with self.subTest(axis_key=axis_key):
                 document = copy.deepcopy(snapshot.view_recipe)
-                controls = copy.deepcopy(document["environment"].get("denoise_controls") or {})
-                controls["methods"] = [SG_METHOD_NAME, "None", "None"]
-                controls["sg"] = {
-                    "window_length": 5,
-                    "polyorder": 2,
-                    "smoothing_axis": axis_key,
+                params = {"window_length": 5, "polyorder": 2, "smoothing_axis": axis_key}
+                document["environment"]["denoise_controls"] = {
+                    "methods": [SG_METHOD_NAME, "None", "None"],
+                    "sg": copy.deepcopy(params),
                 }
-                document["environment"]["denoise_controls"] = controls
                 document["state_digest"] = state_digest(document)
                 path.write_text(ViewRecipeDocument(document).dumps(), encoding="utf-8")
 
@@ -431,22 +479,25 @@ class RecipeRoundtripTests(unittest.TestCase):
                     path, confirm=False, relocate=lambda _: str(self.path),
                 ))
                 self.assertEqual(other.global_denoise_methods, [])
-                self.assertEqual(other.page_control_blank.sg_axis_combo.currentText(), axis_label)
-                self.assertEqual(
-                    other.page_control_blank.get_savgol_params(),
-                    {"window_length": 5, "polyorder": 2, "smoothing_axis": axis_key},
-                )
+                restored = other.page_render.denoise_pipeline.export_state()["nodes"]
+                self.assertEqual(len(restored), 1)
+                self.assertEqual(restored[0]["label"], SG_METHOD_NAME)
+                self.assertEqual(restored[0]["params"], params)
+                self.assertEqual(other.page_render.get_denoise_settings(), [{
+                    "id": restored[0]["id"], "label": SG_METHOD_NAME, "params": params,
+                }])
 
     def test_thin_roi_wavelet_preflight_rejection_keeps_committed_state(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
 
         w = self.window
-        previous_methods = [
-            {
-                "label": GAUSSIAN_METHOD_NAME,
-                "params": {"sigma_kx": 0.5, "sigma_ky": 0.0, "sigma_e": 0.0},
-            }
-        ]
+        w.page_render.denoise_pipeline.restore_state({"nodes": [{
+            "id": "previous-gaussian",
+            "label": GAUSSIAN_METHOD_NAME,
+            "params": {"sigma_kx": 0.5, "sigma_ky": 0.0, "sigma_e": 0.0},
+            "enabled": True,
+        }]})
+        previous_methods = w.page_render.get_denoise_settings()
         previous_data = DenoiseEngines.apply_pipeline(w.original_raw_data, previous_methods)
         w._commit_shared_denoise(previous_methods, previous_data)
         scope = w._register_roi_scope((0, 0, 0, 6, 0, 7))
@@ -476,13 +527,12 @@ class RecipeRoundtripTests(unittest.TestCase):
         previous_ready = w._render_exact_ready
         previous_context = w.current_render_context
 
-        for combo in (w.page_render.combo_n1, w.page_render.combo_n2, w.page_render.combo_n3):
-            combo.setCurrentIndex(combo.findText("None"))
-        w.page_render.combo_n1.setCurrentIndex(w.page_render.combo_n1.findText(WAVELET_METHOD_NAME))
-        w.page_control_blank.wavelet_combo.setCurrentIndex(
-            w.page_control_blank.wavelet_combo.findText("haar")
-        )
-        w.page_control_blank.wavelet_level_box.setValue(1)
+        w.page_render.denoise_pipeline.restore_state({"nodes": [{
+            "id": "thin-wavelet",
+            "label": WAVELET_METHOD_NAME,
+            "params": {**self._denoise_params()[WAVELET_METHOD_NAME], "level": 1},
+            "enabled": True,
+        }]})
         with (
             patch.object(w, "_show_message") as show_message,
             patch.object(w.refresh_coordinator, "submit_compute") as submit_compute,
@@ -490,9 +540,9 @@ class RecipeRoundtripTests(unittest.TestCase):
         ):
             w.on_apply_denoise()
 
-        show_message.assert_called_once()
-        self.assertEqual(show_message.call_args.args[0], "去噪参数与数据范围不兼容")
-        message = show_message.call_args.args[1]
+        show_message.assert_not_called()
+        self.assertEqual(w.page_render.denoise_pipeline._execution_state, "error")
+        message = w.page_render.denoise_pipeline.error_label.text()
         self.assertIn(scope.label, message)
         self.assertIn(WAVELET_METHOD_NAME, message)
         self.assertRegex(message, r"(?:请求|级别|层数|requested)[^\n]*1")

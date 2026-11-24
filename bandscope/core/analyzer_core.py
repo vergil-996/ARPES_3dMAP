@@ -13,6 +13,7 @@ from bandscope.core.axis_assignment import (
     numeric_coordinate_candidates,
     validate_assignment,
 )
+from bandscope.processing.momentum_calibration import calibrate_momentum_axes
 
 
 class AnalyzerCore(QObject):
@@ -191,6 +192,43 @@ class AnalyzerCore(QObject):
             candidates=self.coordinate_candidates,
             automatic=self.auto_axis_assignment,
             candidate_units=self.coordinate_candidate_units,
+        )
+        return candidate
+
+    def copy_with_momentum_calibration(self, point_a, point_b, target_distance, unit=""):
+        if self.source_array is None or self.axis_assignment is None:
+            raise ValueError("当前数据源没有可定标的原始数组。")
+        calibration = calibrate_momentum_axes(
+            self.coords["X"],
+            self.coords["Y"],
+            point_a,
+            point_b,
+            target_distance,
+            unit=unit,
+        )
+        candidate = AnalyzerCore()
+        candidate.source_identity = self.source_identity
+        updated = self.axis_assignment.clone()
+        updated.manual = True
+        updated.coord_keys["X"] = "kx"
+        updated.coord_keys["Y"] = "ky"
+        updated.coord_units["X"] = calibration.unit or None
+        updated.coord_units["Y"] = calibration.unit or None
+        candidates = dict(self.coordinate_candidates)
+        candidates["kx"] = calibration.x
+        candidates["ky"] = calibration.y
+        candidate_units = {
+            role: dict(values)
+            for role, values in self.coordinate_candidate_units.items()
+        }
+        for role, key in (("X", "kx"), ("Y", "ky")):
+            candidate_units.setdefault(role, {})[key] = calibration.unit or None
+        candidate._apply_assignment(
+            self.source_array,
+            updated,
+            candidates=candidates,
+            automatic=self.auto_axis_assignment,
+            candidate_units=candidate_units,
         )
         return candidate
 

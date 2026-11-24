@@ -45,7 +45,7 @@ class AxisCropBlitTests(unittest.TestCase):
         self.analyzer._supports_axis_crop_context = lambda _spec, _context: True
         self.selected = []
         self.analyzer._on_axis_crop_selected = (
-            lambda press, release: self.selected.append((press, release))
+            lambda press, release, selection_id=None: self.selected.append((press, release))
         )
         self.spec = SimpleNamespace(page_id="axis-page", page_kind="axis_integral")
         self.context = {"view": "2d"}

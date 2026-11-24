@@ -6,7 +6,7 @@
 - 把随数据源变化的窗口状态整体捕获 / 安装（数组按引用保存）；全局分组及其
   页面副本不进入会话状态包，切源时保持不变，副本激活时按页面归属切回所属源；
 - 新数据先独立准备，成功后才登记会话；失败不改变已有会话；轴重设复用同一事务，
-  只有原始主页时更新当前源，已有分析时新增源；
+  只有原始主页时更新当前源，已有分析时新增源；Kx / Ky 定标只换坐标并原位保留页面与源；
 - 切源时先提交当前页、保存旧源状态、失效旧源显示任务与交互对象，再绑定目标
   会话，最后只触发一次页面激活与刷新；
 - 根视图删除走源级关闭事务：先摘页面记录再清理，避免逐页删除时误激活。
@@ -20,7 +20,7 @@ import copy
 from typing import Optional
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import FourthAxisDragSettings
@@ -496,7 +496,20 @@ class SourceWorkspaceMixin:
             as_new_source=self._current_source_has_analysis(),
             parent=self,
         )
-        if dialog.exec_() != dialog.Accepted:
+        calibration_requested = getattr(dialog, "calibration_requested", None)
+        if calibration_requested is not None:
+            calibration_requested.connect(
+                lambda: self._open_momentum_calibration(dialog)
+            )
+        result = dialog.exec_()
+        calibration_applied = getattr(
+            dialog,
+            "CALIBRATION_APPLIED",
+            getattr(AxisAssignmentDialog, "CALIBRATION_APPLIED", QDialog.Accepted + 1),
+        )
+        if result == calibration_applied:
+            return True
+        if result != dialog.Accepted:
             return False
         try:
             updated = dialog.assignment()
@@ -508,6 +521,192 @@ class SourceWorkspaceMixin:
         if not settings_only and not self.apply_axis_assignment(updated):
             return False
         return self.on_fourth_axis_settings_changed(settings.docking, settings.continuous_pan)
+
+    def _momentum_calibration_indices(self):
+        shape = self.core.raw_data.shape
+        energy_index = 0
+        spec = self.left_workspace.current_spec()
+        params = getattr(spec, "params", None) or {}
+        slice_info = params.get("home_slice_info") or self.home_slice_info or {}
+        if int(slice_info.get("axis", -1)) == 2:
+            energy_index = int(slice_info.get("index", 0))
+        elif int(params.get("slice_axis", -1)) == 2:
+            energy_index = int(params.get("slice_index", 0))
+        energy_index = max(0, min(energy_index, int(shape[2]) - 1))
+        slider = getattr(getattr(self, "timeline_bar", None), "slider_time", None)
+        scan_index = int(slider.value()) if slider is not None else 0
+        if len(shape) > 3:
+            scan_index = max(0, min(scan_index, int(shape[3]) - 1))
+        else:
+            scan_index = 0
+        return energy_index, scan_index
+
+    def _open_momentum_calibration(self, axis_dialog):
+        from bandscope.ui.momentum_calibration_dialog import MomentumCalibrationDialog
+
+        energy_index, scan_index = self._momentum_calibration_indices()
+        calibration = MomentumCalibrationDialog(
+            self.core,
+            energy_index=energy_index,
+            scan_index=scan_index,
+            parent=axis_dialog,
+        )
+        applied = False
+
+        def apply_requested(point_a, point_b, target_distance, unit):
+            nonlocal applied
+            try:
+                candidate = self.core.copy_with_momentum_calibration(
+                    point_a, point_b, target_distance, unit=unit
+                )
+                if candidate.raw_data.shape != self.core.raw_data.shape:
+                    raise ValueError("定标后的数据维度发生变化。")
+                self._install_momentum_calibration(candidate)
+            except Exception as exc:  # Qt 槽不得让异常逃逸
+                calibration.set_applied(False, str(exc))
+                return False
+            applied = True
+            calibration.set_applied(True, "Kx / Ky 定标已应用。", core=self.core)
+            return True
+
+        calibration.apply_requested.connect(apply_requested)
+        calibration.save_requested.connect(
+            lambda: self._save_momentum_calibration(calibration)
+        )
+        try:
+            calibration.exec_()
+        finally:
+            calibration.deleteLater()
+        if applied:
+            axis_dialog.done(axis_dialog.CALIBRATION_APPLIED)
+        return applied
+
+    @staticmethod
+    def _momentum_calibration_scale(previous_core, candidate):
+        import math
+
+        for key in ("X", "Y"):
+            before = previous_core.coords.get(key)
+            after = candidate.coords.get(key)
+            if before is None or after is None:
+                continue
+            for old_value, new_value in zip(before, after):
+                old_value = float(old_value)
+                if old_value == 0.0:
+                    continue
+                scale = float(new_value) / old_value
+                if math.isfinite(scale) and scale > 0.0:
+                    return scale
+        raise ValueError("无法从定标坐标确定比例。")
+
+    def _scale_momentum_page_geometry(self, scale):
+        undo = []
+        for spec in self.left_workspace.page_specs.values():
+            params = spec.params
+            interval = params.get("axis_interval")
+            if isinstance(interval, dict) and interval.get("axis_key") in ("X", "Y"):
+                undo.append((params, "axis_interval", interval))
+                updated = copy.deepcopy(interval)
+                for key in ("minimum", "maximum", "low", "up"):
+                    if updated.get(key) is not None:
+                        updated[key] = float(updated[key]) * scale
+                params["axis_interval"] = updated
+
+            domain = params.get("axis_domain")
+            if (
+                isinstance(domain, dict)
+                and self._axis_index_for_interval(spec) in (0, 1)
+            ):
+                undo.append((params, "axis_domain", domain))
+                updated = copy.deepcopy(domain)
+                for key in ("minimum", "maximum"):
+                    if updated.get(key) is not None:
+                        updated[key] = float(updated[key]) * scale
+                params["axis_domain"] = updated
+
+            regions = params.get("crop_regions")
+            if not regions:
+                continue
+            undo.append((params, "crop_regions", regions))
+            updated_regions = copy.deepcopy(regions)
+            for region in updated_regions:
+                axes = list(region.get("axes") or ())
+                bounds = list(region.get("bounds") or ())
+                for axis_index, key in enumerate(axes):
+                    if key not in ("X", "Y") or 2 * axis_index + 1 >= len(bounds):
+                        continue
+                    bounds[2 * axis_index] = float(bounds[2 * axis_index]) * scale
+                    bounds[2 * axis_index + 1] = float(bounds[2 * axis_index + 1]) * scale
+                region["bounds"] = bounds
+            params["crop_regions"] = updated_regions
+        return undo
+
+    def _install_momentum_calibration(self, candidate):
+        manager = self.__dict__.get("source_manager")
+        active = manager.active() if manager is not None else None
+        if active is None:
+            raise RuntimeError("当前没有可定标的数据源。")
+        previous_state = self._store_active_session().state
+        scale = self._momentum_calibration_scale(self.core, candidate)
+        geometry_undo = []
+        try:
+            self._invalidate_pending_tasks()
+            self._clear_interaction_objects()
+            geometry_undo = self._scale_momentum_page_geometry(scale)
+            self.core = candidate
+            self.original_raw_data = candidate.raw_data
+            self.base_raw_data = candidate.raw_data
+            self.original_coords = self._clone_coords(candidate.coords)
+            self.base_coords = self._clone_coords(candidate.coords)
+            self.axis_space = None
+            self.axis_interval = None
+            self._axis_prefix_cache = None
+            self._second_derivative_volume_cache = None
+            self._rotation_cache.clear()
+            self._computed_volume_cache.clear()
+            self.backend_manager.clear_caches()
+            self._last_ui_transfer_signature = None
+            self._render_exact_ready = True
+            self._activate_current_session()
+            self._sync_source_switcher()
+            active.state = self._capture_source_state()
+        except Exception:
+            for params, key, value in reversed(geometry_undo):
+                params[key] = value
+            active.state = previous_state
+            self._install_source_state(previous_state)
+            self._activate_current_session()
+            raise
+
+    def _save_momentum_calibration(self, calibration):
+        from bandscope.exporting.calibrated_source import save_calibrated_source
+        from bandscope.ui.file_dialogs import RememberingFileDialog
+
+        stem = str(getattr(self, "loaded_npz_stem", "") or "data")
+        app = QApplication.instance()
+        busy_cursor = False
+        try:
+            path, selected_filter = RememberingFileDialog.getSaveFileName(
+                calibration,
+                "保存定标后的完整数据体",
+                f"{stem}_calibrated.npz",
+                "NumPy Files (*.npz);;MATLAB Files (*.mat)",
+            )
+            if not path:
+                return False
+            path = self._sanitize_save_path(path, selected_filter)
+            if app is not None:
+                app.setOverrideCursor(Qt.WaitCursor)
+                busy_cursor = True
+            save_calibrated_source(path, self.core)
+        except Exception as exc:  # 保存失败不影响已应用的工作区
+            calibration.set_saved(False, str(exc))
+            return False
+        finally:
+            if busy_cursor:
+                app.restoreOverrideCursor()
+        calibration.set_saved(True, f"已保存：{path}")
+        return True
 
     def apply_axis_assignment(self, assignment, *, as_new_source=None):
         try:

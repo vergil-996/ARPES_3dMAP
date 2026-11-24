@@ -31,6 +31,9 @@ class CanvasToolOverlay(QFrame):
     return_3d_requested = pyqtSignal()
     rotation_preview = pyqtSignal(float)
     rotation_committed = pyqtSignal(float)
+    selection_toggled = pyqtSignal(bool)
+    edc_requested = pyqtSignal()
+    new_region_requested = pyqtSignal()
 
     def __init__(self, parent, crop_button, erase_button, export_button):
         super().__init__(parent)
@@ -112,14 +115,44 @@ class CanvasToolOverlay(QFrame):
         self.crop_button = crop_button
         self.erase_button = erase_button
         self.export_button = export_button
+        self.selection_button = ActionButton(self)
+        self.selection_button.setCheckable(True)
+        self._configure_button(
+            self.selection_button, "框选范围", "ic_fluent_select_object_regular"
+        )
+        layout.addWidget(self.selection_button, 0, Qt.AlignHCenter)
+        self.export_button.setParent(self)
+        self._configure_button(
+            self.export_button, "导出结果", "ic_fluent_arrow_export_regular"
+        )
+        layout.addWidget(self.export_button, 0, Qt.AlignHCenter)
+
+        self.selection_panel = QFrame(parent)
+        self.selection_panel.setObjectName("canvas_selection_panel")
+        self.selection_panel.setAttribute(Qt.WA_StyledBackground, True)
+        self.selection_panel.setStyleSheet(
+            f"QFrame#canvas_selection_panel {{ background-color: {theme.BG_2};"
+            f"border: 1px solid {theme.BORDER_HEX}; border-radius: 7px; }}"
+        )
+        selection_layout = QVBoxLayout(self.selection_panel)
+        self._selection_layout = selection_layout
+        selection_layout.setContentsMargins(4, 4, 4, 4)
+        selection_layout.setSpacing(4)
+        self.edc_button = ActionButton(self.selection_panel)
+        self.new_region_button = ActionButton(self.selection_panel)
         for button, name, icon in (
             (self.crop_button, "裁剪", "ic_fluent_crop_regular"),
             (self.erase_button, "裁空", "ic_fluent_eraser_regular"),
-            (self.export_button, "导出结果", "ic_fluent_arrow_export_regular"),
+            (self.edc_button, "生成 EDC", "ic_fluent_data_trending_regular"),
+            (self.new_region_button, "新增框选范围", "ic_fluent_add_regular"),
         ):
-            button.setParent(self)
+            button.setParent(self.selection_panel)
             self._configure_button(button, name, icon)
-            layout.addWidget(button, 0, Qt.AlignHCenter)
+            selection_layout.addWidget(button, 0, Qt.AlignHCenter)
+        self.selection_panel.hide()
+        self.selection_button.toggled.connect(self._on_selection_toggled)
+        self.edc_button.clicked.connect(self.edc_requested.emit)
+        self.new_region_button.clicked.connect(self.new_region_requested.emit)
 
         layout.addWidget(self._separator(), 0, Qt.AlignHCenter)
         self.focus_button = ActionButton(self)
@@ -137,7 +170,7 @@ class CanvasToolOverlay(QFrame):
         button.setCheckable(True)
         button.setToolTip("折线路径切片：左键加点，双击节点改名，右键生成")
         layout = self.layout()
-        layout.insertWidget(max(0, layout.indexOf(self.crop_button)), button, 0, Qt.AlignHCenter)
+        layout.insertWidget(max(0, layout.indexOf(self.selection_button)), button, 0, Qt.AlignHCenter)
         button.hide()
         self.adjustSize()
         self.reposition()
@@ -148,6 +181,45 @@ class CanvasToolOverlay(QFrame):
             button.setVisible(bool(available))
             self.adjustSize()
             self.reposition()
+
+    def set_selection_panel_visible(self, visible):
+        visible = bool(visible)
+        self.selection_button.setChecked(visible)
+        self._set_selection_panel_visible(visible)
+
+    def close_selection_panel(self):
+        self.selection_button.setChecked(False)
+        self.selection_panel.hide()
+
+    def _on_selection_toggled(self, checked):
+        self._set_selection_panel_visible(checked)
+        self.selection_toggled.emit(checked)
+
+    def _set_selection_panel_visible(self, visible):
+        if visible:
+            self.close_rotation_panel(commit=False)
+            self._position_selection_panel()
+            self.selection_panel.show()
+            self.selection_panel.raise_()
+        else:
+            self.selection_panel.hide()
+
+    def _position_selection_panel(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        panel = self.selection_panel
+        available_height = max(0, parent.height() - 24)
+        compact = panel.sizeHint().height() > available_height
+        self._selection_layout.setSpacing(0 if compact else 4)
+        self._selection_layout.setContentsMargins(4, 2 if compact else 4, 4, 2 if compact else 4)
+        panel.adjustSize()
+        anchor = self.selection_button.mapTo(parent, QPoint(0, 0))
+        x = anchor.x() - panel.width() - 8
+        y = anchor.y() + (self.selection_button.height() - panel.height()) // 2
+        x = max(0, min(x, max(0, parent.width() - panel.width())))
+        y = max(0, min(y, max(0, parent.height() - panel.height())))
+        panel.move(x, y)
 
     def rotation_angle(self):
         return self.rotation_panel.current_angle()
@@ -166,6 +238,7 @@ class CanvasToolOverlay(QFrame):
 
     def show_rotation_panel(self):
         self._suppress_rotation_click = False
+        self.close_selection_panel()
         self._position_rotation_panel()
         self.rotation_panel.show()
         self.rotation_panel.raise_()
@@ -253,6 +326,7 @@ class CanvasToolOverlay(QFrame):
 
     def hideEvent(self, event):
         self.close_rotation_panel(commit=False)
+        self.close_selection_panel()
         super().hideEvent(event)
 
     @staticmethod
@@ -344,5 +418,8 @@ class CanvasToolOverlay(QFrame):
         self.resize(layout.sizeHint())
         self.move(max(0, parent.width() - self.width() - 12), 2 if compact else 12)
         self.raise_()
+        if self.selection_panel.isVisible():
+            self._position_selection_panel()
+            self.selection_panel.raise_()
         if self.rotation_panel.isVisible():
             self._position_rotation_panel()

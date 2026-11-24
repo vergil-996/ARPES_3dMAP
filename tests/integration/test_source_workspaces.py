@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from PyQt5.QtTest import QSignalSpy
 from PyQt5.QtWidgets import QApplication, QDialog
 
 from bandscope.core.axis_interval import (
@@ -409,66 +410,85 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertEqual(workspace.page_tree.group_page_ids(group.group_id), [second_copy.page_id])
         self.assertEqual([item.title for item in workspace.groups], ["全局分组"])
 
-    def test_denoise_drafts_and_applied_pipeline_survive_source_roundtrips(self):
+    def test_denoise_nodes_and_applied_pipeline_survive_source_roundtrips(self):
         from bandscope.processing.denoise_engines import DenoiseEngines
 
         window = self.window
-        first_drafts = {
-            "gaussian": {"sigma_kx": 0.75, "sigma_ky": 1.25, "sigma_e": 0.5},
-            "median": {"size_kx": 3, "size_ky": 5, "size_e": 1},
-            "sg": {"window_length": 5, "polyorder": 2, "smoothing_axis": "kx"},
-            "wavelet": {
-                "wavelet": "sym4",
-                "level": 1,
-                "threshold_rule": "bayes",
-                "threshold_mode": "hard",
-                "strength": 0.8,
-                "noise_sigma": 0.15,
+        first_nodes = [
+            {
+                "id": "first-gaussian-light",
+                "label": DenoiseEngines.GAUSSIAN_METHOD_NAME,
+                "params": {"sigma_kx": 0.75, "sigma_ky": 1.25, "sigma_e": 0.5},
+                "enabled": True,
             },
-            "nlmeans": {
-                "patch_size": 3,
-                "patch_distance": 4,
-                "h_scale": 1.3,
-                "noise_sigma": 0.2,
+            {
+                "id": "first-gaussian-strong",
+                "label": DenoiseEngines.GAUSSIAN_METHOD_NAME,
+                "params": {"sigma_kx": 2.0, "sigma_ky": 0.25, "sigma_e": 0.75},
+                "enabled": True,
             },
-            "low_rank": {"rank": 2},
-        }
-        second_drafts = {
-            "gaussian": {"sigma_kx": 1.5, "sigma_ky": 0.5, "sigma_e": 1.0},
-            "median": {"size_kx": 1, "size_ky": 3, "size_e": 5},
-            "sg": {"window_length": 7, "polyorder": 3, "smoothing_axis": "e"},
-            "wavelet": {
-                "wavelet": "db2",
-                "level": 2,
-                "threshold_rule": "universal",
-                "threshold_mode": "soft",
-                "strength": 1.2,
-                "noise_sigma": 0.05,
+            {
+                "id": "first-sg",
+                "label": DenoiseEngines.SG_METHOD_NAME,
+                "params": {"window_length": 5, "polyorder": 2, "smoothing_axis": "kx"},
+                "enabled": True,
             },
-            "nlmeans": {
-                "patch_size": 5,
-                "patch_distance": 7,
-                "h_scale": 0.9,
-                "noise_sigma": 0.1,
+            {
+                "id": "first-wavelet-off",
+                "label": DenoiseEngines.WAVELET_METHOD_NAME,
+                "params": {
+                    "wavelet": "sym4",
+                    "level": 1,
+                    "threshold_rule": "bayes",
+                    "threshold_mode": "hard",
+                    "strength": 0.8,
+                    "noise_sigma": 0.15,
+                },
+                "enabled": False,
             },
-            "low_rank": {"rank": 4},
-        }
+        ]
+        second_nodes = [
+            {
+                "id": "second-gaussian",
+                "label": DenoiseEngines.GAUSSIAN_METHOD_NAME,
+                "params": {"sigma_kx": 1.5, "sigma_ky": 0.5, "sigma_e": 1.0},
+                "enabled": True,
+            },
+            {
+                "id": "second-median",
+                "label": DenoiseEngines.MEDIAN_METHOD_NAME,
+                "params": {"size_kx": 1, "size_ky": 3, "size_e": 5},
+                "enabled": True,
+            },
+            {
+                "id": "second-low-rank",
+                "label": DenoiseEngines.LOW_RANK_METHOD_NAME,
+                "params": {"rank": 4},
+                "enabled": True,
+            },
+            {
+                "id": "second-nlmeans-off",
+                "label": DenoiseEngines.NLM_METHOD_NAME,
+                "params": {
+                    "patch_size": 5,
+                    "patch_distance": 7,
+                    "h_scale": 0.9,
+                    "noise_sigma": 0.1,
+                },
+                "enabled": False,
+            },
+        ]
 
-        def configure_and_apply(drafts, selected):
-            window.page_control_blank.restore_state(drafts)
-            for combo, method in zip(
-                (window.page_render.combo_n1, window.page_render.combo_n2, window.page_render.combo_n3),
-                selected,
-            ):
-                index = combo.findText(method)
-                self.assertGreaterEqual(index, 0)
-                combo.setCurrentIndex(index)
-            methods = window._normalize_denoise_methods(
-                window.page_control_blank.build_method_specs(
-                    window.page_render.get_denoise_settings(),
-                    data_shape=window.original_raw_data.shape,
-                )
+        def configure_and_apply(nodes):
+            pipeline = window.page_render.denoise_pipeline
+            pipeline.restore_state({"nodes": nodes})
+            self.assertEqual(pipeline.export_state(), {"nodes": nodes})
+            settings = window.page_render.get_denoise_settings()
+            self.assertEqual(
+                [method["id"] for method in settings],
+                [node["id"] for node in nodes if node["enabled"]],
             )
+            methods = window._normalize_denoise_methods(settings)
             processed = DenoiseEngines.apply_pipeline(
                 window.original_raw_data,
                 methods,
@@ -484,25 +504,48 @@ class _WorkspaceFixture(unittest.TestCase):
             np.testing.assert_array_equal(window.shared_denoised_raw_data, processed)
 
         first_id = self.load_first()
-        first_expected = configure_and_apply(
-            first_drafts,
-            [DenoiseEngines.GAUSSIAN_METHOD_NAME, DenoiseEngines.SG_METHOD_NAME, "None"],
+        first_expected = configure_and_apply(first_nodes)
+        self.assertEqual(
+            [node["label"] for node in first_nodes[:2]],
+            [DenoiseEngines.GAUSSIAN_METHOD_NAME] * 2,
+        )
+        self.assertNotEqual(first_nodes[0]["id"], first_nodes[1]["id"])
+        self.assertNotEqual(first_nodes[0]["params"], first_nodes[1]["params"])
+        self.assertNotIn(
+            "first-wavelet-off",
+            [method["id"] for method in first_expected[1]],
         )
 
-        self.assertTrue(window.load_data(str(self.second_path)))
+        restore_commits = QSignalSpy(window.page_render.denoise_committed)
+        with patch.object(
+            DenoiseEngines, "apply_pipeline", wraps=DenoiseEngines.apply_pipeline
+        ) as restore_apply:
+            self.assertTrue(window.load_data(str(self.second_path)))
+        restore_apply.assert_not_called()
+        self.assertEqual(len(restore_commits), 0)
+
         second_id = window.source_manager.active_id
         saved_first = window.source_manager.get(first_id).state["denoise_controls"]
         self.assertEqual(saved_first, first_expected[0])
         self.assertNotIn("second_derivative", saved_first)
-        second_expected = configure_and_apply(
-            second_drafts,
-            [DenoiseEngines.MEDIAN_METHOD_NAME, DenoiseEngines.LOW_RANK_METHOD_NAME, "None"],
+        self.assertFalse(saved_first["nodes"][-1]["enabled"])
+        self.assertNotIn(
+            "first-wavelet-off",
+            [method["id"] for method in saved_first["methods"]],
         )
+        second_expected = configure_and_apply(second_nodes)
+        self.assertNotEqual(first_nodes[0]["id"], second_nodes[0]["id"])
+        self.assertNotEqual(first_nodes[0]["params"], second_nodes[0]["params"])
 
-        self.assertTrue(window.activate_source(first_id))
-        assert_source_state(first_expected)
-        self.assertTrue(window.activate_source(second_id))
-        assert_source_state(second_expected)
+        with patch.object(
+            DenoiseEngines, "apply_pipeline", wraps=DenoiseEngines.apply_pipeline
+        ) as restore_apply:
+            self.assertTrue(window.activate_source(first_id))
+            assert_source_state(first_expected)
+            self.assertTrue(window.activate_source(second_id))
+            assert_source_state(second_expected)
+        restore_apply.assert_not_called()
+        self.assertEqual(len(restore_commits), 0)
 
     def test_switching_clears_pending_denoise_but_keeps_the_configuration(self):
         from bandscope.processing.denoise_engines import DenoiseEngines

@@ -8,18 +8,13 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
+from bandscope.core.display_style import new_render_quality
+from bandscope.processing.compute_backends import BackendManager
+from bandscope.processing.denoise_config import SG_METHOD_NAME
 from bandscope.ui.blank_control_page import BlankControlPage
-from bandscope.processing.denoise_config import (
-    DEFAULT_SG_PARAMS,
-    DEFAULT_WAVELET_PARAMS,
-    SG_AXIS_LABEL_TO_KEY,
-    THRESHOLD_MODE_OPTIONS,
-    THRESHOLD_RULE_OPTIONS,
-    WAVELET_OPTIONS,
-)
 from bandscope.ui.page_render_control import RenderControlPage
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
-from bandscope.ui.settings_popups import DenoiseSettingsPanel
+from bandscope.ui.settings_dialog import SettingsDialog
 from bandscope.ui.timeline_bar import TimelineBar
 
 
@@ -36,18 +31,37 @@ class ControlPageStateTests(unittest.TestCase):
         page.s_low.setValue(13)
         page.s_gamma.setValue(47)
         page.s_up.setValue(91)
-        page.combo_n1.setCurrentIndex(3)
+        page.denoise_pipeline.restore_state({"nodes": [
+            {
+                "id": "sg-first",
+                "label": SG_METHOD_NAME,
+                "params": {"window_length": 9, "polyorder": 3, "smoothing_axis": "kx"},
+                "enabled": True,
+            },
+            {
+                "id": "sg-second",
+                "label": SG_METHOD_NAME,
+                "params": {"window_length": 15, "polyorder": 2, "smoothing_axis": "ky"},
+                "enabled": False,
+            },
+        ]})
         page.colormap_selector.set_colormap("coolwarm")
         expected = page.export_state()
 
         page.s_low.setValue(0)
         page.s_gamma.setValue(0)
         page.s_up.setValue(0)
-        page.combo_n1.setCurrentIndex(0)
+        page.denoise_pipeline.restore_state({"nodes": []})
         page.colormap_selector.set_colormap("magma")
         page.restore_state(expected)
 
         self.assertEqual(page.export_state(), expected)
+        self.assertEqual(
+            page.export_state()["denoise_pipeline"]["nodes"],
+            expected["denoise_pipeline"]["nodes"],
+        )
+        for name in ("combo_n1", "combo_n2", "combo_n3"):
+            self.assertFalse(hasattr(page, name))
         self.assertEqual(page.get_selected_cmap(), "coolwarm")
         self.assertEqual(
             [slider._value_label.text() for slider in (page.s_low, page.s_gamma, page.s_up)],
@@ -231,30 +245,25 @@ class ControlPageStateTests(unittest.TestCase):
         self.assertLessEqual(selector.width(), page.width())
         self.assertEqual(selector.width(), page.colormap_range_editor.width())
 
-    def test_denoise_pages_share_defaults_and_options(self):
-        blank = BlankControlPage()
-        popup = DenoiseSettingsPanel(blank)
+    def test_settings_dialog_excludes_global_denoise_and_keeps_management_entries(self):
+        settings = SettingsDialog(BackendManager("CPU"), new_render_quality())
+        self.addCleanup(settings.close)
 
-        self.assertEqual(blank.get_savgol_params(), DEFAULT_SG_PARAMS)
-        self.assertEqual(blank.get_wavelet_params(), DEFAULT_WAVELET_PARAMS)
-        self.assertEqual(
-            [blank.sg_axis_combo.itemText(i) for i in range(blank.sg_axis_combo.count())],
-            list(SG_AXIS_LABEL_TO_KEY),
-        )
-        self.assertEqual(
-            [popup.wavelet_combo.itemText(i) for i in range(popup.wavelet_combo.count())],
-            list(WAVELET_OPTIONS),
-        )
-        self.assertEqual(
-            [popup.wavelet_threshold_rule_combo.itemText(i)
-             for i in range(popup.wavelet_threshold_rule_combo.count())],
-            list(THRESHOLD_RULE_OPTIONS),
-        )
-        self.assertEqual(
-            [popup.wavelet_threshold_mode_combo.itemText(i)
-             for i in range(popup.wavelet_threshold_mode_combo.count())],
-            list(THRESHOLD_MODE_OPTIONS),
-        )
+        items = [settings.navigation.topLevelItem(i) for i in range(settings.navigation.topLevelItemCount())]
+        labels = []
+        while items:
+            item = items.pop()
+            labels.append(item.text(0))
+            items.extend(item.child(i) for i in range(item.childCount()))
+        self.assertNotIn("去噪参数", labels)
+        self.assertFalse(hasattr(settings, "denoise"))
+
+        for key, title in (("plugins", "插件管理"), ("updates", "更新设置")):
+            with self.subTest(entry=title):
+                self.assertTrue(settings.select_page(key))
+                current = settings.navigation.currentItem()
+                self.assertEqual(current.text(0), title)
+                self.assertTrue(current.flags() & Qt.ItemIsEnabled)
 
 
 if __name__ == "__main__":

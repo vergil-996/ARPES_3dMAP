@@ -5,13 +5,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+import pyvista as pv
 import vtk
 from PyQt5.QtWidgets import QApplication, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.crop_model import apply_selection
+from bandscope.rendering.refresh_pipeline import RenderQuality
 from bandscope.ui.crop_controls import CropController
+from tests.support.environment import requires_opengl
 
 
 class CropBoxBoundsTests(unittest.TestCase):
@@ -33,6 +36,8 @@ class CropBoxBoundsTests(unittest.TestCase):
         self.analyzer._full_domain_spatial_shape = lambda: (4, 5, 6)
         self.analyzer.crop_controller = self.controller
         self.analyzer.current_render_context = self.context
+        self.analyzer._box_interacting = False
+        self.analyzer._orig_volume_opacity = None
         self.flip = SimpleNamespace(checked=False)
         self.flip.isChecked = lambda: self.flip.checked
         self.analyzer.timeline_bar = SimpleNamespace(switch_flip=self.flip)
@@ -92,11 +97,54 @@ class CropBoxBoundsTests(unittest.TestCase):
         self.analyzer._can_show_interactive_box = lambda: True
         self.analyzer._box_bounds_signature = None
         self.analyzer._restore_volume_opacity_if_dimmed = Mock()
+        self.analyzer._dim_current_volume = Mock()
         self.analyzer.plotter = SimpleNamespace(clear_box_widgets=Mock(), add_box_widget=add_box_widget)
         self.analyzer._rebuild_interactive_box()
         np.testing.assert_allclose(self.controller.selection.bounds, physical)
         self.analyzer._rebuild_interactive_box()
-        self.analyzer.plotter.clear_box_widgets.assert_called_once()
+        self.analyzer.plotter.clear_box_widgets.assert_not_called()
+        self.assertEqual(len(self.analyzer._crop_box_widgets), 1)
+
+    @requires_opengl
+    def test_real_vtk_boxes_have_visible_overlay_props_and_native_activation(self):
+        plotter = pv.Plotter(off_screen=True, window_size=(320, 240))
+        plotter.add_volume(self.core.raw_data, cmap="magma")
+        self.addCleanup(plotter.close)
+        self.analyzer.plotter = plotter
+        self.analyzer._can_show_interactive_box = lambda: True
+        self.analyzer._dim_current_volume = Mock()
+        self.analyzer._box_interacting = False
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+
+        self.analyzer._rebuild_interactive_box()
+
+        widgets = list(plotter.box_widgets)
+        self.assertEqual(len(widgets), 2)
+        self.assertTrue(all(widget.GetEnabled() for widget in widgets))
+        overlay = self.analyzer._crop_box_renderer
+        self.assertIsNotNone(overlay)
+        self.assertTrue(overlay.GetInteractive())
+        self.assertEqual(overlay.GetActiveCamera(), plotter.renderer.GetActiveCamera())
+        props = overlay.GetViewProps()
+        props.InitTraversal()
+        visible_bounds = []
+        for _ in range(props.GetNumberOfItems()):
+            prop = props.GetNextProp()
+            if prop.GetVisibility() and prop.GetBounds() is not None:
+                visible_bounds.append(tuple(prop.GetBounds()))
+        for widget in widgets:
+            poly = vtk.vtkPolyData()
+            widget.GetPolyData(poly)
+            self.assertTrue(any(
+                np.allclose(poly.GetBounds(), bounds, rtol=1e-7, atol=1e-7)
+                for bounds in visible_bounds
+            ))
+
+        for selection_id, widget in zip((first, second), widgets):
+            widget.InvokeEvent("InteractionEvent")
+            self.assertEqual(self.controller.active_selection_id, selection_id)
+            widget.InvokeEvent("EndInteractionEvent")
 
     def test_page_switch_and_energy_flip_preserve_outside_geometry(self):
         bounds = (-1, 4, -2, 6, -1, 6)
@@ -140,6 +188,122 @@ class CropBoxBoundsTests(unittest.TestCase):
             expected = self.context["data"].copy()
             expected[:1, :2, :3] = np.nan
             np.testing.assert_equal(erased["data"], expected)
+
+    def test_volume_redim_guard_accepts_uninitialized_widget_host(self):
+        host = My3DAnalyzer.__new__(My3DAnalyzer)
+        data = np.ones((2, 2, 2), dtype=np.float32)
+        spec = SimpleNamespace(page_id="home", page_kind="home", params={})
+        context = {"view": "3d", "data": data, "coords": {}}
+        host.left_workspace = SimpleNamespace(current_spec=lambda: spec)
+        host.core = SimpleNamespace(raw_data=data, coords={})
+        host.current_render_context = None
+        host.left_display_stack = Mock()
+        host.plot_coordinate_tooltip = Mock()
+        host.ax_2d = Mock()
+        host.page_render = SimpleNamespace(
+            get_display_style=lambda: {"opacity_mode": "linear"},
+            get_selected_cmap=lambda: "magma",
+        )
+        host.timeline_bar = SimpleNamespace(
+            switch_axes=SimpleNamespace(isChecked=lambda: False),
+            switch_flip=SimpleNamespace(isChecked=lambda: False),
+        )
+        host.volume_session = Mock()
+        host.render_quality = SimpleNamespace()
+        host.rotation_angle = 0.0
+        host._compute_render_context = lambda _spec: context
+        host._get_display_levels = lambda: (0.0, 1.0)
+        host._current_transfer_signature = lambda: ()
+        host._three_d_axis_titles = lambda _spec: None
+        host._enhancement_state = lambda _spec: None
+        host._prepare_display_statistics = Mock(return_value=False)
+        host._enhancement_display = Mock(return_value=None)
+        host._plugin_render_context = lambda ctx, **_kwargs: (ctx, None)
+        host._can_show_interactive_box = lambda: False
+        host._plugin_session = lambda: None
+        host._path_slices = lambda: None
+        host._dim_current_volume = Mock()
+        for name in (
+            "_clear_axis_crop_interaction", "_reset_axis_title_interaction",
+            "_activate_crop_context", "_restore_3d_camera_position",
+            "_apply_pending_e_flip_camera", "_reset_volume_actor_transform",
+            "_capture_3d_camera_position", "_restore_volume_opacity_if_dimmed",
+            "_clear_interactive_box", "_refresh_axis_crop_interaction",
+            "_sync_enhancement_controls", "_draw_enhancement_regions",
+            "_set_camera_view_visible", "_sync_camera_view_controls",
+        ):
+            setattr(host, name, Mock())
+
+        host._render_active_page(RenderQuality.EXACT)
+        host._dim_current_volume.assert_not_called()
+
+        host._orig_volume_opacity = object()
+        host._render_active_page(RenderQuality.EXACT)
+        host._dim_current_volume.assert_called_once_with()
+        self.assertIsNone(host._orig_volume_opacity)
+
+    def test_visible_crop_boxes_keep_only_main_volume_dimmed_until_forced_restore(self):
+        def opacity_function(scale):
+            function = vtk.vtkPiecewiseFunction()
+            function.AddPoint(0.0, scale)
+            function.AddPoint(100.0, scale / 2)
+            return function
+
+        def opacity_values(volume):
+            function = volume.GetProperty().GetScalarOpacity()
+            values = []
+            for index in range(function.GetSize()):
+                node = [0.0, 0.0, 0.0, 0.0]
+                function.GetNodeValue(index, node)
+                values.append(tuple(node[:2]))
+            return values
+
+        main_volume = vtk.vtkVolume()
+        main_volume.GetProperty().SetScalarOpacity(opacity_function(1.0))
+        enhancement_volume = vtk.vtkVolume()
+        enhancement_volume.GetProperty().SetScalarOpacity(opacity_function(0.8))
+        renderer = vtk.vtkRenderer()
+        renderer.AddVolume(main_volume)
+        renderer.AddVolume(enhancement_volume)
+        enhancement_widget = SimpleNamespace(Off=Mock())
+        box_widgets = [enhancement_widget]
+
+        def add_box_widget(callback, bounds, **kwargs):
+            widget = SimpleNamespace(Off=Mock(), PlaceWidget=Mock(), AddObserver=Mock())
+            box_widgets.append(widget)
+            return widget
+
+        self.analyzer.plotter = SimpleNamespace(
+            renderer=renderer,
+            box_widgets=box_widgets,
+            add_box_widget=add_box_widget,
+            clear_box_widgets=Mock(),
+        )
+        self.analyzer._enhancement_box_widget = enhancement_widget
+        self.analyzer._can_show_interactive_box = lambda: True
+        self.analyzer._box_bounds_signature = None
+        self.controller.add_selection()
+
+        self.analyzer._rebuild_interactive_box()
+        self.assertEqual(len(self.analyzer._crop_box_widgets), 2)
+        np.testing.assert_allclose(opacity_values(main_volume), [(0.0, 0.15), (100.0, 0.075)])
+        np.testing.assert_allclose(opacity_values(enhancement_volume), [(0.0, 0.8), (100.0, 0.4)])
+
+        self.analyzer._rebuild_interactive_box()
+        np.testing.assert_allclose(opacity_values(main_volume), [(0.0, 0.15), (100.0, 0.075)])
+        self.analyzer._on_box_interaction_start(None, None)
+        self.assertTrue(self.analyzer._box_interacting)
+        self.analyzer._on_box_interaction_end(None, None)
+        self.assertFalse(self.analyzer._box_interacting)
+        np.testing.assert_allclose(opacity_values(main_volume), [(0.0, 0.15), (100.0, 0.075)])
+
+        self.analyzer._restore_volume_opacity_if_dimmed()
+        self.analyzer._clear_interactive_box()
+        np.testing.assert_allclose(opacity_values(main_volume), [(0.0, 1.0), (100.0, 0.5)])
+        np.testing.assert_allclose(opacity_values(enhancement_volume), [(0.0, 0.8), (100.0, 0.4)])
+        self.assertEqual(box_widgets, [enhancement_widget])
+        self.assertIs(self.analyzer._enhancement_box_widget, enhancement_widget)
+        self.analyzer.plotter.clear_box_widgets.assert_not_called()
 
     def test_normal_coordinate_conversions_still_clamp_by_default(self):
         self.assertEqual(self.core.physical_to_logical("X", -3), 0)

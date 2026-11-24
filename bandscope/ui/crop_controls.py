@@ -20,6 +20,9 @@ from bandscope.core.crop_model import axis_labels, reorient_volume_selection, se
 from bandscope.ui.numeric_wheel import enable_numeric_wheel
 
 
+_USE_CACHED_E_FLIP = object()
+
+
 class CropPopup(QFrame):
     edited = pyqtSignal()
     apply_requested = pyqtSignal()
@@ -200,27 +203,125 @@ class CropController(QObject):
         self.page_id = None
         self.selection = None
         self.selections = {}
+        self._active_selection_ids = {}
+        self._next_selection_id = 1
+        self._context = None
+        self._e_flip = False
         self._syncing = False
         self.popup.edited.connect(self.commit_edits)
         self.popup.apply_requested.connect(self._apply)
+
+    @property
+    def active_selection_id(self):
+        selection_id = self._active_selection_ids.get(self.page_id)
+        if selection_id not in self.selections.get(self.page_id, {}):
+            return None
+        return selection_id
+
+    def selections_for_page(self, page_id=None):
+        page_id = self.page_id if page_id is None else page_id
+        return tuple(self.selections.get(page_id, {}).items())
+
+    def _new_selection_id(self):
+        selection_id = self._next_selection_id
+        self._next_selection_id += 1
+        return selection_id
+
+    def _default_selection(self, context, e_flip, existing_count):
+        default = selection_for_context(context, e_flip=e_flip)
+        if default is None:
+            return None
+        fraction = 0
+        if default.view == "2d":
+            fraction = .1 if not existing_count else .4 - .2 / (2 ** (existing_count - 1))
+        elif existing_count:
+            fraction = .4 - .3 / (2 ** (existing_count - 1))
+        if fraction:
+            bounds = []
+            for low, high in zip(default.bounds[::2], default.bounds[1::2]):
+                inset = (high - low) * fraction
+                bounds.extend((low + inset, high - inset))
+            default = replace(default, bounds=tuple(bounds))
+        return replace(default, operation=self.operation)
+
+    def _set_active_selection(self, selection_id, selection, *, notify=True):
+        if self.page_id is not None and selection_id is not None:
+            self._active_selection_ids[self.page_id] = selection_id
+        elif self.page_id is not None:
+            self._active_selection_ids.pop(self.page_id, None)
+        self.selection = selection
+        self._syncing = True
+        try:
+            self.popup.set_selection(selection)
+        finally:
+            self._syncing = False
+        if notify:
+            self.selection_changed.emit()
 
     def activate(self, page_id, context, *, e_flip=False):
         if self.page_id != page_id:
             self.popup.hide()
         self.page_id = page_id
-        default = selection_for_context(context, e_flip=e_flip)
-        saved = self.selections.get(page_id)
+        if context is not None:
+            self._context = context
+        self._e_flip = e_flip
+        drafts = self.selections.get(page_id, {})
+        selection_id = self._active_selection_ids.get(page_id)
+        if selection_id not in drafts:
+            selection_id = next(iter(drafts), None)
+        saved = drafts.get(selection_id)
+        default = selection_for_context(context, e_flip=e_flip) if context is not None else None
         if default and saved and (saved.view, saved.axes) == (default.view, default.axes):
-            default = reorient_volume_selection(context, saved, e_flip)
-        elif default and default.view == "2d":
-            # Leave room around all nine handles on a new 2D page. Saved and
-            # manually entered ranges are restored exactly, including overflow.
-            bounds = []
-            for low, high in zip(default.bounds[::2], default.bounds[1::2]):
-                inset = (high - low) * .1
-                bounds.extend((low + inset, high - inset))
-            default = replace(default, bounds=tuple(bounds))
-        self.set_selection(replace(default, operation=self.operation) if default else None, notify=False)
+            selection = reorient_volume_selection(context, saved, e_flip)
+        elif default:
+            existing_count = max(0, len(drafts) - 1) if saved is not None else len(drafts)
+            selection = self._default_selection(context, e_flip, existing_count)
+        elif saved is not None:
+            selection = saved
+        else:
+            selection = None
+        if selection is not None:
+            selection = replace(selection, operation=self.operation)
+            if selection_id is None:
+                selection_id = self._new_selection_id()
+            self.selections.setdefault(page_id, {})[selection_id] = selection
+        self._set_active_selection(selection_id, selection, notify=False)
+
+    def add_selection(self, context=None, *, e_flip=_USE_CACHED_E_FLIP):
+        if context is None:
+            context = self._context
+            if e_flip is _USE_CACHED_E_FLIP:
+                e_flip = self._e_flip
+        elif e_flip is _USE_CACHED_E_FLIP:
+            e_flip = False
+        if self.page_id is None or context is None:
+            return None
+        drafts = self.selections.setdefault(self.page_id, {})
+        selection = self._default_selection(context, e_flip, len(drafts))
+        if selection is None:
+            return None
+        selection_id = self._new_selection_id()
+        drafts[selection_id] = selection
+        self._set_active_selection(selection_id, selection)
+        return selection_id
+
+    def activate_selection(self, selection_id, *, notify=True):
+        drafts = self.selections.get(self.page_id, {})
+        if selection_id not in drafts:
+            return False
+        self._set_active_selection(selection_id, drafts[selection_id], notify=notify)
+        return True
+
+    def update_selection(self, selection_id, selection, *, notify=True):
+        drafts = self.selections.get(self.page_id, {})
+        if selection_id not in drafts:
+            return False
+        drafts[selection_id] = selection
+        if selection_id == self.active_selection_id:
+            self._set_active_selection(selection_id, selection, notify=notify)
+        elif notify:
+            self.selection_changed.emit()
+        return True
 
     def set_operation(self, operation):
         self.operation = operation
@@ -229,16 +330,15 @@ class CropController(QObject):
             self.set_selection(replace(self.selection, operation=operation), notify=False)
 
     def set_selection(self, selection, *, notify=True):
-        self.selection = selection
+        selection_id = self.active_selection_id
         if selection is not None and self.page_id is not None:
-            self.selections[self.page_id] = selection
-        self._syncing = True
-        try:
-            self.popup.set_selection(selection)
-        finally:
-            self._syncing = False
-        if notify:
-            self.selection_changed.emit()
+            drafts = self.selections.setdefault(self.page_id, {})
+            if selection_id is None:
+                selection_id = self._new_selection_id()
+            drafts[selection_id] = selection
+        elif selection is None:
+            selection_id = None
+        self._set_active_selection(selection_id, selection, notify=notify)
 
     def commit_edits(self):
         if self._syncing or self.selection is None:
@@ -259,10 +359,15 @@ class CropController(QObject):
     def clear(self):
         self.popup.hide()
         self.selections.clear()
-        self.selection = None
+        self._active_selection_ids.clear()
+        self._context = None
+        self._e_flip = False
         self.page_id = None
+        self._set_active_selection(None, None, notify=False)
 
     def remove_page(self, page_id):
         self.selections.pop(page_id, None)
+        self._active_selection_ids.pop(page_id, None)
         if self.page_id == page_id:
             self.popup.hide()
+            self._set_active_selection(None, None, notify=False)

@@ -2,8 +2,9 @@
 """真实窗口验收“视图右键 → 处理分析”的完整入口。
 
 默认使用 WSe₂ 时间分辨数据，在隔离设置和扩展目录中构建并安装 EDC 瀑布图插件。
-所有创建都通过 2D／3D 视图区域的真实右键 QMenu 完成；QTimer 操作菜单，避免
-exec_() 阻塞。报告、菜单截图和结果页截图仅写入 .local/outputs/integration-context-menu/。
+内置结果和 EDC 瀑布图都通过 2D／3D 视图区域的真实右键 QMenu 创建；每个实际
+打开的菜单另断言不含已移除的 builtin:edc_curve。QTimer 操作菜单，避免 exec_()
+阻塞。报告、菜单截图和结果页截图仅写入 .local/outputs/integration-context-menu/。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_integration_context_menu.py [npz路径] [--output-dir DIR]
 """
@@ -46,8 +47,10 @@ def _drive_view_create_menu(
     if widget not in (window.plotter, window.canvas_2d):
         widget = window.canvas_2d
     position = QPoint(max(1, widget.width() // 2), max(1, widget.height() // 2))
+    parent_spec = workspace.page_by_id(parent_page_id)
     report = {
         "parent_page_id": parent_page_id,
+        "parent_page_kind": parent_spec.page_kind if parent_spec is not None else None,
         "action_key": action_key,
         "active_before": current.page_id if current is not None else None,
         "opened": False,
@@ -241,6 +244,14 @@ def main() -> int:
         path = args.output_dir / name
         return window.grab().save(str(path))
 
+    def record_menu_without_edc(report, label=None):
+        kind = str(report.get("parent_page_kind") or "未知")
+        record(
+            label or f"{kind} 页菜单不含 builtin:edc_curve",
+            "builtin:edc_curve" not in report["keys"],
+            report["error"] or f"页型={kind}，动作={report['keys']}",
+        )
+
     def current_page_id():
         spec = window.left_workspace.current_spec()
         return spec.page_id if spec is not None else None
@@ -323,6 +334,7 @@ def main() -> int:
 
         def open_menu():
             def after_menu(report):
+                record_menu_without_edc(report)
                 record(
                     f"视图右键提供并触发 {action_key}",
                     report["opened"]
@@ -407,15 +419,25 @@ def main() -> int:
             any(str(key) == "edc_waterfall:create" for key, _label, _order in actions),
             repr(actions),
         )
-        window.canvas_tool_overlay.preset_buttons["yz"].click()
-        wait_for(
-            "X 轴积分来源页",
-            lambda: window.left_workspace.current_spec() is not None
-            and window.left_workspace.current_spec().page_kind == "axis_integral"
-            and int(window.left_workspace.current_spec().params.get("axis_index", -1)) == 0
-            and page_ready(current_page_id(), "2d"),
-            step_x_integral,
-            90000,
+        def checked_home_menu(report):
+            record_menu_without_edc(report, "3D 主页菜单不含 builtin:edc_curve")
+            window.canvas_tool_overlay.preset_buttons["yz"].click()
+            wait_for(
+                "X 轴积分来源页",
+                lambda: window.left_workspace.current_spec() is not None
+                and window.left_workspace.current_spec().page_kind == "axis_integral"
+                and int(window.left_workspace.current_spec().params.get("axis_index", -1)) == 0
+                and page_ready(current_page_id(), "2d"),
+                step_x_integral,
+                90000,
+            )
+
+        inspect_analysis_menu(
+            window,
+            window.left_workspace.home_page_id,
+            guarded(checked_home_menu),
+            output_dir=args.output_dir,
+            shot_prefix="menu-light-home-3d",
         )
 
     def step_x_integral():
@@ -502,6 +524,7 @@ def main() -> int:
         expected = ["builtin:slice_dos", "builtin:energy_dos", "builtin:second_derivative"]
 
         def checked(report):
+            record_menu_without_edc(report, "2D 主页菜单不含 builtin:edc_curve")
             record(
                 "含能量轴的 2D 主页只显示合法内置动作（浅色菜单）",
                 report["opened"] and report["keys"] == expected,
@@ -538,10 +561,10 @@ def main() -> int:
         before_ids = set(window.left_workspace.page_specs)
 
         def checked(report):
+            record_menu_without_edc(report, "energy_dos 结果页菜单不含 builtin:edc_curve")
             record(
                 "非法结果父页没有处理分析子菜单且不建页",
-                report["opened"]
-                and not report["create_present"]
+                not report["create_present"]
                 and set(window.left_workspace.page_specs) == before_ids,
                 report["error"] or f"父页={parent_id}",
             )
@@ -573,7 +596,7 @@ def main() -> int:
             parent_id = pages.get("axis_x")
             if parent_id is None:
                 record("视图右键创建二阶导", False, "X 积分父页不可用")
-                step_edc()
+                step_removed_edc()
                 return
 
             def validate(spec):
@@ -592,44 +615,44 @@ def main() -> int:
                 "builtin:second_derivative",
                 "second_derivative",
                 "2d",
-                step_edc,
+                step_removed_edc,
                 shot_prefix="menu-dark-second",
                 validate=validate,
             )
 
         QTimer.singleShot(600, guarded(create))
 
-    def step_edc():
-        parent_id = pages.get("axis_z_crop")
+    def step_removed_edc():
+        def inspect_crop():
+            parent_id = pages.get("axis_z_crop")
+            if parent_id is None:
+                record("axis_integral_crop 页菜单不含 builtin:edc_curve", False, "Z 轴裁剪父页不可用")
+                step_waterfall()
+                return
+
+            def checked_crop(report):
+                record_menu_without_edc(report, "axis_integral_crop 页菜单不含 builtin:edc_curve")
+                step_waterfall()
+
+            inspect_analysis_menu(window, parent_id, guarded(checked_crop), output_dir=args.output_dir)
+
+        parent_id = pages.get("axis_z")
         if parent_id is None:
-            record("右键创建 edc_curve", False, "Z 轴裁剪父页不可用")
-            step_waterfall()
+            record("E/Z 积分页菜单不含 builtin:edc_curve", False, "Z 轴积分父页不可用")
+            inspect_crop()
             return
 
-        def validate(spec):
-            source = window.left_workspace.page_specs[parent_id]
-            keys = ("crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up")
-            record(
-                "单条 EDC 冻结矩形裁剪父页",
-                spec.params.get("source_page_id") == parent_id
-                and all(spec.params.get(key) == source.params.get(key) for key in keys),
-                json.dumps({key: spec.params.get(key) for key in keys}, ensure_ascii=False),
-            )
+        def checked_axis(report):
+            record_menu_without_edc(report, "E/Z 积分页菜单不含 builtin:edc_curve")
+            inspect_crop()
 
-        create_result(
-            parent_id,
-            "builtin:edc_curve",
-            "edc_curve",
-            "1d",
-            step_waterfall,
-            validate=validate,
-        )
+        inspect_analysis_menu(window, parent_id, guarded(checked_axis), output_dir=args.output_dir)
 
     def step_waterfall():
         parent_id = pages.get("axis_x")
         if parent_id is None or window.plugin_session is None:
             record("右键创建 plugin_derived", False, "X 积分父页或插件会话不可用")
-            step_final()
+            step_result_menus_without_edc()
             return
         window.plugin_session.save_derived_defaults(
             "edc_waterfall", {"k_step_mode": "manual", "k_step": 10.0}
@@ -653,10 +676,32 @@ def main() -> int:
             "edc_waterfall:create",
             "plugin_derived",
             "waterfall",
-            step_final,
+            step_result_menus_without_edc,
             shot_prefix="menu-dark-waterfall",
             validate=validate,
         )
+
+    def step_result_menus_without_edc():
+        page_keys = ["slice_dos", "second_derivative", "plugin_derived"]
+
+        def inspect_next(index=0):
+            if index >= len(page_keys):
+                step_final()
+                return
+            key = page_keys[index]
+            parent_id = pages.get(key)
+            if parent_id is None:
+                record(f"{key} 结果页菜单不含 builtin:edc_curve", False, "结果页不可用")
+                inspect_next(index + 1)
+                return
+
+            def checked(report):
+                record_menu_without_edc(report, f"{key} 结果页菜单不含 builtin:edc_curve")
+                inspect_next(index + 1)
+
+            inspect_analysis_menu(window, parent_id, guarded(checked), output_dir=args.output_dir)
+
+        inspect_next()
 
     def step_final():
         window._set_theme("light")
@@ -678,18 +723,20 @@ def main() -> int:
         if state["finished"]:
             return
         state["finished"] = True
+        passed = sum(1 for item in results if item["ok"])
         payload = {
             "data": str(args.data),
             "data_shape": list(window.core.raw_data.shape) if window.core.raw_data is not None else None,
             "pages": pages,
             "results": results,
             "messages": messages,
-            "success": bool(results) and all(item["ok"] for item in results),
+            "passed": passed,
+            "total": len(results),
+            "success": bool(results) and passed == len(results),
         }
         (args.output_dir / "report.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        passed = sum(1 for item in results if item["ok"])
         print(f"[accept] {passed}/{len(results)} 项通过；输出 {args.output_dir}", flush=True)
         for widget in QApplication.topLevelWidgets():
             if widget.isVisible():

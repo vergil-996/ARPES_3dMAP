@@ -59,6 +59,7 @@ from bandscope.ui.camera_view_controls import (
 from bandscope.ui.crop_controls import CropController
 from bandscope.ui.day_night_switch import DayNightSwitch
 from bandscope.app.crop_integration import CropInteractionMixin
+from bandscope.app.edc_integration import EdcIntegrationMixin
 from bandscope.app.path_slice_integration import PathSliceController
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.app.source_workspace import SourceWorkspaceMixin
@@ -126,7 +127,7 @@ class QuickCloseMessageBox(QMessageBox):
         return super().eventFilter(watched, event)
 
 
-class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, EnhancementInteractionMixin, CropInteractionMixin, QWidget):
+class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, ViewRecipeMixin, EnhancementInteractionMixin, EdcIntegrationMixin, CropInteractionMixin, QWidget):
     refreshFinished = pyqtSignal(object)
     refreshFailed = pyqtSignal(object, str)
 
@@ -159,7 +160,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     BUILTIN_PAGE_CREATE_ACTIONS = (
         ("builtin:slice_dos", "切片内强度积分", 0.0),
         ("builtin:energy_dos", "能级态密度", 10.0),
-        ("builtin:edc_curve", "单条 EDC 曲线", 30.0),
         ("builtin:second_derivative", "二阶导", 40.0),
     )
 
@@ -243,6 +243,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         self.current_render_context = None
         self.axis_crop_selector = None
+        self.axis_crop_selectors = {}
+        self._crop_box_widget = None
+        self._crop_box_widgets = {}
+        self._crop_box_widget_ids = {}
+        self._crop_box_signatures = {}
+        self._crop_box_syncing_ids = set()
         self.axis_crop_overlay = None
         self.axis_crop_canvas_cid = None
         # 轴标题是会话内状态：关页清该页、换数据整体清空。
@@ -862,10 +868,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             line_colors = [theme.ACCENT] * len(self.ax_2d.lines)
         else:
             line_colors = None
-        for selector in (
-            self.axis_crop_selector,
-            self.__dict__.get("_enhancement_selector"),
-        ):
+        crop_selectors = list(self.__dict__.get("axis_crop_selectors", {}).values())
+        if self.axis_crop_selector is not None and self.axis_crop_selector not in crop_selectors:
+            crop_selectors.append(self.axis_crop_selector)
+        for selector in (*crop_selectors, self.__dict__.get("_enhancement_selector")):
             if selector is not None:
                 selector.update_theme()
         VisualEngine.apply_2d_theme(
@@ -1643,36 +1649,35 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.refresh_coordinator.submit_compute(request, work)
 
     def _on_refresh_result(self, request, result):
-        if (
+        page_id = str(request.page_id)
+        is_lazy_scope_denoise = (
             request.cause in {RefreshCause.DENOISE, RefreshCause.DATA_SCOPE}
-            and str(request.page_id).startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
+            and page_id.startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
+        )
+        is_global_denoise = (
+            request.cause == RefreshCause.DENOISE
+            and (
+                request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+                or page_id.startswith(f"{self.GLOBAL_DENOISE_PAGE_ID}:")
+            )
+        )
+        if (
+            (is_lazy_scope_denoise or is_global_denoise)
+            and request.snapshot.get("source_id") != id(self.original_raw_data)
         ):
+            return
+
+        if is_lazy_scope_denoise:
             scope_id = str(request.snapshot.get("scope_id", ""))
             signature = str(request.snapshot.get("denoise_signature", ""))
-            self._pending_scope_denoise_keys.discard((scope_id, signature))
+            if signature != self.shared_denoise_signature:
+                return
             if (
                 request.snapshot.get("roi_commit")
                 and self.__dict__.get("_pending_roi_scope_id") != scope_id
             ):
-                self._discard_roi_scope(
-                    scope_id,
-                    cancel_task=False,
-                    clear_cache=False,
-                    clear_pending=False,
-                )
                 return
-            if (
-                signature != self.shared_denoise_signature
-                or request.snapshot.get("source_id") != id(self.original_raw_data)
-            ):
-                if request.snapshot.get("roi_commit"):
-                    self._discard_roi_scope(
-                        scope_id,
-                        cancel_task=False,
-                        clear_cache=False,
-                        clear_pending=True,
-                    )
-                return
+            self._pending_scope_denoise_keys.discard((scope_id, signature))
             try:
                 self._store_scope_denoise_result(scope_id, result.value, signature)
             except Exception as exc:
@@ -1713,15 +1718,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 )
             return
 
-        if (
-            request.cause == RefreshCause.DENOISE
-            and request.page_id == self._global_denoise_page_id()
-        ):
+        if is_global_denoise:
             expected_signature = request.snapshot.get("denoise_signature")
-            if (
-                expected_signature != self._pending_denoise_signature
-                or request.snapshot.get("source_id") != id(self.original_raw_data)
-            ):
+            if expected_signature != self._pending_denoise_signature:
                 return
             scope_id = str(request.snapshot.get("scope_id", self.FULL_SCOPE_ID))
             pending_scope_id = str(
@@ -1742,6 +1741,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 return
             self._last_compute_backend = result.backend
             self._render_exact_ready = False
+            self.page_render.set_denoise_execution_state("applied")
             self._update_export_button_states()
             # Any page job queued while denoising was based on the previous
             # shared source.  Drop it before the coordinator starts pending
@@ -1792,18 +1792,35 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._finish_ui_refresh(request, result.backend)
 
     def _on_refresh_failed(self, request, message):
+        page_id = str(request.page_id)
         is_lazy_scope_denoise = (
             request.cause in {RefreshCause.DENOISE, RefreshCause.DATA_SCOPE}
-            and str(request.page_id).startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
+            and page_id.startswith(self.SCOPE_DENOISE_PAGE_PREFIX)
         )
+        is_global_denoise = (
+            request.cause == RefreshCause.DENOISE
+            and (
+                request.page_id == self.GLOBAL_DENOISE_PAGE_ID
+                or page_id.startswith(f"{self.GLOBAL_DENOISE_PAGE_ID}:")
+            )
+        )
+        if (
+            (is_lazy_scope_denoise or is_global_denoise)
+            and request.snapshot.get("source_id") != id(self.original_raw_data)
+        ):
+            return
+
         if is_lazy_scope_denoise:
             failed_scope_id = str(request.snapshot.get("scope_id", ""))
-            self._pending_scope_denoise_keys.discard(
-                (
-                    failed_scope_id,
-                    str(request.snapshot.get("denoise_signature", "")),
-                )
-            )
+            signature = str(request.snapshot.get("denoise_signature", ""))
+            if signature != self.shared_denoise_signature:
+                return
+            if (
+                request.snapshot.get("roi_commit")
+                and self.__dict__.get("_pending_roi_scope_id") != failed_scope_id
+            ):
+                return
+            self._pending_scope_denoise_keys.discard((failed_scope_id, signature))
             if request.snapshot.get("roi_commit"):
                 self._discard_roi_scope(
                     failed_scope_id,
@@ -1812,17 +1829,15 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     clear_pending=True,
                 )
             self._render_exact_ready = True
-        is_global_denoise = (
-            request.cause == RefreshCause.DENOISE
-            and request.page_id == self._global_denoise_page_id()
-        )
         if is_global_denoise:
-            if request.snapshot.get("denoise_signature") == self._pending_denoise_signature:
-                self._pending_denoise_methods = None
-                self._pending_denoise_signature = None
-                self._pending_denoise_scope_id = None
+            if request.snapshot.get("denoise_signature") != self._pending_denoise_signature:
+                return
+            self._pending_denoise_methods = None
+            self._pending_denoise_signature = None
+            self._pending_denoise_scope_id = None
             # The previously committed global source is still valid and visible.
             self._render_exact_ready = True
+            self.page_render.set_denoise_execution_state("error", str(message))
         elif not is_lazy_scope_denoise:
             self._render_exact_ready = False
         self._update_export_button_states()
@@ -2080,6 +2095,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         )
         self.btn_tb_crop.toggled.connect(self.on_toggle_interactive_box)
         self.btn_tb_erase.toggled.connect(self.on_toggle_erase)
+        self.canvas_tool_overlay.selection_toggled.connect(self.on_selection_toggled)
+        self.canvas_tool_overlay.new_region_requested.connect(self._on_new_region_requested)
+        self.canvas_tool_overlay.edc_requested.connect(self._create_edc_result_from_selections)
+        path_button = getattr(self.path_slice_controller, "button", None)
+        if path_button is not None:
+            path_button.toggled.connect(
+                lambda checked: checked and self.canvas_tool_overlay.close_selection_panel()
+            )
         self.timeline_bar.switch_flip.toggled.connect(self.on_toggle_e_flip)
         self.canvas_tool_overlay.rotation_preview.connect(self.on_rotation_angle_preview)
         self.canvas_tool_overlay.rotation_committed.connect(self.on_rotation_angle_changed)
@@ -2098,7 +2121,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.page_render.s_up.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_cmap_low.sliderReleased.connect(self.flush_render_levels_refresh)
         self.page_render.s_cmap_high.sliderReleased.connect(self.flush_render_levels_refresh)
-        self.page_render.btn_apply_noise.clicked.connect(self.on_apply_denoise)
+        self.page_render.denoise_edited.connect(self._on_denoise_edited)
+        self.page_render.denoise_committed.connect(self.on_apply_denoise)
+        self.page_render.set_denoise_execution_state("idle")
         self.page_render.camera_pose_committed.connect(self.on_camera_view_pose_committed)
 
         self.time_interval_controller.intervalChanged.connect(
@@ -2334,24 +2359,42 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def _capture_global_denoise_control_state(self):
         detail_state = self.page_control_blank.export_state()
-        state = {"methods": list(self.page_render.get_denoise_settings())}
-        for key in self.DENOISE_CONTROL_STATE_KEYS:
-            state[key] = self._copy_state(detail_state.get(key) or {})
-        return state
+        pipeline_state = self.page_render.denoise_pipeline.export_state()
+        legacy_controls = {
+            key: self._copy_state(detail_state.get(key) or {})
+            for key in self.DENOISE_CONTROL_STATE_KEYS
+        }
+        return {
+            "nodes": self._copy_state(pipeline_state.get("nodes") or []),
+            "methods": self._copy_state(self.page_render.get_denoise_settings()),
+            "legacy_controls": legacy_controls,
+        }
 
     def _render_state_with_global_denoise(self, render_state, denoise_state):
         merged = self._copy_state(render_state) or {}
-        methods = list((denoise_state or {}).get("methods") or ())
-        methods.extend(["None"] * (3 - len(methods)))
-        for index, key in enumerate(("combo_n1", "combo_n2", "combo_n3")):
-            merged[key] = methods[index]
+        denoise_state = denoise_state or {}
+        legacy_controls = denoise_state.get("legacy_controls")
+        if legacy_controls is None:
+            legacy_controls = {
+                key: self._copy_state(denoise_state.get(key) or {})
+                for key in self.DENOISE_CONTROL_STATE_KEYS
+            }
+        if "nodes" in denoise_state:
+            pipeline_state = {"nodes": self._copy_state(denoise_state.get("nodes") or [])}
+        else:
+            methods = list(denoise_state.get("methods") or ())
+            pipeline_state = {"methods": self._copy_state(methods)}
+            methods.extend(["None"] * (3 - len(methods)))
+            for index, key in enumerate(("combo_n1", "combo_n2", "combo_n3")):
+                merged[key] = methods[index]
+        pipeline_state["legacy_controls"] = self._copy_state(legacy_controls)
+        merged["denoise_pipeline"] = pipeline_state
         return merged
 
     def _detail_state_with_global_denoise(self, detail_state, denoise_state):
         merged = self._copy_state(detail_state) or {}
-        denoise_state = denoise_state or {}
         for key in self.DENOISE_CONTROL_STATE_KEYS:
-            merged[key] = self._copy_state(denoise_state.get(key) or {})
+            merged.pop(key, None)
         return merged
 
     def _store_control_state(self, spec, control_state):
@@ -2405,6 +2448,19 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if session is not None:
             session.store_page_state(owner_spec)
 
+    def _sync_denoise_execution_state_after_restore(self):
+        if self.original_raw_data is None:
+            state = "idle"
+        elif self.__dict__.get("_pending_denoise_signature") is not None:
+            state = "running"
+        else:
+            methods = self._normalize_denoise_methods(
+                self.page_render.get_denoise_settings()
+            )
+            signature = self._denoise_signature(methods)
+            state = "applied" if signature == self.shared_denoise_signature else "pending"
+        self.page_render.set_denoise_execution_state(state)
+
     def _restore_page_ui_state(self, spec):
         owner_spec = self._control_state_owner(spec)
         if owner_spec is None:
@@ -2456,6 +2512,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             self._select_control_page(tab_index)
         finally:
             self._syncing_controls = False
+        self._sync_denoise_execution_state_after_restore()
 
     def _persist_axis_integral_page_state(self, spec=None):
         target_spec = spec or self.left_workspace.current_spec()
@@ -3052,45 +3109,136 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         labels = ["X轴下限", "X轴上限", "Y轴下限", "Y轴上限", "Z轴下限", "Z轴上限"]
         return {label: str(logical_bounds[idx]) for idx, label in enumerate(labels)}
 
+    def _crop_box_overlay_renderer(self):
+        plotter = self.__dict__.get("plotter")
+        render_window = getattr(plotter, "ren_win", None)
+        main_renderer = getattr(plotter, "renderer", None)
+        if render_window is None or main_renderer is None:
+            return None
+        renderer = self.__dict__.get("_crop_box_renderer")
+        if renderer is None:
+            renderer = vtk.vtkRenderer()
+            renderer.SetLayer(max(1, main_renderer.GetLayer() + 1))
+            renderer.SetInteractive(True)
+            render_window.AddRenderer(renderer)
+            self._crop_box_renderer = renderer
+        renderer.SetActiveCamera(main_renderer.GetActiveCamera())
+        renderer.SetViewport(*main_renderer.GetViewport())
+        return renderer
+
     def _rebuild_interactive_box(self, logical_bounds=None):
         if not self._can_show_interactive_box():
             return
 
-        box_bounds = self._get_render_bounds_for_box(logical_bounds)
-        if box_bounds is None:
-            return
-        signature = tuple(round(float(value), 5) for value in box_bounds)
-        if signature == self._box_bounds_signature:
-            return
+        controller = self.crop_controller
+        if hasattr(controller, "selections_for_page"):
+            selections = list(controller.selections_for_page())
+        else:
+            selections = [(0, controller.selection)] if controller.selection is not None else []
+        selections = [(selection_id, selection) for selection_id, selection in selections
+                      if selection is not None and selection.view == "3d"]
+        widgets = self.__dict__.setdefault("_crop_box_widgets", {})
+        signatures = self.__dict__.setdefault("_crop_box_signatures", {})
+        syncing = self.__dict__.setdefault("_crop_box_syncing_ids", set())
+        widget_ids = self.__dict__.setdefault("_crop_box_widget_ids", {})
+        wanted = {selection_id for selection_id, _selection in selections}
+        for selection_id in list(widgets):
+            if selection_id not in wanted:
+                self._remove_crop_box_widget(selection_id)
 
-        self._restore_volume_opacity_if_dimmed()
-        self.plotter.clear_box_widgets()
-        box_widget = self.plotter.add_box_widget(
-            callback=lambda poly: self._sync_slice_edits_from_render_bounds(poly.bounds),
-            bounds=box_bounds,
-            factor=1.0,
-            color=theme.ACCENT,
-            rotation_enabled=False,
+        active_id = getattr(controller, "active_selection_id", None)
+        for selection_id, selection in selections:
+            bounds = (logical_bounds if logical_bounds is not None and selection_id == active_id
+                      else self._crop_logical_bounds(selection))
+            box_bounds = self._get_render_bounds_for_box(bounds)
+            if box_bounds is None:
+                continue
+            signature = tuple(round(float(value), 5) for value in box_bounds)
+            box_widget = widgets.get(selection_id)
+            if box_widget is not None and signature == signatures.get(selection_id):
+                continue
+            syncing.add(selection_id)
+            try:
+                if box_widget is None:
+                    box_widget = self.plotter.add_box_widget(
+                        callback=lambda poly, sid=selection_id: self._on_crop_box_callback(sid, poly),
+                        bounds=box_bounds,
+                        factor=1.0,
+                        color=theme.ACCENT,
+                        rotation_enabled=False,
+                    )
+                    overlay_renderer = self._crop_box_overlay_renderer()
+                    if overlay_renderer is not None:
+                        box_widget.Off()
+                        box_widget.SetCurrentRenderer(overlay_renderer)
+                        box_widget.On()
+                    widgets[selection_id] = box_widget
+                    widget_ids[id(box_widget)] = selection_id
+                    box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
+                    box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
+                else:
+                    box_widget.PlaceWidget(box_bounds)
+                signatures[selection_id] = signature
+            finally:
+                syncing.discard(selection_id)
+
+        self._crop_box_widget = widgets.get(active_id)
+        if self._crop_box_widget is None and len(widgets) == 1:
+            only_id = next(iter(widgets))
+            self._crop_box_widget = widgets[only_id]
+            self._box_bounds_signature = signatures.get(only_id)
+        else:
+            self._box_bounds_signature = signatures.get(active_id)
+        if widgets:
+            self._dim_current_volume()
+        else:
+            self._restore_volume_opacity_if_dimmed()
+
+    def _on_crop_box_callback(self, selection_id, poly):
+        if selection_id in self.__dict__.setdefault("_crop_box_syncing_ids", set()):
+            return
+        if not self._activate_crop_selection(selection_id):
+            return
+        bounds = tuple(poly.bounds)
+        self.__dict__.setdefault("_crop_box_signatures", {})[selection_id] = tuple(
+            round(float(value), 5) for value in bounds
         )
-        box_widget.AddObserver("InteractionEvent", self._on_box_interaction_start)
-        box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
-        self._crop_box_widget = box_widget
-        self._box_bounds_signature = signature
+        self._sync_slice_edits_from_render_bounds(bounds, selection_id=selection_id)
+
+    def _remove_crop_box_widget(self, selection_id):
+        widgets = self.__dict__.setdefault("_crop_box_widgets", {})
+        widget = widgets.pop(selection_id, None)
+        if widget is not None:
+            widget.Off()
+            if widget in self.plotter.box_widgets:
+                self.plotter.box_widgets.remove(widget)
+            self.__dict__.setdefault("_crop_box_widget_ids", {}).pop(id(widget), None)
+        self.__dict__.setdefault("_crop_box_signatures", {}).pop(selection_id, None)
 
     def _clear_interactive_box(self):
+        widgets = self.__dict__.setdefault("_crop_box_widgets", {})
+        legacy_widget = self.__dict__.get("_crop_box_widget")
+        if legacy_widget is not None and legacy_widget not in widgets.values():
+            controller = getattr(self, "crop_controller", None)
+            active_id = getattr(controller, "active_selection_id", 0)
+            widgets[active_id] = legacy_widget
         if self.__dict__.get("_enhancement_box_widget") is None:
             self.plotter.clear_box_widgets()
+            for widget in widgets.values():
+                self.__dict__.setdefault("_crop_box_widget_ids", {}).pop(id(widget), None)
+            widgets.clear()
+            self.__dict__.setdefault("_crop_box_signatures", {}).clear()
         else:
-            widget = self.__dict__.get("_crop_box_widget")
-            if widget is not None:
-                widget.Off()
-                if widget in self.plotter.box_widgets:
-                    self.plotter.box_widgets.remove(widget)
+            for selection_id in list(widgets):
+                self._remove_crop_box_widget(selection_id)
         self._crop_box_widget = None
         self._box_bounds_signature = None
 
     def _find_main_volume(self):
-        volumes = self.plotter.renderer.GetVolumes()
+        renderer = getattr(self.plotter, "renderer", None)
+        if renderer is None:
+            return None
+        volumes = renderer.GetVolumes()
         volumes.InitTraversal()
         for _ in range(volumes.GetNumberOfItems()):
             vol = volumes.GetNextItem()
@@ -3099,12 +3247,18 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         return None
 
     def _on_box_interaction_start(self, obj, event):
+        selection_id = self.__dict__.get("_crop_box_widget_ids", {}).get(id(obj))
+        if (selection_id is not None
+                and selection_id not in self.__dict__.get("_crop_box_syncing_ids", set())):
+            self._activate_crop_selection(selection_id)
         if self._box_interacting:
             return
         self._dim_current_volume()
         self._box_interacting = True
 
     def _dim_current_volume(self):
+        if self.__dict__.get("_orig_volume_opacity") is not None:
+            return
         vol = self._find_main_volume()
         if vol is None:
             return
@@ -3119,17 +3273,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         prop.SetScalarOpacity(lowered)
 
     def _on_box_interaction_end(self, obj, event):
-        if not self._box_interacting:
-            return
+        self._box_interacting = False
+
+    def _restore_volume_opacity_if_dimmed(self):
         vol = self._find_main_volume()
         if vol is not None and self._orig_volume_opacity is not None:
             vol.GetProperty().SetScalarOpacity(self._orig_volume_opacity)
         self._orig_volume_opacity = None
         self._box_interacting = False
-
-    def _restore_volume_opacity_if_dimmed(self):
-        if self._box_interacting:
-            self._on_box_interaction_end(None, None)
 
     def _get_display_levels(self):
         return tuple(self._enhancement_background_style()["levels"])
@@ -3590,6 +3741,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 if show_message:
                     self._show_message("无法取对数", "当前页没有可用的 1D 曲线。", QMessageBox.Information)
                 return False
+            frozen_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+            if frozen_curve is not None:
+                snapshot["curve_id"] = frozen_curve.get("curve_id", "")
             if curve_kind is not None:
                 snapshot["curve_kind"] = curve_kind
             source_curves = [snapshot]
@@ -3612,18 +3766,25 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         base_curve = log_curves[0]
         base_title = base_curve.get("source_title") or base_curve.get("title") or "1D 曲线"
+        log_params = {
+            "log_base": "log10",
+            "comparison_kind": self._curve_kind_for_spec(spec),
+            "x_match_policy": spec.params.get(
+                "x_match_policy", context.get("x_match_policy", "shared")
+            ),
+            "base_curve": copy.deepcopy(base_curve),
+            "overlay_curves": [copy.deepcopy(curve) for curve in log_curves[1:]],
+        }
+        for key in ("curve_metadata", "source_scope_metadata", "source_rotation_angle"):
+            if key in spec.params:
+                log_params[key] = copy.deepcopy(spec.params[key])
         new_spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=self._make_unique_page_title(f"log10 - {base_title}"),
             page_kind=self.LOG_1D_PAGE_KIND,
             source_module="data_process",
             source_page_id=spec.page_id,
-            params={
-                "log_base": "log10",
-                "comparison_kind": self._curve_kind_for_spec(spec),
-                "base_curve": copy.deepcopy(base_curve),
-                "overlay_curves": [copy.deepcopy(curve) for curve in log_curves[1:]],
-            },
+            params=log_params,
         )
         self._seed_control_state_for_spec(new_spec)
         self.left_workspace.add_page(new_spec)
@@ -3640,7 +3801,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             dialog = SettingsDialog(
                 self.backend_manager,
                 self.render_quality,
-                self.page_control_blank,
                 self,
                 plugin_panel=plugin_panel,
                 update_panel=self.update_controller.create_settings_panel(),
@@ -3670,6 +3830,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         menu = QMenu(owner)
         menu.setStyleSheet(self.CONTEXT_MENU_STYLE)
         return menu, global_pos
+
+    def _add_enhancement_region(self):
+        self.canvas_tool_overlay.close_selection_panel()
+        return super()._add_enhancement_region()
 
     def _show_curve_context_menu(self, pos):
         if self._crop_enabled():
@@ -4057,15 +4221,42 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     def _configure_time_controls(self):
         self._bind_time_interval(self.left_workspace.current_spec(), animate=True)
 
+    def _can_export_curve_comparison(self, spec):
+        return bool(
+            spec is not None
+            and spec.page_kind == self.COMPARISON_PAGE_KIND
+            and spec.params.get("comparison_kind") == "edc_curve"
+            and spec.params.get("x_match_policy") == "per_curve"
+            and self._normalize_curve_snapshot(spec.params.get("base_curve")) is not None
+        )
+
+    def _can_export_edc_log(self, spec):
+        return bool(
+            spec is not None
+            and spec.page_kind == self.LOG_1D_PAGE_KIND
+            and spec.params.get("comparison_kind") == "edc_curve"
+            and self._normalize_curve_snapshot(spec.params.get("base_curve")) is not None
+        )
+
     def _update_export_button_states(self):
         has_data = self.base_raw_data is not None
         active_spec = self.left_workspace.current_spec()
         can_capture = active_spec is not None
+        snapshot_export = bool(
+            active_spec is not None
+            and (
+                (active_spec.page_kind == "edc_curve" and active_spec.params.get("base_curve"))
+                or self._can_export_curve_comparison(active_spec)
+                or self._can_export_edc_log(active_spec)
+            )
+        )
         can_export = (
-            has_data
+            (has_data or snapshot_export)
             and self._render_exact_ready
             and active_spec is not None
-            and active_spec.page_kind not in {"control_panel", self.COMPARISON_PAGE_KIND}
+            and active_spec.page_kind != "control_panel"
+            and (active_spec.page_kind != self.COMPARISON_PAGE_KIND
+                 or self._can_export_curve_comparison(active_spec))
         )
         self.btn_tb_export.setEnabled(can_export)
         self.btn_tb_shot.setEnabled(can_capture)
@@ -4075,6 +4266,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         erase_button = self.__dict__.get("btn_tb_erase")
         if erase_button is not None:
             erase_button.setEnabled(has_data and active_spec is not None and active_spec.page_kind not in {"control_panel", self.PATH_SLICE_PAGE_KIND})
+        overlay = getattr(self, "canvas_tool_overlay", None)
+        selection_button = getattr(overlay, "selection_button", None)
+        if selection_button is not None:
+            selection_button.setEnabled(
+                has_data and active_spec is not None
+                and active_spec.page_kind not in {"control_panel", self.PATH_SLICE_PAGE_KIND}
+            )
 
     @staticmethod
     def _format_filename_number(value):
@@ -4968,7 +5166,29 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         }
 
     def _get_edc_curve_context(self, spec, raw_data, coords):
-        return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
+        snapshot = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        if snapshot is None:
+            return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
+        context = {
+            "view": "1d",
+            "x_data": snapshot["x_data"],
+            "y_data": snapshot["y_data"],
+            "title": spec.title or snapshot["title"],
+            "xlabel": snapshot.get("xlabel") or "Energy (eV)",
+            "ylabel": "Intensity (a.u.)",
+        }
+        metadata = next(
+            (
+                item for item in spec.params.get("curve_metadata", ())
+                if item.get("curve_id") == snapshot.get("curve_id")
+            ),
+            None,
+        )
+        if metadata is None and spec.params.get("curve_metadata"):
+            metadata = spec.params["curve_metadata"][0]
+        if metadata:
+            context.update(copy.deepcopy(metadata))
+        return context
 
     def _get_curve_comparison_context(self, spec):
         comparison_kind = self._curve_kind_for_spec(spec)
@@ -4989,7 +5209,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 continue
             if normalized.get("curve_kind") not in (None, comparison_kind):
                 continue
-            if not self._curve_x_data_matches(base_curve, normalized):
+            if (spec.params.get("x_match_policy") != "per_curve"
+                    and not self._curve_x_data_matches(base_curve, normalized)):
                 continue
             normalized["curve_kind"] = comparison_kind
             normalized.update(curve_id=normalized.get("curve_id") or f"legacy:overlay:{index}",
@@ -5002,6 +5223,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "xlabel": base_curve.get("xlabel") or "",
             "ylabel": "Intensity (a.u.)",
             "comparison_kind": comparison_kind,
+            "x_match_policy": spec.params.get("x_match_policy", "shared"),
             "curves": curves,
         }
 
@@ -5018,7 +5240,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             normalized = self._normalize_curve_snapshot(curve)
             if normalized is None:
                 continue
-            if not self._curve_x_data_matches(base_curve, normalized):
+            if (spec.params.get("x_match_policy") != "per_curve"
+                    and not self._curve_x_data_matches(base_curve, normalized)):
                 continue
             normalized["curve_kind"] = self.LOG_1D_PAGE_KIND
             normalized.update(curve_id=normalized.get("curve_id") or f"legacy:overlay:{index}",
@@ -5034,6 +5257,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 "title": spec.title,
                 "xlabel": curve.get("xlabel") or "",
                 "ylabel": "log10(Intensity) (a.u.)",
+                "x_match_policy": spec.params.get("x_match_policy", "shared"),
             }
         return {
             "view": "1d_comparison",
@@ -5041,6 +5265,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "xlabel": base_curve.get("xlabel") or "",
             "ylabel": "log10(Intensity) (a.u.)",
             "comparison_kind": self.LOG_1D_PAGE_KIND,
+            "x_match_policy": spec.params.get("x_match_policy", "shared"),
             "curves": curves,
         }
 
@@ -5525,6 +5750,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return self._get_log_curve_context(spec)
         if spec.page_kind == self.PLUGIN_CURVE_PAGE_KIND:
             return self._get_plugin_curve_context(spec)
+        if spec.page_kind == "edc_curve" and spec.params.get("base_curve") is not None:
+            return self._get_edc_curve_context(spec, None, None)
 
         raw_data, coords = self._get_display_state_for_spec(spec)
         if raw_data is None or coords is None:
@@ -5760,8 +5987,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._persist_active_page_state()
         spec = self.left_workspace.page_by_id(page_id)
         if spec is None:
+            self.canvas_tool_overlay.close_selection_panel()
             return
 
+        if spec.page_kind in {"control_panel", self.PATH_SLICE_PAGE_KIND}:
+            self.canvas_tool_overlay.close_selection_panel()
         self.active_page_spec = spec
         path_controller = self._path_slices()
         if path_controller is not None:
@@ -5877,8 +6107,17 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         except Exception:
             pass
 
+    def _on_denoise_edited(self):
+        if getattr(self, "_syncing_controls", False):
+            return
+        self._pending_denoise_methods = None
+        self._pending_denoise_signature = None
+        self._pending_denoise_scope_id = None
+        self.page_render.set_denoise_execution_state("pending")
+
     def on_apply_denoise(self):
         if self.original_raw_data is None:
+            self.page_render.set_denoise_execution_state("idle")
             return
 
         if not self.__dict__.get("data_scopes"):
@@ -5893,6 +6132,15 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 clear_pending=True,
             )
 
+        methods = self._normalize_denoise_methods(
+            self.page_render.get_denoise_settings()
+        )
+        signature = self._denoise_signature(methods)
+        if signature != self.__dict__.get("_pending_denoise_signature"):
+            self._pending_denoise_methods = None
+            self._pending_denoise_signature = None
+            self._pending_denoise_scope_id = None
+
         current_spec = self.left_workspace.current_spec()
         if current_spec is not None and current_spec.page_kind != "control_panel":
             target_spec = current_spec
@@ -5900,37 +6148,30 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             target_page_id = self.last_visual_page_id or self.left_workspace.home_page_id
             target_spec = self.left_workspace.page_by_id(target_page_id)
         if target_spec is None:
+            self.page_render.set_denoise_execution_state("idle")
             return
 
-        try:
-            methods = self.page_control_blank.build_method_specs(
-                self.page_render.get_denoise_settings(),
-                data_shape=self.original_raw_data.shape,
-            )
-        except ValueError as exc:
-            self._show_message("去噪参数无效", str(exc), QMessageBox.Warning)
-            return
-
-        methods = self._normalize_denoise_methods(methods)
         try:
             self._validate_denoise_for_scopes(methods)
         except ValueError as exc:
-            self._show_message(
-                "去噪参数与数据范围不兼容",
-                str(exc),
-                QMessageBox.Warning,
-            )
+            self._pending_denoise_methods = None
+            self._pending_denoise_signature = None
+            self._pending_denoise_scope_id = None
+            self._render_exact_ready = True
+            self._update_export_button_states()
+            self.page_render.set_denoise_execution_state("error", str(exc))
             return
-        signature = self._denoise_signature(methods)
+
         self._persist_page_ui_state(self.active_page_spec)
         if current_spec is None or current_spec.page_id != target_spec.page_id:
             self.left_workspace.activate_page(target_spec.page_id)
 
-        if signature == self._pending_denoise_signature:
+        if signature == self.__dict__.get("_pending_denoise_signature"):
+            self.page_render.set_denoise_execution_state("running")
             return
 
-        # Every Apply creates a new global generation.  This invalidates a
-        # still-running older pipeline without attempting an unsafe hard cancel.
+        # Every committed configuration creates a new global generation.  This
+        # invalidates older work without attempting an unsafe hard cancel.
         target_descriptor = self._scope_for_spec(target_spec)
         target_scope_id = (
             target_descriptor.scope_id if target_descriptor is not None else self.FULL_SCOPE_ID
@@ -5948,6 +6189,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         if not methods:
             self._commit_shared_denoise((), None, signature, target_scope_id)
+            self.page_render.set_denoise_execution_state("applied")
             self.request_refresh(
                 RefreshCause.DENOISE,
                 RenderQuality.EXACT,
@@ -5969,6 +6211,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         ):
             self._pending_denoise_methods = None
             self._pending_denoise_signature = None
+            self._pending_denoise_scope_id = None
+            self.page_render.set_denoise_execution_state("applied")
             self.request_refresh(
                 RefreshCause.DENOISE,
                 RenderQuality.EXACT,
@@ -5980,6 +6224,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._pending_denoise_signature = signature
         self._pending_denoise_scope_id = target_scope_id
         self._render_exact_ready = False
+        self.page_render.set_denoise_execution_state("running")
         self._update_export_button_states()
         job = self._build_denoise_job(target_descriptor, methods)
 
@@ -6058,8 +6303,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         controller = self.__dict__.get("crop_controller")
         if controller is not None:
             controller.popup.hide()
+            controller.enabled = False
             controller.selection = None
             controller.page_id = None
+        self.canvas_tool_overlay.close_selection_panel()
         self.btn_tb_crop.setChecked(False)
         self.btn_tb_erase.setChecked(False)
         self.update_ax_slider_range()
@@ -7114,13 +7361,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
         if action_key == "builtin:energy_dos":
             return kind == "home" or (integral_kind and axis_index in (0, 1))
-        if action_key == "builtin:edc_curve":
-            if kind != "axis_integral_crop" or axis_index != 2:
-                return False
-            try:
-                return self._axis_crop_rect_from_params(spec.params) is not None
-            except (KeyError, TypeError, ValueError, AttributeError):
-                return False
         if action_key == "builtin:second_derivative":
             if integral_kind:
                 return axis_index in (0, 1)
@@ -7216,7 +7456,6 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         builders = {
             "builtin:slice_dos": self._build_slice_dos_spec,
             "builtin:energy_dos": self._build_energy_dos_spec,
-            "builtin:edc_curve": self._build_edc_curve_spec,
             "builtin:second_derivative": self._build_second_derivative_spec,
         }
         builder = builders.get(key)
@@ -7238,12 +7477,18 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
 
     def _clear_axis_crop_selector(self):
-        if self.axis_crop_selector is None:
-            return
-        try:
-            self.axis_crop_selector.dispose()
-        except Exception:
-            pass
+        selectors = self.__dict__.setdefault("axis_crop_selectors", {})
+        legacy = self.__dict__.get("axis_crop_selector")
+        if legacy is not None and legacy not in selectors.values():
+            controller = getattr(self, "crop_controller", None)
+            active_id = getattr(controller, "active_selection_id", 0)
+            selectors[active_id] = legacy
+        for selector in selectors.values():
+            try:
+                selector.dispose()
+            except Exception:
+                pass
+        selectors.clear()
         self.axis_crop_selector = None
 
     def _clear_axis_crop_overlay(self, redraw=False):
@@ -7261,13 +7506,15 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._clear_axis_crop_overlay(redraw=redraw)
 
     def _axis_crop_selector_will_blit(self, event):
-        selector = self.axis_crop_selector
-        return bool(
-            selector is not None
-            and selector.active
-            and event is not None
-            and event.inaxes is self.ax_2d
-            and getattr(selector, "_eventpress", None) is not None
+        if event is None or event.inaxes is not self.ax_2d:
+            return False
+        selectors = list(self.__dict__.get("axis_crop_selectors", {}).values())
+        legacy = self.__dict__.get("axis_crop_selector")
+        if legacy is not None and legacy not in selectors:
+            selectors.append(legacy)
+        return any(
+            selector.active and getattr(selector, "_eventpress", None) is not None
+            for selector in selectors
         )
 
     def _active_2d_blit_artists(self):
@@ -7276,8 +7523,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if overlay is not None:
             artists.append(overlay)
 
-        selector = self.axis_crop_selector
-        if selector is not None:
+        selectors = list(self.__dict__.get("axis_crop_selectors", {}).values())
+        legacy = self.__dict__.get("axis_crop_selector")
+        if legacy is not None and legacy not in selectors:
+            selectors.append(legacy)
+        for selector in selectors:
             for artist in getattr(selector, "artists", ()):
                 artists.append(artist)
 
@@ -7292,8 +7542,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return
 
         self.plot_coordinate_tooltip._background = background
-        selector = self.axis_crop_selector
-        if selector is not None:
+        selectors = list(self.__dict__.get("axis_crop_selectors", {}).values())
+        legacy = self.__dict__.get("axis_crop_selector")
+        if legacy is not None and legacy not in selectors:
+            selectors.append(legacy)
+        for selector in selectors:
             selector.background = background
         enhancement = self.__dict__.get("_enhancement_selector")
         if enhancement is not None:
@@ -7732,7 +7985,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 self._reset_3d_camera_to_default()
             self._capture_3d_camera_position()
             self._rendered_rotation_angle = float(self.rotation_angle)
-            if self._box_interacting:
+            if (self.__dict__.get("_box_interacting", False)
+                    or self.__dict__.get("_orig_volume_opacity") is not None):
                 self._orig_volume_opacity = None
                 self._dim_current_volume()
         elif render_context["view"] == self.PATH_SLICE_PAGE_KIND:
@@ -7954,10 +8208,94 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             export_data["time"] = np.asarray(coords["delay"], dtype=np.float32)
         return "Save slice-integrated intensity", "slice_dos.mat", export_data
 
+    @staticmethod
+    def _edc_export_metadata(export_data, context, suffix=""):
+        for key in ("kx_range", "ky_range", "energy_range"):
+            if context.get(key) is not None:
+                export_data[key + suffix] = np.asarray(context[key], dtype=np.float32)
+        if context.get("index_bounds") is not None:
+            export_data["index_bounds" + suffix] = np.asarray(
+                context["index_bounds"], dtype=np.int32
+            ).reshape(-1)
+        if context.get("crop_rect") is not None:
+            export_data["crop_rect" + suffix] = My3DAnalyzer._crop_rect_export_array(
+                context["crop_rect"]
+            )
+        for key, dtype in (
+            ("source_t_range", np.float32),
+            ("source_t_indices", np.int32),
+            ("source_t_index", np.int32),
+            ("source_t_value", np.float32),
+        ):
+            if context.get(key) is not None:
+                export_data[key + suffix] = np.asarray(context[key], dtype=dtype).reshape(
+                    1 if key in {"source_t_index", "source_t_value"} else -1
+                )
+
+    @staticmethod
+    def _edc_export_source_rotation(export_data, spec):
+        if spec.params.get("source_rotation_angle") is not None:
+            export_data["source_rotation_angle"] = np.asarray(
+                [float(spec.params["source_rotation_angle"])], dtype=np.float32
+            )
+
+    def _build_snapshot_edc_export_payload(self, spec, context):
+        export_data = {
+            "E": np.asarray(context["x_data"], dtype=np.float32),
+            "intensity": np.asarray(context["y_data"], dtype=np.float32),
+        }
+        self._edc_export_metadata(export_data, context)
+        self._edc_export_source_rotation(export_data, spec)
+        return "Save EDC curve result", "edc_curve.mat", export_data
+
+    def _build_frozen_edc_curves_export_payload(self, spec, context, title):
+        metadata_by_id = {
+            item.get("curve_id"): item
+            for item in spec.params.get("curve_metadata", ())
+            if isinstance(item, dict)
+        }
+        curves = context.get("curves")
+        if curves is None:
+            base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve")) or {}
+            curves = [{
+                "curve_id": base_curve.get("curve_id"),
+                "x_data": context["x_data"],
+                "y_data": context["y_data"],
+            }]
+        export_data = {}
+        for index, curve in enumerate(curves, 1):
+            export_data[f"E_{index}"] = np.asarray(curve["x_data"], dtype=np.float32)
+            export_data[f"intensity_{index}"] = np.asarray(curve["y_data"], dtype=np.float32)
+            metadata = metadata_by_id.get(curve.get("curve_id"))
+            if metadata:
+                self._edc_export_metadata(export_data, metadata, suffix=f"_{index}")
+        self._edc_export_source_rotation(export_data, spec)
+        return title, self._sanitize_filename_component(spec.title) + ".mat", export_data
+
+    def _build_curve_comparison_export_payload(self, spec):
+        if not self._can_export_curve_comparison(spec):
+            return None
+        context = self._get_curve_comparison_context(spec)
+        if context is None:
+            return None
+        return self._build_frozen_edc_curves_export_payload(
+            spec, context, "Save EDC comparison result"
+        )
+
+    def _build_edc_log_export_payload(self, spec):
+        context = self._get_log_curve_context(spec)
+        if context is None:
+            return None
+        return self._build_frozen_edc_curves_export_payload(
+            spec, context, "Save EDC log curve result"
+        )
+
     def _build_edc_export_payload(self, spec, raw_data, coords):
         context = self._get_edc_curve_context(spec, raw_data, coords)
         if context is None:
             return None
+        if spec.params.get("base_curve") is not None:
+            return self._build_snapshot_edc_export_payload(spec, context)
         descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
         e_slice = (
             descriptor.spatial_slices[2]
@@ -8251,6 +8589,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             for key, value in self._crop_export_metadata(spec, context, coords).items():
                 payload.setdefault(key, value)
             return "导出裁剪结果", self._sanitize_filename_component(spec.title) + ".mat", payload
+        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+            return self._build_curve_comparison_export_payload(spec)
         if spec.page_kind == "home":
             return self._build_home_export_payload(raw_data, coords)
         elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
@@ -8259,6 +8599,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return self._build_slice_dos_export_payload(spec, raw_data, coords)
         elif spec.page_kind == "edc_curve":
             return self._build_edc_export_payload(spec, raw_data, coords)
+        elif (spec.page_kind == self.LOG_1D_PAGE_KIND
+              and spec.params.get("comparison_kind") == "edc_curve"):
+            return self._build_edc_log_export_payload(spec)
         elif spec.page_kind == self.PATH_SLICE_PAGE_KIND:
             context = self._compute_render_context(spec)
             return self._path_slices().export_payload(spec, context) if context is not None else None
@@ -8299,9 +8642,17 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def export_current_result(self):
         spec = self.left_workspace.current_spec()
-        if spec is None or self.core.raw_data is None or spec.page_kind == "control_panel":
+        if spec is None or spec.page_kind == "control_panel":
             return
-        if spec.page_kind == self.COMPARISON_PAGE_KIND:
+        comparison_export = self._can_export_curve_comparison(spec)
+        snapshot_export = bool(
+            (spec.page_kind == "edc_curve" and spec.params.get("base_curve"))
+            or comparison_export
+            or self._can_export_edc_log(spec)
+        )
+        if self.core.raw_data is None and not snapshot_export:
+            return
+        if spec.page_kind == self.COMPARISON_PAGE_KIND and not comparison_export:
             self._show_message(
                 "无法导出数据",
                 "比较页暂不导出叠加曲线数据，请使用左侧视图保存导出图片。",
@@ -8309,19 +8660,30 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
             return
 
-        raw_data, coords = self._get_display_state_for_spec(spec)
-        if raw_data is None or coords is None:
-            return
+        if snapshot_export:
+            raw_data = None
+            coords = (
+                {} if "source_scope_metadata" in spec.params
+                else getattr(self.core, "coords", {}) or {}
+            )
+        else:
+            raw_data, coords = self._get_display_state_for_spec(spec)
+            if raw_data is None or coords is None:
+                return
 
         payload = self._build_export_payload(spec, raw_data, coords)
         if payload is None:
             return
         title, default_name, export_data = payload
-        export_data.update(
-            self._scope_export_metadata(self._scope_for_spec(spec), coords)
-        )
+        if "source_scope_metadata" in spec.params:
+            export_data.update(copy.deepcopy(spec.params["source_scope_metadata"] or {}))
+        else:
+            export_data.update(
+                self._scope_export_metadata(self._scope_for_spec(spec), coords)
+            )
         self._export_allow_tabular = (
-            My3DAnalyzer._find_tabular_primary(export_data)[0] is not None
+            spec.page_kind != self.COMPARISON_PAGE_KIND
+            and My3DAnalyzer._find_tabular_primary(export_data)[0] is not None
         )
 
         path = self._choose_export_path(title, default_name)

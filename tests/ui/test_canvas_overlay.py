@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QColor, QImage, QTransform
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QFrame, QPushButton, QVBoxLayout, QWidget
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 
@@ -30,13 +30,84 @@ class CanvasToolOverlayTests(unittest.TestCase):
         return parent, overlay, buttons
 
     def test_existing_actions_move_into_the_canvas_tool_group(self):
-        _parent, overlay, buttons = self.make_overlay()
-        for button, name in zip(buttons, ("裁剪", "裁空", "导出结果")):
-            self.assertIs(button.parentWidget(), overlay)
+        parent, overlay, buttons = self.make_overlay()
+        crop_button, erase_button, export_button = buttons
+        self.assertIs(export_button.parentWidget(), overlay)
+        self.assertIs(overlay.selection_button.parentWidget(), overlay)
+        self.assertIs(overlay.selection_panel.parentWidget(), parent)
+        self.assertIsInstance(overlay.selection_panel, QFrame)
+        self.assertIsInstance(overlay.selection_panel.layout(), QVBoxLayout)
+        self.assertFalse(overlay.selection_panel.windowFlags() & Qt.Popup)
+        self.assertTrue(overlay.selection_button.isCheckable())
+        self.assertEqual(overlay.selection_button.accessibleName(), "框选范围")
+        for button, name, icon in (
+            (crop_button, "裁剪", "ic_fluent_crop_regular"),
+            (erase_button, "裁空", "ic_fluent_eraser_regular"),
+            (overlay.edc_button, "生成 EDC", "ic_fluent_data_trending_regular"),
+            (overlay.new_region_button, "新增框选范围", "ic_fluent_add_regular"),
+        ):
+            self.assertIs(button.parentWidget(), overlay.selection_panel)
             self.assertEqual(button.text(), "")
             self.assertEqual(button.accessibleName(), name)
+            self.assertEqual(button.property("fluentIconName"), icon)
+            self.assertFalse(button.icon().isNull())
             self.assertEqual(button.size().width(), 28)
             self.assertEqual(button.size().height(), 26)
+        self.assertEqual(export_button.accessibleName(), "导出结果")
+        self.assertEqual(export_button.size().width(), 28)
+        self.assertEqual(export_button.size().height(), 26)
+        self.assertEqual(
+            overlay.selection_button.property("fluentIconName"),
+            "ic_fluent_select_object_regular",
+        )
+        self.assertFalse(overlay.selection_button.icon().isNull())
+
+    def test_selection_button_toggles_panel_and_emits_state_changes(self):
+        parent, overlay, _buttons = self.make_overlay()
+        parent.show()
+        states = []
+        overlay.selection_toggled.connect(states.append)
+        overlay.selection_button.click()
+        self.assertTrue(overlay.selection_button.isChecked())
+        self.assertTrue(overlay.selection_panel.isVisible())
+        overlay.selection_button.click()
+        self.assertFalse(overlay.selection_button.isChecked())
+        self.assertFalse(overlay.selection_panel.isVisible())
+        self.assertEqual(states, [True, False])
+
+        overlay.set_selection_panel_visible(True)
+        overlay.set_selection_panel_visible(True)
+        self.assertTrue(overlay.selection_panel.isVisible())
+        self.assertEqual(states, [True, False, True])
+        overlay.close_selection_panel()
+        overlay.close_selection_panel()
+        self.assertFalse(overlay.selection_panel.isVisible())
+        self.assertEqual(states, [True, False, True, False])
+
+        overlay.set_selection_panel_visible(True)
+        overlay.hide()
+        self.assertFalse(overlay.selection_panel.isVisible())
+        self.assertFalse(overlay.selection_button.isChecked())
+        self.assertEqual(states, [True, False, True, False, True, False])
+
+    def test_selection_panel_exposes_four_actions(self):
+        _parent, overlay, buttons = self.make_overlay()
+        crop_button, erase_button, _export_button = buttons
+        actions = []
+        crop_button.clicked.connect(lambda: actions.append("crop"))
+        erase_button.clicked.connect(lambda: actions.append("erase"))
+        overlay.edc_requested.connect(lambda: actions.append("edc"))
+        overlay.new_region_requested.connect(lambda: actions.append("new"))
+        self.assertFalse(overlay.edc_button.isCheckable())
+        self.assertFalse(overlay.new_region_button.isCheckable())
+        for button in (
+            crop_button,
+            erase_button,
+            overlay.edc_button,
+            overlay.new_region_button,
+        ):
+            button.click()
+        self.assertEqual(actions, ["crop", "erase", "edc", "new"])
 
     def test_overlay_uses_a_vertical_tool_group(self):
         _parent, overlay, _buttons = self.make_overlay()
@@ -69,6 +140,29 @@ class CanvasToolOverlayTests(unittest.TestCase):
         overlay.reposition()
         self.assertLessEqual(overlay.y() + overlay.height(), parent.height())
         self.assertFalse(overlay.path_button.isHidden())
+
+    def test_selection_panel_repositions_left_of_button_and_stays_in_parent(self):
+        parent, overlay, _buttons = self.make_overlay()
+        parent.show()
+        overlay.reposition()
+        overlay.set_selection_panel_visible(True)
+        anchor = overlay.selection_button.mapTo(parent, QPoint(0, 0))
+        panel = overlay.selection_panel
+        self.assertLessEqual(panel.x() + panel.width() + 8, anchor.x())
+        self.assertGreaterEqual(panel.x(), 0)
+        self.assertGreaterEqual(panel.y(), 0)
+        self.assertLessEqual(panel.x() + panel.width(), parent.width())
+        self.assertLessEqual(panel.y() + panel.height(), parent.height())
+
+        parent.resize(360, 140)
+        overlay.reposition()
+        anchor = overlay.selection_button.mapTo(parent, QPoint(0, 0))
+        self.assertLessEqual(panel.x() + panel.width() + 8, anchor.x())
+        self.assertGreaterEqual(panel.x(), 0)
+        self.assertGreaterEqual(panel.y(), 0)
+        self.assertLessEqual(panel.x() + panel.width(), parent.width())
+        self.assertLessEqual(panel.y() + panel.height(), parent.height())
+        self.assertEqual(panel.layout().spacing(), 0)
 
     def test_rounded_corners_are_transparent(self):
         _parent, overlay, _buttons = self.make_overlay()
@@ -154,11 +248,24 @@ class CanvasToolOverlayTests(unittest.TestCase):
             self.assertIs(button.parentWidget(), overlay.view_container)
         layout = overlay.layout()
         self.assertGreater(layout.indexOf(overlay.view_container), layout.indexOf(overlay.reset_button))
-        self.assertLess(layout.indexOf(overlay.view_container), layout.indexOf(overlay.crop_button))
+        self.assertLess(layout.indexOf(overlay.view_container), layout.indexOf(overlay.selection_button))
+        self.assertEqual(layout.indexOf(overlay.crop_button), -1)
         overlay.switch_axes.click()
         overlay.switch_flip.click()
         self.assertTrue(overlay.switch_axes.isChecked())
         self.assertTrue(overlay.switch_flip.isChecked())
+
+    def test_path_button_is_inserted_before_selection_in_the_main_toolbar(self):
+        _parent, overlay, _buttons = self.make_overlay()
+        overlay.install_path_button(QPushButton("折线路径切片"))
+        overlay.set_path_available(True)
+        layout = overlay.layout()
+        self.assertIs(overlay.path_button.parentWidget(), overlay)
+        self.assertEqual(
+            layout.indexOf(overlay.path_button) + 1,
+            layout.indexOf(overlay.selection_button),
+        )
+        self.assertLess(layout.indexOf(overlay.selection_button), layout.indexOf(overlay.export_button))
 
     def test_rotation_popup_closes_with_button_and_escape_and_preserves_highlight(self):
         parent, overlay, _buttons = self.make_overlay()
@@ -187,6 +294,19 @@ class CanvasToolOverlayTests(unittest.TestCase):
         overlay.close_rotation_panel(commit=False)
         overlay.set_rotation_angle(0)
         self.assertFalse(overlay.rotation_button.isChecked())
+
+    def test_rotation_and_selection_panels_are_mutually_exclusive(self):
+        parent, overlay, _buttons = self.make_overlay()
+        parent.show()
+        overlay.selection_button.click()
+        self.assertTrue(overlay.selection_panel.isVisible())
+        overlay.rotation_button.click()
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.selection_panel.isVisible())
+        self.assertFalse(overlay.selection_button.isChecked())
+        overlay.selection_button.click()
+        self.assertTrue(overlay.selection_panel.isVisible())
+        self.assertFalse(overlay.rotation_panel.isVisible())
 
     def test_timeline_state_round_trip_drives_the_same_overlay_controls(self):
         from bandscope.ui.timeline_bar import TimelineBar

@@ -147,7 +147,7 @@ def waterfall_offsets(context):
     return np.asarray(context.get("curve_offsets", np.arange(len(context["curves"])) * float(context.get("offset_step", 1.2))), dtype=float)
 
 
-def _index_interval(values, low, high):
+def index_interval(values, low, high):
     """Inclusive, outward-rounded sample range, also for descending axes."""
     values = np.asarray(values, dtype=float)
     if not values.size or high < np.min(values) or low > np.max(values):
@@ -160,6 +160,9 @@ def _index_interval(values, low, high):
         index = int(np.clip(round(a), 0, len(values) - 1))
         return index, index
     return max(0, int(np.floor(min(a, b) + 1e-10))), min(len(values) - 1, int(np.ceil(max(a, b) - 1e-10)))
+
+
+_index_interval = index_interval
 
 
 def _empty(context):

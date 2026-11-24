@@ -16,6 +16,7 @@ from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.crop_model import CropSelection
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.processing.compute_backends import ArrayLRUCache
+from bandscope.ui.crop_controls import CropController
 from tests.support.pages import make_workspace, page_spec
 
 
@@ -294,9 +295,7 @@ class IntegrationContextMenuTests(unittest.TestCase):
                 2, crop_k_low=0, crop_k_up=2, crop_e_low=1, crop_e_up=3
             ),
         )
-        self.assertEqual(
-            self.action_keys("z-crop"), ["builtin:slice_dos", "builtin:edc_curve"]
-        )
+        self.assertEqual(self.action_keys("z-crop"), ["builtin:slice_dos"])
         self.add_page(
             "e-home",
             "home",
@@ -368,7 +367,7 @@ class IntegrationContextMenuTests(unittest.TestCase):
             [1, 3, 2, 5],
         )
 
-    def test_edc_curve_uses_the_z_axis_crop_and_its_time_frame(self):
+    def test_edc_curve_uses_the_selection_tool_and_its_time_frame(self):
         params = integral_params(
             2,
             crop_k_low=0,
@@ -377,21 +376,29 @@ class IntegrationContextMenuTests(unittest.TestCase):
             crop_e_up=3,
             time_interval=time_interval(1, 1),
         )
-        self.add_page("z-crop", "axis_integral_crop", params=params)
-
-        page_id = self.analyzer._on_page_create_requested(
-            "z-crop", "builtin:edc_curve"
+        source = self.add_page("z-crop", "axis_integral_crop", params=params)
+        self.analyzer.shared_denoise_version = 0
+        self.analyzer.current_render_context = self.analyzer._compute_render_context(source)
+        parent = QWidget()
+        self.addCleanup(parent.deleteLater)
+        self.analyzer.crop_controller = CropController(parent)
+        self.analyzer.crop_controller.activate(
+            source.page_id, self.analyzer.current_render_context
         )
+
+        page_id = self.analyzer._create_edc_result_from_selections()
 
         created = self.workspace.page_by_id(page_id)
         self.assertEqual(created.page_kind, "edc_curve")
         self.assertEqual(created.source_page_id, "z-crop")
         self.assertEqual(created.params["time_interval"], time_interval(1, 1))
-        context = self.analyzer._build_edc_curve_context_from_params(
-            RAW, COORDS, created.params
-        )
+        context = self.analyzer._get_edc_curve_context(created, None, None)
         np.testing.assert_allclose(context["y_data"], np.sum(RAW[0:3, 1:4, :, 1], axis=(0, 1)))
         self.assertEqual(context["source_t_indices"], (1, 1))
+        self.assertNotIn("builtin:edc_curve", self.action_keys("z-crop"))
+        self.assertIsNone(
+            self.analyzer._on_page_create_requested("z-crop", "builtin:edc_curve")
+        )
 
     def test_second_derivative_rebuilds_a_cropped_nonactive_home_context(self):
         regions = [
@@ -629,10 +636,13 @@ class LegacyControlStateTests(unittest.TestCase):
             export_state=Mock(return_value={}),
             restore_state=Mock(),
             get_denoise_settings=lambda: [],
+            denoise_pipeline=SimpleNamespace(export_state=Mock(return_value={"nodes": []})),
+            set_denoise_execution_state=Mock(),
         )
         analyzer.page_control_blank = SimpleNamespace(
             export_state=Mock(return_value={}), restore_state=Mock()
         )
+        analyzer.original_raw_data = None
         analyzer._enhancement_export_render_state = lambda state: state
         analyzer._ensure_page_display_state = lambda spec: None
         analyzer._restore_enhancement_style = lambda: None

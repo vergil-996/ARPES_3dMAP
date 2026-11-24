@@ -7,14 +7,13 @@ from PyQt5.QtWidgets import (
 
 from bandscope.core.display_style import resolved_render_quality
 from bandscope.ui.ui_controls import ChevronComboBox
-from bandscope.ui.settings_popups import DenoiseSettingsPanel
 
 
 class SettingsDialog(QDialog):
     backend_changed = pyqtSignal(str)
     quality_changed = pyqtSignal(dict)
 
-    def __init__(self, backend, quality, denoise_controls, parent=None, *,
+    def __init__(self, backend, quality, parent=None, *,
                  plugin_panel=None, update_panel=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
@@ -64,11 +63,6 @@ class SettingsDialog(QDialog):
         self.set_quality(quality)
         for combo in (self.mode, self.interpolation, self.resting):
             combo.currentIndexChanged.connect(self._edit_quality)
-
-        processing = self._category("数据处理")
-        denoise_page = self._page(processing, "去噪参数")
-        self.denoise = DenoiseSettingsPanel(denoise_controls)
-        denoise_page.addWidget(self.denoise)
 
         app = self._category("应用管理")
         plugins_page = self._page(app, "插件管理", key="plugins", scroll=False)

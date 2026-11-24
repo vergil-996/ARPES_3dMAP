@@ -67,6 +67,140 @@ class CropControlTests(unittest.TestCase):
         self.assertTrue(self.controller.selection.e_flip)
         self.assertTrue(self.controller.enabled)
 
+    def test_multiple_selections_are_ordered_and_active_id_is_restored_per_page(self):
+        first = self.controller.active_selection_id
+        original = replace(self.controller.selection, bounds=(1, 3, 1, 3))
+        self.controller.set_selection(original, notify=False)
+        second = self.controller.add_selection()
+        self.assertIsNotNone(first)
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.controller.active_selection_id, second)
+        self.assertEqual(
+            [selection_id for selection_id, _ in self.controller.selections_for_page()],
+            [first, second],
+        )
+
+        self.assertTrue(self.controller.activate_selection(first, notify=False))
+        self.controller.activate("b", self.context)
+        other = self.controller.active_selection_id
+        self.assertEqual(len(self.controller.selections_for_page("b")), 1)
+        self.controller.add_selection()
+        self.controller.activate("a", self.context)
+
+        self.assertEqual(self.controller.active_selection_id, first)
+        self.assertEqual(self.controller.selection, original)
+        self.assertEqual(len(self.controller.selections_for_page("a")), 2)
+        self.assertNotEqual(other, self.controller.active_selection_id)
+        self.controller.activate("b", self.context)
+        self.assertEqual(len(self.controller.selections_for_page()), 2)
+        self.assertNotEqual(self.controller.active_selection_id, other)
+
+    def test_add_activate_and_update_by_id_only_change_their_target(self):
+        first = self.controller.active_selection_id
+        original_first = self.controller.selection
+        second = self.controller.add_selection()
+        original_second = self.controller.selection
+        changes = []
+        self.controller.selection_changed.connect(lambda: changes.append(True))
+        updated_first = replace(original_first, bounds=(1, 2, 1, 2))
+
+        self.assertTrue(self.controller.update_selection(first, updated_first))
+        self.assertEqual(changes, [True])
+        self.assertEqual(self.controller.selection, original_second)
+        self.assertEqual(dict(self.controller.selections_for_page())[first], updated_first)
+        self.assertTrue(self.controller.activate_selection(second, notify=False))
+        self.assertTrue(self.controller.activate_selection(first))
+        self.assertEqual(self.controller.selection, updated_first)
+        self.assertEqual(self.controller.popup.edits[0].text(), "1")
+        self.assertFalse(self.controller.activate_selection(-1, notify=False))
+        self.assertFalse(self.controller.update_selection(-1, original_first, notify=False))
+
+    def test_operation_popup_and_legacy_set_selection_only_edit_active_item(self):
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+        self.controller.set_operation("erase")
+        drafts = dict(self.controller.selections_for_page())
+        self.assertEqual(drafts[first].operation, "crop")
+        self.assertEqual(drafts[second].operation, "erase")
+
+        self.controller.popup.edits[0].setText("1.5")
+        self.assertTrue(self.controller.commit_edits())
+        drafts = dict(self.controller.selections_for_page())
+        self.assertEqual(drafts[second].bounds[0], 1.5)
+        self.assertEqual(drafts[first].bounds[0], 0)
+        self.controller.activate_selection(first, notify=False)
+        replacement = replace(self.controller.selection, bounds=(2, 3, 2, 3))
+        self.controller.set_selection(replacement, notify=False)
+        drafts = dict(self.controller.selections_for_page())
+        self.assertEqual(drafts[first], replacement)
+        self.assertEqual(drafts[second].bounds[0], 1.5)
+        self.assertEqual(drafts[second].operation, "erase")
+
+    def test_activate_none_preserves_drafts_and_add_uses_cached_context(self):
+        context = {
+            "view": "2d",
+            "data": np.ones((11, 11)),
+            "slice_info": {"axis": 1},
+            "coords": {"X": np.arange(11.), "E": np.arange(11.)},
+        }
+        self.controller.activate("image", context, e_flip=True)
+        first = self.controller.active_selection_id
+        original = self.controller.selection
+        self.assertEqual(original.bounds, (1, 9, 1, 9))
+        for _ in range(3):
+            self.controller.activate("image", context, e_flip=True)
+            self.assertEqual(len(self.controller.selections_for_page()), 1)
+            self.assertEqual(self.controller.active_selection_id, first)
+
+        self.controller.activate("image", None, e_flip=True)
+        self.assertEqual(self.controller.selection, original)
+        self.assertEqual(self.controller.active_selection_id, first)
+        second = self.controller.add_selection()
+        additions = [self.controller.add_selection() for _ in range(5)]
+        selections = self.controller.selections_for_page()
+        self.assertEqual(len(selections), 7)
+        self.assertTrue(all(selection.e_flip for _, selection in selections))
+        self.assertEqual(selections[0][1].bounds, (1, 9, 1, 9))
+        self.assertEqual(dict(selections)[second].bounds, (2, 8, 2, 8))
+        for previous, current in zip(selections[1:-1], selections[2:]):
+            self.assertLess(current[1].bounds[0], 4)
+            self.assertGreater(current[1].bounds[0], previous[1].bounds[0])
+            self.assertLess(current[1].bounds[1], previous[1].bounds[1])
+        self.assertTrue(all(selection_id is not None for selection_id in additions))
+
+        self.controller.activate("missing", None)
+        self.assertIsNone(self.controller.selection)
+        self.assertEqual(len(self.controller.selections_for_page("image")), 7)
+        self.controller.activate("image", None)
+        self.assertEqual(self.controller.active_selection_id, selections[-1][0])
+        unflipped = self.controller.add_selection(e_flip=False)
+        self.assertFalse(dict(self.controller.selections_for_page())[unflipped].e_flip)
+
+    def test_remove_page_and_clear_remove_all_ids_and_drafts(self):
+        first = self.controller.active_selection_id
+        self.controller.add_selection()
+        self.controller.activate("b", self.context)
+        other = self.controller.active_selection_id
+        other_second = self.controller.add_selection()
+        self.controller.remove_page("a")
+        self.assertEqual(self.controller.selections_for_page("a"), ())
+        self.assertEqual(self.controller.active_selection_id, other_second)
+        self.assertEqual(len(self.controller.selections_for_page("b")), 2)
+
+        self.controller.remove_page("b")
+        self.assertEqual(self.controller.selections_for_page(), ())
+        self.assertIsNone(self.controller.active_selection_id)
+        self.assertIsNone(self.controller.selection)
+        self.controller.activate("a", self.context)
+        self.controller.activate("b", self.context)
+        self.controller.clear()
+        self.assertEqual(self.controller.selections_for_page("a"), ())
+        self.assertEqual(self.controller.selections_for_page("b"), ())
+        self.assertIsNone(self.controller.active_selection_id)
+        self.assertIsNone(self.controller.selection)
+        self.assertIsNone(self.controller.page_id)
+        self.assertNotEqual(first, other)
+
     def test_popup_clamps_to_screen_and_escape_preserves_draft(self):
         popup = self.controller.popup
         screen = self.app.primaryScreen().availableGeometry()
@@ -116,10 +250,20 @@ class CropControlTests(unittest.TestCase):
         )
         return parent, controller, host
 
+    def _place_region_button(self, host, target):
+        popup = host.crop_controller.popup
+        host.btn_tb_crop.setGeometry(
+            target.x() - (80 - popup.width()) // 2,
+            target.y() - 32 - 8,
+            80,
+            32,
+        )
+
     def test_toggle_buttons_open_and_close_the_range_window(self):
         parent, controller, host = self._region_host()
         popup = controller.popup
-        host.btn_tb_crop.setGeometry(200, 100, 80, 32)
+        target = self.app.primaryScreen().availableGeometry().topLeft() + QPoint(10, 10)
+        self._place_region_button(host, target)
         self.assertFalse(popup.isVisible())
 
         host.btn_tb_crop.click()
@@ -127,7 +271,7 @@ class CropControlTests(unittest.TestCase):
         self.assertTrue(popup.isVisible())
         # 窗口落在按钮正下方并居中对齐，且是独立浮窗而不是模态弹出层。
         self.assertTrue(popup.windowFlags() & Qt.Tool)
-        self.assertEqual(popup.pos(), QPoint(200 + (80 - popup.width()) // 2, 100 + 32 + 8))
+        self.assertEqual(popup.pos(), target)
         self.assertEqual(popup.apply_button.text(), "裁剪")
 
         # 切到裁空：窗口留在原地，只换标题与动作。
@@ -160,17 +304,20 @@ class CropControlTests(unittest.TestCase):
     def test_range_window_keeps_user_position_and_follows_toggle_state(self):
         parent, controller, host = self._region_host()
         popup = controller.popup
-        host.btn_tb_crop.setGeometry(200, 100, 80, 32)
+        target = self.app.primaryScreen().availableGeometry().topLeft()
+        self._place_region_button(host, target)
         host.btn_tb_crop.click()
         start = popup.pos()
+        self.assertEqual(start, target)
 
-        self.assertTrue(self._drag(popup, QPoint(60, 40)))
-        self.assertEqual(popup.pos(), start + QPoint(60, 40))
+        delta = QPoint(20, 20)
+        self.assertTrue(self._drag(popup, delta))
+        self.assertEqual(popup.pos(), start + delta)
 
         # 关掉再打开回到用户拖到的位置，而不是按钮下方。
         host.btn_tb_crop.click()
         host.btn_tb_crop.click()
-        self.assertEqual(popup.pos(), start + QPoint(60, 40))
+        self.assertEqual(popup.pos(), start + delta)
 
         # 页面渲染就绪后窗口自动回来；离开可裁剪内容则收起。
         controller.popup.hide()

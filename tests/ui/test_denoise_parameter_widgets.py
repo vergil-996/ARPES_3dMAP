@@ -240,7 +240,7 @@ class DenoiseParameterWidgetTests(unittest.TestCase):
                     self.page.SG_AXIS_LABEL_TO_KEY[expected_label],
                 )
 
-    def test_render_restore_migrates_aliases_and_clears_unknown_methods(self):
+    def test_render_restore_migrates_aliases_and_rejects_unknown_methods(self):
         page = RenderControlPage()
         self.addCleanup(page.deleteLater)
         aliases = (
@@ -253,14 +253,16 @@ class DenoiseParameterWidgetTests(unittest.TestCase):
         for alias, canonical_name in aliases:
             with self.subTest(alias=alias):
                 page.restore_state({"combo_n1": alias})
-                self.assertEqual(page.combo_n1.currentText(), canonical_name)
+                settings = page.get_denoise_settings()
+                self.assertEqual(len(settings), 1)
+                self.assertEqual(settings[0]["label"], canonical_name)
 
-        for combo in (page.combo_n1, page.combo_n2, page.combo_n3):
-            combo.setCurrentIndex(combo.findText(LOW_RANK_METHOD_NAME))
-        page.restore_state(
-            {"combo_n1": "卡尔曼滤波", "combo_n2": "不存在的方法", "combo_n3": 42}
-        )
-        self.assertEqual(page.get_denoise_settings(), ["None", "None", "None"])
+        for combo_name in ("combo_n1", "combo_n2", "combo_n3"):
+            self.assertFalse(hasattr(page, combo_name))
+        for unknown_name in ("卡尔曼滤波", "不存在的方法", 42):
+            with self.subTest(unknown_name=unknown_name):
+                with self.assertRaisesRegex(ValueError, "第 1 个去噪节点无效"):
+                    page.restore_state({"combo_n1": unknown_name})
 
     def test_partial_legacy_restore_preserves_missing_fields(self):
         page = self.page
