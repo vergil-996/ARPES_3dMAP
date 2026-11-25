@@ -268,9 +268,6 @@ class OpacityInterpolationSwitch(QAbstractButton):
         painter.drawRoundedRect(rect.adjusted(0.45, 0.45, -0.45, -0.45),
                                 radius - 0.45, radius - 0.45)
 
-        highlight = QColor(255, 255, 255, 42 if dark else 150)
-        painter.setPen(QPen(highlight, 0.8, Qt.SolidLine, Qt.RoundCap))
-        painter.drawArc(rect.adjusted(2.0, 1.5, -2.0, -1.5), 28 * 16, 124 * 16)
 
     def _paint_thumb(self, painter):
         rect = self._thumb_rect()

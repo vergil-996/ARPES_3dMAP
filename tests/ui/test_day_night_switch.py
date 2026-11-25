@@ -63,6 +63,17 @@ class DayNightSwitchTests(unittest.TestCase):
         self.assertGreaterEqual(self.switch._theme_animation.duration(), 500)
         self.assertLessEqual(self.switch._theme_animation.duration(), 700)
 
+    def test_focus_does_not_paint_an_additional_outline(self):
+        self.switch.setFocus(Qt.OtherFocusReason)
+        self.app.processEvents()
+        focused_image = self.render_switch()
+
+        self.switch.clearFocus()
+        self.app.processEvents()
+        unfocused_image = self.render_switch()
+
+        self.assertEqual(focused_image, unfocused_image)
+
     def test_mouse_click_emits_theme_request_and_starts_animation(self):
         requests = QSignalSpy(self.switch.theme_requested)
 
@@ -187,6 +198,23 @@ class DayNightSwitchTests(unittest.TestCase):
                 )
                 self.assertGreater(len(colors), 30)
 
+    def test_groove_has_upper_shadow_and_lower_reflection(self):
+        self.switch.clearFocus()
+        self.app.processEvents()
+        self.switch.set_theme("light", animate=False)
+        day_image = self.render_switch()
+        shadowed_top = self.pixel_at_logical(day_image, 90.0, 4.0)
+        clear_top = self.pixel_at_logical(day_image, 90.0, 10.0)
+        self.assertGreater(clear_top.red(), shadowed_top.red() + 20)
+        self.assertGreater(clear_top.green(), shadowed_top.green() + 8)
+
+        self.switch.set_theme("dark", animate=False)
+        night_image = self.render_switch()
+        lit_bottom = self.pixel_at_logical(night_image, 90.0, 65.0)
+        clear_bottom = self.pixel_at_logical(night_image, 90.0, 60.0)
+        self.assertGreater(lit_bottom.red(), clear_bottom.red() + 3)
+        self.assertGreater(lit_bottom.green(), clear_bottom.green() + 3)
+
     def test_cloud_band_is_solid_extended_and_behind_sun(self):
         cloud = DayNightSwitch._cloud_band_path()
         overlap = QPointF(103.0, 50.0)
@@ -217,6 +245,19 @@ class DayNightSwitchTests(unittest.TestCase):
         sun_pixel = self.pixel_at_logical(image, 35.0, 52.0)
         self.assertGreater(sun_pixel.red(), 200)
         self.assertLess(sun_pixel.blue(), 180)
+
+    def test_foreground_cloud_sits_in_front_of_lower_sun(self):
+        cloud = DayNightSwitch._foreground_cloud_path()
+        self.assertTrue(cloud.contains(QPointF(35.0, 61.0)))
+        self.assertFalse(cloud.contains(QPointF(35.0, 52.0)))
+
+        self.switch.setProperty("progress", 0.0)
+        self.app.processEvents()
+        image = self.render_switch()
+        cloud_pixel = self.pixel_at_logical(image, 35.0, 61.0)
+        self.assertGreater(cloud_pixel.red(), 225)
+        self.assertGreater(cloud_pixel.green(), 225)
+        self.assertGreater(cloud_pixel.blue(), 225)
 
     def test_day_and_night_have_two_halo_layers(self):
         layers = DayNightSwitch.HALO_LAYERS

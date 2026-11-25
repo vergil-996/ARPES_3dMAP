@@ -36,6 +36,44 @@ class SelectionIndexBoundsTests(unittest.TestCase):
             (1, 3, 0, 2, 0, 3),
         )
 
+    def test_2d_xz_and_yz_selections_use_supplied_normal_bounds(self):
+        data = np.arange(4 * 3 * 4, dtype=np.float64).reshape(4, 3, 4)
+        cases = (
+            (
+                "XZ",
+                CropSelection("2d", ("X", "E"), (1.0, 2.0, 0.0, 1.0)),
+                (1, 1),
+                (1, 2, 1, 1, 1, 3),
+            ),
+            (
+                "YZ",
+                CropSelection("2d", ("E", "Y"), (-1.0, 0.2, 0.0, 1.0)),
+                (2, 3),
+                (2, 3, 0, 1, 2, 3),
+            ),
+        )
+        for name, selection, normal_bounds, expected_bounds in cases:
+            with self.subTest(view=name):
+                bounds = selection_index_bounds(
+                    selection,
+                    self.coords,
+                    self.shape,
+                    normal_index_bounds=normal_bounds,
+                )
+                self.assertEqual(bounds, expected_bounds)
+                result = integrate_edc(data, self.coords["E"], bounds)
+                x_low, x_up, y_low, y_up, e_low, e_up = expected_bounds
+                np.testing.assert_allclose(
+                    result.intensity,
+                    np.sum(
+                        data[x_low:x_up + 1, y_low:y_up + 1, e_low:e_up + 1],
+                        axis=(0, 1),
+                    ),
+                )
+                np.testing.assert_array_equal(
+                    result.energy, self.coords["E"][e_low:e_up + 1]
+                )
+
     def test_equal_3d_energy_limits_select_nearest_single_sample(self):
         selection = CropSelection(
             "3d", ("X", "Y", "E"), (0.0, 2.0, 0.0, 1.0, 1.4, 1.4)
@@ -59,12 +97,22 @@ class SelectionIndexBoundsTests(unittest.TestCase):
         self.assertIsNone(selection_index_bounds(disjoint, self.coords, self.shape))
 
     def test_invalid_axes_shapes_and_coordinates_raise_value_error(self):
-        invalid_axis = CropSelection("2d", ("X", "E"), (0.0, 1.0, 0.0, 1.0))
+        invalid_axis = CropSelection("2d", ("X", "X"), (0.0, 1.0, 0.0, 1.0))
+        missing_normal = CropSelection("2d", ("X", "E"), (0.0, 1.0, 0.0, 1.0))
         valid = CropSelection(
             "3d", ("X", "Y", "E"), (0.0, 1.0, 0.0, 1.0, 0.2, 1.0)
         )
         with self.assertRaises(ValueError):
             selection_index_bounds(invalid_axis, self.coords, self.shape)
+        with self.assertRaises(ValueError):
+            selection_index_bounds(missing_normal, self.coords, self.shape)
+        with self.assertRaises(ValueError):
+            selection_index_bounds(
+                missing_normal,
+                self.coords,
+                self.shape,
+                normal_index_bounds=(0, 3),
+            )
         for shape in ((4, 3), (4, 3, 4, 1), (0, 3, 4), (4.5, 3, 4)):
             with self.subTest(shape=shape), self.assertRaises(ValueError):
                 selection_index_bounds(valid, self.coords, shape)

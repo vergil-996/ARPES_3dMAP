@@ -71,6 +71,51 @@ class FluentIconEngine(QIconEngine):
             painter.restore()
 
 
+class ReliefIconEngine(FluentIconEngine):
+    def __init__(self, svg_bytes, shadow_svg, highlight_svg):
+        super().__init__(svg_bytes)
+        self._shadow_svg = bytes(shadow_svg)
+        self._highlight_svg = bytes(highlight_svg)
+
+    def clone(self):
+        return ReliefIconEngine(self._svg_bytes, self._shadow_svg, self._highlight_svg)
+
+    def _paint_layers(self, painter, bounds):
+        offset = max(0.35, bounds.height() * 0.035)
+        opacity = painter.opacity()
+        for svg, dy, alpha in (
+            (self._shadow_svg, offset, 0.30),
+            (self._highlight_svg, -offset * 0.75, 0.48),
+            (self._svg_bytes, 0.0, 1.0),
+        ):
+            painter.save()
+            try:
+                painter.setOpacity(opacity * alpha)
+                FluentIconEngine._render(svg, painter, bounds.translated(0.0, dy))
+            finally:
+                painter.restore()
+
+    def _normal_pixmap(self, size):
+        if size.width() <= 0 or size.height() <= 0:
+            return QPixmap()
+        pixmap = QPixmap(size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        self._paint_layers(painter, QRectF(pixmap.rect()))
+        painter.end()
+        return pixmap
+
+    def paint(self, painter, rect, mode, state):
+        if mode != QIcon.Normal:
+            super().paint(painter, rect, mode, state)
+            return
+        painter.save()
+        try:
+            self._paint_layers(painter, QRectF(rect))
+        finally:
+            painter.restore()
+
+
 class FluentIconLabel(QLabel):
     def __init__(self, parent=None, name="", size=16, color=None):
         super().__init__(parent)

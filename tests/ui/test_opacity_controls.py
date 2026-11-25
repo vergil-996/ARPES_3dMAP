@@ -94,15 +94,46 @@ class OpacityCurveEditorTests(unittest.TestCase):
         self.assertEqual(image.pixelColor(x, y - int(round(8 * ratio))), background)
 
     def test_rail_has_no_center_line(self):
+        original = theme.current_theme()
+        self.addCleanup(theme.set_theme, original)
         editor = self.make_editor()
         curve = editor.curve
+        rail = curve._rail_rect()
+        for name in ("light", "dark"):
+            with self.subTest(theme=name):
+                theme.set_theme(name)
+                QApplication.processEvents()
+                image = curve.grab().toImage()
+                ratio = image.devicePixelRatio() or 1.0
+                x = int(round(curve._x(0.2) * ratio))
+                colors = [
+                    image.pixelColor(x, int(round(logical_y * ratio)))
+                    for logical_y in range(rail.top() + 3, rail.bottom() - 2)
+                ]
+                self.assertGreater(len({color.rgba() for color in colors}), 1)
+                self.assertLess(colors[0].lightness(), colors[-1].lightness())
+                for above, below in zip(colors, colors[1:]):
+                    channel_step = max(
+                        abs(a - b) for a, b in zip(above.getRgb()[:3], below.getRgb()[:3])
+                    )
+                    self.assertLessEqual(channel_step, 12)
+
+    def test_rail_handle_has_relief_and_keeps_its_dark_center(self):
+        editor = self.make_editor()
+        curve = editor.curve
+        QApplication.processEvents()
         image = curve.grab().toImage()
         ratio = image.devicePixelRatio() or 1.0
-        rail = curve._rail_rect()
-        x = int(round(curve._x(0.2) * ratio))
-        for logical_y in (rail.center().y(), rail.center().y() + 1):
-            y = int(round(logical_y * ratio))
-            self.assertEqual(image.pixelColor(x, y), QColor(theme.BG_4))
+        center = curve._rail_point()
+
+        def pixel(dy):
+            return image.pixelColor(
+                int(round(center.x() * ratio)), int(round((center.y() + dy) * ratio)),
+            )
+
+        self.assertEqual(pixel(0), QColor("#111111"))
+        self.assertGreater(pixel(-4).lightness(), pixel(0).lightness())
+        self.assertLess(pixel(4).lightness(), pixel(0).lightness())
 
     def test_rail_handle_stays_put_while_dragging_a_curve_point(self):
         editor = self.make_editor([[0.0, 0.0], [0.2, 0.3], [0.6, 0.6], [1.0, 1.0]])
@@ -123,6 +154,7 @@ class OpacityCurveEditorTests(unittest.TestCase):
         theme.set_theme("light")
         editor = self.make_editor()
         curve = editor.curve
+        baseline = curve.grab().toImage()
         curve, _rail = self.start_rail(editor, 0.4)
         below = point_at(0.4, 0.15, curve)
         drag_to(curve, below)
@@ -138,7 +170,7 @@ class OpacityCurveEditorTests(unittest.TestCase):
         rail = curve._rail_rect()
         sample = (int(round((curve._x(0.4) + 3) * ratio)),
                   int(round((rail.center().y() - 3) * ratio)))
-        self.assertEqual(image.pixelColor(*sample), QColor(theme.BG_4))
+        self.assertEqual(image.pixelColor(*sample), baseline.pixelColor(*sample))
         # 横向移动不会改变锁定的候选强度，黑点只沿竖直虚线上下走。
         locked_x = dot.x()
         drag_to(curve, QPoint(int(round(curve._x(0.75))), below.y()))

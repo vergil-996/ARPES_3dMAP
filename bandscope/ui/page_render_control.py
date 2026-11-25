@@ -132,14 +132,6 @@ class RenderControlPage(ControlPageBase):
 
         # 去噪属于当前结果页的数据范围，不随显示对象下拉框切换。
         grp_noise, v_noise = self._create_group("去噪")
-        self.denoise_scope_label = SiLabel("当前数据范围 · 全局共享")
-        self.denoise_scope_label.setStyleSheet(theme.field_label_qss())
-        self.denoise_scope_label.setToolTip(
-            "去噪配置由所有显示对象共享；应用范围由当前结果页的数据范围决定，"
-            "不随显示对象切换。节点按顺序处理，结构与参数修改自动生效。"
-        )
-        v_noise.addWidget(self.denoise_scope_label)
-
         self.denoise_pipeline = DenoisePipelineWidget(grp_noise)
         self.denoise_pipeline.pipeline_edited.connect(self.denoise_edited)
         self.denoise_pipeline.pipeline_committed.connect(self.denoise_committed)

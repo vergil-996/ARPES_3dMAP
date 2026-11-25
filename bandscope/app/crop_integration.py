@@ -7,6 +7,7 @@ from dataclasses import replace
 
 import numpy as np
 from PyQt5.QtCore import QEvent, Qt, QTimer
+from PyQt5.QtGui import QContextMenuEvent
 
 import bandscope.ui.theme as theme
 from bandscope.core.axis_interval import nearest_index
@@ -103,12 +104,20 @@ class CropInteractionMixin:
         if event.type() in (QEvent.Enter, QEvent.MouseMove):
             watched.setCursor(controller.cursor)
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+            selection_id = CropInteractionMixin._crop_selection_at_pointer(self, watched, event)
+            if selection_id is not None and CropInteractionMixin._show_crop_selection_popup(
+                    self, selection_id, event.globalPos()):
+                return True
             self._show_crop_popup(event.globalPos())
             _request_axis_title_menu(self, watched, event.globalPos())
             return True
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.RightButton:
             return True
         if event.type() == QEvent.ContextMenu:
+            selection_id = CropInteractionMixin._crop_selection_at_pointer(self, watched, event)
+            if selection_id is not None and CropInteractionMixin._show_crop_selection_popup(
+                    self, selection_id, event.globalPos()):
+                return True
             if not popup.isVisible():
                 self._show_crop_popup(event.globalPos())
             _request_axis_title_menu(self, watched, event.globalPos())
@@ -119,6 +128,35 @@ class CropInteractionMixin:
         controller = self.crop_controller
         if controller.selection is not None:
             controller.popup.show_at(global_pos)
+
+    def _crop_selection_at_pointer(self, watched, event):
+        if watched is not self.canvas_2d:
+            hit_test = getattr(self, "_crop_box_selection_at_event", None)
+            return hit_test(watched, event) if hit_test is not None else None
+        if (event.type() == QEvent.ContextMenu
+                and event.reason() != QContextMenuEvent.Mouse):
+            return None
+        return CropInteractionMixin._axis_crop_selection_at_event(self, event)
+
+    def _axis_crop_selection_at_event(self, event):
+        selectors = self.__dict__.get("axis_crop_selectors", {})
+        if not selectors:
+            return None
+        pos = event.pos()
+        ratio_getter = getattr(self.canvas_2d, "devicePixelRatioF", None)
+        ratio = float(ratio_getter()) if ratio_getter is not None else 1.0
+        x = pos.x() * ratio
+        y = (self.canvas_2d.figure.bbox.height / ratio - pos.y()) * ratio
+        for selection_id, selector in reversed(list(selectors.items())):
+            if selector.handle_at_display(x, y) is not None:
+                return selection_id
+        return None
+
+    def _show_crop_selection_popup(self, selection_id, global_pos):
+        if not CropInteractionMixin._activate_crop_selection(self, selection_id):
+            return False
+        self.crop_controller.popup.show_at(global_pos)
+        return True
 
     def _activate_crop_context(self, spec, context):
         controller = self.__dict__.get("crop_controller")
@@ -348,6 +386,14 @@ class CropInteractionMixin:
     def _on_crop_selection_changed(self):
         selection = self.crop_controller.selection
         if selection is None:
+            context = self.current_render_context
+            if context is not None and context.get("view") == "3d":
+                self._rebuild_interactive_box()
+            else:
+                self._refresh_axis_crop_interaction(
+                    self.left_workspace.current_spec(), context
+                )
+            self.plotter.render()
             return
         if selection.view == "3d":
             self.precise_logical_bounds = self._crop_logical_bounds()
@@ -389,6 +435,8 @@ class CropInteractionMixin:
         for selection_id, selection in selections:
             if selection_id not in wanted:
                 continue
+            label = (controller.selection_label(selection_id)
+                     if hasattr(controller, "selection_label") else f"Z{selection_id}")
             selector = selectors.get(selection_id)
             if selector is None:
                 selector = InteractiveCropBox(
@@ -399,9 +447,11 @@ class CropInteractionMixin:
                     selection.bounds,
                     on_activate=lambda sid=selection_id: self._activate_crop_selection(sid),
                     coordinator=coordinator,
+                    label=label,
                 )
                 selectors[selection_id] = selector
             else:
+                selector.set_label(label)
                 selector.sync_bounds(selection.bounds)
         coordinator.set_selectors(selectors.values())
         active_id = getattr(controller, "active_selection_id", None)

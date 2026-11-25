@@ -7,6 +7,8 @@ from unittest.mock import Mock
 import numpy as np
 import pyvista as pv
 import vtk
+from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import QApplication, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
@@ -304,6 +306,161 @@ class CropBoxBoundsTests(unittest.TestCase):
         self.assertEqual(box_widgets, [enhancement_widget])
         self.assertIs(self.analyzer._enhancement_box_widget, enhancement_widget)
         self.analyzer.plotter.clear_box_widgets.assert_not_called()
+
+    def test_box_labels_follow_stable_ids_bounds_removal_and_clear(self):
+        second = self.controller.add_selection()
+        first = next(
+            selection_id for selection_id, _selection in self.controller.selections_for_page()
+            if selection_id != second
+        )
+        box_widgets = []
+        overlay = vtk.vtkRenderer()
+        enhancement_actor = vtk.vtkActor()
+        overlay.AddActor(enhancement_actor)
+
+        def add_box_widget(callback, bounds, **kwargs):
+            widget = SimpleNamespace(
+                Off=Mock(), On=Mock(), SetCurrentRenderer=Mock(), AddObserver=Mock(),
+                PlaceWidget=Mock(),
+            )
+            box_widgets.append(widget)
+            return widget
+
+        self.analyzer.plotter = SimpleNamespace(
+            box_widgets=box_widgets,
+            add_box_widget=add_box_widget,
+            clear_box_widgets=Mock(side_effect=box_widgets.clear),
+        )
+        self.analyzer._crop_box_renderer = overlay
+        self.analyzer._crop_box_overlay_renderer = lambda: overlay
+        self.analyzer._can_show_interactive_box = lambda: True
+        self.analyzer._dim_current_volume = Mock()
+        self.analyzer._restore_volume_opacity_if_dimmed = Mock()
+
+        self.analyzer._rebuild_interactive_box()
+
+        labels = self.analyzer._crop_box_label_actors
+        self.assertEqual(set(labels), {first, second})
+        self.assertEqual(labels[first].GetInput(), f"Z{first}")
+        self.assertEqual(labels[second].GetInput(), f"Z{second}")
+        self.assertTrue(all(overlay.HasViewProp(actor) for actor in labels.values()))
+        active_actor = labels[second]
+        previous_position = active_actor.GetPosition()
+        active = self.controller.selection
+        shifted = (active.bounds[0] + 0.5, active.bounds[1] + 0.5, *active.bounds[2:])
+        self.controller.update_selection(second, replace(active, bounds=shifted))
+
+        self.analyzer._rebuild_interactive_box()
+
+        self.assertIs(self.analyzer._crop_box_label_actors[second], active_actor)
+        self.assertNotEqual(active_actor.GetPosition(), previous_position)
+        first_actor = labels[first]
+        self.analyzer._remove_crop_box_widget(first)
+        self.assertNotIn(first, self.analyzer._crop_box_label_actors)
+        self.assertFalse(overlay.HasViewProp(first_actor))
+
+        self.analyzer._clear_interactive_box()
+
+        self.assertEqual(self.analyzer._crop_box_label_actors, {})
+        self.assertEqual(self.analyzer._crop_box_widgets, {})
+        self.assertTrue(overlay.HasViewProp(enhancement_actor))
+        self.assertFalse(overlay.HasViewProp(active_actor))
+
+    def test_box_drag_callback_updates_label_without_rebuilding_widget(self):
+        selection_id = self.controller.active_selection_id
+        overlay = vtk.vtkRenderer()
+        self.analyzer._crop_box_renderer = overlay
+        self.analyzer._crop_box_overlay_renderer = lambda: overlay
+        initial_bounds = self.analyzer._get_render_bounds_for_box()
+        self.analyzer._sync_crop_box_label(selection_id, initial_bounds)
+        actor = self.analyzer._crop_box_label_actors[selection_id]
+        initial_position = actor.GetPosition()
+        dragged_bounds = (
+            initial_bounds[0] + 20.0, initial_bounds[1] + 20.0,
+            initial_bounds[2] + 10.0, initial_bounds[3] + 10.0,
+            *initial_bounds[4:],
+        )
+        self.analyzer._rebuild_interactive_box = Mock()
+
+        self.analyzer._on_crop_box_callback(
+            selection_id, SimpleNamespace(bounds=dragged_bounds)
+        )
+
+        self.analyzer._rebuild_interactive_box.assert_not_called()
+        self.assertNotEqual(actor.GetPosition(), initial_position)
+        padding = max(
+            dragged_bounds[index + 1] - dragged_bounds[index] for index in (0, 2, 4)
+        ) * 0.03
+        np.testing.assert_allclose(
+            actor.GetPosition(),
+            (
+                dragged_bounds[1] + padding,
+                dragged_bounds[3] + padding,
+                dragged_bounds[5] + padding,
+            ),
+        )
+        synced_position = actor.GetPosition()
+        self.analyzer._crop_box_syncing_ids = {selection_id}
+        self.analyzer._on_crop_box_callback(
+            selection_id, SimpleNamespace(bounds=initial_bounds)
+        )
+        self.assertEqual(actor.GetPosition(), synced_position)
+
+    def test_right_click_hit_tests_only_projected_box_handles(self):
+        class Renderer:
+            def SetWorldPoint(self, x, y, z, _w):
+                self.display = (x, y, z)
+
+            def WorldToDisplay(self):
+                pass
+
+            def GetDisplayPoint(self):
+                return self.display
+
+        renderer = Renderer()
+
+        def widget_at(point):
+            points = vtk.vtkPoints()
+            for index in range(15):
+                points.InsertNextPoint(1000.0, 1000.0, 1000.0)
+            points.SetPoint(8, *point)
+
+            def get_poly_data(poly):
+                poly.SetPoints(points)
+
+            return SimpleNamespace(GetPolyData=get_poly_data)
+
+        interactor = SimpleNamespace()
+        plotter = SimpleNamespace(
+            interactor=interactor, renderer=renderer, height=lambda: 100
+        )
+        self.analyzer.plotter = plotter
+        self.analyzer._crop_box_widgets = {1: widget_at((20.0, 30.0, 0.0))}
+        right = QMouseEvent(
+            QEvent.MouseButtonPress, QPoint(20, 70), Qt.RightButton,
+            Qt.RightButton, Qt.NoModifier,
+        )
+
+        self.assertEqual(self.analyzer._crop_box_selection_at_event(plotter, right), 1)
+        self.assertEqual(self.analyzer._crop_box_selection_at_event(interactor, right), 1)
+        left = QMouseEvent(
+            QEvent.MouseButtonPress, QPoint(20, 70), Qt.LeftButton,
+            Qt.LeftButton, Qt.NoModifier,
+        )
+        self.assertIsNone(self.analyzer._crop_box_selection_at_event(plotter, left))
+        far = QMouseEvent(
+            QEvent.MouseButtonPress, QPoint(80, 10), Qt.RightButton,
+            Qt.RightButton, Qt.NoModifier,
+        )
+        self.assertIsNone(self.analyzer._crop_box_selection_at_event(plotter, far))
+        self.assertIsNone(self.analyzer._crop_box_selection_at_event(object(), right))
+        self.analyzer.current_render_context = {"view": "2d"}
+        self.assertIsNone(self.analyzer._crop_box_selection_at_event(plotter, right))
+
+        self.analyzer.current_render_context = self.context
+        plotter.devicePixelRatioF = lambda: 2.0
+        self.analyzer._crop_box_widgets = {7: widget_at((40.0, 58.0, 0.0))}
+        self.assertEqual(self.analyzer._crop_box_selection_at_event(plotter, right), 7)
 
     def test_normal_coordinate_conversions_still_clamp_by_default(self):
         self.assertEqual(self.core.physical_to_logical("X", -3), 0)

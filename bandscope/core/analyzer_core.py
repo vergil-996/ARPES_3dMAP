@@ -39,6 +39,8 @@ class AnalyzerCore(QObject):
         self.auto_axis_assignment = None
         self.coordinate_candidates = {}
         self.coordinate_candidate_units = {}
+        self.original_coordinate_candidates = {}
+        self.original_coordinate_candidate_units = {}
         # 坐标来源与单位可信度（科研导出用）：
         # coord_sources[axis] = 'file'（文件提供坐标数组）/ 'index'（索引回退）；
         # coord_units[axis] = 显式单位元数据（如 'eV'、'Å⁻¹'），没有则为 None。
@@ -61,7 +63,8 @@ class AnalyzerCore(QObject):
             for name in (
                 "raw_data", "source_array", "coords", "has_time_axis",
                 "axis_assignment", "auto_axis_assignment", "coordinate_candidates",
-                "coordinate_candidate_units", "coord_sources", "coord_units",
+                "coordinate_candidate_units", "original_coordinate_candidates",
+                "original_coordinate_candidate_units", "coord_sources", "coord_units",
                 "source_identity", "source_layout",
             ):
                 setattr(self, name, getattr(candidate, name))
@@ -145,7 +148,17 @@ class AnalyzerCore(QObject):
             if data is not None:
                 data.close()
 
-    def _apply_assignment(self, raw, assignment, *, candidates, automatic=None, candidate_units=None):
+    def _apply_assignment(
+        self,
+        raw,
+        assignment,
+        *,
+        candidates,
+        automatic=None,
+        candidate_units=None,
+        original_candidates=None,
+        original_candidate_units=None,
+    ):
         assignment = validate_assignment(assignment.clone(), candidates)
         source_array = np.asarray(raw, dtype=np.float32)
         canonical = canonical_data(assignment, source_array)
@@ -159,6 +172,14 @@ class AnalyzerCore(QObject):
         self.coordinate_candidates = dict(candidates)
         self.coordinate_candidate_units = {
             role: dict(values) for role, values in (candidate_units or {}).items()
+        }
+        original_candidates = candidates if original_candidates is None else original_candidates
+        original_candidate_units = (
+            candidate_units if original_candidate_units is None else original_candidate_units
+        )
+        self.original_coordinate_candidates = dict(original_candidates)
+        self.original_coordinate_candidate_units = {
+            role: dict(values) for role, values in (original_candidate_units or {}).items()
         }
         self.has_time_axis = assignment.has_scan
         self.coords = {
@@ -179,19 +200,31 @@ class AnalyzerCore(QObject):
         }
         self.source_layout = assignment.to_layout(self.coord_sources)
 
-    def copy_with_assignment(self, assignment):
+    def copy_with_assignment(self, assignment, *, restore_original_coordinates=False):
         if self.source_array is None or self.axis_assignment is None:
             raise ValueError("当前数据源没有可重新分配的原始数组。")
         candidate = AnalyzerCore()
         candidate.source_identity = self.source_identity
         updated = assignment.clone()
         updated.manual = True
+        candidates = (
+            self.original_coordinate_candidates
+            if restore_original_coordinates
+            else self.coordinate_candidates
+        )
+        candidate_units = (
+            self.original_coordinate_candidate_units
+            if restore_original_coordinates
+            else self.coordinate_candidate_units
+        )
         candidate._apply_assignment(
             self.source_array,
             updated,
-            candidates=self.coordinate_candidates,
+            candidates=candidates,
             automatic=self.auto_axis_assignment,
-            candidate_units=self.coordinate_candidate_units,
+            candidate_units=candidate_units,
+            original_candidates=self.original_coordinate_candidates,
+            original_candidate_units=self.original_coordinate_candidate_units,
         )
         return candidate
 
@@ -229,6 +262,8 @@ class AnalyzerCore(QObject):
             candidates=candidates,
             automatic=self.auto_axis_assignment,
             candidate_units=candidate_units,
+            original_candidates=self.original_coordinate_candidates,
+            original_candidate_units=self.original_coordinate_candidate_units,
         )
         return candidate
 

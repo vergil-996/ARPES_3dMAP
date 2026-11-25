@@ -13,7 +13,7 @@ configure_qt_plugin_path()
 import numpy as np
 import vtk
 from PyQt5.QtCore import QEvent, QSettings, QSize, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QCursor, QKeySequence
+from PyQt5.QtGui import QContextMenuEvent, QCursor, QKeySequence
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -158,10 +158,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     #: 右键菜单统一走 theme.context_menu_qss()（抬升面 + 圆角 + 禁用态 + 分隔线）。
     CONTEXT_MENU_STYLE = theme.context_menu_qss()
     BUILTIN_PAGE_CREATE_ACTIONS = (
-        ("builtin:slice_dos", "切片内强度积分", 0.0),
         ("builtin:energy_dos", "能级态密度", 10.0),
         ("builtin:second_derivative", "二阶导", 40.0),
     )
+    CROP_BOX_HANDLE_GRAB_RADIUS = 10.0
 
     def __init__(self):
         super().__init__()
@@ -248,6 +248,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._crop_box_widgets = {}
         self._crop_box_widget_ids = {}
         self._crop_box_signatures = {}
+        self._crop_box_label_actors = {}
         self._crop_box_syncing_ids = set()
         self.axis_crop_overlay = None
         self.axis_crop_canvas_cid = None
@@ -762,11 +763,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             line.setStyleSheet(f"background: {theme.BORDER_HEX};")
             return line
 
-        def _make_tb_btn(text, kind, width=92):
+        def _make_tb_btn(text, kind, width=92, *, raised=False):
             btn = ActionButton(self.toolbar)
             btn.setFixedHeight(32)
             btn.setFixedWidth(width)
             btn.attachment().setText(text)
+            btn.setProperty("raisedButton", raised)
             theme.style_push_button(btn, kind)
             icon_names = {
                 "打开数据": "ic_fluent_folder_open_regular",
@@ -815,12 +817,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.btn_tb_blender = _make_tb_btn("Blender", "quiet", 82)
         self.btn_tb_blender.setToolTip("多页面导出 Blender 工程，或打开已有工程调整显示并原位更新资产")
         row.addWidget(self.btn_tb_blender)
-        self.btn_main_export = _make_tb_btn("导出", "primary", 74)
+        self.btn_main_export = _make_tb_btn("导出", "primary", 74, raised=True)
         self.btn_main_export.setToolTip("冻结当前视图，设置并导出版图")
         row.addWidget(self.btn_main_export)
 
         self.btn_tb_settings = ActionButton(self.toolbar)
         self.btn_tb_settings.setProperty("compactIconButton", True)
+        self.btn_tb_settings.setProperty("raisedButton", True)
         self.btn_tb_settings.setFixedSize(28, 26)
         self.btn_tb_settings.setAccessibleName("设置")
         self.btn_tb_settings.setToolTip("设置")
@@ -2098,6 +2101,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.canvas_tool_overlay.selection_toggled.connect(self.on_selection_toggled)
         self.canvas_tool_overlay.new_region_requested.connect(self._on_new_region_requested)
         self.canvas_tool_overlay.edc_requested.connect(self._create_edc_result_from_selections)
+        self.canvas_tool_overlay.slice_dos_requested.connect(self._create_slice_dos_result_from_selections)
         path_button = getattr(self.path_slice_controller, "button", None)
         if path_button is not None:
             path_button.toggled.connect(
@@ -3126,6 +3130,41 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         renderer.SetViewport(*main_renderer.GetViewport())
         return renderer
 
+    def _remove_crop_box_label(self, selection_id):
+        labels = self.__dict__.setdefault("_crop_box_label_actors", {})
+        actor = labels.pop(selection_id, None)
+        renderer = self.__dict__.get("_crop_box_renderer")
+        if actor is not None and renderer is not None:
+            renderer.RemoveActor(actor)
+
+    def _sync_crop_box_label(self, selection_id, bounds):
+        renderer = self._crop_box_overlay_renderer()
+        if renderer is None:
+            return
+        labels = self.__dict__.setdefault("_crop_box_label_actors", {})
+        actor = labels.get(selection_id)
+        if actor is None:
+            actor = vtk.vtkBillboardTextActor3D()
+            text_property = actor.GetTextProperty()
+            text_property.SetFontSize(18)
+            text_property.BoldOn()
+            color = theme.accent_qcolor()
+            text_property.SetColor(color.redF(), color.greenF(), color.blueF())
+            renderer.AddActor(actor)
+            labels[selection_id] = actor
+        controller = self.__dict__.get("crop_controller")
+        selection_label = getattr(controller, "selection_label", None)
+        label = selection_label(selection_id) if callable(selection_label) else f"Z{selection_id}"
+        actor.SetInput(str(label))
+        padding = max(
+            (float(bounds[index + 1]) - float(bounds[index])) for index in (0, 2, 4)
+        ) * 0.03
+        actor.SetPosition(
+            float(bounds[1]) + padding,
+            float(bounds[3]) + padding,
+            float(bounds[5]) + padding,
+        )
+
     def _rebuild_interactive_box(self, logical_bounds=None):
         if not self._can_show_interactive_box():
             return
@@ -3142,7 +3181,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         syncing = self.__dict__.setdefault("_crop_box_syncing_ids", set())
         widget_ids = self.__dict__.setdefault("_crop_box_widget_ids", {})
         wanted = {selection_id for selection_id, _selection in selections}
-        for selection_id in list(widgets):
+        labels = self.__dict__.setdefault("_crop_box_label_actors", {})
+        for selection_id in list(set(widgets) | set(labels)):
             if selection_id not in wanted:
                 self._remove_crop_box_widget(selection_id)
 
@@ -3178,6 +3218,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     box_widget.AddObserver("EndInteractionEvent", self._on_box_interaction_end)
                 else:
                     box_widget.PlaceWidget(box_bounds)
+                self._sync_crop_box_label(selection_id, box_bounds)
                 signatures[selection_id] = signature
             finally:
                 syncing.discard(selection_id)
@@ -3200,6 +3241,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if not self._activate_crop_selection(selection_id):
             return
         bounds = tuple(poly.bounds)
+        self._sync_crop_box_label(selection_id, bounds)
         self.__dict__.setdefault("_crop_box_signatures", {})[selection_id] = tuple(
             round(float(value), 5) for value in bounds
         )
@@ -3210,10 +3252,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         widget = widgets.pop(selection_id, None)
         if widget is not None:
             widget.Off()
-            if widget in self.plotter.box_widgets:
-                self.plotter.box_widgets.remove(widget)
+            box_widgets = getattr(self.plotter, "box_widgets", ())
+            if widget in box_widgets:
+                box_widgets.remove(widget)
             self.__dict__.setdefault("_crop_box_widget_ids", {}).pop(id(widget), None)
         self.__dict__.setdefault("_crop_box_signatures", {}).pop(selection_id, None)
+        self._remove_crop_box_label(selection_id)
 
     def _clear_interactive_box(self):
         widgets = self.__dict__.setdefault("_crop_box_widgets", {})
@@ -3231,8 +3275,74 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         else:
             for selection_id in list(widgets):
                 self._remove_crop_box_widget(selection_id)
+        for selection_id in list(self.__dict__.setdefault("_crop_box_label_actors", {})):
+            self._remove_crop_box_label(selection_id)
         self._crop_box_widget = None
         self._box_bounds_signature = None
+
+    def _crop_box_selection_at_event(self, watched, event):
+        plotter = self.__dict__.get("plotter")
+        context = self.__dict__.get("current_render_context")
+        if (
+            plotter is None
+            or watched not in (plotter, getattr(plotter, "interactor", None))
+            or not context
+            or context.get("view") != "3d"
+            or event is None
+        ):
+            return None
+        event_type = event.type()
+        if event_type == QEvent.MouseButtonPress:
+            if event.button() != Qt.RightButton:
+                return None
+        elif event_type == QEvent.ContextMenu:
+            reason = getattr(event, "reason", None)
+            if callable(reason) and reason() != QContextMenuEvent.Mouse:
+                return None
+        else:
+            return None
+
+        try:
+            position = event.pos()
+            if watched is not plotter and hasattr(watched, "mapTo"):
+                position = watched.mapTo(plotter, position)
+            ratio_getter = getattr(plotter, "devicePixelRatioF", None)
+            pixel_ratio = float(ratio_getter()) if callable(ratio_getter) else 1.0
+            cursor_x = float(position.x()) * pixel_ratio
+            cursor_y = float(plotter.height() - position.y() - 1) * pixel_ratio
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+        closest = None
+        widgets = self.__dict__.get("_crop_box_widgets", {})
+        for selection_id, widget in widgets.items():
+            try:
+                poly = vtk.vtkPolyData()
+                returned = widget.GetPolyData(poly)
+                if hasattr(returned, "GetPoints"):
+                    poly = returned
+                points = poly.GetPoints()
+                if points is None:
+                    continue
+                current_renderer = getattr(widget, "GetCurrentRenderer", None)
+                renderer = current_renderer() if callable(current_renderer) else None
+                if renderer is None:
+                    renderer = self.__dict__.get("_crop_box_renderer") or getattr(plotter, "renderer", None)
+                if renderer is None:
+                    continue
+                for point_index in range(8, min(15, points.GetNumberOfPoints())):
+                    point = points.GetPoint(point_index)
+                    renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
+                    renderer.WorldToDisplay()
+                    display = renderer.GetDisplayPoint()
+                    distance = float(np.hypot(display[0] - cursor_x, display[1] - cursor_y))
+                    if distance <= self.CROP_BOX_HANDLE_GRAB_RADIUS * pixel_ratio and (
+                        closest is None or distance < closest[0]
+                    ):
+                        closest = (distance, selection_id)
+            except (AttributeError, IndexError, TypeError, ValueError):
+                continue
+        return closest[1] if closest is not None else None
 
     def _find_main_volume(self):
         renderer = getattr(self.plotter, "renderer", None)
@@ -4272,6 +4382,25 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             selection_button.setEnabled(
                 has_data and active_spec is not None
                 and active_spec.page_kind not in {"control_panel", self.PATH_SLICE_PAGE_KIND}
+            )
+        slice_dos_button = getattr(overlay, "slice_dos_button", None)
+        if slice_dos_button is not None:
+            slice_dos_button.setEnabled(
+                bool(
+                    has_data
+                    and self._integration_action_available("builtin:slice_dos", active_spec)
+                )
+            )
+        edc_button = getattr(overlay, "edc_button", None)
+        if edc_button is not None:
+            kind = getattr(active_spec, "page_kind", None)
+            integral_axis = (
+                self._integration_axis_index(active_spec)
+                if kind in {"axis_integral", "axis_integral_crop"}
+                else None
+            )
+            edc_button.setEnabled(
+                bool(has_data and (kind == "home" or integral_axis in (0, 1, 2)))
             )
 
     @staticmethod
@@ -6753,38 +6882,76 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if current is None or current.page_kind == "control_panel":
             current = self._current_visual_spec()
         if current is not None and current.page_kind in {"home", "axis_integral", "axis_integral_crop"}:
+            integral_page = current.page_kind in {"axis_integral", "axis_integral_crop"}
+            resolved = self._resolved_axis_integral_params(current) if integral_page else None
             base = self._compute_base_render_context(current)
-            context = (apply_crop_regions(base, current.params.get("crop_regions", ()))
-                       if base is not None else None)
-            if context is not None and context.get("view") == "2d":
-                if context.get("crop_empty"):
-                    self._show_message("无法积分", "当前裁剪范围内没有有效数据。", QMessageBox.Warning)
-                    return None
-                # Only geometry is frozen; data is recomputed for every delay.
-                # A 3D template covers a crop chain that collapses to a slice.
-                template = {key: copy.deepcopy(base[key]) for key in (
-                    "view", "slice_info", "plot_axes", "plot_logical_bounds",
-                    "data_bounds", "full_shape",
-                ) if key in base}
-                if base["view"] == "2d" and "plot_logical_bounds" not in template:
-                    axes = [key for i, key in enumerate(("X", "Y", "E"))
-                            if i != int(base["slice_info"]["axis"])]
-                    template["plot_logical_bounds"] = {
-                        "x_low": 0, "x_up": len(base["coords"][axes[0]]) - 1,
-                        "y_low": 0, "y_up": len(base["coords"][axes[1]]) - 1,
-                    }
-                spec = AnalysisPageSpec(
-                    page_id=self._make_page_id(),
-                    title=f"切片内强度积分 - {current.title}",
-                    page_kind="slice_dos", source_module="data_process",
-                    source_page_id=current.page_id,
-                    params={"slice_source": {
-                        "context": template,
-                        "crop_regions": copy.deepcopy(current.params.get("crop_regions", [])),
-                    }},
-                )
-                self._seed_control_state_for_spec(spec)
-                return spec
+            if base is not None:
+                regions = copy.deepcopy(current.params.get("crop_regions", []))
+                if (
+                    integral_page
+                    and base.get("view") == "2d"
+                    and "crop_controller" in self.__dict__
+                ):
+                    controller = self.__dict__.get("crop_controller")
+                    selection = None
+                    if controller is not None and controller.commit_edits():
+                        if hasattr(controller, "selections_for_page"):
+                            active_id = getattr(controller, "active_selection_id", None)
+                            selection = dict(controller.selections_for_page()).get(active_id)
+                        else:
+                            selection = controller.selection
+                    plot_axes = base.get("plot_axes") or {}
+                    expected_axes = (plot_axes.get("x_key"), plot_axes.get("y_key"))
+                    if (
+                        selection is None
+                        or selection.view != "2d"
+                        or tuple(selection.axes) != expected_axes
+                    ):
+                        self._show_message(
+                            "无法积分",
+                            "请在当前二维切片页建立并激活有效框选范围。",
+                            QMessageBox.Warning,
+                        )
+                        return None
+                    region = copy.deepcopy(selection.to_dict())
+                    region["operation"] = "crop"
+                    regions.append(region)
+                context = apply_crop_regions(base, regions)
+                if context.get("view") == "2d":
+                    if context.get("crop_empty"):
+                        self._show_message("无法积分", "当前裁剪范围内没有有效数据。", QMessageBox.Warning)
+                        return None
+                    # Only geometry is frozen; data is recomputed for every delay.
+                    # A 3D template covers a crop chain that collapses to a slice.
+                    template = {key: copy.deepcopy(base[key]) for key in (
+                        "view", "slice_info", "plot_axes", "plot_logical_bounds",
+                        "data_bounds", "full_shape",
+                    ) if key in base}
+                    if resolved is not None:
+                        template["slice_info"] = dict(
+                            template.get("slice_info") or {},
+                            mode="integral",
+                            range=(int(resolved["low"]), int(resolved["up"])),
+                        )
+                    if base["view"] == "2d" and "plot_logical_bounds" not in template:
+                        axes = [key for i, key in enumerate(("X", "Y", "E"))
+                                if i != int(base["slice_info"]["axis"])]
+                        template["plot_logical_bounds"] = {
+                            "x_low": 0, "x_up": len(base["coords"][axes[0]]) - 1,
+                            "y_low": 0, "y_up": len(base["coords"][axes[1]]) - 1,
+                        }
+                    spec = AnalysisPageSpec(
+                        page_id=self._make_page_id(),
+                        title=f"切片内强度积分 - {current.title}",
+                        page_kind="slice_dos", source_module="data_process",
+                        source_page_id=current.page_id,
+                        params={"slice_source": {
+                            "context": template,
+                            "crop_regions": regions,
+                        }},
+                    )
+                    self._seed_control_state_for_spec(spec)
+                    return spec
 
         clip_info = self._get_clip_slices(self.clip_ranges)
         if clip_info is None:
@@ -6804,6 +6971,32 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         )
         self._seed_control_state_for_spec(spec)
         return spec
+
+    def _create_slice_dos_result_from_selections(self):
+        current = self.left_workspace.current_spec()
+        if current is None or current.page_kind == "control_panel":
+            current = self._current_visual_spec()
+        if not self._integration_has_time_axis(current):
+            self._show_message(
+                "静态数据",
+                "当前数据不包含扫描轴，无法计算切片内强度积分。",
+                QMessageBox.Information,
+            )
+            return None
+        if not self._integration_action_available("builtin:slice_dos", current):
+            self._show_message(
+                "无法积分",
+                "请在三维体、有效切片或轴积分页面使用切片内强度积分。",
+                QMessageBox.Warning,
+            )
+            return None
+        spec = self._build_slice_dos_spec()
+        if spec is None:
+            return None
+        spec.title = self._make_unique_page_title(spec.title)
+        self.left_workspace.add_page(spec)
+        self._update_export_button_states()
+        return spec.page_id
 
     def _build_energy_dos_spec(self):
         current_spec = self.left_workspace.current_spec()
@@ -7442,6 +7635,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         key = str(action_key)
         allowed = {item[0] for item in self._integration_actions_for_parent(parent_page_id)}
+        if key == "builtin:slice_dos" and self._integration_action_available(key, parent):
+            allowed.add(key)
         current = workspace.current_spec()
         if key not in allowed or current is None or current.page_id != parent_page_id:
             return None

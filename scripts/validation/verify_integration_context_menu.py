@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""真实窗口验收“视图右键 → 处理分析”的完整入口。
+"""真实窗口验收“视图右键 → 处理分析”及框选工具入口。
 
 默认使用 WSe₂ 时间分辨数据，在隔离设置和扩展目录中构建并安装 EDC 瀑布图插件。
-内置结果和 EDC 瀑布图都通过 2D／3D 视图区域的真实右键 QMenu 创建；每个实际
-打开的菜单另断言不含已移除的 builtin:edc_curve。QTimer 操作菜单，避免 exec_()
-阻塞。报告、菜单截图和结果页截图仅写入 .local/outputs/integration-context-menu/。
+能级态密度、二阶导和 EDC 瀑布图通过 2D／3D 视图区域的真实右键 QMenu 创建；
+每个实际打开的菜单都断言不含 builtin:edc_curve 与 builtin:slice_dos。切片内强度
+积分改由框选次级工具按钮创建，并核对活动选区与法向双端区间。QTimer 操作菜单，
+避免 exec_() 阻塞。报告与截图仅写入 .local/outputs/integration-context-menu/。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_integration_context_menu.py [npz路径] [--output-dir DIR]
 """
@@ -17,6 +18,8 @@ import time
 import traceback
 from dataclasses import replace
 from pathlib import Path
+
+import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -228,7 +231,7 @@ def main() -> int:
     messages = []
     window._show_message = lambda title, text, *a, **k: messages.append((title, text))
 
-    from bandscope.core.crop_model import selection_for_context
+    from bandscope.core.crop_model import index_interval, selection_for_context
     from bandscope.ui import theme
 
     results = []
@@ -244,12 +247,14 @@ def main() -> int:
         path = args.output_dir / name
         return window.grab().save(str(path))
 
-    def record_menu_without_edc(report, label=None):
+    def record_menu_without_selection_tools(report, label=None):
         kind = str(report.get("parent_page_kind") or "未知")
+        removed = {"builtin:edc_curve", "builtin:slice_dos"}
+        present = sorted(removed.intersection(report["keys"]))
         record(
-            label or f"{kind} 页菜单不含 builtin:edc_curve",
-            "builtin:edc_curve" not in report["keys"],
-            report["error"] or f"页型={kind}，动作={report['keys']}",
+            label or f"{kind} 页菜单不含框选工具内置项",
+            not present,
+            report["error"] or f"页型={kind}，已移除项={present}，动作={report['keys']}",
         )
 
     def current_page_id():
@@ -334,7 +339,7 @@ def main() -> int:
 
         def open_menu():
             def after_menu(report):
-                record_menu_without_edc(report)
+                record_menu_without_selection_tools(report)
                 record(
                     f"视图右键提供并触发 {action_key}",
                     report["opened"]
@@ -420,7 +425,7 @@ def main() -> int:
             repr(actions),
         )
         def checked_home_menu(report):
-            record_menu_without_edc(report, "3D 主页菜单不含 builtin:edc_curve")
+            record_menu_without_selection_tools(report, "3D 主页菜单不含 EDC/切片积分内置项")
             window.canvas_tool_overlay.preset_buttons["yz"].click()
             wait_for(
                 "X 轴积分来源页",
@@ -459,7 +464,7 @@ def main() -> int:
 
     def step_z_integral():
         pages["axis_z"] = current_page_id()
-        window.btn_tb_crop.setChecked(True)
+        window.btn_tb_crop.click()
         QTimer.singleShot(400, guarded(step_crop_z))
 
     def step_crop_z():
@@ -478,7 +483,7 @@ def main() -> int:
             y0 + 0.75 * (y1 - y0),
         )
         window.crop_controller.set_selection(replace(selection, bounds=bounds, operation="crop"))
-        window.on_cut()
+        window.crop_controller.popup.apply_button.click()
         window.btn_tb_crop.setChecked(False)
         wait_for(
             "EDC 矩形裁剪父页",
@@ -521,23 +526,16 @@ def main() -> int:
         step_inspect_home()
 
     def step_inspect_home():
-        expected = ["builtin:slice_dos", "builtin:energy_dos", "builtin:second_derivative"]
+        expected = ["builtin:energy_dos", "builtin:second_derivative"]
 
         def checked(report):
-            record_menu_without_edc(report, "2D 主页菜单不含 builtin:edc_curve")
+            record_menu_without_selection_tools(report, "2D 主页菜单不含 EDC/切片积分内置项")
             record(
                 "含能量轴的 2D 主页只显示合法内置动作（浅色菜单）",
                 report["opened"] and report["keys"] == expected,
                 report["error"] or "、".join(report["keys"]),
             )
-            create_result(
-                window.left_workspace.home_page_id,
-                "builtin:slice_dos",
-                "slice_dos",
-                "1d",
-                step_energy_dos,
-                shot_prefix="menu-light-slice",
-            )
+            step_slice_dos_tool()
 
         inspect_analysis_menu(
             window,
@@ -546,6 +544,162 @@ def main() -> int:
             output_dir=args.output_dir,
             shot_prefix="menu-light-home",
         )
+
+    def step_slice_dos_tool():
+        parent_id = pages["axis_x"]
+
+        def prepare():
+            overlay = window.canvas_tool_overlay
+            primary_ok = all(
+                button.parentWidget() is overlay
+                and overlay.selection_panel.layout().indexOf(button) < 0
+                for button in (window.btn_tb_crop, window.btn_tb_erase)
+            )
+            secondary = [overlay.new_region_button, overlay.edc_button, overlay.slice_dos_button]
+            record(
+                "裁剪/裁空在初级栏，切片内强度积分在框选次级栏",
+                primary_ok and all(
+                    button.parentWidget() is overlay.selection_panel
+                    and overlay.selection_panel.layout().indexOf(button) >= 0
+                    for button in secondary
+                ),
+                f"次级动作={[button.toolTip() for button in secondary]}",
+            )
+            if not overlay.selection_button.isChecked():
+                overlay.selection_button.click()
+            if not window.btn_tb_crop.isChecked():
+                window.btn_tb_crop.click()
+            selection = window.crop_controller.selection
+            if selection is None:
+                record("框选次级按钮创建切片内强度积分", False, "没有活动选区")
+                step_energy_dos()
+                return
+            x0, x1, y0, y1 = selection.bounds
+            bounds = (
+                x0 + 0.15 * (x1 - x0), x0 + 0.70 * (x1 - x0),
+                y0 + 0.20 * (y1 - y0), y0 + 0.80 * (y1 - y0),
+            )
+            window.crop_controller.set_selection(replace(selection, bounds=bounds, operation="crop"))
+            normal_low = 0
+            normal_up = min(2, window.core.raw_data.shape[0] - 1)
+            coords = window.current_render_context["coords"]["X"]
+            control = window.timeline_bar.interval_control
+            initially_locked = bool(window.axis_interval.locked)
+            if initially_locked:
+                badge = control.range_slider.lock_badge
+                if not badge.isVisible() or not badge.isEnabled():
+                    raise AssertionError("X 法向区间锁徽章不可点击")
+                QTest.mouseClick(badge, Qt.LeftButton, Qt.NoModifier, badge.rect().center())
+                app.processEvents()
+            record(
+                "切片积分前通过真实锁徽章解锁 X 法向区间",
+                not window.axis_interval.locked,
+                f"初始 locked={initially_locked}，当前 locked={window.axis_interval.locked}",
+            )
+            if window.axis_interval.locked:
+                raise AssertionError("X 法向区间仍锁定，不能分别提交双端")
+            target_low, target_up = sorted(
+                (float(coords[normal_low]), float(coords[normal_up]))
+            )
+            if target_low > float(window.axis_interval.up):
+                submissions = (("up", target_up), ("low", target_low))
+            else:
+                submissions = (("low", target_low), ("up", target_up))
+            for endpoint, value in submissions:
+                control.endpointCommitted.emit(endpoint, value)
+            app.processEvents()
+            actual = window.axis_interval.to_indices(coords)
+            if actual != (normal_low, normal_up):
+                raise AssertionError(
+                    f"X 法向区间不一致：{actual} != {(normal_low, normal_up)}"
+                )
+            window.btn_tb_crop.click()
+            QTimer.singleShot(300, guarded(lambda: create(normal_low, normal_up)))
+
+        def create(normal_low, normal_up):
+            parent = window.left_workspace.page_specs[parent_id]
+            selection = window.crop_controller.selection
+            source_coords = window.current_render_context["coords"]
+            actual_range = window.axis_interval.to_indices(source_coords["X"])
+            record(
+                "切片积分使用活动选区和 X 法向双端区间",
+                actual_range == (normal_low, normal_up),
+                f"实际法向区间={actual_range}，选区={selection.bounds}",
+            )
+            before_ids = set(window.left_workspace.page_specs)
+            window.canvas_tool_overlay.slice_dos_button.click()
+
+            def check_created():
+                new_ids = set(window.left_workspace.page_specs) - before_ids
+                spec = window.left_workspace.current_spec()
+                ok = (
+                    len(new_ids) == 1 and spec is not None and spec.page_id in new_ids
+                    and spec.page_kind == "slice_dos" and spec.source_page_id == parent_id
+                    and page_ready(spec.page_id, "1d")
+                )
+                if not ok:
+                    record("框选次级按钮创建切片内强度积分", False,
+                           f"新页={sorted(new_ids)}，当前={current_page_id()}")
+                    step_energy_dos()
+                    return
+                pages["slice_dos"] = spec.page_id
+                region = [0, window.core.raw_data.shape[0] - 1,
+                          0, window.core.raw_data.shape[1] - 1,
+                          0, window.core.raw_data.shape[2] - 1]
+                for axis, key in enumerate(selection.axes):
+                    axis_index = ("X", "Y", "E").index(key)
+                    interval = index_interval(
+                        source_coords[key], *selection.bounds[2 * axis:2 * axis + 2]
+                    )
+                    if interval is None:
+                        raise AssertionError(f"活动框选与 {key} 轴不相交")
+                    region[2 * axis_index:2 * axis_index + 2] = list(interval)
+                region[0:2] = [normal_low, normal_up]
+                x0, x1, y0, y1, e0, e1 = region
+                expected = window.core.raw_data[x0:x1 + 1, y0:y1 + 1, e0:e1 + 1, :].sum(
+                    axis=(0, 1, 2), dtype="float64"
+                )
+                actual_values = (window.current_render_context or {}).get("y_data")
+                actual = np.asarray(
+                    [] if actual_values is None else actual_values, dtype=np.float64
+                )
+                shape_ok = actual.shape == expected.shape
+                max_error = (
+                    float(np.max(np.abs(actual - expected)))
+                    if shape_ok and actual.size else None
+                )
+                numeric_ok = shape_ok and bool(
+                    np.allclose(actual, expected, rtol=1e-6, atol=1e-5)
+                )
+                frozen_info = ((spec.params.get("slice_source") or {}).get("context") or {}).get("slice_info") or {}
+                record(
+                    "框选次级按钮创建切片内强度积分并核对逐帧数值",
+                    numeric_ok and tuple(frozen_info.get("range") or ()) == (normal_low, normal_up),
+                    {
+                        "selection_bounds": selection.bounds,
+                        "expected_region": region,
+                        "normal_range": [normal_low, normal_up],
+                        "frozen_normal_range": frozen_info.get("range"),
+                        "actual_intensity": actual.tolist(),
+                        "expected_intensity": expected.tolist(),
+                        "actual_intensity_sum": float(np.sum(actual)) if actual.size else None,
+                        "expected_intensity_sum": float(np.sum(expected)),
+                        "max_intensity_error": max_error,
+                    },
+                )
+                save_window("result-slice-dos-selection-tool.png")
+                step_energy_dos()
+
+            wait_for(
+                "框选工具 slice_dos 结果页",
+                lambda: len(set(window.left_workspace.page_specs) - before_ids) == 1
+                and current_page_id() not in before_ids
+                and page_ready(current_page_id(), "1d"),
+                check_created,
+                90000,
+            )
+
+        activate(parent_id, prepare, "2d")
 
     def step_energy_dos():
         create_result(
@@ -561,7 +715,7 @@ def main() -> int:
         before_ids = set(window.left_workspace.page_specs)
 
         def checked(report):
-            record_menu_without_edc(report, "energy_dos 结果页菜单不含 builtin:edc_curve")
+            record_menu_without_selection_tools(report, "energy_dos 结果页菜单不含 EDC/切片积分内置项")
             record(
                 "非法结果父页没有处理分析子菜单且不建页",
                 not report["create_present"]
@@ -626,24 +780,24 @@ def main() -> int:
         def inspect_crop():
             parent_id = pages.get("axis_z_crop")
             if parent_id is None:
-                record("axis_integral_crop 页菜单不含 builtin:edc_curve", False, "Z 轴裁剪父页不可用")
+                record("axis_integral_crop 页菜单不含 EDC/切片积分内置项", False, "Z 轴裁剪父页不可用")
                 step_waterfall()
                 return
 
             def checked_crop(report):
-                record_menu_without_edc(report, "axis_integral_crop 页菜单不含 builtin:edc_curve")
+                record_menu_without_selection_tools(report, "axis_integral_crop 页菜单不含 EDC/切片积分内置项")
                 step_waterfall()
 
             inspect_analysis_menu(window, parent_id, guarded(checked_crop), output_dir=args.output_dir)
 
         parent_id = pages.get("axis_z")
         if parent_id is None:
-            record("E/Z 积分页菜单不含 builtin:edc_curve", False, "Z 轴积分父页不可用")
+            record("E/Z 积分页菜单不含 EDC/切片积分内置项", False, "Z 轴积分父页不可用")
             inspect_crop()
             return
 
         def checked_axis(report):
-            record_menu_without_edc(report, "E/Z 积分页菜单不含 builtin:edc_curve")
+            record_menu_without_selection_tools(report, "E/Z 积分页菜单不含 EDC/切片积分内置项")
             inspect_crop()
 
         inspect_analysis_menu(window, parent_id, guarded(checked_axis), output_dir=args.output_dir)
@@ -691,12 +845,12 @@ def main() -> int:
             key = page_keys[index]
             parent_id = pages.get(key)
             if parent_id is None:
-                record(f"{key} 结果页菜单不含 builtin:edc_curve", False, "结果页不可用")
+                record(f"{key} 结果页菜单不含 EDC/切片积分内置项", False, "结果页不可用")
                 inspect_next(index + 1)
                 return
 
             def checked(report):
-                record_menu_without_edc(report, f"{key} 结果页菜单不含 builtin:edc_curve")
+                record_menu_without_selection_tools(report, f"{key} 结果页菜单不含 EDC/切片积分内置项")
                 inspect_next(index + 1)
 
             inspect_analysis_menu(window, parent_id, guarded(checked), output_dir=args.output_dir)
@@ -728,6 +882,11 @@ def main() -> int:
             "data": str(args.data),
             "data_shape": list(window.core.raw_data.shape) if window.core.raw_data is not None else None,
             "pages": pages,
+            "manual_visual_review": False,
+            "not_executed": [{
+                "item": "人工视觉复核",
+                "reason": "本脚本仅自动操作、断言并截图，未由人员复核菜单、弹窗和科研出图质量。",
+            }],
             "results": results,
             "messages": messages,
             "passed": passed,

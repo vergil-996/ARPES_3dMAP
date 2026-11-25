@@ -14,6 +14,8 @@ from PyQt5.QtWidgets import (
 )
 
 import bandscope.ui.theme as theme
+from bandscope.ui.groove_painting import paint_groove
+from bandscope.ui.relief_painting import paint_raised_ellipse
 from bandscope.ui.opacity_interpolation_switch import OpacityInterpolationSwitch
 from bandscope.core.display_style import normalize_opacity_points
 from bandscope.core.opacity_curve import (
@@ -584,10 +586,7 @@ class OpacityCurveCanvas(QWidget):
         painter.drawRect(plot)
 
     def _paint_rail(self, painter):
-        rail = self._rail_rect()
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(theme.BG_4))
-        painter.drawRoundedRect(QRectF(rail), rail.height() / 2.0, rail.height() / 2.0)
+        paint_groove(painter, self._rail_rect())
 
     def _paint_connector(self, painter):
         rail = self._rail_rect()
@@ -636,6 +635,13 @@ class OpacityCurveCanvas(QWidget):
         for index in range(len(self._points)):
             self._paint_point(painter, index)
 
+    @staticmethod
+    def _paint_raised_dot(painter, center, radius, *, pressed=False):
+        rect = QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0)
+        paint_raised_ellipse(
+            painter, rect, "#111111", "#050505", pressed=pressed,
+        )
+
     def _paint_rail_handle(self, painter):
         center = self._rail_point()
         painter.setPen(QPen(self._contrast_color(), 1.4))
@@ -653,9 +659,7 @@ class OpacityCurveCanvas(QWidget):
                 # 动画期间底轨被移走时，回填仍发生在放点时的原位。
                 self._paint_backfill_marker(painter)
         if fill > 0.0:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#111111"))
-            painter.drawEllipse(center, fill, fill)
+            self._paint_raised_dot(painter, center, fill, pressed=self._mode == "rail")
 
     def _paint_backfill_marker(self, painter):
         progress = self.backfill_progress()
@@ -667,9 +671,7 @@ class OpacityCurveCanvas(QWidget):
         painter.drawEllipse(center, self.RAIL_DOT_RADIUS, self.RAIL_DOT_RADIUS)
         fill = self.RAIL_DOT_RADIUS * float(progress)
         if fill > 0.0:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor("#111111"))
-            painter.drawEllipse(center, fill, fill)
+            self._paint_raised_dot(painter, center, fill)
 
     def moving_dot_position(self):
         if self._mode != "insert":
@@ -680,9 +682,7 @@ class OpacityCurveCanvas(QWidget):
         center = self.moving_dot_position()
         if center is None:
             return
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#111111"))
-        painter.drawEllipse(center, self.RAIL_DOT_RADIUS, self.RAIL_DOT_RADIUS)
+        self._paint_raised_dot(painter, center, self.RAIL_DOT_RADIUS, pressed=True)
 
     def paintEvent(self, _event):
         painter = QPainter(self)

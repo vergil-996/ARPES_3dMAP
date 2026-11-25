@@ -139,31 +139,51 @@ class EdcIntegrationTests(unittest.TestCase):
             "locked": True,
         }
 
-    def _axis_host(self, selections):
+    def _axis_host(
+        self, selections, *, axis_index=2, normal_bounds=None, page_kind="axis_integral_crop"
+    ):
+        plot_keys = tuple(
+            key for index, key in enumerate(("X", "Y", "E")) if index != axis_index
+        )
+        if normal_bounds is None:
+            normal_bounds = (0, self.raw_data.shape[axis_index] - 1)
+        low, up = sorted(normal_bounds)
         spec = AnalysisPageSpec(
             "axis-page",
-            "E integral",
-            "axis_integral_crop",
+            f"{plot_keys[0]}-{plot_keys[1]} integral",
+            page_kind,
             "test",
             source_page_id="home",
             params={
-                "axis_index": 2,
-                "low": 0,
-                "up": 4,
-                "mid": 2,
+                "axis_index": axis_index,
+                "low": low,
+                "up": up,
+                "mid": round((low + up) / 2),
                 "source_t_low": 1,
                 "source_t_up": 2,
                 "time_interval": copy.deepcopy(self.time_interval),
                 "crop_k_low": 0,
-                "crop_k_up": 3,
+                "crop_k_up": self.raw_data.shape[
+                    ("X", "Y", "E").index(plot_keys[0])
+                ] - 1,
                 "crop_e_low": 0,
-                "crop_e_up": 4,
+                "crop_e_up": self.raw_data.shape[
+                    ("X", "Y", "E").index(plot_keys[1])
+                ] - 1,
             },
         )
+        if page_kind == "axis_integral":
+            for key in ("crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"):
+                spec.params.pop(key)
         context = {
             "view": "2d",
-            "data": np.zeros((4, 3)),
-            "plot_axes": {"x_key": "X", "y_key": "Y"},
+            "data": np.zeros(
+                tuple(
+                    self.raw_data.shape[("X", "Y", "E").index(key)]
+                    for key in plot_keys
+                )
+            ),
+            "plot_axes": {"x_key": plot_keys[0], "y_key": plot_keys[1]},
         }
         return _EdcHost(spec, context, selections, self.raw_data, self.coords)
 
@@ -236,6 +256,116 @@ class EdcIntegrationTests(unittest.TestCase):
         self.assertEqual(
             page.params["curve_metadata"][0]["time_interval"], self.time_interval
         )
+
+    def test_xz_selection_uses_selected_energy_and_normal_y_interval(self):
+        selection = CropSelection("2d", ("X", "E"), (-0.5, 1.0, 0.0, 0.5))
+        host = self._axis_host(
+            [("xz", selection)],
+            axis_index=1,
+            normal_bounds=(1, 2),
+            page_kind="axis_integral",
+        )
+
+        page_id = host._create_edc_result_from_selections()
+
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        curve = page.params["base_curve"]
+        source = np.sum(self.raw_data[..., 1:3], axis=3, dtype=np.float64)
+        np.testing.assert_array_equal(curve["x_data"], [0.5, 0.0])
+        np.testing.assert_allclose(
+            curve["y_data"], np.sum(source[1:4, 1:3, 1:3], axis=(0, 1))
+        )
+        self.assertEqual(page.params["source_data_bounds"], (0, 3, 0, 2, 0, 4))
+        metadata = page.params["curve_metadata"][0]
+        self.assertEqual(metadata["index_bounds"], (1, 3, 1, 2, 1, 2))
+        self.assertEqual(metadata["kx_range"], (-0.5, 1.0))
+        self.assertEqual(metadata["ky_range"], (1.0, 3.0))
+        self.assertEqual(metadata["energy_range"], (0.5, 0.0))
+        self.assertIn("E 0.5~0", curve["title"])
+
+    def test_yz_selection_with_swapped_axes_uses_normal_x_interval(self):
+        selection = CropSelection("2d", ("E", "Y"), (-0.5, 2.0, 1.0, 3.0))
+        host = self._axis_host(
+            [("yz", selection)],
+            axis_index=0,
+            normal_bounds=(1, 2),
+            page_kind="axis_integral",
+        )
+
+        page_id = host._create_edc_result_from_selections()
+
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        curve = page.params["base_curve"]
+        source = np.sum(self.raw_data[..., 1:3], axis=3, dtype=np.float64)
+        np.testing.assert_array_equal(curve["x_data"], [2.0, 0.5, 0.0, -0.5])
+        np.testing.assert_allclose(
+            curve["y_data"], np.sum(source[1:3, 1:3, 0:4], axis=(0, 1))
+        )
+        self.assertEqual(page.params["source_data_bounds"], (0, 3, 0, 2, 0, 4))
+        metadata = page.params["curve_metadata"][0]
+        self.assertEqual(metadata["index_bounds"], (1, 2, 1, 2, 0, 3))
+        self.assertEqual(metadata["kx_range"], (-0.5, 0.5))
+        self.assertEqual(metadata["ky_range"], (1.0, 3.0))
+        self.assertEqual(metadata["energy_range"], (2.0, -0.5))
+
+    def test_xy_selection_keeps_full_energy_when_e_slider_is_narrowed(self):
+        selection = CropSelection("2d", ("X", "Y"), (-1.0, -0.5, 0.0, 1.0))
+        host = self._axis_host(
+            [("xy", selection)],
+            axis_index=2,
+            normal_bounds=(1, 2),
+            page_kind="axis_integral",
+        )
+
+        page_id = host._create_edc_result_from_selections()
+
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        curve = page.params["base_curve"]
+        source = np.sum(self.raw_data[..., 1:3], axis=3, dtype=np.float64)
+        np.testing.assert_array_equal(curve["x_data"], self.coords["E"])
+        np.testing.assert_allclose(
+            curve["y_data"], np.sum(source[0:2, 0:2, :], axis=(0, 1))
+        )
+        self.assertEqual(page.params["source_data_bounds"], (0, 3, 0, 2, 0, 4))
+        self.assertEqual(
+            page.params["curve_metadata"][0]["index_bounds"], (0, 1, 0, 1, 0, 4)
+        )
+
+    def test_xz_crop_and_erase_regions_replay_in_order_with_normal_interval(self):
+        selection = CropSelection("2d", ("X", "E"), (-1.0, 1.0, -2.0, 2.0))
+        host = self._axis_host(
+            [("xz", selection)], axis_index=1, normal_bounds=(1, 2)
+        )
+        host.left_workspace.spec.params.update(
+            crop_base_rect=None,
+            crop_regions=[
+                CropSelection(
+                    "2d", ("X", "E"), (-0.5, 1.0, -0.5, 2.0)
+                ).to_dict(),
+                CropSelection(
+                    "2d",
+                    ("X", "E"),
+                    (0.5, 1.0, -0.5, 0.0),
+                    operation="erase",
+                ).to_dict(),
+            ],
+        )
+
+        page_id = host._create_edc_result_from_selections()
+
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        source = np.sum(self.raw_data[..., 1:3], axis=3, dtype=np.float64)
+        expected = np.sum(source[1:4, 1:3, 0:4], axis=(0, 1))
+        expected[2:4] -= np.sum(source[2:4, 1:3, 2:4], axis=(0, 1))
+        np.testing.assert_allclose(page.params["base_curve"]["y_data"], expected)
+        np.testing.assert_array_equal(
+            page.params["base_curve"]["x_data"], [2.0, 0.5, 0.0, -0.5]
+        )
+        self.assertEqual(page.params["source_data_bounds"], (1, 3, 1, 2, 0, 3))
 
     def test_2d_crop_and_erase_regions_replay_on_the_3d_source_in_order(self):
         selection = CropSelection("2d", ("X", "Y"), (-1.0, 1.0, 0.0, 3.0))
@@ -551,7 +681,7 @@ class EdcIntegrationTests(unittest.TestCase):
             intensity[[0, 3, 4]], np.sum(source[0:2, 0:2, :], axis=(0, 1))[[0, 3, 4]]
         )
 
-    def test_rejects_non_xy_or_unsupported_pages_before_building_source(self):
+    def test_rejects_mismatched_axes_or_unsupported_pages_before_building_source(self):
         selection = CropSelection("2d", ("X", "Y"), (-1.0, -0.5, 0.0, 1.0))
         host = self._axis_host([("sel", selection)])
         host.left_workspace.spec.params["axis_index"] = 1

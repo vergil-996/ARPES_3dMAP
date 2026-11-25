@@ -11,6 +11,8 @@ import numpy as np
 from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtWidgets import QApplication, QPushButton, QWidget
 
 from bandscope.app.refactored_app import My3DAnalyzer
@@ -70,6 +72,7 @@ class MultiRegion2DTests(unittest.TestCase):
         self.spec = SimpleNamespace(page_id="image", page_kind="home")
         self.host.left_workspace = SimpleNamespace(current_spec=lambda: self.spec)
         self.host.current_render_context = _image_context()
+        self.host.plotter = SimpleNamespace(interactor=SimpleNamespace(), render=Mock())
         self.controller = self.host.crop_controller = CropController(self.parent)
         self.controller.enabled = True
         self.controller.activate("image", self.host.current_render_context)
@@ -95,6 +98,15 @@ class MultiRegion2DTests(unittest.TestCase):
                          ("motion_notify_event", end),
                          ("button_release_event", end)):
             self.host.canvas_2d.callbacks.process(name, self.event(name, xy))
+
+    def right_click(self, xy):
+        x, y = self.host.ax_2d.transData.transform(xy)
+        local = QPoint(round(x), round(self.host.canvas_2d.figure.bbox.height - y))
+        event = QMouseEvent(
+            QEvent.MouseButtonPress, local, QPoint(100, 100),
+            Qt.RightButton, Qt.RightButton, Qt.NoModifier,
+        )
+        return self.host._crop_event_filter(self.host.canvas_2d, event)
 
     def test_multiple_selectors_activate_and_update_only_their_own_id(self):
         first = self.controller.active_selection_id
@@ -168,6 +180,80 @@ class MultiRegion2DTests(unittest.TestCase):
         np.testing.assert_allclose(drafts[second].bounds, (5, 9, 5, 9))
         self.assertEqual(self.controller.active_selection_id, second)
         self.assertIs(self.host.axis_crop_selector, self.host.axis_crop_selectors[second])
+
+    def test_selector_labels_are_stable_across_refresh_and_axes_rebuild(self):
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+        self.refresh()
+        expected = {first: f"Z{first}", second: f"Z{second}"}
+        self.assertEqual({
+            selection_id: selector._label_artist.get_text()
+            for selection_id, selector in self.host.axis_crop_selectors.items()
+        }, expected)
+
+        self.controller.activate_selection(first, notify=False)
+        self.controller.set_selection(
+            replace(self.controller.selection, bounds=(0, 5, 2, 6)), notify=False
+        )
+        self.refresh()
+        self.assertEqual(
+            self.host.axis_crop_selectors[first]._label_artist.get_position(), (0, 6)
+        )
+        self.host.ax_2d.clear()
+        self.host.ax_2d.set(xlim=(0, 10), ylim=(0, 10))
+        self.refresh()
+        self.assertEqual({
+            selection_id: selector._label_artist.get_text()
+            for selection_id, selector in self.host.axis_crop_selectors.items()
+        }, expected)
+
+    def test_right_click_handle_opens_and_removes_that_selection(self):
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+        second_selection = self.controller.selection
+        self.refresh()
+        self.host._show_axis_title_menu = Mock()
+        applications = Mock()
+        self.controller.apply_requested.connect(applications)
+
+        self.assertTrue(self.right_click((1, 1)))
+        QApplication.processEvents()
+
+        self.assertEqual(self.controller.active_selection_id, first)
+        self.assertTrue(self.controller.popup.isVisible())
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{first}")
+        self.host._show_axis_title_menu.assert_not_called()
+        self.controller.popup.remove_button.click()
+
+        self.assertEqual(dict(self.controller.selections_for_page()), {second: second_selection})
+        self.assertEqual(self.controller.active_selection_id, second)
+        self.assertEqual(set(self.host.axis_crop_selectors), {second})
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{second}")
+        applications.assert_not_called()
+
+    def test_right_click_away_from_handles_keeps_generic_popup_and_axis_menu(self):
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+        self.refresh()
+        self.host._show_axis_title_menu = Mock()
+
+        self.assertTrue(self.right_click((0.2, 0.2)))
+        QApplication.processEvents()
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.controller.active_selection_id, second)
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{second}")
+        self.host._show_axis_title_menu.assert_called_once()
+
+    def test_removing_last_selection_clears_selector(self):
+        self.refresh()
+        self.assertTrue(self.host.axis_crop_selectors)
+
+        self.assertTrue(self.controller.remove_selection(self.controller.active_selection_id))
+
+        self.assertEqual(self.host.axis_crop_selectors, {})
+        self.assertIsNone(self.host.axis_crop_selector)
+        self.host.plotter.render.assert_called_once()
 
     def test_all_selectors_share_blit_and_background(self):
         self.controller.add_selection()
@@ -385,6 +471,21 @@ class MultiRegion3DTests(unittest.TestCase):
         np.testing.assert_allclose(self.host._crop_logical_bounds(drafts[second]), second_logical)
         np.testing.assert_allclose(self.host._crop_logical_bounds(drafts[first]), first_logical)
         np.testing.assert_allclose(self.host.precise_logical_bounds, second_logical)
+
+    def test_remove_selection_updates_3d_widgets_including_the_last_box(self):
+        controller = self.host.crop_controller
+        first = controller.active_selection_id
+        second = controller.add_selection()
+        self.host._rebuild_interactive_box()
+
+        self.assertTrue(controller.remove_selection(second))
+        self.assertEqual(controller.active_selection_id, first)
+        self.assertEqual(set(self.host._crop_box_widgets), {first})
+        self.assertTrue(controller.remove_selection(first))
+        self.assertIsNone(controller.selection)
+        self.assertEqual(self.host._crop_box_widgets, {})
+        self.assertIsNone(self.host._crop_box_widget)
+        self.host._restore_volume_opacity_if_dimmed.assert_called()
 
     def test_clear_removes_all_crop_boxes_but_preserves_enhancement_box(self):
         self.host.crop_controller.add_selection()

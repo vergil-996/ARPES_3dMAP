@@ -101,6 +101,37 @@ class AnalyzerCoreMomentumCalibrationTests(unittest.TestCase):
         self.assertEqual(calibrated.has_time_axis, self.core.has_time_axis)
         self.assertIs(calibrated.source_identity, self.core.source_identity)
 
+    def test_restore_original_coordinates_clears_repeated_calibration(self):
+        calibrated = self.core.copy_with_momentum_calibration(
+            (0, 0), (3, 4), 10.0, unit="nm⁻¹"
+        )
+        calibrated = calibrated.copy_with_momentum_calibration(
+            (0, 0), (1, 0), 8.0, unit="Å⁻¹"
+        )
+        self.assertEqual(calibrated.coord_units["X"], "Å⁻¹")
+
+        restored = calibrated.copy_with_assignment(
+            calibrated.auto_axis_assignment,
+            restore_original_coordinates=True,
+        )
+
+        np.testing.assert_array_equal(restored.coords["X"], self.core.coords["X"])
+        np.testing.assert_array_equal(restored.coords["Y"], self.core.coords["Y"])
+        np.testing.assert_array_equal(
+            restored.coordinate_candidates["kx"], self.core.coordinate_candidates["kx"]
+        )
+        np.testing.assert_array_equal(
+            restored.coordinate_candidates["ky"], self.core.coordinate_candidates["ky"]
+        )
+        self.assertEqual(restored.coord_units["X"], "old-x-unit")
+        self.assertEqual(restored.coord_units["Y"], "old-y-unit")
+        self.assertEqual(
+            restored.axis_assignment.coord_keys,
+            self.core.auto_axis_assignment.coord_keys,
+        )
+        np.testing.assert_array_equal(restored.raw_data, self.core.raw_data)
+        self.assertIs(restored.source_array, self.core.source_array)
+
     def test_index_momentum_coordinates_become_file_candidates(self):
         assignment = self.core.axis_assignment.clone()
         assignment.coord_keys["X"] = None

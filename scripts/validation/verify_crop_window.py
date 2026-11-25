@@ -2,12 +2,12 @@
 """主框选工具条与裁剪/裁空范围窗口的真实鼠标验收。
 
 验证点：
-1. 真实点击主「框选范围」展开次级工具条，再点击次级「裁剪」呼出独立浮窗；
-2. 次级工具条位于主按钮左侧且不超出画布，浮窗落在裁剪按钮下方；
-3. 拖动标题行整窗移动，切到「裁空」只换模式且保留浮窗位置；
-4. 右击画布仍能把窗口移到光标处；重复点击次级按钮只收起浮窗；
-5. 重复点击主按钮收起/再展开工具条时保留选区草稿；
-6. 开关打开期间，页面重新渲染后浮窗仍在，最终可分别关闭次级与主模式。
+1. 真实点击主「框选范围」展开次级工具条，再点击画布初级「裁剪」呼出独立浮窗；
+2. 次级工具条位于主按钮左侧且不超出画布，浮窗落在初级裁剪按钮下方；
+3. 拖动标题行整窗移动，切到初级「裁空」只换模式且保留浮窗位置；
+4. 右击画布仍能把窗口移到光标处；重复点击初级操作按钮只收起浮窗；
+5. 重复点击主按钮收起/再展开工具条时保留选区草稿与 Z 标号标题；
+6. 开关打开期间，页面重新渲染后浮窗仍在，最终可分别关闭初级操作与主模式。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_crop_window.py <npz路径>
 """
@@ -119,6 +119,7 @@ def main():
     selection_panel = overlay.selection_panel
     crop_button = window.btn_tb_crop
     erase_button = window.btn_tb_erase
+    secondary_buttons = (overlay.new_region_button, overlay.edc_button, overlay.slice_dos_button)
     screen_area = QApplication.primaryScreen().availableGeometry()
 
     def step_loaded():
@@ -129,7 +130,15 @@ def main():
         click(selection_button)
         check("真实点击主框选按钮展开次级工具条",
               selection_button.isChecked() and selection_panel.isVisible()
-              and crop_button.isVisible() and erase_button.isVisible())
+              and all(button.isVisible() for button in secondary_buttons))
+        check("裁剪/裁空属于画布初级布局而非框选次级布局",
+              all(button.parentWidget() is overlay and overlay.layout().indexOf(button) >= 0
+                  and selection_panel.layout().indexOf(button) < 0
+                  for button in (crop_button, erase_button)))
+        check("新增/EDC/切片积分属于框选次级布局",
+              all(button.parentWidget() is selection_panel
+                  and selection_panel.layout().indexOf(button) >= 0
+                  for button in secondary_buttons))
         check("展开主框选按钮启用交互并建立草稿",
               window.crop_controller.enabled and window.crop_controller.selection is not None)
         parent = overlay.parentWidget()
@@ -143,13 +152,16 @@ def main():
               and parent.rect().contains(selection_panel.geometry()))
 
         click(crop_button)
-        check("真实点击次级「裁剪」直接呼出范围窗口", crop_button.isChecked() and popup.isVisible())
-        check("点击次级按钮不收起主工具条", selection_button.isChecked() and selection_panel.isVisible())
+        check("真实点击初级「裁剪」直接呼出范围窗口", crop_button.isChecked() and popup.isVisible())
+        check("点击初级操作按钮不收起框选次级工具条",
+              selection_button.isChecked() and selection_panel.isVisible())
         check("窗口是独立浮窗（Qt.Tool + 无边框）",
               bool(popup.isWindow() and popup.windowFlags() & Qt.Tool
                    and popup.windowFlags() & Qt.FramelessWindowHint))
-        check("窗口标题与动作按钮为裁剪",
-              popup.title_label.text() == "裁剪范围" and popup.apply_button.text() == "裁剪")
+        crop_label = window.crop_controller.selection_label(window.crop_controller.active_selection_id)
+        check("窗口标题含裁剪模式与对应 Z 标号，动作按钮为裁剪",
+              popup.title_label.text().startswith("裁剪范围")
+              and crop_label in popup.title_label.text() and popup.apply_button.text() == "裁剪")
         popup_anchor = crop_button.mapToGlobal(QPoint(0, crop_button.height() + 8))
         check(f"窗口落在按钮下方（窗口 {popup.pos()} / 按钮 {popup_anchor}）",
               popup.y() == popup_anchor.y() and popup.x() < popup_anchor.x())
@@ -168,10 +180,12 @@ def main():
 
     def step_erase_mode():
         click(erase_button)
-        check("两个次级开关互斥", erase_button.isChecked() and not crop_button.isChecked())
+        check("两个初级操作开关互斥", erase_button.isChecked() and not crop_button.isChecked())
         check("切到裁空后窗口留在原地", popup.isVisible() and popup.pos() == state["dragged"])
-        check("窗口换成裁空文案",
-              popup.title_label.text() == "裁空范围" and popup.apply_button.text() == "裁空")
+        erase_label = window.crop_controller.selection_label(window.crop_controller.active_selection_id)
+        check("窗口换成含同一 Z 标号的裁空文案",
+              popup.title_label.text().startswith("裁空范围")
+              and erase_label in popup.title_label.text() and popup.apply_button.text() == "裁空")
         save_shot(window, popup, "crop_window_erase_mode.png")
 
         right_click_canvas(window, QPoint(200, 200))
@@ -183,8 +197,8 @@ def main():
     def step_toggle_off():
         selection = window.crop_controller.selection
         click(erase_button)
-        check("重复点击次级裁空按钮只收起浮窗", not popup.isVisible() and not erase_button.isChecked())
-        check("次级按钮收起后主模式与草稿保留",
+        check("重复点击初级裁空按钮只收起浮窗", not popup.isVisible() and not erase_button.isChecked())
+        check("初级操作按钮收起后主模式与草稿保留",
               window.crop_controller.enabled and selection_button.isChecked()
               and selection_panel.isVisible() and window.crop_controller.selection == selection)
 
@@ -201,7 +215,7 @@ def main():
         check("仅展开主工具条不会擅自打开裁剪浮窗", not popup.isVisible())
 
         click(crop_button)
-        check(f"再次打开次级裁剪回到用户拖到的位置 {state['dragged']}",
+        check(f"再次打开初级裁剪回到用户拖到的位置 {state['dragged']}",
               crop_button.isChecked() and popup.isVisible() and popup.pos() == state["dragged"])
 
         popup.hide()
@@ -209,12 +223,12 @@ def main():
         QTimer.singleShot(2500, guarded(step_after_refresh))
 
     def step_after_refresh():
-        check("主/次级开关打开期间重新渲染后浮窗仍然回来", popup.isVisible())
+        check("主框选与初级操作开关打开期间重新渲染后浮窗仍然回来", popup.isVisible())
         check("重新渲染后选区仍然有效", window.crop_controller.selection is not None)
         save_shot(window, popup, "crop_window_after_refresh.png")
         selection = window.crop_controller.selection
         click(crop_button)
-        check("最终重复点击次级裁剪只关闭浮窗",
+        check("最终重复点击初级裁剪只关闭浮窗",
               not popup.isVisible() and window.crop_controller.enabled and selection_panel.isVisible())
         click(selection_button)
         check("最终点击主按钮关闭工具条且保留草稿",

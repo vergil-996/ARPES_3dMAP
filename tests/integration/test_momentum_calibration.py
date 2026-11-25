@@ -232,6 +232,55 @@ class MomentumCalibrationIntegrationTests(unittest.TestCase):
         np.testing.assert_allclose(self.window.core.coords["Y"], self.y * 3.0)
         np.testing.assert_array_equal(original.coords["X"], self.x)
 
+    def test_restore_automatic_clears_calibration_only_when_applied(self):
+        original = self.window.core
+        source_id = self.window.source_manager.active_id
+        self.assertTrue(self.run_calibration([
+            self.apply_action(),
+            self.apply_action(distance=6.0),
+        ]))
+        calibrated = self.window.core
+        np.testing.assert_allclose(calibrated.coords["X"], self.x * 3.0)
+
+        def reject_restore(dialog):
+            dialog.restore_button.click()
+            return QDialog.Rejected
+
+        with patch.object(AxisAssignmentDialog, "exec_", reject_restore):
+            self.assertFalse(self.window.on_source_assignment_requested())
+        self.assertIs(self.window.core, calibrated)
+        np.testing.assert_allclose(self.window.core.coords["X"], self.x * 3.0)
+
+        previews = {}
+
+        def accept_restore(dialog):
+            dialog.restore_button.click()
+            previews["X"] = dialog._rows["X"]["preview"].text()
+            previews["Y"] = dialog._rows["Y"]["preview"].text()
+            return QDialog.Accepted
+
+        with patch.object(AxisAssignmentDialog, "exec_", accept_restore):
+            self.assertTrue(self.window.on_source_assignment_requested())
+
+        restored = self.window.core
+        self.assertEqual(previews, {"X": "-2 … 4", "Y": "10 … 40"})
+        self.assertEqual(self.window.source_manager.active_id, source_id)
+        self.assertEqual(len(self.window.source_manager), 1)
+        self.assertIs(self.window.source_manager.active().state["core"], restored)
+        np.testing.assert_array_equal(restored.coords["X"], self.x)
+        np.testing.assert_array_equal(restored.coords["Y"], self.y)
+        np.testing.assert_array_equal(restored.coordinate_candidates["kx"], self.x)
+        np.testing.assert_array_equal(restored.coordinate_candidates["ky"], self.y)
+        np.testing.assert_array_equal(restored.raw_data, original.raw_data)
+        np.testing.assert_array_equal(self.window.original_coords["X"], self.x)
+        np.testing.assert_array_equal(self.window.base_coords["Y"], self.y)
+        self.assertEqual(restored.coord_units["X"], original.coord_units["X"])
+        self.assertEqual(restored.coord_units["Y"], original.coord_units["Y"])
+        self.assertEqual(
+            restored.axis_assignment.coord_keys,
+            original.auto_axis_assignment.coord_keys,
+        )
+
     def test_save_uses_selected_filter_and_default_calibrated_name(self):
         self.assertTrue(self.run_calibration([self.apply_action()]))
         calibrated_core = self.window.core

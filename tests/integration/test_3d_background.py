@@ -41,8 +41,13 @@ class View3dBackgroundTests(unittest.TestCase):
         self.addCleanup(window.close)
 
         self.assertEqual(window.btn_tb_settings.iconSize(), QSize(18, 18))
+        self.assertEqual(window.btn_tb_settings.size(), QSize(28, 26))
         self.assertEqual(window.btn_main_export.iconSize(), QSize(16, 16))
         self.assertEqual(window.btn_tb_shot.iconSize(), QSize(16, 16))
+        for button in (window.btn_main_export, window.btn_tb_settings):
+            self.assertTrue(button.property("raisedButton"))
+            self.assertTrue(button.property("fluentIconRelief"))
+            self.assertIn("qlineargradient", button.styleSheet())
         overlay = window.canvas_tool_overlay
         self.assertEqual(overlay.focus_button.iconSize(), QSize(16, 16))
         overlay.set_focus_mode(True)

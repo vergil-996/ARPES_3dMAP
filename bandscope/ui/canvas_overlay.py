@@ -33,6 +33,7 @@ class CanvasToolOverlay(QFrame):
     rotation_committed = pyqtSignal(float)
     selection_toggled = pyqtSignal(bool)
     edc_requested = pyqtSignal()
+    slice_dos_requested = pyqtSignal()
     new_region_requested = pyqtSignal()
 
     def __init__(self, parent, crop_button, erase_button, export_button):
@@ -121,6 +122,13 @@ class CanvasToolOverlay(QFrame):
             self.selection_button, "框选范围", "ic_fluent_select_object_regular"
         )
         layout.addWidget(self.selection_button, 0, Qt.AlignHCenter)
+        for button, name, icon in (
+            (self.crop_button, "裁剪", "ic_fluent_crop_regular"),
+            (self.erase_button, "裁空", "ic_fluent_eraser_regular"),
+        ):
+            button.setParent(self)
+            self._configure_button(button, name, icon)
+            layout.addWidget(button, 0, Qt.AlignHCenter)
         self.export_button.setParent(self)
         self._configure_button(
             self.export_button, "导出结果", "ic_fluent_arrow_export_regular"
@@ -139,11 +147,11 @@ class CanvasToolOverlay(QFrame):
         selection_layout.setContentsMargins(4, 4, 4, 4)
         selection_layout.setSpacing(4)
         self.edc_button = ActionButton(self.selection_panel)
+        self.slice_dos_button = ActionButton(self.selection_panel)
         self.new_region_button = ActionButton(self.selection_panel)
         for button, name, icon in (
-            (self.crop_button, "裁剪", "ic_fluent_crop_regular"),
-            (self.erase_button, "裁空", "ic_fluent_eraser_regular"),
             (self.edc_button, "生成 EDC", "ic_fluent_data_trending_regular"),
+            (self.slice_dos_button, "切片内强度积分", "ic_fluent_data_trending_filled"),
             (self.new_region_button, "新增框选范围", "ic_fluent_add_regular"),
         ):
             button.setParent(self.selection_panel)
@@ -152,6 +160,7 @@ class CanvasToolOverlay(QFrame):
         self.selection_panel.hide()
         self.selection_button.toggled.connect(self._on_selection_toggled)
         self.edc_button.clicked.connect(self.edc_requested.emit)
+        self.slice_dos_button.clicked.connect(self.slice_dos_requested.emit)
         self.new_region_button.clicked.connect(self.new_region_requested.emit)
 
         layout.addWidget(self._separator(), 0, Qt.AlignHCenter)
@@ -412,6 +421,23 @@ class CanvasToolOverlay(QFrame):
         layout.setContentsMargins(
             padding, 2 if compact else padding, padding, 2 if compact else padding
         )
+        compact_buttons = [
+            *self.preset_buttons.values(),
+            self.reset_button,
+            self.switch_axes,
+            self.switch_flip,
+            self.rotation_button,
+            self.selection_button,
+            self.crop_button,
+            self.erase_button,
+            self.export_button,
+            self.focus_button,
+        ]
+        path_button = getattr(self, "path_button", None)
+        if path_button is not None:
+            compact_buttons.append(path_button)
+        for button in compact_buttons:
+            button.setFixedHeight(22 if compact else 26)
         for separator in self._separators:
             separator.setVisible(not compact)
         layout.activate()

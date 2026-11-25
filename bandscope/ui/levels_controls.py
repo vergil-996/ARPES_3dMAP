@@ -9,6 +9,8 @@ from PyQt5.QtWidgets import QLabel, QSlider, QToolTip, QWidget
 
 import bandscope.ui.theme as theme
 from bandscope.processing.display_transfer import gamma_for_gray_position, level_info
+from bandscope.ui.groove_painting import paint_groove
+from bandscope.ui.relief_painting import paint_raised_path
 
 
 class _HandleEditor(QWidget):
@@ -181,17 +183,20 @@ class _HandleEditor(QWidget):
         return QColor(self._handle_borders[name])
 
     def _draw_handle(self, painter, name, x, y):
-        fill = QColor(self._handle_fills[name])
-        border = self._handle_border(name)
         half_width = self.HANDLE_WIDTH / 2.0
         half_height = self.HANDLE_HEIGHT / 2.0
-        rect = QRectF(
-            float(x) - half_width, float(y) - half_height,
-            float(self.HANDLE_WIDTH), float(self.HANDLE_HEIGHT),
+        path = QPainterPath()
+        path.addRoundedRect(
+            QRectF(
+                float(x) - half_width, float(y) - half_height,
+                float(self.HANDLE_WIDTH), float(self.HANDLE_HEIGHT),
+            ),
+            half_width, half_width,
         )
-        painter.setPen(QPen(border, 1.0))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(rect, half_width, half_width)
+        paint_raised_path(
+            painter, path, self._handle_fills[name], self._handle_border(name),
+            pressed=self._dragging and name == self._active_name,
+        )
 
 
 class LevelsEditor(_HandleEditor):
@@ -330,24 +335,25 @@ class LevelsEditor(_HandleEditor):
         painter.drawLine(histogram_rect.bottomLeft(), histogram_rect.bottomRight())
         track = self._track_rect()
         positions = self._handle_positions()
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(theme.BG_4))
-        painter.drawRoundedRect(QRectF(track), 2.5, 2.5)
-        selected_left = min(positions["black"], positions["white"])
-        selected_width = max(0.0, positions["white"] - positions["black"])
-        if selected_width > 0.0:
-            painter.setBrush(theme.token_color("ACCENT_DIM"))
-            painter.drawRoundedRect(
-                QRectF(selected_left, track.top(), selected_width, track.height()),
-                2.5, 2.5,
-            )
-        # 黑场到灰场之间保持纯黑。
-        black_width = max(0.0, positions["gray"] - positions["black"])
-        if black_width > 0.0:
+
+        def paint_content(painter, rect):
+            selected_left = min(positions["black"], positions["white"])
+            selected_width = max(0.0, positions["white"] - positions["black"])
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(theme.RANGE_HANDLE_DARK_FILL))
-            painter.drawRect(QRectF(positions["black"], track.top(),
-                                    black_width, track.height()))
+            if selected_width > 0.0:
+                painter.setBrush(theme.token_color("ACCENT_DIM"))
+                painter.drawRoundedRect(
+                    QRectF(selected_left, rect.top(), selected_width, rect.height()),
+                    rect.height() / 2.0, rect.height() / 2.0,
+                )
+            # 黑场到灰场使用黑色映射，凹槽明暗统一叠加。
+            black_width = max(0.0, positions["gray"] - positions["black"])
+            if black_width > 0.0:
+                painter.setBrush(QColor(theme.RANGE_HANDLE_DARK_FILL))
+                painter.drawRect(QRectF(positions["black"], rect.top(),
+                                        black_width, rect.height()))
+
+        paint_groove(painter, QRectF(track), content=paint_content)
         for name in self._paint_order():
             self._draw_handle(painter, name, positions[name], track.center().y())
 
@@ -413,8 +419,6 @@ class ColormapRangeEditor(_HandleEditor):
         self._set_fraction(name, (getattr(self, name).value() + step) / 1000.0)
 
     def _draw_handle(self, painter, name, x, y):
-        fill = QColor(self._handle_fills[name])
-        border = self._handle_border(name)
         half_width = self.HOUSE_WIDTH / 2.0
         top = float(y) - self.HOUSE_HEIGHT / 2.0
         bottom = top + self.HOUSE_HEIGHT
@@ -429,9 +433,10 @@ class ColormapRangeEditor(_HandleEditor):
         path.lineTo(float(x) - half_width + radius, bottom)
         path.quadTo(float(x) - half_width, bottom, float(x) - half_width, bottom - radius)
         path.closeSubpath()
-        painter.setPen(QPen(border, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(fill)
-        painter.drawPath(path)
+        paint_raised_path(
+            painter, path, self._handle_fills[name], self._handle_border(name),
+            pressed=self._dragging and name == self._active_name,
+        )
 
     def _update_hover(self, position):
         super()._update_hover(position)
@@ -448,17 +453,18 @@ class ColormapRangeEditor(_HandleEditor):
         gradient = QLinearGradient(float(track.left()), 0.0, float(track.right() + 1), 0.0)
         for position, rgba in zip(np.linspace(0.0, 1.0, 64), palette(np.linspace(0.0, 1.0, 64))):
             gradient.setColorAt(float(position), QColor.fromRgbF(*rgba))
-        painter.fillRect(track, gradient)
         positions = self._handle_positions()
         shade = QColor(theme.BG_3)
         shade.setAlpha(175)
-        painter.fillRect(QRectF(track.left(), track.top(),
-                                max(0.0, positions["cmap_low"] - track.left()), track.height()), shade)
-        painter.fillRect(QRectF(positions["cmap_high"], track.top(),
-                                max(0.0, track.right() + 1 - positions["cmap_high"]), track.height()), shade)
-        painter.setPen(QPen(QColor(theme.BORDER_HEX), 1.0))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(track)
+
+        def paint_content(painter, rect):
+            painter.fillRect(rect, gradient)
+            painter.fillRect(QRectF(rect.left(), rect.top(),
+                                    max(0.0, positions["cmap_low"] - rect.left()), rect.height()), shade)
+            painter.fillRect(QRectF(positions["cmap_high"], rect.top(),
+                                    max(0.0, rect.right() + 1 - positions["cmap_high"]), rect.height()), shade)
+
+        paint_groove(painter, QRectF(track), content=paint_content)
         handle_y = self._handle_center_y()
         for name in self._paint_order():
             self._draw_handle(painter, name, positions[name], handle_y)

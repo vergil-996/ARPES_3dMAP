@@ -52,9 +52,10 @@ class CropBoxGestureCoordinator:
 
 
 class InteractiveCropBox(RectangleSelector):
-    def __init__(self, ax, onselect, bounds, on_activate=None, coordinator=None):
+    def __init__(self, ax, onselect, bounds, on_activate=None, coordinator=None, label=None):
         self._on_activate = on_activate
         self._gesture_coordinator = coordinator
+        self._label_artist = None
         super().__init__(
             ax, onselect, useblit=True, button=[1], interactive=True,
             drag_from_anywhere=True, ignore_event_outside=True, grab_range=10,
@@ -68,7 +69,31 @@ class InteractiveCropBox(RectangleSelector):
                           "markersize": 8, "alpha": 1.0, "zorder": 101},
             state_modifier_keys={"move": "__disabled__"},
         )
+        self._label_artist = self.ax.text(
+            0, 0, "", ha="left", va="bottom", color=theme.ACCENT,
+            fontsize=10, zorder=102, clip_on=False, animated=self.useblit,
+            fontfamily=theme.MPL_FONT_FAMILIES,
+            path_effects=[patheffects.Stroke(linewidth=3, foreground=theme.BG_2),
+                          patheffects.Normal()],
+        )
+        self.set_label(label)
         self.sync_bounds(bounds)
+
+    @property
+    def artists(self):
+        artists = super().artists
+        if self._label_artist is not None:
+            artists += (self._label_artist,)
+        return artists
+
+    def set_label(self, label):
+        self._label_artist.set_text("" if label is None else str(label))
+
+    def _sync_label_position(self, extents=None):
+        if self._label_artist is None:
+            return
+        x0, x1, y0, y1 = self.extents if extents is None else extents
+        self._label_artist.set_position((min(x0, x1), max(y0, y1)))
 
     def update_theme(self):
         self._selection_artist.set(
@@ -81,6 +106,14 @@ class InteractiveCropBox(RectangleSelector):
         )
         for artist in getattr(self, "_handles_artists", ()):
             artist.set(markerfacecolor=theme.ACCENT, markeredgecolor=theme.BG_2)
+        if self._label_artist is not None:
+            self._label_artist.set(
+                color=theme.ACCENT,
+                path_effects=[
+                    patheffects.Stroke(linewidth=3, foreground=theme.BG_2),
+                    patheffects.Normal(),
+                ],
+            )
 
     def sync_bounds(self, bounds):
         """Update geometry in place without rewriting the numeric draft."""
@@ -89,6 +122,7 @@ class InteractiveCropBox(RectangleSelector):
         self.set_visible(True)
         if self.extents != tuple(bounds):
             self.extents = bounds
+        self._sync_label_position(bounds)
 
     def _draw_shape(self, extents):
         # Numeric bounds may exceed the axes. Artist clipping is display-only;
@@ -97,6 +131,21 @@ class InteractiveCropBox(RectangleSelector):
         x0, x1 = sorted((x0, x1))
         y0, y1 = sorted((y0, y1))
         self._selection_artist.set_bounds(x0, y0, x1 - x0, y1 - y0)
+        self._sync_label_position(extents)
+
+    def handle_at_display(self, x, y):
+        if not self.active or not self.get_visible():
+            return None
+        c_idx, c_dist = self._corner_handles.closest(x, y)
+        e_idx, e_dist = self._edge_handles.closest(x, y)
+        _m_idx, m_dist = self._center_handle.closest(x, y)
+        if m_dist < self.grab_range * 2:
+            return "C"
+        if c_dist <= self.grab_range or e_dist <= self.grab_range:
+            if c_dist < e_dist:
+                return self._corner_order[c_idx]
+            return self._edge_order[e_idx]
+        return None
 
     def _handle_at(self, event):
         c_idx, c_dist = self._corner_handles.closest(event.x, event.y)

@@ -492,6 +492,8 @@ class SourceWorkspaceMixin:
             automatic,
             self.core.coordinate_candidates,
             candidate_units=self.core.coordinate_candidate_units,
+            automatic_candidates=self.core.original_coordinate_candidates,
+            automatic_candidate_units=self.core.original_coordinate_candidate_units,
             fourth_axis_drag=getattr(active, "fourth_axis_drag", None),
             as_new_source=self._current_source_has_analysis(),
             parent=self,
@@ -517,8 +519,15 @@ class SourceWorkspaceMixin:
             self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
             return False
         settings = dialog.fourth_axis_drag()
-        settings_only = dialog.fourth_axis_drag_changed() and not dialog.assignment_changed()
-        if not settings_only and not self.apply_axis_assignment(updated):
+        clear_calibration = dialog.calibration_clear_requested()
+        settings_only = (
+            dialog.fourth_axis_drag_changed()
+            and not dialog.assignment_changed()
+            and not clear_calibration
+        )
+        if not settings_only and not self.apply_axis_assignment(
+            updated, restore_original_coordinates=clear_calibration
+        ):
             return False
         return self.on_fourth_axis_settings_changed(settings.docking, settings.continuous_pan)
 
@@ -708,9 +717,13 @@ class SourceWorkspaceMixin:
         calibration.set_saved(True, f"已保存：{path}")
         return True
 
-    def apply_axis_assignment(self, assignment, *, as_new_source=None):
+    def apply_axis_assignment(
+        self, assignment, *, as_new_source=None, restore_original_coordinates=False
+    ):
         try:
-            candidate = self.core.copy_with_assignment(assignment)
+            candidate = self.core.copy_with_assignment(
+                assignment, restore_original_coordinates=restore_original_coordinates
+            )
         except (TypeError, ValueError, AttributeError) as exc:
             self._show_message("无法应用轴分配", str(exc), QMessageBox.Warning)
             return False

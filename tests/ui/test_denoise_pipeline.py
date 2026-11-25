@@ -7,8 +7,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5 import sip
 from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtTest import QSignalSpy, QTest
-from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QMenu, QPushButton
+from PyQt5.QtWidgets import QApplication, QDialogButtonBox, QLabel, QMenu, QPushButton
 
 from bandscope.app.qt_bootstrap import configure_qt_plugin_path
 from bandscope.processing.denoise_config import (
@@ -22,7 +23,7 @@ from bandscope.processing.denoise_config import (
     default_method_params,
 )
 from bandscope.ui import theme
-from bandscope.ui.denoise_pipeline import DenoisePipelineWidget
+from bandscope.ui.denoise_pipeline import DenoisePipelineWidget, _MIME_TYPE
 
 
 configure_qt_plugin_path()
@@ -45,6 +46,82 @@ class DenoisePipelineWidgetTests(unittest.TestCase):
         self.addCleanup(widget.deleteLater)
         self.addCleanup(widget.close)
         return widget
+
+    def test_empty_state_removes_instructions_but_keeps_add_entry(self):
+        self.assertEqual(self.widget.flow_host.findChildren(QLabel), [])
+        self.assertIsNone(self.widget.findChild(QLabel, "denoise_empty_title"))
+        self.assertIsNone(self.widget.findChild(QLabel, "denoise_empty_body"))
+        self.assertNotIn("denoise_empty_title", self.widget.styleSheet())
+        self.assertNotIn("denoise_empty_body", self.widget.styleSheet())
+        all_label_text = "\n".join(label.text() for label in self.widget.findChildren(QLabel))
+        self.assertNotIn("从第一个去噪步骤开始", all_label_text)
+        self.assertNotIn("自由组合算法，按顺序处理", all_label_text)
+        self.assertNotIn("修改参数后自动更新", all_label_text)
+        self.assertTrue(self.widget.add_button.isVisibleTo(self.widget))
+        self.assertEqual(self.widget.add_button.accessibleName(), "添加去噪步骤")
+
+    def test_first_add_and_rebuild_have_settled_card_layout_immediately(self):
+        self.widget.resize(252, 700)
+        with patch.object(self.widget, "open_parameter_dialog"):
+            self.widget._add_node(WAVELET_METHOD_NAME)
+
+        node_id = self.widget.export_state()["nodes"][0]["id"]
+        first_card = self.widget._node_cards[node_id]
+        first_layout = self.assert_card_layout_is_settled(first_card)
+        self.app.processEvents()
+        self.assertEqual(self.assert_card_layout_is_settled(first_card), first_layout)
+
+        self.widget._rebuild()
+        rebuilt_card = self.widget._node_cards[node_id]
+        self.assertEqual(self.assert_card_layout_is_settled(rebuilt_card), first_layout)
+        self.app.processEvents()
+        self.assertEqual(self.assert_card_layout_is_settled(rebuilt_card), first_layout)
+
+    def assert_card_layout_is_settled(self, card):
+        self.assertTrue(card.isVisibleTo(self.widget))
+        self.assertGreaterEqual(card.width(), card.minimumSizeHint().width())
+        self.assertGreaterEqual(card.height(), card.sizeHint().height())
+        self.assertGreaterEqual(card.title.height(), card.title.sizeHint().height())
+        required_summary_height = card.summary.heightForWidth(card.summary.width())
+        self.assertGreaterEqual(required_summary_height, 0)
+        self.assertGreaterEqual(card.summary.height(), required_summary_height)
+        self.assertLess(card.title.geometry().bottom(), card.summary.geometry().top())
+        self.assertLessEqual(card.summary.geometry().bottom(), card.contentsRect().bottom())
+        return (
+            card.size(),
+            card.title.geometry(),
+            card.summary.geometry(),
+            card.grip.geometry(),
+            card.more.geometry(),
+        )
+
+    def test_drag_grip_uses_card_snapshot_and_press_point_hotspot(self):
+        self.widget.restore_state({"nodes": [
+            {"id": "first", "label": GAUSSIAN_METHOD_NAME},
+        ]})
+        self.app.processEvents()
+        card = self.widget._node_cards["first"]
+        grip = card.grip
+        press_position = QPoint(6, 12)
+        move_position = press_position + QPoint(QApplication.startDragDistance() + 2, 0)
+
+        with patch("bandscope.ui.denoise_pipeline.QDrag") as drag_class:
+            drag = drag_class.return_value
+            QTest.mousePress(grip, Qt.LeftButton, pos=press_position)
+            QApplication.sendEvent(grip, QMouseEvent(
+                QEvent.MouseMove, move_position, Qt.NoButton, Qt.LeftButton, Qt.NoModifier,
+            ))
+            QTest.mouseRelease(grip, Qt.LeftButton, pos=move_position)
+
+        drag_class.assert_called_once_with(grip)
+        mime = drag.setMimeData.call_args.args[0]
+        self.assertTrue(mime.hasFormat(_MIME_TYPE))
+        self.assertEqual(bytes(mime.data(_MIME_TYPE)).decode("utf-8"), "first")
+        pixmap = drag.setPixmap.call_args.args[0]
+        self.assertFalse(pixmap.isNull())
+        self.assertEqual(pixmap.size(), card.grab().size())
+        drag.setHotSpot.assert_called_once_with(grip.mapTo(card, press_position))
+        drag.exec_.assert_called_once_with(Qt.MoveAction)
 
     def test_add_popup_offers_and_adds_all_six_algorithms(self):
         committed = QSignalSpy(self.widget.pipeline_committed)

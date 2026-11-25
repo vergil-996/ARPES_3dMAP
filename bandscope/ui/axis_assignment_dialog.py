@@ -52,6 +52,8 @@ class AxisAssignmentDialog(QDialog):
         candidates,
         *,
         candidate_units=None,
+        automatic_candidates=None,
+        automatic_candidate_units=None,
         fourth_axis_drag=None,
         as_new_source=False,
         parent=None,
@@ -64,6 +66,13 @@ class AxisAssignmentDialog(QDialog):
         self._automatic = automatic.clone()
         self._candidates = dict(candidates)
         self._candidate_units = candidate_units or {}
+        self._automatic_candidates = dict(
+            candidates if automatic_candidates is None else automatic_candidates
+        )
+        self._automatic_candidate_units = (
+            candidate_units if automatic_candidate_units is None else automatic_candidate_units
+        ) or {}
+        self._calibration_clear_requested = False
         self._initial_fourth_axis_drag = fourth_axis_drag or FourthAxisDragSettings()
         self._as_new_source = bool(as_new_source)
         self._loading = False
@@ -321,6 +330,9 @@ class AxisAssignmentDialog(QDialog):
     def assignment_changed(self):
         return self._assignment_dirty
 
+    def calibration_clear_requested(self):
+        return self._calibration_clear_requested
+
     def fourth_axis_drag_changed(self):
         return self.fourth_axis_drag() != self._initial_fourth_axis_drag
 
@@ -348,6 +360,9 @@ class AxisAssignmentDialog(QDialog):
 
     def restore_automatic(self):
         self._current = self._automatic.clone()
+        self._candidates = dict(self._automatic_candidates)
+        self._candidate_units = self._automatic_candidate_units
+        self._calibration_clear_requested = True
         self._set_assignment(self._automatic)
         self._mark_assignment_dirty()
 

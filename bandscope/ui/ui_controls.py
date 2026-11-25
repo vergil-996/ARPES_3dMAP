@@ -19,6 +19,7 @@ from siui.components.button import SiSwitchRefactor
 from siui.components.slider_ import SiSlider
 
 import bandscope.ui.theme as theme
+from bandscope.ui.relief_painting import paint_raised_path
 
 
 class ChevronComboBox(QComboBox):
@@ -37,7 +38,7 @@ class ChevronComboBox(QComboBox):
 
 
 class ActionButton(QPushButton):
-    """Flat, keyboard-accessible button retaining the SiUI text attachment API."""
+    """Keyboard-accessible button retaining the SiUI text attachment API."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -56,6 +57,7 @@ class AnimatedLockButton(ActionButton):
         self._lock_animation.setEasingCurve(QEasingCurve.InOutCubic)
         self.setCheckable(True)
         self.setProperty("compactIconButton", True)
+        self.setProperty("raisedButton", True)
         self.toggled.connect(self._animate_lock)
 
     def _get_lock_progress(self):
@@ -104,14 +106,34 @@ class AnimatedLockButton(ActionButton):
             painter.translate(-3.35, -0.5)
             painter.rotate(-22.0 * (1.0 - self._lock_progress))
             painter.translate(3.35, 0.5)
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(color, 1.55, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(shackle)
+            for layer_color, offset in (
+                (QColor(0, 0, 0, 72), 0.55),
+                (QColor(255, 255, 255, 88), -0.45),
+                (color, 0.0),
+            ):
+                painter.save()
+                painter.translate(0.0, offset)
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(
+                    layer_color, 1.55, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin,
+                ))
+                painter.drawPath(shackle)
+                painter.restore()
             painter.restore()
 
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawRoundedRect(QRectF(-5.5, -0.5, 11.0, 8.5), 1.8, 1.8)
+            body = QPainterPath()
+            body.addRoundedRect(QRectF(-5.5, -0.5, 11.0, 8.5), 1.8, 1.8)
+            for layer_color, offset in (
+                (QColor(0, 0, 0, 65), 0.55),
+                (QColor(255, 255, 255, 82), -0.45),
+            ):
+                painter.save()
+                painter.translate(0.0, offset)
+                painter.fillPath(body, layer_color)
+                painter.restore()
+            paint_raised_path(
+                painter, body, color, color, pressed=self.isDown(), shadow=False,
+            )
         finally:
             painter.end()
 

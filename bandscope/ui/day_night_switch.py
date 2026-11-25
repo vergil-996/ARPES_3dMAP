@@ -9,6 +9,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
 )
 from PyQt5.QtGui import (
+    QBrush,
     QColor,
     QLinearGradient,
     QPainter,
@@ -196,6 +197,7 @@ class DayNightSwitch(QAbstractButton):
             self._mixed_color((174, 224, 249), (30, 53, 91), progress),
         )
         painter.fillPath(capsule, sky)
+        self._paint_inset(painter, capsule, capsule_rect, night_mix)
 
         painter.save()
         painter.setClipPath(capsule)
@@ -210,12 +212,6 @@ class DayNightSwitch(QAbstractButton):
         )
         center = QPointF(thumb_x, 35.0)
         radius = 29.0
-        thumb_rect = QRectF(
-            center.x() - radius,
-            center.y() - radius,
-            radius * 2.0,
-            radius * 2.0,
-        )
 
         self._draw_halos(
             painter, center, radius, QColor(255, 236, 178), day_mix
@@ -224,31 +220,58 @@ class DayNightSwitch(QAbstractButton):
             painter, center, radius, QColor(208, 229, 255), night_mix
         )
 
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(5, 15, 31, 38))
-        painter.drawEllipse(thumb_rect.translated(0.0, 2.2))
+        self._draw_thumb_shadow(painter, center, radius, night_mix)
         self._draw_sun(painter, center, radius)
         if night_mix > 0.0:
             painter.save()
             painter.setOpacity(night_mix)
             self._draw_moon(painter, center, radius)
             painter.restore()
+        self._draw_foreground_clouds(painter, progress, day_mix)
 
         if not self.isEnabled():
             painter.fillRect(capsule_rect, QColor(225, 230, 237, 100))
         painter.restore()
 
         painter.setBrush(Qt.NoBrush)
-        border = QColor(255, 255, 255, 105) if self.isEnabled() else QColor(112, 122, 137, 180)
-        painter.setPen(QPen(border, 1.4))
+        if self.isEnabled():
+            edge = QLinearGradient(capsule_rect.topLeft(), capsule_rect.bottomLeft())
+            edge.setColorAt(0.0, QColor(255, 255, 255, round(175 - 120 * night_mix)))
+            edge.setColorAt(0.48, QColor(255, 255, 255, round(70 - 35 * night_mix)))
+            edge.setColorAt(1.0, QColor(0, 0, 0, round(42 + 73 * night_mix)))
+            border_pen = QPen(QBrush(edge), 1.2)
+        else:
+            border_pen = QPen(QColor(112, 122, 137, 180), 1.4)
+        painter.setPen(border_pen)
         painter.drawPath(capsule)
 
-        if self.hasFocus() and self.isEnabled():
-            focus_rect = capsule_rect.adjusted(1.3, 1.3, -1.3, -1.3)
-            painter.setPen(QPen(QColor(248, 251, 255, 235), 3.6))
-            painter.drawRoundedRect(focus_rect, 32.9, 32.9)
-            painter.setPen(QPen(QColor(33, 101, 164, 235), 1.5))
-            painter.drawRoundedRect(focus_rect, 32.9, 32.9)
+    @staticmethod
+    def _paint_inset(painter, capsule, rect, night_mix):
+        painter.save()
+        painter.setClipPath(capsule)
+
+        top_shadow = QLinearGradient(
+            rect.topLeft(), QPointF(rect.left(), rect.top() + 9.0)
+        )
+        top_shadow.setColorAt(0.0, QColor(0, 0, 0, round(72 + 43 * night_mix)))
+        top_shadow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.fillRect(rect, top_shadow)
+
+        bottom_light = QLinearGradient(
+            QPointF(rect.left(), rect.bottom() - 5.0), rect.bottomLeft()
+        )
+        bottom_light.setColorAt(0.0, QColor(255, 255, 255, 0))
+        bottom_light.setColorAt(1.0, QColor(255, 255, 255, round(105 - 50 * night_mix)))
+        painter.fillRect(rect, bottom_light)
+
+        side_shadow = QLinearGradient(rect.topLeft(), rect.topRight())
+        side_alpha = round(24 + 21 * night_mix)
+        side_shadow.setColorAt(0.0, QColor(0, 0, 0, side_alpha))
+        side_shadow.setColorAt(0.18, QColor(0, 0, 0, 0))
+        side_shadow.setColorAt(0.82, QColor(0, 0, 0, 0))
+        side_shadow.setColorAt(1.0, QColor(0, 0, 0, side_alpha))
+        painter.fillRect(rect, side_shadow)
+        painter.restore()
 
     def _draw_halos(self, painter, center, radius, color, opacity):
         if opacity <= 0.0:
@@ -279,8 +302,27 @@ class DayNightSwitch(QAbstractButton):
         painter.setOpacity(opacity)
         painter.translate(-9.0 * (1.0 - opacity), 10.0 * (1.0 - opacity))
         painter.setPen(Qt.NoPen)
-        for x, y, radius, brightness in self.STAR_FIELD:
-            painter.setBrush(QColor(241, 246, 255, brightness))
+
+        painter.setBrush(QColor(176, 202, 239, 105))
+        painter.drawEllipse(QPointF(70.0, 46.0), 1.2, 1.2)
+        painter.drawEllipse(QPointF(135.0, 33.0), 1.0, 1.0)
+
+        sorted_stars = sorted(self.STAR_FIELD, key=lambda star: star[2])
+        for x, y, radius, brightness in sorted_stars:
+            depth = max(0.0, min(1.0, (radius - 0.7) / 1.1))
+            center = QPointF(x, y)
+            if radius >= 1.15:
+                glow_radius = 3.6 + radius * 2.3
+                glow = QRadialGradient(center, glow_radius)
+                glow_alpha = round(brightness * (0.28 + 0.20 * depth))
+                glow.setColorAt(0.0, QColor(190, 219, 255, glow_alpha))
+                glow.setColorAt(
+                    0.35, QColor(158, 196, 248, round(brightness * 0.16))
+                )
+                glow.setColorAt(1.0, QColor(133, 177, 239, 0))
+                painter.setBrush(glow)
+                painter.drawEllipse(center, glow_radius, glow_radius)
+
             star = QPainterPath()
             star.moveTo(x, y - radius * 2.0)
             star.quadTo(x + radius * 0.35, y - radius * 0.35, x + radius * 2.0, y)
@@ -288,10 +330,29 @@ class DayNightSwitch(QAbstractButton):
             star.quadTo(x - radius * 0.35, y + radius * 0.35, x - radius * 2.0, y)
             star.quadTo(x - radius * 0.35, y - radius * 0.35, x, y - radius * 2.0)
             star.closeSubpath()
-            painter.drawPath(star)
-        painter.setBrush(QColor(210, 226, 255, 180))
-        painter.drawEllipse(QPointF(70.0, 46.0), 1.2, 1.2)
-        painter.drawEllipse(QPointF(135.0, 33.0), 1.0, 1.0)
+
+            if depth > 0.45:
+                painter.save()
+                painter.translate(0.6, 0.9)
+                painter.fillPath(star, QColor(0, 5, 20, round(85 * depth)))
+                painter.restore()
+
+            star_fill = QRadialGradient(
+                QPointF(x - radius * 0.35, y - radius * 0.4), radius * 2.4
+            )
+            star_fill.setColorAt(
+                0.0, QColor(255, 255, 255, min(255, brightness + 35))
+            )
+            star_fill.setColorAt(0.55, QColor(226, 238, 255, brightness))
+            edge_alpha = round(brightness * (0.55 + 0.35 * depth))
+            star_fill.setColorAt(1.0, QColor(154, 190, 238, edge_alpha))
+            painter.fillPath(star, star_fill)
+
+            if radius >= 1.5:
+                painter.setBrush(QColor(255, 255, 255, 235))
+                painter.drawEllipse(
+                    QPointF(x - 0.15, y - 0.15), radius * 0.28, radius * 0.28
+                )
         painter.restore()
 
     @staticmethod
@@ -319,12 +380,81 @@ class DayNightSwitch(QAbstractButton):
 
         cloud = self._cloud_band_path()
         back_cloud = QPainterPath(cloud)
-        back_cloud.translate(9.0, -6.0)
-        painter.setOpacity(opacity * 0.38)
-        painter.fillPath(back_cloud, QColor(224, 240, 250))
+        back_cloud.translate(9.0, -7.0)
+        back_fill = QLinearGradient(QPointF(0.0, 24.0), QPointF(0.0, 88.0))
+        back_fill.setColorAt(0.0, QColor(215, 235, 248))
+        back_fill.setColorAt(1.0, QColor(127, 174, 207))
+        painter.setOpacity(opacity * 0.48)
+        painter.fillPath(back_cloud, back_fill)
 
+        middle_cloud = QPainterPath(cloud)
+        middle_cloud.translate(-5.0, 5.0)
+        middle_fill = QLinearGradient(QPointF(0.0, 28.0), QPointF(0.0, 90.0))
+        middle_fill.setColorAt(0.0, QColor(239, 248, 253))
+        middle_fill.setColorAt(1.0, QColor(151, 193, 220))
+        painter.setOpacity(opacity * 0.68)
+        painter.fillPath(middle_cloud, middle_fill)
+
+        cloud_shadow = QPainterPath(cloud)
+        cloud_shadow.translate(0.0, 3.0)
+        painter.setOpacity(opacity * 0.65)
+        painter.fillPath(cloud_shadow, QColor(35, 78, 112, 100))
+
+        cloud_fill = QLinearGradient(QPointF(0.0, 28.0), QPointF(0.0, 88.0))
+        cloud_fill.setColorAt(0.0, QColor(255, 255, 255))
+        cloud_fill.setColorAt(0.55, QColor(250, 252, 254))
+        cloud_fill.setColorAt(1.0, QColor(178, 208, 228))
         painter.setOpacity(opacity)
-        painter.fillPath(cloud, QColor(252, 253, 255))
+        painter.fillPath(cloud, cloud_fill)
+        painter.restore()
+
+    @staticmethod
+    def _foreground_cloud_path():
+        cloud = QPainterPath()
+        cloud.setFillRule(Qt.WindingFill)
+        cloud.addEllipse(QRectF(-24.0, 58.0, 58.0, 34.0))
+        cloud.addEllipse(QRectF(12.0, 56.0, 58.0, 36.0))
+        cloud.addEllipse(QRectF(55.0, 59.0, 56.0, 34.0))
+        cloud.addEllipse(QRectF(97.0, 56.0, 58.0, 36.0))
+        cloud.addEllipse(QRectF(143.0, 58.0, 58.0, 34.0))
+        cloud.addRoundedRect(QRectF(-24.0, 66.0, 230.0, 26.0), 13.0, 13.0)
+        return cloud
+
+    def _draw_foreground_clouds(self, painter, progress, opacity):
+        if opacity <= 0.0:
+            return
+        painter.save()
+        painter.translate(-10.0 * progress, 36.0 * progress)
+        painter.setPen(Qt.NoPen)
+        cloud = self._foreground_cloud_path()
+
+        cloud_shadow = QPainterPath(cloud)
+        cloud_shadow.translate(0.0, 2.4)
+        painter.setOpacity(opacity * 0.72)
+        painter.fillPath(cloud_shadow, QColor(25, 65, 98, 115))
+
+        cloud_fill = QLinearGradient(QPointF(0.0, 52.0), QPointF(0.0, 90.0))
+        cloud_fill.setColorAt(0.0, QColor(255, 255, 255))
+        cloud_fill.setColorAt(0.45, QColor(238, 247, 252))
+        cloud_fill.setColorAt(1.0, QColor(157, 195, 221))
+        painter.setOpacity(opacity * 0.98)
+        painter.fillPath(cloud, cloud_fill)
+        painter.restore()
+
+    @staticmethod
+    def _draw_thumb_shadow(painter, center, radius, night_mix):
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        shadow_center = QPointF(center.x() + 1.2, center.y() + 3.2)
+        shadow_radius = radius * 1.18
+        shadow = QRadialGradient(shadow_center, shadow_radius)
+        shadow.setColorAt(0.0, QColor(3, 10, 24, round(100 + 35 * night_mix)))
+        shadow.setColorAt(0.68, QColor(3, 10, 24, round(62 + 25 * night_mix)))
+        shadow.setColorAt(1.0, QColor(3, 10, 24, 0))
+        painter.setBrush(shadow)
+        painter.drawEllipse(shadow_center, shadow_radius, shadow_radius)
+        painter.setBrush(QColor(2, 8, 20, round(50 + 20 * night_mix)))
+        painter.drawEllipse(QPointF(center.x() + 0.8, center.y() + 2.2), radius, radius)
         painter.restore()
 
     @staticmethod
@@ -333,13 +463,32 @@ class DayNightSwitch(QAbstractButton):
             QPointF(center.x() - radius * 0.30, center.y() - radius * 0.34),
             radius * 1.45,
         )
-        gradient.setColorAt(0.0, QColor(255, 248, 183))
-        gradient.setColorAt(0.42, QColor(255, 215, 91))
-        gradient.setColorAt(1.0, QColor(242, 157, 39))
+        gradient.setColorAt(0.0, QColor(255, 252, 205))
+        gradient.setColorAt(0.32, QColor(255, 226, 115))
+        gradient.setColorAt(0.70, QColor(250, 184, 52))
+        gradient.setColorAt(1.0, QColor(213, 111, 20))
         painter.setPen(Qt.NoPen)
         painter.setBrush(gradient)
         painter.drawEllipse(center, radius, radius)
-        painter.setPen(QPen(QColor(255, 250, 204, 145), 1.6, Qt.SolidLine, Qt.RoundCap))
+
+        sun_rect = QRectF(
+            center.x() - radius + 1.4,
+            center.y() - radius + 1.4,
+            radius * 2.0 - 2.8,
+            radius * 2.0 - 2.8,
+        )
+        painter.setBrush(Qt.NoBrush)
+        highlight_pen = QPen(
+            QColor(255, 251, 211, 205), 2.2, Qt.SolidLine, Qt.RoundCap
+        )
+        painter.setPen(highlight_pen)
+        painter.drawArc(sun_rect, 48 * 16, 128 * 16)
+        shade_pen = QPen(
+            QColor(157, 75, 12, 135), 2.5, Qt.SolidLine, Qt.RoundCap
+        )
+        painter.setPen(shade_pen)
+        painter.drawArc(sun_rect.adjusted(0.0, 0.8, 0.0, 0.8), 200 * 16, 140 * 16)
+        painter.setPen(QPen(QColor(255, 250, 204, 185), 1.6, Qt.SolidLine, Qt.RoundCap))
         painter.drawArc(
             QRectF(center.x() - 21.0, center.y() - 21.0, 42.0, 42.0),
             65 * 16,
@@ -353,11 +502,30 @@ class DayNightSwitch(QAbstractButton):
             radius * 1.45,
         )
         gradient.setColorAt(0.0, QColor(255, 255, 250))
-        gradient.setColorAt(0.48, QColor(229, 234, 240))
-        gradient.setColorAt(1.0, QColor(167, 179, 195))
+        gradient.setColorAt(0.35, QColor(239, 243, 246))
+        gradient.setColorAt(0.72, QColor(192, 202, 216))
+        gradient.setColorAt(1.0, QColor(121, 137, 161))
         painter.setPen(Qt.NoPen)
         painter.setBrush(gradient)
         painter.drawEllipse(center, radius, radius)
+
+        moon_rect = QRectF(
+            center.x() - radius + 1.3,
+            center.y() - radius + 1.3,
+            radius * 2.0 - 2.6,
+            radius * 2.0 - 2.6,
+        )
+        painter.setBrush(Qt.NoBrush)
+        highlight_pen = QPen(
+            QColor(255, 255, 255, 195), 2.0, Qt.SolidLine, Qt.RoundCap
+        )
+        painter.setPen(highlight_pen)
+        painter.drawArc(moon_rect, 45 * 16, 130 * 16)
+        shade_pen = QPen(
+            QColor(61, 79, 106, 120), 2.4, Qt.SolidLine, Qt.RoundCap
+        )
+        painter.setPen(shade_pen)
+        painter.drawArc(moon_rect.adjusted(0.0, 0.8, 0.0, 0.8), 200 * 16, 140 * 16)
 
         craters = (
             (-9.0, -7.0, 5.3),
@@ -368,18 +536,28 @@ class DayNightSwitch(QAbstractButton):
         )
         for dx, dy, crater_radius in craters:
             crater_center = QPointF(center.x() + dx, center.y() + dy)
-            painter.setBrush(QColor(121, 137, 157, 75))
-            painter.setPen(QPen(QColor(111, 128, 149, 70), 0.8))
-            painter.drawEllipse(crater_center, crater_radius, crater_radius)
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor(255, 255, 255, 105), 0.9))
-            painter.drawArc(
-                QRectF(
-                    crater_center.x() - crater_radius + 0.8,
-                    crater_center.y() - crater_radius + 0.8,
-                    crater_radius * 2.0 - 1.6,
-                    crater_radius * 2.0 - 1.6,
-                ),
-                35 * 16,
-                130 * 16,
+            crater_rect = QRectF(
+                crater_center.x() - crater_radius,
+                crater_center.y() - crater_radius,
+                crater_radius * 2.0,
+                crater_radius * 2.0,
             )
+            crater_fill = QRadialGradient(
+                QPointF(
+                    crater_center.x() - crater_radius * 0.28,
+                    crater_center.y() - crater_radius * 0.32,
+                ),
+                crater_radius * 1.25,
+            )
+            crater_fill.setColorAt(0.0, QColor(72, 88, 112, 155))
+            crater_fill.setColorAt(0.55, QColor(117, 134, 157, 125))
+            crater_fill.setColorAt(1.0, QColor(198, 207, 219, 90))
+            painter.setBrush(crater_fill)
+            painter.setPen(QPen(QColor(61, 79, 106, 125), 0.9))
+            painter.drawEllipse(crater_center, crater_radius, crater_radius)
+
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(46, 63, 89, 135), 1.1, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(crater_rect.adjusted(0.5, 0.5, -0.5, -0.5), 35 * 16, 130 * 16)
+            painter.setPen(QPen(QColor(255, 255, 255, 160), 1.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(crater_rect.adjusted(0.7, 0.7, -0.7, -0.7), 200 * 16, 130 * 16)

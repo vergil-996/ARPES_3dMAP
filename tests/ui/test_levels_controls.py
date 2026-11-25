@@ -94,26 +94,58 @@ class LevelsEditorTests(unittest.TestCase):
         finally:
             theme.set_theme(original)
 
-    def test_black_to_gray_track_segment_is_black(self):
+    def test_input_handles_have_top_highlights_and_bottom_shading(self):
         editor = self.make_editor()
-        y = editor._track_rect().center().y()
+        QApplication.processEvents()
         positions = editor._handle_positions()
-        x = (positions["black"] + positions["gray"]) / 2.0
-        self.assertEqual(
-            grab_pixel(editor, x, y).name(),
-            theme.RANGE_HANDLE_DARK_FILL.lower(),
-        )
+        y = editor._track_rect().center().y()
 
-    def test_gray_to_white_track_has_no_center_line(self):
+        for name in ("black", "gray"):
+            with self.subTest(handle=name):
+                center = grab_pixel(editor, positions[name], y)
+                self.assertGreater(grab_pixel(editor, positions[name], y - 5).lightness(), center.lightness())
+                self.assertLess(grab_pixel(editor, positions[name], y + 5).lightness(), center.lightness())
+        white = grab_pixel(editor, positions["white"], y)
+        self.assertLess(grab_pixel(editor, positions["white"], y + 5).lightness(), white.lightness())
+
+    def test_black_to_gray_track_segment_stays_dark_inside_groove(self):
         editor = self.make_editor()
-        y = editor._track_rect().center().y()
-        positions = editor._handle_positions()
-        x = (positions["gray"] + positions["white"]) / 2.0
-        above = grab_pixel(editor, x, y - 1)
-        center = grab_pixel(editor, x, y)
-        below = grab_pixel(editor, x, y + 1)
-        self.assertEqual(center, above)
-        self.assertEqual(center, below)
+        original = theme.current_theme()
+        try:
+            for name in ("dark", "light"):
+                theme.set_theme(name)
+                QApplication.processEvents()
+                y = editor._track_rect().center().y()
+                positions = editor._handle_positions()
+                black_x = (positions["black"] + positions["gray"]) / 2.0
+                selected_x = (positions["gray"] + positions["white"]) / 2.0
+                above = grab_pixel(editor, black_x, y - 1)
+                center = grab_pixel(editor, black_x, y)
+                below = grab_pixel(editor, black_x, y + 1)
+                selected = grab_pixel(editor, selected_x, y)
+                self.assertLess(center.lightness(), selected.lightness())
+                self.assertLess(above.lightness(), center.lightness())
+                self.assertGreaterEqual(len({above.getRgb(), center.getRgb(), below.getRgb()}), 2)
+        finally:
+            theme.set_theme(original)
+
+    def test_gray_to_white_selection_retains_groove_shading(self):
+        editor = self.make_editor()
+        original = theme.current_theme()
+        try:
+            for name in ("dark", "light"):
+                theme.set_theme(name)
+                QApplication.processEvents()
+                y = editor._track_rect().center().y()
+                positions = editor._handle_positions()
+                x = (positions["gray"] + positions["white"]) / 2.0
+                above = grab_pixel(editor, x, y - 1)
+                center = grab_pixel(editor, x, y)
+                below = grab_pixel(editor, x, y + 1)
+                self.assertLess(above.lightness(), center.lightness())
+                self.assertGreaterEqual(len({above.getRgb(), center.getRgb(), below.getRgb()}), 3)
+        finally:
+            theme.set_theme(original)
 
     def test_output_range_handles_use_timeline_fills(self):
         editor = ColormapRangeEditor("gray")
@@ -135,6 +167,65 @@ class LevelsEditorTests(unittest.TestCase):
             y - editor.HOUSE_HEIGHT / 2.0, editor._track_rect().bottom(),
         )
         self.assertGreaterEqual(editor.height(), editor.LABEL_TOP + 16)
+
+    def test_output_handles_have_house_shaped_relief(self):
+        editor = ColormapRangeEditor("gray")
+        editor.resize(300, editor.height())
+        editor.show()
+        self.addCleanup(editor.close)
+        self.addCleanup(editor.deleteLater)
+        QApplication.processEvents()
+        positions = editor._handle_positions()
+        y = editor._handle_center_y()
+
+        dark_center = grab_pixel(editor, positions["cmap_low"], y)
+        self.assertGreater(
+            grab_pixel(editor, positions["cmap_low"], y - 3).lightness(),
+            dark_center.lightness(),
+        )
+        self.assertLess(
+            grab_pixel(editor, positions["cmap_low"], y + 4).lightness(),
+            dark_center.lightness(),
+        )
+        light_center = grab_pixel(editor, positions["cmap_high"], y)
+        self.assertLess(
+            grab_pixel(editor, positions["cmap_high"], y + 4).lightness(),
+            light_center.lightness(),
+        )
+
+    def test_output_colormap_retains_gradient_masks_and_groove_shading(self):
+        editor = ColormapRangeEditor("viridis")
+        editor.resize(300, editor.height())
+        editor.show()
+        self.addCleanup(editor.close)
+        self.addCleanup(editor.deleteLater)
+        original = theme.current_theme()
+        try:
+            for name in ("dark", "light"):
+                theme.set_theme(name)
+                editor.cmap_low.setValue(0)
+                editor.cmap_high.setValue(1000)
+                QApplication.processEvents()
+                track = editor._track_rect()
+                y = track.center().y()
+                low_x = track.left() + track.width() * 0.25
+                middle_x = track.left() + track.width() * 0.5
+                high_x = track.left() + track.width() * 0.75
+                full_low = grab_pixel(editor, low_x, y)
+                full_high = grab_pixel(editor, high_x, y)
+                self.assertNotEqual(full_low.getRgb(), full_high.getRgb())
+                above = grab_pixel(editor, middle_x, y - 5)
+                center = grab_pixel(editor, middle_x, y)
+                below = grab_pixel(editor, middle_x, y + 5)
+                self.assertLess(above.lightness(), center.lightness())
+                self.assertNotEqual(center.getRgb(), below.getRgb())
+                editor.cmap_low.setValue(300)
+                editor.cmap_high.setValue(700)
+                QApplication.processEvents()
+                self.assertNotEqual(grab_pixel(editor, low_x, y).getRgb(), full_low.getRgb())
+                self.assertNotEqual(grab_pixel(editor, high_x, y).getRgb(), full_high.getRgb())
+        finally:
+            theme.set_theme(original)
 
     def test_output_range_survives_palette_switch_and_orders_mouse_drag(self):
         editor = ColormapRangeEditor("gray")

@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from bandscope.core.crop_model import CropSelection, apply_selection
+from bandscope.core.crop_model import CropSelection, SPATIAL_KEYS, apply_selection
 from bandscope.core.data_scope import (
     DataScopeDescriptor,
     ScopedSpatialArray,
@@ -26,6 +26,8 @@ class _EdcSource:
     time_spec: Any
     view: str
     data_bounds: tuple[int, int, int, int, int, int]
+    axis_index: int | None
+    normal_index_bounds: tuple[int, int] | None
 
 
 def _full_shape_from_coords(coords) -> tuple[int, int, int]:
@@ -83,17 +85,40 @@ def _full_energy_range(coords) -> tuple[float, float]:
     return _nonzero_range(np.min(energy), np.max(energy))
 
 
-def _xy_volume_selection(selection: CropSelection, coords) -> CropSelection:
-    if selection.view != "2d" or set(selection.axes) != {"X", "Y"}:
-        raise ValueError("An EDC axis crop requires a 2D X/Y selection.")
+def _normal_axis_key(axis_keys) -> str:
+    keys = tuple(axis_keys)
+    if (
+        len(keys) != 2
+        or len(set(keys)) != 2
+        or not set(keys).issubset(SPATIAL_KEYS)
+    ):
+        raise ValueError("An EDC axis crop requires two distinct spatial axes.")
+    return next(key for key in SPATIAL_KEYS if key not in keys)
+
+
+def _axis_volume_selection(
+    selection: CropSelection, coords, normal_index_bounds
+) -> CropSelection:
+    if selection.view != "2d":
+        raise ValueError("An EDC axis crop requires a 2D selection.")
+    normal_key = _normal_axis_key(selection.axes)
     ranges = {
         key: selection.bounds[2 * index:2 * index + 2]
         for index, key in enumerate(selection.axes)
     }
+    if normal_key == "E":
+        normal_range = _full_energy_range(coords)
+    else:
+        if normal_index_bounds is None:
+            raise ValueError("An XZ/YZ EDC selection requires a normal-axis range.")
+        normal_range = _index_coordinate_range(
+            coords, normal_key, *normal_index_bounds
+        )
+    ranges[normal_key] = normal_range
     return CropSelection(
         "3d",
-        ("X", "Y", "E"),
-        (*ranges["X"], *ranges["Y"], *_full_energy_range(coords)),
+        SPATIAL_KEYS,
+        tuple(value for key in SPATIAL_KEYS for value in ranges[key]),
         e_flip=selection.e_flip,
         operation=selection.operation,
     )
@@ -118,10 +143,11 @@ def _full_coordinate_range(coords, key) -> tuple[float, float]:
     return _nonzero_range(np.min(values), np.max(values))
 
 
-def _legacy_volume_selections(rect, coords, plot_axes) -> list[CropSelection]:
+def _legacy_volume_selections(
+    rect, coords, plot_axes, normal_index_bounds
+) -> list[CropSelection]:
     x_key, y_key = str(plot_axes["x_key"]), str(plot_axes["y_key"])
-    if {x_key, y_key} != {"X", "Y"}:
-        raise ValueError("EDC requires an X/Y energy-integral plot.")
+    normal_key = _normal_axis_key((x_key, y_key))
     ranges = {
         x_key: _index_coordinate_range(
             coords, x_key, rect["x_low"], rect["x_up"]
@@ -130,12 +156,22 @@ def _legacy_volume_selections(rect, coords, plot_axes) -> list[CropSelection]:
             coords, y_key, rect["y_low"], rect["y_up"]
         ),
     }
+    if normal_key == "E":
+        normal_range = _full_energy_range(coords)
+    else:
+        if normal_index_bounds is None:
+            raise ValueError("An XZ/YZ EDC selection requires a normal-axis range.")
+        normal_range = _index_coordinate_range(
+            coords, normal_key, *normal_index_bounds
+        )
 
-    def selection(xy_ranges):
+    def selection(plot_ranges):
+        volume_ranges = dict(plot_ranges)
+        volume_ranges[normal_key] = normal_range
         return CropSelection(
             "3d",
-            ("X", "Y", "E"),
-            (*xy_ranges["X"], *xy_ranges["Y"], *_full_energy_range(coords)),
+            SPATIAL_KEYS,
+            tuple(value for key in SPATIAL_KEYS for value in volume_ranges[key]),
         )
 
     if all(low == up for low, up in ranges.values()):
@@ -188,7 +224,9 @@ def _legacy_crop_rectangle(params):
     }
 
 
-def _replay_axis_source_crops(spec, source_context, coords, raw_data, plot_axes):
+def _replay_axis_source_crops(
+    spec, source_context, coords, raw_data, plot_axes, normal_index_bounds
+):
     data, full_shape, data_bounds = _spatial_source(source_context, coords, raw_data)
     replayed = dict(
         source_context,
@@ -208,9 +246,16 @@ def _replay_axis_source_crops(spec, source_context, coords, raw_data, plot_axes)
         )
     selections = []
     if base_rect is not None:
-        selections.extend(_legacy_volume_selections(base_rect, coords, plot_axes))
+        selections.extend(
+            _legacy_volume_selections(
+                base_rect, coords, plot_axes, normal_index_bounds
+            )
+        )
     selections.extend(
-        _xy_volume_selection(_selection_snapshot(region), coords) for region in regions
+        _axis_volume_selection(
+            _selection_snapshot(region), coords, normal_index_bounds
+        )
+        for region in regions
     )
     for selection in selections:
         replayed = apply_selection(replayed, selection)
@@ -269,17 +314,21 @@ class EdcIntegrationMixin:
                 ):
                     raise ValueError("A 3D EDC source requires 3D selections on a home page.")
             else:
+                expected_axes = set(SPATIAL_KEYS) - {SPATIAL_KEYS[source.axis_index]}
                 if current_spec.page_kind not in {"axis_integral", "axis_integral_crop"} or any(
-                    selection.view != "2d" or set(selection.axes) != {"X", "Y"}
+                    selection.view != "2d" or set(selection.axes) != expected_axes
                     for _selection_id, selection in selections
                 ):
-                    raise ValueError("A 2D EDC source requires X/Y selections on an E integral page.")
+                    raise ValueError("A 2D EDC source requires selections matching its integral page axes.")
 
             time_metadata = _time_metadata(self, source.time_spec, source.coords)
             integrated = []
             for selection_id, selection in selections:
                 index_bounds = selection_index_bounds(
-                    selection, source.coords, source.full_shape
+                    selection,
+                    source.coords,
+                    source.full_shape,
+                    normal_index_bounds=source.normal_index_bounds,
                 )
                 if index_bounds is None:
                     raise ValueError("An EDC selection does not intersect the source coordinates.")
@@ -310,7 +359,9 @@ class EdcIntegrationMixin:
                 f"EDC #{index + 1}"
                 if len(integrated) > 1
                 else self._edc_selection_title(
-                    index + 1, metadata, include_energy=source.view == "3d"
+                    index + 1,
+                    metadata,
+                    include_energy=source.view == "3d" or source.axis_index in (0, 1),
                 )
             )
             curves.append(
@@ -368,16 +419,20 @@ class EdcIntegrationMixin:
             if coords is None:
                 raise ValueError("EDC source coordinates are unavailable.")
             data, full_shape, data_bounds = _spatial_source(context, coords, raw_data)
-            return _EdcSource(data, coords, full_shape, spec, "3d", data_bounds)
+            return _EdcSource(
+                data, coords, full_shape, spec, "3d", data_bounds, None, None
+            )
 
         if spec.page_kind not in {"axis_integral", "axis_integral_crop"} or context.get("view") != "2d":
-            raise ValueError("EDC requires a 3D home page or an X/Y energy-integral page.")
+            raise ValueError("EDC requires a 3D home page or a two-axis integral page.")
         resolved = self._resolved_axis_integral_params(spec)
-        if resolved is None or int(resolved.get("axis_index", -1)) != 2:
-            raise ValueError("EDC requires an energy-axis integral page.")
+        axis_index = -1 if resolved is None else int(resolved.get("axis_index", -1))
+        if axis_index not in (0, 1, 2):
+            raise ValueError("EDC requires an X, Y, or E axis integral page.")
         plot_axes = context.get("plot_axes") or {}
-        if {plot_axes.get("x_key"), plot_axes.get("y_key")} != {"X", "Y"}:
-            raise ValueError("EDC requires an X/Y energy-integral plot.")
+        expected_axes = set(SPATIAL_KEYS) - {SPATIAL_KEYS[axis_index]}
+        if {plot_axes.get("x_key"), plot_axes.get("y_key")} != expected_axes:
+            raise ValueError("EDC plot axes do not match the integral page axis.")
 
         axis_params = copy.deepcopy(spec.params or {})
         axis_params.update(copy.deepcopy(resolved))
@@ -390,10 +445,30 @@ class EdcIntegrationMixin:
         source_context = self._get_3d_source_context_for_axis(source_spec, raw_data)
         if source_context is None or source_context.get("view") != "3d":
             raise ValueError("EDC axis source is not three-dimensional.")
-        data, full_shape, data_bounds = _replay_axis_source_crops(
-            spec, source_context, coords, raw_data, plot_axes
+        full_shape = _full_shape_from_coords(coords)
+        normal_index_bounds = (
+            (0, full_shape[2] - 1)
+            if axis_index == 2
+            else tuple(sorted((int(resolved["low"]), int(resolved["up"]))))
         )
-        return _EdcSource(data, coords, full_shape, source_spec, "2d", data_bounds)
+        data, full_shape, data_bounds = _replay_axis_source_crops(
+            spec,
+            source_context,
+            coords,
+            raw_data,
+            plot_axes,
+            normal_index_bounds,
+        )
+        return _EdcSource(
+            data,
+            coords,
+            full_shape,
+            source_spec,
+            "2d",
+            data_bounds,
+            axis_index,
+            normal_index_bounds,
+        )
 
     def _edc_source_scope_metadata(self, spec, source) -> dict:
         descriptor = scoped_descriptor_from_array(source.data)
@@ -460,6 +535,6 @@ class EdcIntegrationMixin:
         if show_message is not None:
             show_message(
                 "无法创建 EDC",
-                "请在三维主页或 E 轴积分的 kx-ky 页面建立有效选区，并确保所有选区与数据相交。",
+                "请在三维主页或任意轴积分页面建立有效选区，并确保所有选区与数据相交。",
             )
         return None

@@ -206,7 +206,6 @@ class PluginDerivedFlowTests(unittest.TestCase):
     def test_action_registration_and_page_creation(self):
         actions = list(self.analyzer._integration_actions_for_parent(SOURCE_PAGE_ID))
         self.assertEqual(actions, [
-            ("builtin:slice_dos", "切片内强度积分", 0.0),
             ("builtin:energy_dos", "能级态密度", 10.0),
             ("edc_waterfall:create", "EDC瀑布图", 20.0),
             ("builtin:second_derivative", "二阶导", 40.0),

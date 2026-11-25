@@ -27,6 +27,8 @@ from PyQt5.QtWidgets import (
 )
 
 from bandscope.ui import theme
+from bandscope.ui.groove_painting import paint_groove
+from bandscope.ui.relief_painting import paint_raised_path
 
 
 class EndpointSpinBox(QDoubleSpinBox):
@@ -181,16 +183,13 @@ class LockBadge(QToolButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         background = QPainterPath()
-        background.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 6, 6)
-        painter.fillPath(background, QColor(theme.BG_3))
-        painter.setPen(QPen(QColor(theme.BORDER_HEX), 1))
-        painter.drawPath(background)
+        background.addRoundedRect(QRectF(self.rect()).adjusted(1.0, 0.5, -1.0, -1.0), 6, 6)
+        paint_raised_path(
+            painter, background, theme.BG_3,
+            theme.TEXT_3 if self.underMouse() else theme.BORDER_HEX,
+            pressed=self.isDown(),
+        )
 
-        pen = QPen(QColor(theme.TEXT_1), 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        body = QRectF(7.0, 7.0, 10.0, 6.5)
-        painter.drawRoundedRect(body, 2, 2)
         lift = 3.0 * self._open_progress
         shackle = QPainterPath()
         shackle.moveTo(9.0, 7.0)
@@ -198,10 +197,27 @@ class LockBadge(QToolButton):
         shackle.cubicTo(9.0, 0.5 - lift, 15.0, 0.5 - lift, 15.0, 4.5 - lift)
         if self._open_progress < 0.55:
             shackle.lineTo(15.0, 7.0)
-        painter.drawPath(shackle)
-        painter.setBrush(QColor(theme.TEXT_1))
+        for color, offset in (
+            (QColor(0, 0, 0, 80), 0.55),
+            (QColor(255, 255, 255, 95), -0.45),
+            (QColor(theme.TEXT_1), 0.0),
+        ):
+            painter.save()
+            painter.translate(0.0, offset)
+            painter.setPen(QPen(color, 1.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(shackle)
+            painter.restore()
+
+        body = QPainterPath()
+        body.addRoundedRect(QRectF(7.0, 7.0, 10.0, 6.5), 2, 2)
+        paint_raised_path(
+            painter, body, theme.TEXT_1, theme.TEXT_1,
+            pressed=self.isDown(), shadow=False,
+        )
+        painter.setBrush(QColor(theme.BG_3))
         painter.setPen(Qt.NoPen)
-        painter.drawEllipse(QPointF(12.0, 10.0), 1.0, 1.0)
+        painter.drawEllipse(QPointF(12.0, 10.0), 0.8, 0.8)
 
 
 class DualRangeSlider(QWidget):
@@ -427,17 +443,23 @@ class DualRangeSlider(QWidget):
         left = self._track_left()
         right = self._track_right()
         track = QRectF(left, self.TRACK_Y - 2.5, right - left, 5.0)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(theme.BG_4))
-        painter.drawRoundedRect(track, 2.5, 2.5)
+        selected = None
+        if self._interval is not None:
+            low_x = self.handle_center("low")
+            up_x = self.handle_center("up")
+            selected = QRectF(low_x, self.TRACK_Y - 2.5, max(up_x - low_x, 0.0), 5.0)
+
+        def paint_selected(painter, _rect):
+            if selected is not None and selected.width() > 0:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(theme.token_color("ACCENT_DIM"))
+                painter.drawRoundedRect(selected, 2.5, 2.5)
+
+        paint_groove(
+            painter, track, content=paint_selected if selected is not None else None,
+        )
         if self._interval is None:
             return
-        low_x = self.handle_center("low")
-        up_x = self.handle_center("up")
-        selected = QRectF(low_x, self.TRACK_Y - 2.5, max(up_x - low_x, 0.0), 5.0)
-        painter.setBrush(theme.token_color("ACCENT_DIM"))
-        if selected.width() > 0:
-            painter.drawRoundedRect(selected, 2.5, 2.5)
 
         collapsed = self._interval.locked and self._interval.length == 0.0
         if collapsed:
@@ -463,9 +485,12 @@ class DualRangeSlider(QWidget):
         light = theme.current_theme() == "light"
         fill = theme.RANGE_HANDLE_LIGHT_FILL if light else theme.RANGE_HANDLE_DARK_FILL
         border = theme.RANGE_HANDLE_DARK_FILL if light else theme.RANGE_HANDLE_LIGHT_FILL
-        painter.setBrush(QColor(fill))
-        painter.setPen(QPen(QColor(border), 1.5 if active else 1))
-        painter.drawEllipse(center, self.CENTER_HANDLE_RADIUS, self.CENTER_HANDLE_RADIUS)
+        handle = QPainterPath()
+        handle.addEllipse(center, self.CENTER_HANDLE_RADIUS, self.CENTER_HANDLE_RADIUS)
+        paint_raised_path(
+            painter, handle, fill, theme.TEXT_1 if active else border,
+            pressed=self._drag_mode == "center",
+        )
 
     def _draw_handle(self, painter, x, endpoint, collapsed=False):
         outer = self._handle_rect(x, collapsed)
@@ -476,10 +501,13 @@ class DualRangeSlider(QWidget):
                         else theme.RANGE_HANDLE_DARK_BORDER)
         if self._hovered == endpoint or self._drag_mode == endpoint:
             border = QColor(theme.TEXT_1)
-        painter.setBrush(fill)
-        painter.setPen(QPen(border, 1))
+        handle = QPainterPath()
         radius = outer.width() / 2
-        painter.drawRoundedRect(outer, radius, radius)
+        handle.addRoundedRect(outer, radius, radius)
+        paint_raised_path(
+            painter, handle, fill, border,
+            pressed=self._drag_mode == endpoint,
+        )
 
 
 class AxisIntervalControl(QWidget):

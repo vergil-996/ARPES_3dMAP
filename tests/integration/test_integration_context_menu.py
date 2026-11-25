@@ -198,7 +198,7 @@ class IntegrationContextMenuTests(unittest.TestCase):
 
         self.assertEqual(
             [action.text() for action in self.analysis_submenu(menu).actions()],
-            ["切片内强度积分", "能级态密度", "EDC瀑布图", "二阶导"],
+            ["能级态密度", "EDC瀑布图", "二阶导"],
         )
 
     def test_2d_context_menu_adds_the_analysis_entry(self):
@@ -276,7 +276,7 @@ class IntegrationContextMenuTests(unittest.TestCase):
             [action.text() for action in captured[0].actions()], ["处理分析"]
         )
 
-    def test_builtin_action_legality_matrix(self):
+    def test_builtin_action_legality_matrix_excludes_selection_slice_dos(self):
         self.assertEqual(
             self.action_keys("home"),
             ["builtin:energy_dos", "builtin:second_derivative"],
@@ -284,10 +284,10 @@ class IntegrationContextMenuTests(unittest.TestCase):
         self.add_page("x", "axis_integral", params=integral_params(0))
         self.assertEqual(
             self.action_keys("x"),
-            ["builtin:slice_dos", "builtin:energy_dos", "builtin:second_derivative"],
+            ["builtin:energy_dos", "builtin:second_derivative"],
         )
         self.add_page("e", "axis_integral", params=integral_params(2))
-        self.assertEqual(self.action_keys("e"), ["builtin:slice_dos"])
+        self.assertEqual(self.action_keys("e"), [])
         self.add_page(
             "z-crop",
             "axis_integral_crop",
@@ -295,15 +295,13 @@ class IntegrationContextMenuTests(unittest.TestCase):
                 2, crop_k_low=0, crop_k_up=2, crop_e_low=1, crop_e_up=3
             ),
         )
-        self.assertEqual(self.action_keys("z-crop"), ["builtin:slice_dos"])
+        self.assertEqual(self.action_keys("z-crop"), [])
         self.add_page(
             "e-home",
             "home",
             params={"home_slice_info": {"axis": 2, "index": 2}},
         )
-        self.assertEqual(
-            self.action_keys("e-home"), ["builtin:slice_dos", "builtin:energy_dos"]
-        )
+        self.assertEqual(self.action_keys("e-home"), ["builtin:energy_dos"])
         self.add_page("result", "energy_dos")
         self.assertEqual(self.action_keys("result"), [])
         self.add_page(
@@ -311,24 +309,20 @@ class IntegrationContextMenuTests(unittest.TestCase):
             "axis_integral_crop",
             params=integral_params(2, crop_k_low=0, crop_k_up=2),
         )
-        self.assertEqual(self.action_keys("incomplete-crop"), ["builtin:slice_dos"])
-
-    def test_slice_dos_uses_the_nonactive_parent_and_freezes_its_slice(self):
-        self.add_page(
-            "parent-a",
-            "home",
-            params={"home_slice_info": {"axis": 0, "index": 0}},
+        self.assertEqual(self.action_keys("incomplete-crop"), [])
+        self.assertNotIn(
+            "builtin:slice_dos",
+            {item[0] for item in My3DAnalyzer.BUILTIN_PAGE_CREATE_ACTIONS},
         )
+
+    def test_selection_slice_dos_tool_creates_and_freezes_the_current_slice(self):
         self.add_page(
             "parent-b",
             "home",
             params={"home_slice_info": {"axis": 0, "index": 2}},
         )
-        self.workspace.activate_page("parent-a")
 
-        page_id = self.analyzer._on_page_create_requested(
-            "parent-b", "builtin:slice_dos"
-        )
+        page_id = self.analyzer._create_slice_dos_result_from_selections()
 
         self.assertIsNotNone(page_id)
         created = self.workspace.page_by_id(page_id)
@@ -438,7 +432,7 @@ class IntegrationContextMenuTests(unittest.TestCase):
         self.assertEqual(created.params["crop_regions"][0]["view"], "2d")
         self.analyzer._ask_second_derivative_axis.assert_not_called()
 
-    def test_static_data_hides_and_rejects_slice_dos_only(self):
+    def test_static_data_rejects_the_selection_slice_dos_tool(self):
         self.analyzer.core.has_time_axis = False
         self.add_page(
             "slice-home",
@@ -450,10 +444,9 @@ class IntegrationContextMenuTests(unittest.TestCase):
             ["builtin:energy_dos", "builtin:second_derivative"],
         )
         before = set(self.workspace.page_specs)
-        self.assertIsNone(
-            self.analyzer._on_page_create_requested("slice-home", "builtin:slice_dos")
-        )
+        self.assertIsNone(self.analyzer._create_slice_dos_result_from_selections())
         self.assertEqual(set(self.workspace.page_specs), before)
+        self.analyzer._show_message.assert_called_once()
 
     def test_illegal_deleted_and_stale_requests_never_fall_back(self):
         self.add_page("illegal", "energy_dos")
@@ -512,7 +505,6 @@ class IntegrationContextMenuTests(unittest.TestCase):
         self.assertEqual(
             self.action_keys("x"),
             [
-                "builtin:slice_dos",
                 "builtin:energy_dos",
                 "edc_waterfall:create",
                 "builtin:second_derivative",
@@ -586,10 +578,9 @@ class IntegrationContextMenuTests(unittest.TestCase):
             return True
 
         self.analyzer.activate_source = activate_source
-        self.assertIn("builtin:slice_dos", self.action_keys(copied.page_id))
-        page_id = self.analyzer._on_page_create_requested(
-            copied.page_id, "builtin:slice_dos"
-        )
+        self.assertNotIn("builtin:slice_dos", self.action_keys(copied.page_id))
+        self.analyzer._on_group_page_activation_requested(copied.page_id)
+        page_id = self.analyzer._create_slice_dos_result_from_selections()
         self.assertIsNotNone(page_id)
         self.assertEqual(self.workspace.page_by_id(page_id).source_page_id, copied.page_id)
 

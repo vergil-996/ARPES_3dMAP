@@ -137,6 +137,26 @@ class FluentIconTests(unittest.TestCase):
         self.assertIsNot(first, other_name)
         self.assertTrue(theme.fluent_icon("missing-fluent-icon").isNull())
 
+    def test_relief_factory_adds_layers_and_preserves_size_and_disabled_mode(self):
+        name = "ic_fluent_settings_regular"
+        size = QSize(40, 40)
+        flat = theme.fluent_icon(name, 20, theme.TEXT_2)
+        relief = theme.fluent_icon(name, 20, theme.TEXT_2, relief=True)
+
+        self.assertIsNot(flat, relief)
+        normal = relief.pixmap(size, QIcon.Normal, QIcon.Off)
+        self.assertEqual(relief.actualSize(size), size)
+        self.assertNotEqual(
+            _pixmap_bytes(normal),
+            _pixmap_bytes(flat.pixmap(size, QIcon.Normal, QIcon.Off)),
+        )
+        expected_disabled = self.app.style().generatedIconPixmap(
+            QIcon.Disabled, normal, QStyleOption(),
+        )
+        self.assertPixmapEqual(
+            relief.pixmap(size, QIcon.Disabled, QIcon.Off), expected_disabled,
+        )
+
     def test_label_repaints_icon_theme_changes_and_clear(self):
         label = FluentIconLabel(name="ic_fluent_database_regular", size=16)
         label.setFixedSize(30, 30)

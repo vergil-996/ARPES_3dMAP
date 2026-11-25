@@ -84,6 +84,8 @@ class AnimatedLockButtonTests(unittest.TestCase):
         self.assertIn("颜色与不透明度共用该范围", page.btn_lock.toolTip())
         self.assertIn("不会禁止编辑色阶或曲线", page.btn_lock.toolTip())
         self.assertIsNone(page.btn_lock.property("fluentIconName"))
+        self.assertTrue(page.btn_lock.property("raisedButton"))
+        self.assertIn("qlineargradient", page.btn_lock.styleSheet())
         self.assertNotIn(page.btn_lock, page._adaptive_buttons)
 
 

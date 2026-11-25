@@ -26,6 +26,7 @@ _USE_CACHED_E_FLIP = object()
 class CropPopup(QFrame):
     edited = pyqtSignal()
     apply_requested = pyqtSignal()
+    remove_requested = pyqtSignal()
 
     #: 标题行右端的拖动提示：整行可拖动，无边框窗口靠它表明自己是浮窗。
     DRAG_HINT_TEXT = "按住拖动"
@@ -68,11 +69,19 @@ class CropPopup(QFrame):
         self.error_label.setStyleSheet(f"color: {theme.TEXT_2};")
         self.error_label.hide()
         layout.addWidget(self.error_label)
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
         self.apply_button = QPushButton("裁剪", self)
         self.apply_button.setFixedHeight(34)
         theme.style_push_button(self.apply_button, "primary")
         self.apply_button.clicked.connect(self.apply_requested)
-        layout.addWidget(self.apply_button)
+        actions.addWidget(self.apply_button, 1)
+        self.remove_button = QPushButton("移除选区", self)
+        self.remove_button.setFixedHeight(34)
+        theme.style_push_button(self.remove_button, "danger")
+        self.remove_button.clicked.connect(self.remove_requested)
+        actions.addWidget(self.remove_button)
+        layout.addLayout(actions)
 
     def _create_header(self):
         header = QWidget(self)
@@ -91,9 +100,10 @@ class CropPopup(QFrame):
         row.addWidget(hint, 0, Qt.AlignVCenter)
         return header
 
-    def set_selection(self, selection):
+    def set_selection(self, selection, label=""):
         action = "裁空" if selection and selection.operation == "erase" else "裁剪"
-        self.title_label.setText("裁空范围" if action == "裁空" else "裁剪范围")
+        title = "裁空范围" if action == "裁空" else "裁剪范围"
+        self.title_label.setText(f"{title} {label}" if label else title)
         self.apply_button.setText(action)
         labels = axis_labels(selection) if selection else ()
         for i, (label, edit) in enumerate(zip(self.labels, self.edits)):
@@ -107,6 +117,7 @@ class CropPopup(QFrame):
             edit.setText(format(selection.bounds[i], ".12g") if active else "—")
         self.set_error("")
         self.apply_button.setEnabled(selection is not None)
+        self.remove_button.setEnabled(selection is not None)
 
     def set_error(self, message):
         self.error_label.setText(message)
@@ -210,6 +221,7 @@ class CropController(QObject):
         self._syncing = False
         self.popup.edited.connect(self.commit_edits)
         self.popup.apply_requested.connect(self._apply)
+        self.popup.remove_requested.connect(self._remove_active_selection)
 
     @property
     def active_selection_id(self):
@@ -221,6 +233,9 @@ class CropController(QObject):
     def selections_for_page(self, page_id=None):
         page_id = self.page_id if page_id is None else page_id
         return tuple(self.selections.get(page_id, {}).items())
+
+    def selection_label(self, selection_id):
+        return f"Z{selection_id}" if selection_id is not None else ""
 
     def _new_selection_id(self):
         selection_id = self._next_selection_id
@@ -252,7 +267,8 @@ class CropController(QObject):
         self.selection = selection
         self._syncing = True
         try:
-            self.popup.set_selection(selection)
+            label = self.selection_label(selection_id) if selection is not None else ""
+            self.popup.set_selection(selection, label)
         finally:
             self._syncing = False
         if notify:
@@ -322,6 +338,28 @@ class CropController(QObject):
         elif notify:
             self.selection_changed.emit()
         return True
+
+    def remove_selection(self, selection_id):
+        drafts = self.selections.get(self.page_id, {})
+        if selection_id not in drafts:
+            return False
+        selection_ids = list(drafts)
+        removed_index = selection_ids.index(selection_id)
+        was_active = selection_id == self.active_selection_id
+        del drafts[selection_id]
+        if was_active:
+            next_id = None
+            if removed_index < len(selection_ids) - 1:
+                next_id = selection_ids[removed_index + 1]
+            elif removed_index:
+                next_id = selection_ids[removed_index - 1]
+            self._set_active_selection(next_id, drafts.get(next_id))
+        else:
+            self.selection_changed.emit()
+        return True
+
+    def _remove_active_selection(self):
+        self.remove_selection(self.active_selection_id)
 
     def set_operation(self, operation):
         self.operation = operation

@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PyQt5.QtCore import QEvent, QPoint, Qt
-from PyQt5.QtGui import QKeyEvent, QMouseEvent
+from PyQt5.QtGui import QContextMenuEvent, QKeyEvent, QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QLineEdit, QPushButton, QWidget
 
@@ -114,6 +114,49 @@ class CropControlTests(unittest.TestCase):
         self.assertEqual(self.controller.popup.edits[0].text(), "1")
         self.assertFalse(self.controller.activate_selection(-1, notify=False))
         self.assertFalse(self.controller.update_selection(-1, original_first, notify=False))
+
+    def test_remove_selection_uses_stable_labels_and_preserves_other_pages(self):
+        first = self.controller.active_selection_id
+        second = self.controller.add_selection()
+        third = self.controller.add_selection()
+        self.controller.activate("b", self.context)
+        other_page = dict(self.controller.selections_for_page())
+        self.controller.activate("a", self.context)
+        self.controller.activate_selection(second, notify=False)
+        changes, applications = [], []
+        self.controller.selection_changed.connect(lambda: changes.append(True))
+        self.controller.apply_requested.connect(lambda: applications.append(True))
+
+        self.assertEqual(self.controller.selection_label(first), f"Z{first}")
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{second}")
+        self.controller.popup.remove_button.click()
+
+        drafts = dict(self.controller.selections_for_page())
+        self.assertNotIn(second, drafts)
+        self.assertEqual(self.controller.active_selection_id, third)
+        self.assertIs(self.controller.selection, drafts[third])
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{third}")
+        self.assertEqual(dict(self.controller.selections_for_page("b")), other_page)
+        self.assertFalse(applications)
+
+        change_count = len(changes)
+        self.assertTrue(self.controller.remove_selection(first))
+        self.assertEqual(self.controller.active_selection_id, third)
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{third}")
+        self.assertEqual(len(changes), change_count + 1)
+        self.assertFalse(self.controller.remove_selection(first))
+        self.assertEqual(len(changes), change_count + 1)
+
+        self.controller.popup.remove_button.click()
+        self.assertIsNone(self.controller.selection)
+        self.assertIsNone(self.controller.active_selection_id)
+        self.assertFalse(self.controller.popup.remove_button.isEnabled())
+        self.assertFalse(self.controller.popup.apply_button.isEnabled())
+        self.assertEqual(dict(self.controller.selections_for_page("b")), other_page)
+        new_id = self.controller.add_selection()
+        self.assertGreater(new_id, third)
+        self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{new_id}")
+        self.assertFalse(applications)
 
     def test_operation_popup_and_legacy_set_selection_only_edit_active_item(self):
         first = self.controller.active_selection_id
@@ -358,6 +401,53 @@ class CropControlTests(unittest.TestCase):
         self.assertFalse(CropInteractionMixin._crop_event_filter(host, canvas, press))
         canvas.deleteLater()
         plotter.deleteLater()
+
+    def test_3d_right_click_prefers_the_hit_box_and_falls_back_without_a_hit(self):
+        canvas, plotter, interactor = QWidget(), QWidget(), QWidget()
+        plotter.interactor = interactor
+        selection_id = self.controller.active_selection_id
+        host = SimpleNamespace(
+            crop_controller=self.controller,
+            canvas_2d=canvas,
+            plotter=plotter,
+            btn_tb_crop=SimpleNamespace(setChecked=Mock()),
+            _crop_box_selection_at_event=Mock(return_value=selection_id),
+            _show_crop_popup=Mock(),
+            _show_axis_title_menu=Mock(),
+        )
+        self.controller.enabled = True
+        try:
+            press = QMouseEvent(
+                QEvent.MouseButtonPress, QPoint(2, 3), Qt.RightButton,
+                Qt.RightButton, Qt.NoModifier
+            )
+            self.assertTrue(CropInteractionMixin._crop_event_filter(host, interactor, press))
+            host._crop_box_selection_at_event.assert_called_once_with(interactor, press)
+            self.assertTrue(self.controller.popup.isVisible())
+            self.assertEqual(
+                self.controller.popup.title_label.text(), f"裁剪范围 Z{selection_id}"
+            )
+            host._show_crop_popup.assert_not_called()
+            QApplication.processEvents()
+            host._show_axis_title_menu.assert_not_called()
+            context_menu = QContextMenuEvent(
+                QContextMenuEvent.Mouse, QPoint(2, 3), QPoint(20, 30)
+            )
+            self.assertTrue(CropInteractionMixin._crop_event_filter(host, plotter, context_menu))
+            host._crop_box_selection_at_event.assert_called_with(plotter, context_menu)
+            host._show_crop_popup.assert_not_called()
+
+            self.controller.popup.hide()
+            host._crop_box_selection_at_event.return_value = None
+            self.assertTrue(CropInteractionMixin._crop_event_filter(host, interactor, press))
+            host._show_crop_popup.assert_called_once()
+            QApplication.processEvents()
+            host._show_axis_title_menu.assert_called_once()
+        finally:
+            self.controller.enabled = False
+            canvas.deleteLater()
+            plotter.deleteLater()
+            interactor.deleteLater()
 
     def test_right_click_in_crop_mode_also_asks_for_the_axis_title_menu(self):
         """事件过滤器吞掉了右键，轴标题入口就得由它自己排出来。"""

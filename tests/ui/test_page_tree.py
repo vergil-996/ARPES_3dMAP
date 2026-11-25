@@ -770,6 +770,9 @@ class PageGroupTests(_WorkspaceFixture):
         self.assertEqual(button.iconSize(), QSize(20, 20))
         self.assertEqual(button.size(), QSize(24, 24))
         self.assertFalse(button.icon().isNull())
+        self.assertTrue(button.property("raisedButton"))
+        self.assertTrue(button.property("fluentIconRelief"))
+        self.assertIn("qlineargradient", self.panel.styleSheet())
         self.assertEqual(button.toolTip(), "新建分组")
 
     def test_new_group_button_creates_a_separate_area_without_changing_the_source_tree(self):

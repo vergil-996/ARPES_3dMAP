@@ -304,17 +304,44 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.controller.sync_widgets()
         self.assertFalse(self.slider._has_center_handle())
 
-    def test_selected_track_has_no_center_line(self):
+    def test_selected_and_unselected_tracks_have_groove_shading(self):
+        previous_theme = theme.current_theme()
+        self.addCleanup(theme.set_theme, previous_theme)
+        for name in ("light", "dark"):
+            theme.set_theme(name)
+            self.slider.update()
+            QApplication.processEvents()
+            image = self.slider.grab().toImage()
+            ratio = image.devicePixelRatio()
+            low_x = self.slider.handle_center("low")
+            up_x = self.slider.handle_center("up")
+            sample_points = {
+                "selected": (low_x + up_x) / 2,
+                "unselected": (self.slider._track_left() + low_x) / 2,
+            }
+            for region, sample_x in sample_points.items():
+                with self.subTest(theme=name, region=region):
+                    x = int(sample_x * ratio)
+                    center_y = int(self.slider.TRACK_Y * ratio)
+                    below_y = int((self.slider.TRACK_Y + 1) * ratio)
+                    center = QColor(image.pixel(x, center_y))
+                    below = QColor(image.pixel(x, below_y))
+                    self.assertNotEqual(center.rgba(), below.rgba())
+
+    def test_interval_handles_have_top_highlights_and_bottom_shading(self):
         QApplication.processEvents()
         image = self.slider.grab().toImage()
-        ratio = image.devicePixelRatio()
-        x = int(((self.slider.handle_center("low") + self.slider.handle_center("up")) / 2) * ratio)
-        y = int(self.slider.TRACK_Y * ratio)
-        above = QColor(image.pixel(x, y - 1))
-        center = QColor(image.pixel(x, y))
-        below = QColor(image.pixel(x, y + 1))
-        self.assertEqual(center, above)
-        self.assertEqual(center, below)
+        ratio = image.devicePixelRatio() or 1.0
+
+        def pixel(endpoint, dy):
+            return QColor(image.pixel(
+                int(round(self.slider.handle_center(endpoint) * ratio)),
+                int(round((self.slider.TRACK_Y + dy) * ratio)),
+            ))
+
+        self.assertGreater(pixel("low", -5).lightness(), pixel("low", 0).lightness())
+        self.assertLess(pixel("low", 5).lightness(), pixel("low", 0).lightness())
+        self.assertLess(pixel("up", 5).lightness(), pixel("up", 0).lightness())
 
     def test_track_is_centered_with_title_and_length_box(self):
         self.control.resize(720, 60)

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""真实窗口验收多框选工具条及 2D/3D 多选区 EDC。
+"""真实窗口验收多框选工具条、选区弹窗及 2D/3D EDC／切片积分。
 
 默认读取 .local/data/WSe2_step.npz，也可显式传入 NPZ。仅默认文件缺失时生成
 固定合成数据继续可执行验收，并在报告中明确标注；显式路径不存在则报错。
-使用本机 Qt 图形平台和真实 VTK 窗口，不以 offscreen 替代。
+使用本机 Qt 图形平台和真实 VTK 窗口，不以 offscreen 替代。自动截图不等于人工
+视觉复核；Z 标号、手柄命中和弹窗布局仍须在桌面逐图检查。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_multi_region_edc.py [npz路径] [--output-dir DIR]
 """
@@ -127,12 +128,20 @@ def _physical_bounds(coords, region):
 
 
 def _expected_curve(source, energy, region):
+    """按 X/Y/E 完整索引区间求 EDC；法向积分已包含在 region 中。"""
     x0, x1, y0, y1, e0, e1 = (int(value) for value in region)
     selected = np.asarray(source)[x0:x1 + 1, y0:y1 + 1, e0:e1 + 1]
     return (
         np.asarray(energy, dtype=np.float64)[e0:e1 + 1],
         np.nansum(selected, axis=(0, 1), dtype=np.float64),
     )
+
+
+def _physical_bounds_for_axes(coords, region, axes):
+    bounds = _physical_bounds(coords, region)
+    by_axis = {key: bounds[2 * index:2 * index + 2]
+               for index, key in enumerate(("X", "Y", "E"))}
+    return tuple(value for key in axes for value in by_axis[key])
 
 
 def _opacity_nodes(function):
@@ -169,10 +178,26 @@ def _visible_renderer_bounds(renderer):
     return bounds
 
 
+def _visible_renderer_texts(renderer):
+    if renderer is None:
+        return []
+    props = renderer.GetViewProps()
+    props.InitTraversal()
+    texts = []
+    for _ in range(props.GetNumberOfItems()):
+        prop = props.GetNextProp()
+        if not prop.GetVisibility():
+            continue
+        getter = getattr(prop, "GetInput", None)
+        if getter is not None:
+            texts.append(str(getter()))
+    return texts
+
+
 def main():
     args = _arguments()
 
-    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtCore import Qt, QTimer, QPoint
     from PyQt5.QtTest import QTest
     from PyQt5.QtWidgets import QApplication
 
@@ -200,7 +225,17 @@ def main():
             "item": "默认 WSe₂ 真实数据验收",
             "reason": f"默认文件不存在：{DEFAULT_DATA}；本次使用固定合成 NPZ。",
         })
-    state = {"finished": False, "2d_comparison": False, "erase_edc": False, "3d_comparison": False}
+    state = {
+        "finished": False,
+        "2d_comparison": False,
+        "erase_edc": False,
+        "slice_dos": False,
+        "3d_comparison": False,
+        "xz_edc": False,
+        "yz_edc": False,
+        "2d_remove": False,
+        "3d_remove": False,
+    }
 
     def record(item, ok, detail=""):
         entry = {"item": str(item), "ok": bool(ok), "detail": detail}
@@ -302,6 +337,234 @@ def main():
             raise AssertionError(f"按钮不可点击：{label or button.toolTip()}")
         QTest.mouseClick(button, Qt.LeftButton, Qt.NoModifier, button.rect().center())
         app.processEvents()
+
+    def validate_toolbar_placement():
+        overlay = window.canvas_tool_overlay
+        secondary = [overlay.new_region_button, overlay.edc_button, overlay.slice_dos_button]
+        primary_ok = all(
+            button.parentWidget() is overlay and overlay.selection_panel.layout().indexOf(button) < 0
+            for button in (window.btn_tb_crop, window.btn_tb_erase)
+        )
+        secondary_ok = all(
+            button.parentWidget() is overlay.selection_panel
+            and overlay.selection_panel.layout().indexOf(button) >= 0
+            for button in secondary
+        )
+        record("裁剪/裁空位于画布初级栏，新增/EDC/切片积分位于框选次级栏", (
+            primary_ok and secondary_ok
+            and overlay.slice_dos_button.toolTip() == "切片内强度积分"
+        ), {
+            "crop_parent": window.btn_tb_crop.parentWidget().objectName(),
+            "erase_parent": window.btn_tb_erase.parentWidget().objectName(),
+            "secondary": [button.toolTip() for button in secondary],
+        })
+
+    def validate_selection_labels(expected_ids, view):
+        controller = window.crop_controller
+        labels = [controller.selection_label(selection_id) for selection_id in expected_ids]
+        expected = [f"Z{selection_id}" for selection_id in expected_ids]
+        if view.casefold() == "2d":
+            visible = [
+                window.axis_crop_selectors[selection_id]._label_artist.get_text()
+                for selection_id in expected_ids
+                if window.axis_crop_selectors[selection_id]._label_artist.get_visible()
+            ]
+        else:
+            visible = _visible_renderer_texts(getattr(window, "_crop_box_renderer", None))
+        record(f"{view} 每个选区显示稳定 Z 标号", (
+            labels == expected and len(set(labels)) == len(expected_ids)
+            and all(label in visible for label in expected)
+        ), {"selection_ids": list(expected_ids), "labels": labels, "visible_texts": visible})
+
+    def capture_popup(name):
+        path = args.output_dir / name
+        popup = window.crop_controller.popup
+        ok = popup.isVisible() and popup.grab().save(str(path))
+        artifacts.append({"name": name, "path": str(path), "saved": bool(ok),
+                          "automatic_capture": True})
+        record(f"自动截图选区弹窗 {name}", ok, str(path))
+
+    def validate_selection_popup(selection_id):
+        controller = window.crop_controller
+        popup = controller.popup
+        selection = dict(controller.selections_for_page()).get(selection_id)
+        label = controller.selection_label(selection_id)
+        actual = tuple(float(edit.text()) for edit in popup.edits[:len(selection.bounds)])
+        ok = (
+            popup.isVisible() and controller.active_selection_id == selection_id
+            and controller.selection == selection and actual == tuple(selection.bounds)
+            and label in popup.title_label.text()
+            and popup.remove_button.isVisible() and popup.remove_button.isEnabled()
+        )
+        record(f"右键 {label} 手柄只编辑对应选区并可移除", ok, {
+            "expected_id": selection_id,
+            "active_id": controller.active_selection_id,
+            "title": popup.title_label.text(),
+            "expected_bounds": selection.bounds,
+            "actual_bounds": actual,
+        })
+        if not ok:
+            raise AssertionError(f"{label} 手柄右键弹窗不符合选区契约")
+
+    def right_click_2d_selection(selection_id, *, remove=False):
+        selector = window.axis_crop_selectors[selection_id]
+        x0, x1, y0, y1 = selector.extents
+        pixel_x, pixel_y = window.ax_2d.transData.transform(((x0 + x1) / 2, (y0 + y1) / 2))
+        ratio = float(window.canvas_2d.devicePixelRatioF())
+        position = QPoint(
+            int(round(pixel_x / ratio)),
+            int(round((window.canvas_2d.figure.bbox.height - pixel_y) / ratio)),
+        )
+        QTest.mouseClick(window.canvas_2d, Qt.RightButton, Qt.NoModifier, position)
+        app.processEvents()
+        validate_selection_popup(selection_id)
+        capture_popup(f"popup-2d-z{selection_id}.png")
+        if remove:
+            before = dict(selections())
+            click(window.crop_controller.popup.remove_button, f"移除 Z{selection_id}")
+            after = dict(selections())
+            ok = selection_id not in after and set(after) == set(before) - {selection_id}
+            state["2d_remove"] = ok
+            record(f"移除 2D Z{selection_id} 不影响其他选区", ok, {
+                "before": list(before), "after": list(after),
+                "selectors": list(window.axis_crop_selectors),
+            })
+
+    def right_click_3d_selection(selection_id, *, remove=False):
+        from PyQt5.QtCore import QPoint
+
+        import vtk
+
+        widget = window._crop_box_widgets[selection_id]
+        poly = vtk.vtkPolyData()
+        returned = widget.GetPolyData(poly)
+        if hasattr(returned, "GetPoints"):
+            poly = returned
+        point = poly.GetPoints().GetPoint(8)
+        renderer = widget.GetCurrentRenderer() or window._crop_box_renderer
+        renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
+        renderer.WorldToDisplay()
+        display = renderer.GetDisplayPoint()
+        target = window.plotter.interactor
+        position = QPoint(int(round(display[0])), int(round(target.height() - display[1])))
+        QTest.mouseClick(target, Qt.RightButton, Qt.NoModifier, position)
+        app.processEvents()
+        validate_selection_popup(selection_id)
+        capture_popup(f"popup-3d-z{selection_id}.png")
+        if remove:
+            before = dict(selections())
+            click(window.crop_controller.popup.remove_button, f"移除 Z{selection_id}")
+            after = dict(selections())
+            ok = selection_id not in after and set(after) == set(before) - {selection_id}
+            state["3d_remove"] = ok
+            record(f"移除 3D Z{selection_id} 不影响其他交互盒", ok, {
+                "before": list(before), "after": list(after),
+                "boxes": list(window._crop_box_widgets),
+            })
+
+    def commit_normal_interval(axis_index, low, up):
+        key = ("X", "Y", "E")[int(axis_index)]
+        coords = np.asarray(window.current_render_context["coords"][key], dtype=np.float64)
+        control = window.timeline_bar.interval_control
+        initially_locked = bool(window.axis_interval.locked)
+        if initially_locked:
+            click(control.range_slider.lock_badge, f"{key} 法向区间锁徽章")
+        app.processEvents()
+        unlocked = not window.axis_interval.locked
+        record(f"{key} 法向区间通过真实锁徽章解锁", unlocked, {
+            "initially_locked": initially_locked,
+            "locked": bool(window.axis_interval.locked),
+            "lock_badge_visible": control.range_slider.lock_badge.isVisible(),
+        })
+        if not unlocked:
+            raise AssertionError(f"{key} 法向区间仍锁定，不能分别提交双端")
+        target_low, target_up = sorted((float(coords[low]), float(coords[up])))
+        if target_low > float(window.axis_interval.up):
+            submissions = (("up", target_up), ("low", target_low))
+        else:
+            submissions = (("low", target_low), ("up", target_up))
+        for endpoint, value in submissions:
+            control.endpointCommitted.emit(endpoint, value)
+        app.processEvents()
+        actual = window.axis_interval.to_indices(coords)
+        record(f"{key} 法向双端滑条区间提交为 [{low}, {up}]", actual == (low, up), {
+            "axis": key, "expected": [low, up], "actual": list(actual),
+            "target_physical": [target_low, target_up],
+            "submission_order": [endpoint for endpoint, _value in submissions],
+            "physical": [window.axis_interval.low, window.axis_interval.up],
+        })
+        if actual != (low, up):
+            raise AssertionError(f"法向区间不一致：{actual} != {(low, up)}")
+        return actual
+
+    def prepare_axis_source(parent_id):
+        spec = window.left_workspace.page_specs[parent_id]
+        raw_data, display_coords = window._get_display_state_for_spec(spec)
+        resolved = window._resolved_axis_integral_params(spec)
+        axis_params = copy.deepcopy(spec.params)
+        axis_params.update(copy.deepcopy(resolved))
+        source_spec = window._build_axis_source_spec_from_params(axis_params)
+        source_context = window._get_3d_source_context_for_axis(source_spec, raw_data)
+        return np.asarray(source_context["data"]), display_coords
+
+    def validate_axis_edc(spec, parent_id, region, source, coords, label):
+        curve = spec.params.get("base_curve") or {}
+        metadata = (spec.params.get("curve_metadata") or [{}])[0]
+        expected_energy, expected_intensity = _expected_curve(source, coords["E"], region)
+        actual_energy = np.asarray(curve.get("x_data") or [], dtype=np.float64)
+        actual_intensity = np.asarray(curve.get("y_data") or [], dtype=np.float64)
+        source_ok = (
+            spec.page_kind == "edc_curve" and spec.source_page_id == parent_id
+            and not spec.params.get("overlay_curves")
+            and spec.params.get("source_view") == "2d"
+            and tuple(metadata.get("index_bounds") or ()) == tuple(region)
+        )
+        energy_ok = actual_energy.shape == expected_energy.shape and np.allclose(
+            actual_energy, expected_energy, rtol=1e-12, atol=1e-12
+        )
+        intensity_ok = actual_intensity.shape == expected_intensity.shape and np.allclose(
+            actual_intensity, expected_intensity, rtol=1e-10, atol=1e-9
+        )
+        record(f"{label}：框选两轴 + 法向区间数值与冻结来源", (
+            source_ok and energy_ok and intensity_ok
+        ), {
+            "expected_index_bounds": list(region),
+            "actual_index_bounds": metadata.get("index_bounds"),
+            "energy_range": metadata.get("energy_range"),
+            "energy_samples": int(actual_energy.size),
+            "max_intensity_error": float(np.max(np.abs(actual_intensity - expected_intensity)))
+            if actual_intensity.shape == expected_intensity.shape and actual_intensity.size else None,
+        })
+        numeric_checks.append({"label": label, "source_ok": source_ok,
+                               "energy_ok": energy_ok, "intensity_ok": intensity_ok,
+                               "index_bounds": metadata.get("index_bounds")})
+        return source_ok and energy_ok and intensity_ok
+
+    def validate_slice_dos(spec, parent_id, expected, normal_range):
+        context = window.current_render_context or {}
+        actual_values = context.get("y_data")
+        actual = np.asarray([] if actual_values is None else actual_values, dtype=np.float64)
+        source = spec.params.get("slice_source") or {}
+        frozen_info = (source.get("context") or {}).get("slice_info") or {}
+        frozen_range = tuple(int(value) for value in frozen_info.get("range") or ())
+        ok = (
+            spec.page_kind == "slice_dos" and spec.source_page_id == parent_id
+            and context.get("view") == "1d" and frozen_range == tuple(normal_range)
+            and actual.shape == expected.shape
+            and np.allclose(actual, expected, rtol=1e-6, atol=1e-5)
+        )
+        record("2D 切片积分 = 活动框选 + 法向双端区间（逐扫描帧求和）", ok, {
+            "source_page_id": spec.source_page_id,
+            "frozen_normal_range": frozen_range,
+            "expected_normal_range": list(normal_range),
+            "samples": int(actual.size),
+            "intensity_sum": float(np.nansum(actual)) if actual.size else None,
+            "expected_intensity_sum": float(np.nansum(expected)),
+            "max_error": float(np.max(np.abs(actual - expected))) if actual.shape == expected.shape and actual.size else None,
+        })
+        numeric_checks.append({"label": "2D slice DOS", "ok": ok,
+                               "normal_range": frozen_range})
+        return ok
 
     def set_popup_bounds(bounds):
         popup = window.crop_controller.popup
@@ -462,6 +725,7 @@ def main():
     def step_master_toggle():
         overlay = window.canvas_tool_overlay
         controller = window.crop_controller
+        validate_toolbar_placement()
         click(overlay.selection_button, "主框选")
         first = controller.selection
         record("主框选按钮真实点击展开", (
@@ -479,7 +743,8 @@ def main():
             and controller.selection == first and len(selections()) == 1
             and len(window.axis_crop_selectors) == 1
         ))
-        executed.append("主框选按钮展开/收起/再展开及草稿保留")
+        validate_selection_labels([controller.active_selection_id], "2D")
+        executed.append("主框选按钮展开/收起/再展开及草稿、Z 标号保留")
         step_2d_ready()
 
     def step_2d_ready():
@@ -488,7 +753,7 @@ def main():
         overlay = window.canvas_tool_overlay
         if not overlay.selection_button.isChecked():
             click(overlay.selection_button, "主框选")
-        click(window.btn_tb_crop, "次级裁剪")
+        click(window.btn_tb_crop, "初级裁剪")
         regions = _regions_2d(window.core.raw_data.shape[:3])
         coords = window.current_render_context["coords"]
         first_bounds = set_popup_bounds(_physical_bounds(coords, regions[0])[:4])
@@ -497,13 +762,14 @@ def main():
         second_bounds = set_popup_bounds(_physical_bounds(coords, regions[1])[:4])
         second_id = window.crop_controller.active_selection_id
         state["2d_selections"] = selections()
+        validate_selection_labels([first_id, second_id], "2D")
         record("2D 次级新增范围得到两个不同选框", (
             len(selections()) == 2 and first_id != second_id
             and first_bounds != second_bounds
             and set(window.axis_crop_selectors) == {first_id, second_id}
         ), {"selection_ids": [first_id, second_id], "regions": regions,
             "selector_count": len(window.axis_crop_selectors)})
-        click(window.btn_tb_crop, "次级裁剪")
+        click(window.btn_tb_crop, "初级裁剪")
         capture("02-2d-two-selections.png")
 
         spec = window.left_workspace.page_specs[parent_id]
@@ -532,6 +798,14 @@ def main():
         state["2d_comparison"] = spec.page_id in new_ids
         validate_comparison(spec, state["2d_parent"], state["2d_regions"],
                             state["2d_source"], state["2d_coords"], "2D EDC")
+        curves = [spec.params["base_curve"], *spec.params["overlay_curves"]]
+        energy_size = int(window.core.raw_data.shape[2])
+        record("kx-ky EDC 保留完整能量曲线", (
+            all(len(curve["x_data"]) == energy_size for curve in curves)
+            and all(tuple(item.get("index_bounds") or ())[4:] == (0, energy_size - 1)
+                    for item in spec.params["curve_metadata"])
+        ), {"full_energy_samples": energy_size,
+            "actual_lengths": [len(curve["x_data"]) for curve in curves]})
         capture("03-2d-two-curves.png")
         executed.append("2D 双曲线比较页来源、energy、简洁图例和积分强度数值核对")
         window.left_workspace.activate_page(state["2d_parent"])
@@ -544,7 +818,7 @@ def main():
         if not controller.activate_selection(second_id):
             raise AssertionError("无法重新激活第二个二维选区")
         state["erase_source_before"] = set(window.left_workspace.page_specs)
-        click(window.btn_tb_erase, "次级裁空")
+        click(window.btn_tb_erase, "初级裁空")
         click(controller.popup.apply_button, "应用裁空")
         wait_for("二维裁空来源页", lambda: (
             len(set(window.left_workspace.page_specs) - state["erase_source_before"]) == 1
@@ -579,8 +853,8 @@ def main():
             click(overlay.selection_button, "主框选")
         if not window.crop_controller.popup.isVisible():
             if window.btn_tb_erase.isChecked():
-                click(window.btn_tb_erase, "次级裁空")
-            click(window.btn_tb_erase, "次级裁空")
+                click(window.btn_tb_erase, "初级裁空")
+            click(window.btn_tb_erase, "初级裁空")
         coords = window.current_render_context["coords"]
         set_popup_bounds(_physical_bounds(coords, state["erase_full_region"])[:4])
         state["erase_edc_before"] = set(window.left_workspace.page_specs)
@@ -639,6 +913,56 @@ def main():
                                "source_ok": source_ok, "cropped_data_excluded": excluded})
         capture("03b-2d-erase-source-edc.png")
         executed.append("真实裁空来源页及单条 EDC 独立 NaN 重放数值核对")
+        window.left_workspace.activate_page(state["2d_parent"])
+        wait_for("返回原 kx-ky 页验收手柄弹窗", lambda: (
+            page_ready(state["2d_parent"], "2d") and len(window.axis_crop_selectors) == 2
+        ), step_2d_remove)
+
+    def step_2d_remove():
+        second_id = state["2d_selections"][-1][0]
+        right_click_2d_selection(second_id, remove=True)
+        wait_for("2D 选区移除后重绘", lambda: (
+            len(selections()) == 1 and len(window.axis_crop_selectors) == 1
+        ), step_slice_dos_prepare)
+
+    def step_slice_dos_prepare():
+        first_id, _selection = selections()[0]
+        if not window.crop_controller.activate_selection(first_id):
+            raise AssertionError("无法激活保留的 2D 选区")
+        region = state["2d_regions"][0]
+        normal_range = (1, max(1, window.core.raw_data.shape[2] // 2))
+        state["slice_parent"] = current_page_id()
+        state["slice_normal_range"] = normal_range
+        commit_normal_interval(2, *normal_range)
+        wait_for("切片积分前的法向区间精确刷新", lambda: page_ready(current_page_id(), "2d"),
+                 step_slice_dos_create)
+
+    def step_slice_dos_create():
+        parent_id = state["slice_parent"]
+        parent = window.left_workspace.page_specs[parent_id]
+        raw_data, _coords = window._get_display_state_for_spec(parent)
+        x0, x1, y0, y1, _e0, _e1 = state["2d_regions"][0]
+        e0, e1 = state["slice_normal_range"]
+        state["slice_expected"] = np.nansum(
+            np.asarray(raw_data)[x0:x1 + 1, y0:y1 + 1, e0:e1 + 1, :],
+            axis=(0, 1, 2), dtype=np.float64,
+        )
+        state["slice_before"] = set(window.left_workspace.page_specs)
+        click(window.canvas_tool_overlay.slice_dos_button, "切片内强度积分")
+        wait_for("框选次级工具创建切片内强度积分", lambda: (
+            len(set(window.left_workspace.page_specs) - state["slice_before"]) == 1
+            and current_page_id() not in state["slice_before"]
+            and window.left_workspace.current_spec().page_kind == "slice_dos"
+            and page_ready(current_page_id(), "1d")
+        ), step_slice_dos_created)
+
+    def step_slice_dos_created():
+        spec = window.left_workspace.current_spec()
+        state["slice_dos"] = validate_slice_dos(
+            spec, state["slice_parent"], state["slice_expected"], state["slice_normal_range"]
+        )
+        capture("03c-2d-selection-slice-dos.png")
+        executed.append("右键 2D 手柄核对并移除 Z 选区；次级按钮按活动框选和法向区间创建切片积分")
         window.left_workspace.activate_page(window.left_workspace.home_page_id)
         wait_for("返回 3D home", lambda: (
             current_page_id() == window.left_workspace.home_page_id
@@ -655,17 +979,19 @@ def main():
             click(overlay.selection_button, "主框选")
         if len(selections()) != 1:
             raise AssertionError(f"返回 home 后预期保留首个交互盒，实际 {len(selections())}")
-        click(window.btn_tb_crop, "次级裁剪")
+        click(window.btn_tb_crop, "初级裁剪")
         regions = _regions_3d(window.core.raw_data.shape[:3])
         coords = window.current_render_context["coords"]
         first_bounds = set_popup_bounds(_physical_bounds(coords, regions[0]))
         first_id = window.crop_controller.active_selection_id
+        validate_selection_labels([first_id], "3D")
         validate_crop_widgets([first_id], "单个 3D box 原生 Enabled 与可见 renderer props")
         first_capture = capture("04-3d-first-box.png")
         click(overlay.new_region_button, "新增框选范围")
         second_bounds = set_popup_bounds(_physical_bounds(coords, regions[1]))
         second_id = window.crop_controller.active_selection_id
         state["3d_selections"] = selections()
+        validate_selection_labels([first_id, second_id], "3D")
         record("3D home 新增第二个交互盒并设置不同 X/Y/E", (
             len(selections()) == 2 and first_id != second_id
             and first_bounds[:4] != second_bounds[:4]
@@ -703,7 +1029,7 @@ def main():
             and np.allclose(volume_opacity(), expected_dimmed, rtol=0.0, atol=1e-12)
         ), {"original": state["3d_original_opacity"], "actual": volume_opacity(),
             "expected": expected_dimmed})
-        click(window.btn_tb_crop, "次级裁剪")
+        click(window.btn_tb_crop, "初级裁剪")
         activated = []
         for selection_id in (first_id, second_id):
             active_box = window._crop_box_widgets[selection_id]
@@ -765,6 +1091,116 @@ def main():
             "energy_ranges": [item.get("energy_range") for item in spec.params["curve_metadata"]]})
         capture("06-3d-two-curves.png")
         executed.append("3D 直接双曲线页来源、各自 energy、E 截断与积分强度数值核对")
+        window.left_workspace.activate_page(state["3d_parent"])
+        wait_for("返回 3D 主页验收手柄弹窗", lambda: (
+            page_ready(state["3d_parent"], "3d") and len(window._crop_box_widgets) == 2
+        ), step_3d_remove)
+
+    def step_3d_remove():
+        ids = [selection_id for selection_id, _selection in state["3d_selections"]]
+        validate_selection_labels(ids, "3D")
+        right_click_3d_selection(ids[-1], remove=True)
+        wait_for("3D 选区移除后重绘", lambda: (
+            len(selections()) == 1 and len(window._crop_box_widgets) == 1
+        ), step_request_xz)
+
+    def step_request_xz():
+        window.canvas_tool_overlay.preset_buttons["xz"].click()
+        wait_for("XZ（沿 Y 积分）来源页", lambda: (
+            window.left_workspace.current_spec() is not None
+            and window.left_workspace.current_spec().page_kind == "axis_integral"
+            and int(window.left_workspace.current_spec().params.get("axis_index", -1)) == 1
+            and page_ready(current_page_id(), "2d")
+        ), step_xz_ready)
+
+    def step_xz_ready():
+        overlay = window.canvas_tool_overlay
+        if not overlay.selection_button.isChecked():
+            click(overlay.selection_button, "主框选")
+        if not window.btn_tb_crop.isChecked():
+            click(window.btn_tb_crop, "初级裁剪")
+        nx, ny, ne = window.core.raw_data.shape[:3]
+        region = (1, max(2, nx // 3), 1, max(2, ny // 2), 1, max(2, ne // 2))
+        coords = window.current_render_context["coords"]
+        set_popup_bounds(_physical_bounds_for_axes(coords, region, ("X", "E")))
+        click(window.btn_tb_crop, "关闭初级裁剪浮窗")
+        state["xz_parent"] = current_page_id()
+        state["xz_region"] = region
+        commit_normal_interval(1, region[2], region[3])
+        wait_for("XZ 法向 Y 区间精确刷新", lambda: page_ready(current_page_id(), "2d"),
+                 step_xz_create)
+
+    def step_xz_create():
+        parent_id = state["xz_parent"]
+        state["xz_source"], state["xz_coords"] = prepare_axis_source(parent_id)
+        state["xz_before"] = set(window.left_workspace.page_specs)
+        click(window.canvas_tool_overlay.edc_button, "XZ 生成 EDC")
+        wait_for("XZ 框选 EDC 结果页", lambda: (
+            len(set(window.left_workspace.page_specs) - state["xz_before"]) == 1
+            and current_page_id() not in state["xz_before"]
+            and window.left_workspace.current_spec().page_kind == "edc_curve"
+            and page_ready(current_page_id(), "1d")
+        ), step_xz_created)
+
+    def step_xz_created():
+        spec = window.left_workspace.current_spec()
+        state["xz_edc"] = validate_axis_edc(
+            spec, state["xz_parent"], state["xz_region"],
+            state["xz_source"], state["xz_coords"], "XZ EDC",
+        )
+        capture("07-xz-selection-edc.png")
+        executed.append("XZ 通过框选次级 EDC 建页，核对 X/E 框选及 Y 法向双端区间")
+        window.left_workspace.activate_page(window.left_workspace.home_page_id)
+        wait_for("XZ 后返回 3D home", lambda: page_ready(window.left_workspace.home_page_id, "3d"),
+                 step_request_yz)
+
+    def step_request_yz():
+        window.canvas_tool_overlay.preset_buttons["yz"].click()
+        wait_for("YZ（沿 X 积分）来源页", lambda: (
+            window.left_workspace.current_spec() is not None
+            and window.left_workspace.current_spec().page_kind == "axis_integral"
+            and int(window.left_workspace.current_spec().params.get("axis_index", -1)) == 0
+            and page_ready(current_page_id(), "2d")
+        ), step_yz_ready)
+
+    def step_yz_ready():
+        overlay = window.canvas_tool_overlay
+        if not overlay.selection_button.isChecked():
+            click(overlay.selection_button, "主框选")
+        if not window.btn_tb_crop.isChecked():
+            click(window.btn_tb_crop, "初级裁剪")
+        nx, ny, ne = window.core.raw_data.shape[:3]
+        region = (1, max(2, nx // 2), 1, max(2, ny // 3),
+                  max(1, ne // 2), ne - 2)
+        coords = window.current_render_context["coords"]
+        set_popup_bounds(_physical_bounds_for_axes(coords, region, ("Y", "E")))
+        click(window.btn_tb_crop, "关闭初级裁剪浮窗")
+        state["yz_parent"] = current_page_id()
+        state["yz_region"] = region
+        commit_normal_interval(0, region[0], region[1])
+        wait_for("YZ 法向 X 区间精确刷新", lambda: page_ready(current_page_id(), "2d"),
+                 step_yz_create)
+
+    def step_yz_create():
+        parent_id = state["yz_parent"]
+        state["yz_source"], state["yz_coords"] = prepare_axis_source(parent_id)
+        state["yz_before"] = set(window.left_workspace.page_specs)
+        click(window.canvas_tool_overlay.edc_button, "YZ 生成 EDC")
+        wait_for("YZ 框选 EDC 结果页", lambda: (
+            len(set(window.left_workspace.page_specs) - state["yz_before"]) == 1
+            and current_page_id() not in state["yz_before"]
+            and window.left_workspace.current_spec().page_kind == "edc_curve"
+            and page_ready(current_page_id(), "1d")
+        ), step_yz_created)
+
+    def step_yz_created():
+        spec = window.left_workspace.current_spec()
+        state["yz_edc"] = validate_axis_edc(
+            spec, state["yz_parent"], state["yz_region"],
+            state["yz_source"], state["yz_coords"], "YZ EDC",
+        )
+        capture("08-yz-selection-edc.png")
+        executed.append("YZ 通过框选次级 EDC 建页，核对 Y/E 框选及 X 法向双端区间")
         finish()
 
     def finish():
@@ -772,9 +1208,13 @@ def main():
             return
         state["finished"] = True
         passed = sum(1 for item in results if item["ok"])
+        required = (
+            "2d_comparison", "erase_edc", "slice_dos", "3d_comparison",
+            "xz_edc", "yz_edc", "2d_remove", "3d_remove",
+        )
         success = (
             bool(results) and passed == len(results)
-            and state["2d_comparison"] and state["erase_edc"] and state["3d_comparison"]
+            and all(state[key] for key in required)
         )
         payload = {
             "requested_data": str(args.requested_data),
@@ -794,6 +1234,7 @@ def main():
                 "settings": "tests.support.environment.isolate_runtime",
             },
             "executed": executed,
+            "required_checks": {key: bool(state[key]) for key in required},
             "not_executed": not_executed,
             "manual_visual_review": False,
             "automatic_screenshots_only": True,
@@ -808,8 +1249,9 @@ def main():
         (args.output_dir / "report.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
         )
-        print(f"[accept] {passed}/{len(results)} 项通过；2D={state['2d_comparison']}，"
-              f"erase={state['erase_edc']}，3D={state['3d_comparison']}；输出 {args.output_dir}", flush=True)
+        print(f"[accept] {passed}/{len(results)} 项通过；"
+              f"required={{{', '.join(f'{key}={state[key]}' for key in required)}}}；"
+              f"输出 {args.output_dir}", flush=True)
         for widget in QApplication.topLevelWidgets():
             if widget.isVisible():
                 widget.close()
@@ -819,8 +1261,13 @@ def main():
     QTimer.singleShot(600000, lambda: (record("真实窗口验收总超时", False), finish()))
     app.exec_()
     passed = sum(1 for item in results if item["ok"])
-    return 0 if (results and passed == len(results) and state["2d_comparison"]
-                 and state["erase_edc"] and state["3d_comparison"]) else 1
+    return 0 if (
+        results and passed == len(results)
+        and all(state[key] for key in (
+            "2d_comparison", "erase_edc", "slice_dos", "3d_comparison",
+            "xz_edc", "yz_edc", "2d_remove", "3d_remove",
+        ))
+    ) else 1
 
 
 if __name__ == "__main__":

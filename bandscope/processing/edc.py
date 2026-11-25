@@ -45,12 +45,29 @@ def _coordinate_values(coords, key: str, size: int) -> np.ndarray:
     return values
 
 
+def _normal_index_bounds(index_bounds, size: int) -> tuple[int, int]:
+    try:
+        values = tuple(index_bounds)
+        if len(values) != 2:
+            raise ValueError
+        if any(int(value) != value for value in values):
+            raise ValueError
+        low, up = sorted(int(value) for value in values)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("EDC 法向范围必须是两个 inclusive 整数索引。") from exc
+    if low < 0 or up >= size:
+        raise ValueError("EDC 法向范围超出完整数据域。")
+    return low, up
+
+
 def selection_index_bounds(
-    selection: CropSelection, coords, spatial_shape
+    selection: CropSelection, coords, spatial_shape, *, normal_index_bounds=None
 ) -> tuple[int, int, int, int, int, int] | None:
     """Convert a spatial selection to absolute inclusive X/Y/E indices."""
     shape = _spatial_shape(spatial_shape)
     axes = tuple(selection.axes)
+    normal_key = None
+    normal_bounds = None
     if selection.view == "3d":
         if axes != SPATIAL_KEYS:
             raise ValueError("3D EDC 选区必须按 X、Y、E 轴给出范围。")
@@ -59,20 +76,33 @@ def selection_index_bounds(
             for axis, key in enumerate(axes)
         }
     elif selection.view == "2d":
-        if len(axes) != 2 or set(axes) != {"X", "Y"}:
-            raise ValueError("2D EDC 仅支持 kx-ky 选区。")
+        if (
+            len(axes) != 2
+            or len(set(axes)) != 2
+            or not set(axes).issubset(SPATIAL_KEYS)
+        ):
+            raise ValueError("2D EDC 选区必须包含两个不同的 X、Y、E 轴。")
         axis_ranges = {
             key: selection.bounds[2 * axis:2 * axis + 2]
             for axis, key in enumerate(axes)
         }
-        axis_ranges["E"] = (0.0, float(shape[2] - 1))
+        normal_key = next(key for key in SPATIAL_KEYS if key not in axes)
+        normal_axis = SPATIAL_KEYS.index(normal_key)
+        if normal_index_bounds is None:
+            if set(axes) != {"X", "Y"}:
+                raise ValueError("XZ/YZ EDC 选区必须提供法向 inclusive 索引范围。")
+            normal_bounds = (0, shape[2] - 1)
+        else:
+            normal_bounds = _normal_index_bounds(
+                normal_index_bounds, shape[normal_axis]
+            )
     else:
-        raise ValueError("EDC 仅支持 3D 体选区或 2D kx-ky 选区。")
+        raise ValueError("EDC 仅支持 3D 体选区或任意两个空间轴的 2D 选区。")
 
     bounds = []
     for axis, key in enumerate(SPATIAL_KEYS):
-        if selection.view == "2d" and key == "E":
-            bounds.extend((0, shape[2] - 1))
+        if selection.view == "2d" and key == normal_key:
+            bounds.extend(normal_bounds)
             continue
         values = _coordinate_values(coords, key, shape[axis])
         interval = index_interval(values, *axis_ranges[key])

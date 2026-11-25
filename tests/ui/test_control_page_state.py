@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QLabel
 
 from bandscope.core.display_style import new_render_quality
 from bandscope.processing.compute_backends import BackendManager
@@ -216,9 +216,24 @@ class ControlPageStateTests(unittest.TestCase):
             self.assertGreaterEqual(remaining, 72)
         self.assertTrue(page.display_target_row.rect().contains(page.btn_lock.geometry()))
 
-        self.assertEqual(page.denoise_scope_label.text(), "当前数据范围 · 全局共享")
-        self.assertIn("不随显示对象切换", page.denoise_scope_label.toolTip())
         self.assertIn("全部显示对象共用同一输出色带", page.colormap_selector.toolTip())
+
+    def test_denoise_scope_label_is_removed_without_layout_placeholder(self):
+        page = RenderControlPage()
+        self.addCleanup(page.deleteLater)
+        denoise_card = next(
+            group for group in page._adaptive_groups if group.toggle_button.text() == "去噪"
+        )
+
+        self.assertFalse(hasattr(page, "denoise_scope_label"))
+        self.assertNotIn(
+            "当前数据范围 · 全局共享",
+            [label.text() for label in denoise_card.findChildren(QLabel)],
+        )
+        self.assertEqual(denoise_card.body.count(), 1)
+        pipeline_row = denoise_card.body.itemAt(0).layout()
+        self.assertIsNotNone(pipeline_row)
+        self.assertGreaterEqual(pipeline_row.indexOf(page.denoise_pipeline), 0)
 
     def test_view_settings_header_is_removed(self):
         from tests.support.view_recipe import control_window

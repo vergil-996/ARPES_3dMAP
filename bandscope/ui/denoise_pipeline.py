@@ -407,12 +407,16 @@ class _DragGrip(QWidget):
             return
         if (event.pos() - self._press_position).manhattanLength() < QApplication.startDragDistance():
             return
+        press_position = self._press_position
         self._press_position = None
         mime = QMimeData()
         mime.setData(_MIME_TYPE, self.node_id.encode("utf-8"))
         mime.setText(self.node_id)
         drag = QDrag(self)
         drag.setMimeData(mime)
+        card = self.parent()
+        drag.setPixmap(card.grab())
+        drag.setHotSpot(self.mapTo(card, press_position))
         drag.exec_(Qt.MoveAction)
         self.pipeline._clear_drop_indicator()
         event.accept()
@@ -592,18 +596,8 @@ class _EmptyState(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 22, 12, 20)
-        layout.setSpacing(7)
         glyph = _EmptyGlyph(self)
         layout.addWidget(glyph, 0, Qt.AlignHCenter)
-        title = QLabel("从第一个去噪步骤开始")
-        title.setObjectName("denoise_empty_title")
-        title.setAlignment(Qt.AlignCenter)
-        title.setWordWrap(True)
-        layout.addWidget(title)
-        body = QLabel("自由组合算法，按顺序处理\n修改参数后自动更新")
-        body.setObjectName("denoise_empty_body")
-        body.setAlignment(Qt.AlignCenter)
-        layout.addWidget(body)
 
 
 class _MethodChoice(QFrame):
@@ -1181,8 +1175,6 @@ class DenoisePipelineWidget(QWidget):
             QPushButton#denoise_add {{ color: {theme.TEXT_2}; background: transparent; border: 1px dashed {theme.BORDER_HEX}; border-radius: 7px; padding: 7px 10px; font-size: 11px; }}
             QPushButton#denoise_add:hover {{ color: {theme.TEXT_1}; background: {theme.ACCENT_SOFT}; border-color: {theme.TEXT_3}; }}
             QPushButton#denoise_add:focus {{ color: {theme.TEXT_1}; border: 1px solid {theme.TEXT_2}; }}
-            QLabel#denoise_empty_title {{ color: {theme.TEXT_1}; font-size: 12px; font-weight: 600; }}
-            QLabel#denoise_empty_body {{ color: {theme.TEXT_3}; font-size: 11px; line-height: 150%; }}
             QFrame#denoise_node {{ background: {theme.BG_2}; border: 1px solid {theme.BORDER_HEX}; border-radius: 8px; }}
             QFrame#denoise_node:hover, QFrame#denoise_node:focus {{ background: {theme.BG_3}; border-color: {theme.TEXT_3}; }}
             QFrame#denoise_node[nodeEnabled="false"] {{ background: {theme.BG_1}; border-style: dashed; }}
@@ -1252,13 +1244,16 @@ class DenoisePipelineWidget(QWidget):
                 widget.deleteLater()
         self._node_cards = {}
         if not self._nodes:
-            self.flow_layout.addWidget(_EmptyState(self.flow_host))
+            empty_state = _EmptyState(self.flow_host)
+            self.flow_layout.addWidget(empty_state)
+            empty_state.show()
         for position, node in enumerate(self._nodes):
             row = _NodeRow(node, position, len(self._nodes), self, self.flow_host)
             row.card.activated.connect(self.open_parameter_dialog)
             row.card.more_requested.connect(self._show_node_menu)
             row.rail.dot.set_state(self._execution_state, node["enabled"])
             self.flow_layout.addWidget(row)
+            row.show()
             self._node_cards[node["id"]] = row.card
         enabled_count = sum(bool(node["enabled"]) for node in self._nodes)
         if self._nodes:
@@ -1267,6 +1262,8 @@ class DenoisePipelineWidget(QWidget):
             self.count_label.setText("0 步")
         self.flow_host.updateGeometry()
         self.updateGeometry()
+        self.flow_layout.activate()
+        self.layout().activate()
 
     def _mark_pending(self):
         if self._execution_state != "pending":

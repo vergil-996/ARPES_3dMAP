@@ -682,6 +682,7 @@ class PageTreePanel(QWidget):
         header_layout.addWidget(group_label, 1)
         self.new_group_button = QToolButton(group_header)
         self.new_group_button.setObjectName("new_group_button")
+        self.new_group_button.setProperty("raisedButton", True)
         theme.set_button_icon(self.new_group_button, "ic_fluent_folder_add_regular", 20)
         self.new_group_button.setIconSize(QSize(20, 20))
         self.new_group_button.setToolTip("新建分组")
@@ -798,19 +799,32 @@ class PageTreePanel(QWidget):
                 font-weight: 600;
             }
             QToolButton#new_group_button {
-                background-color: %(BG3)s;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 %(RELIEF_TOP)s, stop:0.5 %(BG3)s, stop:1 %(RELIEF_BOTTOM)s);
                 color: %(T2)s;
-                border: none;
-                border-radius: 8px;
-                min-width: 24px;
-                max-width: 24px;
-                min-height: 24px;
-                max-height: 24px;
+                border: 1px solid %(BORD)s;
+                border-bottom: 2px solid %(RELIEF_BOTTOM)s;
+                border-radius: 6px;
+                min-width: 0;
+                min-height: 0;
                 padding: 0;
             }
             QToolButton#new_group_button:hover {
-                background-color: %(ACC_SOFT)s;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 %(RELIEF_TOP)s, stop:0.5 %(BG4)s, stop:1 %(BG3)s);
                 color: %(T1)s;
+                border-color: %(T3)s;
+            }
+            QToolButton#new_group_button:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 %(RELIEF_BOTTOM)s, stop:0.5 %(BG3)s, stop:1 %(RELIEF_TOP)s);
+                border-bottom-width: 1px;
+                padding-top: 1px;
+            }
+            QToolButton#new_group_button:disabled {
+                background: %(BG3)s;
+                color: %(T3)s;
+                border: 1px solid %(BORD)s;
             }
             QLabel#page_tree_empty {
                 color: %(T3)s;

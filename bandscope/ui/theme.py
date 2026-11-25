@@ -252,6 +252,8 @@ def _install_palette(name):
         "DANGER_SOFT": DANGER_SOFT,
         "DANGER_BORD": DANGER_BORDER,
         "SCROLLBAR": SCROLLBAR,
+        "RELIEF_TOP": BG_4 if name == "dark" else BG_3,
+        "RELIEF_BOTTOM": BG_0 if name == "dark" else BG_4,
         "RS": R_S,
         "RM": R_M,
         "RL": R_L,
@@ -278,28 +280,40 @@ def accent_qcolor():
 _FLUENT_ICON_CACHE = {}
 
 
-def fluent_icon(name, size=16, color=None):
+def fluent_icon(name, size=16, color=None, *, relief=False):
     from PyQt5.QtGui import QIcon
     from siui.core import SiGlobal
 
-    from bandscope.ui.fluent_icon import FluentIconEngine
+    from bandscope.ui.fluent_icon import FluentIconEngine, ReliefIconEngine
 
     try:
         actual_color = color or TEXT_2
-        cache_key = (name, actual_color)
+        cache_key = (name, actual_color, bool(relief))
         if cache_key not in _FLUENT_ICON_CACHE:
             svg_bytes = SiGlobal.siui.iconpack.get(name, actual_color)
-            _FLUENT_ICON_CACHE[cache_key] = QIcon(FluentIconEngine(svg_bytes))
+            if relief:
+                engine = ReliefIconEngine(
+                    svg_bytes,
+                    SiGlobal.siui.iconpack.get(name, "#000000"),
+                    SiGlobal.siui.iconpack.get(name, "#FFFFFF"),
+                )
+            else:
+                engine = FluentIconEngine(svg_bytes)
+            _FLUENT_ICON_CACHE[cache_key] = QIcon(engine)
         return _FLUENT_ICON_CACHE[cache_key]
     except Exception:
         return QIcon()
 
 
 def set_button_icon(button, name, size=16, *, on_accent=False):
+    relief = bool(button.property("raisedButton"))
     button.setProperty("fluentIconName", name)
     button.setProperty("fluentIconSize", int(size))
     button.setProperty("fluentIconOnAccent", bool(on_accent))
-    button.setIcon(fluent_icon(name, size, ACCENT_ON if on_accent else TEXT_2))
+    button.setProperty("fluentIconRelief", relief)
+    button.setIcon(fluent_icon(
+        name, size, ACCENT_ON if on_accent else TEXT_2, relief=relief,
+    ))
 
 
 def apply_app_font():
@@ -341,6 +355,46 @@ def action_button_qss(kind="primary"):
     )
 
 
+def raised_action_button_qss(kind="secondary"):
+    accent = QColor(ACCENT)
+    accent_top = accent.lighter(118).name()
+    accent_middle = accent.name()
+    accent_bottom = accent.darker(118).name()
+    accent_edge = accent.darker(142).name()
+    accent_hover = accent.lighter(108).name()
+    if kind == "primary":
+        top, middle, bottom = accent_top, accent_middle, accent_bottom
+        edge = accent_edge
+        foreground = _qss_color("ACCENT_ON")
+    else:
+        dark = _CURRENT_THEME == "dark"
+        top = _qss_color("BG_4" if dark else "BG_3")
+        middle = _qss_color("BG_3")
+        bottom = _qss_color("BG_0" if dark else "BG_4")
+        edge = _qss_color("BORDER_HEX")
+        foreground = _qss_color("TEXT_1")
+    selector = 'QPushButton[raisedButton="true"]'
+    return (
+        f"{selector} {{"
+        f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:0.5 {middle}, stop:1 {bottom});"
+        f"color: {foreground}; border: 1px solid {edge}; border-bottom: 2px solid {accent_edge if kind == 'primary' else edge};"
+        f"border-radius: {R_S}px; }}"
+        f"{selector}:hover {{"
+        f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top if kind == 'primary' else top},"
+        f" stop:0.5 {accent_hover if kind == 'primary' else _qss_color('BG_4')}, stop:1 {accent_middle if kind == 'primary' else middle});"
+        f"border-color: {_qss_color('TEXT_3') if kind != 'primary' else accent_edge}; }}"
+        f"{selector}:pressed {{"
+        f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {bottom}, stop:0.5 {middle}, stop:1 {top});"
+        "border-bottom-width: 1px; padding-top: 1px; }"
+        f"{selector}:checked {{"
+        f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {accent_top}, stop:0.5 {accent_middle}, stop:1 {accent_bottom});"
+        f"color: {_qss_color('ACCENT_ON')}; border-color: {accent_edge}; }}"
+        f"{selector}:disabled {{"
+        f"background: {_qss_color('BG_3')}; color: {_qss_color('TEXT_3')};"
+        f"border: 1px solid {_qss_color('BORDER_HEX')}; }}"
+    )
+
+
 def style_push_button(btn, kind="primary"):
     from siui.core import SiColor
     from PyQt5.QtWidgets import QPushButton
@@ -350,8 +404,11 @@ def style_push_button(btn, kind="primary"):
         fixed_width = btn.minimumWidth() if btn.minimumWidth() == btn.maximumWidth() and btn.minimumWidth() > 0 else None
         fixed_height = btn.minimumHeight() if btn.minimumHeight() == btn.maximumHeight() and btn.minimumHeight() > 0 else None
         style = action_button_qss(kind)
+        if btn.property("raisedButton"):
+            style += raised_action_button_qss(kind)
         if btn.property("compactIconButton"):
-            style += "QPushButton { min-height: 24px; min-width: 26px; padding: 0; }"
+            minimum_height = 23 if btn.property("raisedButton") else 24
+            style += f"QPushButton {{ min-height: {minimum_height}px; min-width: 26px; padding: 0; }}"
         if btn.styleSheet() != style:
             btn.setStyleSheet(style)
         if btn.property("compactIconButton"):
@@ -798,6 +855,7 @@ def apply_widget_theme(root):
                 icon_name,
                 int(widget.property("fluentIconSize") or 16),
                 ACCENT_ON if widget.property("fluentIconOnAccent") else TEXT_2,
+                relief=bool(widget.property("fluentIconRelief")),
             ))
         qt_style = QWidget.style(widget)
         qt_style.unpolish(widget)

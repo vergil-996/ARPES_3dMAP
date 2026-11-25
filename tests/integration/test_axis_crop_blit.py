@@ -134,9 +134,10 @@ class AxisCropBlitTests(unittest.TestCase):
         self.assertEqual(
             to_rgba(selector._selection_artist.get_edgecolor()), to_rgba(theme.ACCENT)
         )
-        for artist in selector.artists[1:]:
+        for artist in selector._handles_artists:
             self.assertEqual(to_rgba(artist.get_markerfacecolor()), to_rgba(theme.ACCENT))
             self.assertEqual(to_rgba(artist.get_markeredgecolor()), to_rgba(theme.BG_2))
+        self.assertEqual(to_rgba(selector._label_artist.get_color()), to_rgba(theme.ACCENT))
 
     def _assert_all_nine_handles_painted(self):
         selector = self.analyzer.axis_crop_selector
