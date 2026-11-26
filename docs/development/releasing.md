@@ -13,6 +13,8 @@ python scripts/release/build_plugin.py flat_band_opacity --output-dir release
 
 版本号示例应与 `bandscope/app_metadata.py` 一致。人工视觉验收见 [测试指南](testing.md)，不要将自动化通过等同于全部界面验收完成。
 
+本机 `.venv` 的依赖版本可能落后于 CI：CI 每次按 `requirements.txt` 解析最新版（2026-11-26 实测 matplotlib 3.11.2、scipy 1.18.1、numpy 2.5.5、vtk 9.7.2、PyQt5 5.15.11），而本机可能仍是旧版本。依赖内部实现变化足以让“本机全绿”的断言在 CI 失败（v1.23.0 首次 tag 就因此失败过：matplotlib 3.11 改用画布级 `_load_blit_background`、scipy 1.18 的 Savitzky-Golay 两条路径差 1 ULP）；此外本机高 DPI 缩放会让按屏幕像素取样的断言与 CI 的 100% 结果不一致。像素取样统一走 `tests/support/pixels.py` 的 1:1 逻辑像素渲染，浮点比较用 `assert_allclose`，不要写死跨版本会变的属性名或绝对色值。
+
 ## 插件签名密钥
 
 官方插件包与插件目录都用 Ed25519 签名，客户端只用宿主内置公钥验签。
@@ -83,6 +85,7 @@ GitHub 与 MatElab 的网络路径相反，发布流程必须按顺序等待维�
 ## CI 与正式发布
 
 - 普通提交和 PR 运行共享测试工作流；版本标签 `vX.Y.Z` 触发发布工作流。
+- 测试任务失败时不会创建 Release，可以修正后把标签改指新提交再推：`git tag -f vX.Y.Z <commit>` 加 `git push --force origin vX.Y.Z`。一旦 Release 已经创建就不要再移动标签，改发补丁版本（v1.22.2 的插件目录冲突、v1.23.0 的依赖版本断言都是先在 tag 上失败，再移动标签重跑）。
 - 发布先检查标签与源码版本一致，再运行完整测试，构建 CPU / NVIDIA 安装包和独立插件包。
 - 插件任务按顺序执行：打包 → 校验签名密钥与内置公钥匹配 → 签名插件包 → 聚合上一版目录并生成 `plugins-index.json` → 签名目录。任一环节失败都不发布。构建脚本会打印本次针对的宿主版本与支持接口集合，兼容声明只覆盖真正验证过的组合；只改声明上限不算验证过。
 - 打包**必须可复现**：`.bsplugin` 的 zip 条目使用固定时间戳，摘要只由文件内容决定。历史版本沿用源文件 mtime，CI 的 checkout 又把它设成运行时刻，同一份源码每次发布会得到不同摘要，聚合上一版目录时会被「同 id/version 内容必须一致」判成内容被替换而失败——发生在标签推上去之后，只能再发一个补丁版本。插件源码没变时不要顺手改包内文件的编码或行尾，行尾差异同样会改变摘要。
