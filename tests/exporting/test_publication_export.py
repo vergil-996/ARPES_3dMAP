@@ -8,11 +8,13 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
 
 import bandscope.exporting.publication_models as pm
+from bandscope.exporting.publication_export import _build_source_desc
 from bandscope.exporting.publication_models import (
     DEFAULT_STYLE_ID,
     OutputOptions,
@@ -121,6 +123,43 @@ class StyleRegistryTests(unittest.TestCase):
         self.assertEqual(
             len(validate_overrides("2d", {"xlabel_text": "x" * 300})["xlabel_text"]), 40
         )
+
+
+class SourceDescriptionTests(unittest.TestCase):
+    @staticmethod
+    def _window(enabled):
+        return SimpleNamespace(
+            TIME_INTERVAL_PAGE_KINDS=frozenset({"curve_comparison_1d", "log_curve"}),
+            core=SimpleNamespace(
+                has_time_axis=True,
+                coords={"delay": np.asarray([0.0, 1.0, 2.0])},
+            ),
+            _time_page_editable=lambda _spec: enabled,
+            _time_indices_for_spec=lambda _spec: (1, 1),
+        )
+
+    def test_time_editable_log_includes_its_actual_frame(self):
+        spec = SimpleNamespace(title="动态 log", page_kind="log_curve")
+
+        description = _build_source_desc(self._window(True), spec, {})
+
+        self.assertEqual(description, "动态 log · 帧 1（delay 1）")
+
+    def test_frozen_comparison_and_log_do_not_claim_a_current_frame(self):
+        for page_kind in ("curve_comparison_1d", "log_curve"):
+            with self.subTest(page_kind=page_kind):
+                spec = SimpleNamespace(title="冻结曲线", page_kind=page_kind)
+                self.assertEqual(
+                    _build_source_desc(self._window(False), spec, {}),
+                    "冻结曲线",
+                )
+
+    def test_lightweight_window_without_capability_hook_keeps_legacy_fallback(self):
+        window = self._window(True)
+        del window._time_page_editable
+        spec = SimpleNamespace(title="兼容替身", page_kind="log_curve")
+
+        self.assertIn("帧 1", _build_source_desc(window, spec, {}))
 
 
 class LevelInfoPurityTests(unittest.TestCase):

@@ -1221,7 +1221,7 @@ class EnhancementInteractionMixin:
             artists.extend(selector.artists)
         return artists
 
-    def _draw_enhancement_regions(self, context, fields):
+    def _draw_enhancement_regions(self, context, fields, *, redraw=True):
         if "_enhancement_artists" not in self.__dict__:
             return
         if fields is None or self._crop_enabled():
@@ -1263,7 +1263,8 @@ class EnhancementInteractionMixin:
             existing=self.__dict__.get("_enhancement_colorbars", ()))
         if self._enhancement_selector is not None and active:
             self._enhancement_selector.sync_bounds(physical_bounds(context, active["bounds"]))
-        self.canvas_2d.draw_idle()
+        if redraw:
+            self.canvas_2d.draw_idle()
 
     def _on_enhancement_rectangle(self, press, release):
         region = self._enhancement_selected()

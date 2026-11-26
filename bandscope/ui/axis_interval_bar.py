@@ -548,7 +548,7 @@ class AxisIntervalControl(QWidget):
         self.input_length.setAlignment(Qt.AlignCenter)
         self.input_length.setStyleSheet(theme.value_input_qss())
         self.input_length.setToolTip("区间长度 = 上限 − 下限；以中心扩缩，输入 0 合拢锁定")
-        layout.addWidget(self.input_length, 0, Qt.AlignVCenter)
+        self.input_length.hide()
 
     def sync(self, space, interval, enabled=True):
         if space is None or interval is None:

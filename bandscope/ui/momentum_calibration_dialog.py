@@ -18,14 +18,123 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QShortcut,
     QSizePolicy,
-    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
+from bandscope.core.axis_interval import AxisSpace, nearest_index
 from bandscope.rendering.path_slice import axis_edges
 from bandscope.ui import theme
+from bandscope.ui.axis_interval_bar import DualRangeSlider
+
+
+class CalibrationSliceSlider(DualRangeSlider):
+    valueChanged = pyqtSignal(int)
+    intervalChanged = pyqtSignal()
+
+    def __init__(
+        self,
+        axis_key,
+        coordinates,
+        *,
+        label=None,
+        unit="",
+        source="file",
+        index=0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.rebind(
+            axis_key,
+            coordinates,
+            label=label,
+            unit=unit,
+            source=source,
+            index=index,
+        )
+        self.endpointPreview.connect(self._change_endpoint)
+        self.endpointCommitted.connect(self._change_endpoint)
+        self.centerPreview.connect(self._change_center)
+        self.lockRequested.connect(self._change_lock)
+
+    def rebind(
+        self,
+        axis_key,
+        coordinates,
+        *,
+        label=None,
+        unit="",
+        source="file",
+        index=0,
+    ):
+        self.coordinate_popup.hide()
+        self.space = AxisSpace(
+            axis_key,
+            coordinates,
+            label=label,
+            unit=unit,
+            source=source,
+        )
+        initial = self.space.coords[self._bounded_value(index)]
+        self.interval = self.space.as_interval(low=initial, up=initial, locked=True)
+        self.sync(self.space, self.interval)
+
+    def _bounded_value(self, value):
+        return max(0, min(int(value), self.space.sample_count - 1))
+
+    def minimum(self):
+        return 0
+
+    def maximum(self):
+        return self.space.sample_count - 1
+
+    def value(self):
+        return nearest_index(self.space.coords, self.interval.center)
+
+    def selected_indices(self):
+        return self.interval.to_indices(self.space.coords)
+
+    def setValue(self, value):
+        index = self._bounded_value(value)
+        previous = self._state()
+        previous_value = self.value()
+        self.interval.set_length(0.0)
+        self.interval.set_center(float(self.space.coords[index]))
+        self.interval.set_locked(True)
+        self._sync_after_change(previous, previous_value)
+
+    def _state(self):
+        return self.interval.low, self.interval.up, self.interval.locked
+
+    def _sync_after_change(self, previous, previous_value):
+        self.sync(self.space, self.interval)
+        if self._state() != previous:
+            self.intervalChanged.emit()
+        value = self.value()
+        if value != previous_value:
+            self.valueChanged.emit(value)
+
+    def _change_endpoint(self, endpoint, value):
+        previous = self._state()
+        previous_value = self.value()
+        if endpoint == "low":
+            self.interval.set_low(value)
+        else:
+            self.interval.set_up(value)
+        self._sync_after_change(previous, previous_value)
+
+    def _change_center(self, value):
+        previous = self._state()
+        previous_value = self.value()
+        self.interval.set_center(value)
+        self._sync_after_change(previous, previous_value)
+
+    def _change_lock(self, locked):
+        previous = self._state()
+        previous_value = self.value()
+        self.interval.set_locked(locked)
+        self._sync_after_change(previous, previous_value)
 
 
 class MomentumCalibrationDialog(QDialog):
@@ -61,7 +170,7 @@ class MomentumCalibrationDialog(QDialog):
         title.setStyleSheet(theme.card_title_qss())
         root.addWidget(title)
         subtitle = QLabel(
-            "在同一 XY 切片上选取两点；仅统一缩放 Kx、Ky，保留零点、方向、采样比例与强度数据。",
+            "在同一 XY 切片上选取两点；切片取区间中心最近采样（不积分），仅统一缩放 Kx、Ky，保留零点、方向、采样比例与强度数据。",
             self,
         )
         self.subtitle_label = subtitle
@@ -155,8 +264,6 @@ class MomentumCalibrationDialog(QDialog):
             shading="auto",
             rasterized=True,
         )
-        self.colorbar = self.figure.colorbar(self.image, ax=self.axes, pad=0.025)
-        self.colorbar.set_label("Intensity")
         self.axes.set_aspect("equal", adjustable="box")
         self._selection_line, = self.axes.plot(
             [], [], color="#FFFFFF", linewidth=1.6, zorder=20
@@ -192,11 +299,15 @@ class MomentumCalibrationDialog(QDialog):
         self.energy_value_label.setStyleSheet(theme.slider_value_qss())
         energy_header.addWidget(self.energy_value_label)
         layout.addLayout(energy_header)
-        self.energy_slider = QSlider(Qt.Horizontal, panel)
-        self.energy_slider.setAccessibleName("定标能量切片")
-        self.energy_slider.setRange(0, self.raw_data.shape[2] - 1)
-        self.energy_slider.setSingleStep(1)
-        self.energy_slider.setPageStep(1)
+        self.energy_slider = CalibrationSliceSlider(
+            "E",
+            self.energy,
+            label="能量",
+            unit=str(self.core.coord_units.get("E") or ""),
+            source=(getattr(self.core, "coord_sources", None) or {}).get("E", "index"),
+            parent=panel,
+        )
+        self.energy_slider.setAccessibleName("定标能量切片区间")
         layout.addWidget(self.energy_slider)
 
         self.scan_widgets = [QLabel(getattr(self.core, "scan_name", "扫描帧"), panel)]
@@ -209,11 +320,15 @@ class MomentumCalibrationDialog(QDialog):
         scan_header.addWidget(self.scan_value_label)
         self.scan_header_layout = scan_header
         layout.addLayout(scan_header)
-        self.scan_slider = QSlider(Qt.Horizontal, panel)
-        self.scan_slider.setAccessibleName("定标扫描帧")
-        self.scan_slider.setRange(0, self.raw_data.shape[3] - 1)
-        self.scan_slider.setSingleStep(1)
-        self.scan_slider.setPageStep(1)
+        self.scan_slider = CalibrationSliceSlider(
+            "delay",
+            self.scan,
+            label=getattr(self.core, "scan_name", "扫描帧"),
+            unit=str(getattr(self.core, "scan_unit", None) or self.core.coord_units.get("delay") or ""),
+            source=(getattr(self.core, "coord_sources", None) or {}).get("delay", "index"),
+            parent=panel,
+        )
+        self.scan_slider.setAccessibleName("定标扫描帧区间")
         layout.addWidget(self.scan_slider)
         self.scan_widgets.append(self.scan_slider)
 
@@ -304,8 +419,8 @@ class MomentumCalibrationDialog(QDialog):
         return area
 
     def _connect_changes(self):
-        self.energy_slider.valueChanged.connect(self._on_slice_changed)
-        self.scan_slider.valueChanged.connect(self._on_slice_changed)
+        self.energy_slider.intervalChanged.connect(self._on_slice_changed)
+        self.scan_slider.intervalChanged.connect(self._on_slice_changed)
         self.distance_input.valueChanged.connect(self._on_distance_changed)
         self.unit_edit.textChanged.connect(self._on_settings_changed)
         self.undo_button.clicked.connect(self.undo_point)
@@ -341,19 +456,6 @@ class MomentumCalibrationDialog(QDialog):
             f"QFrame#calibrationActionArea {{ background: {theme.BG_2};"
             f"border-top: 1px solid {theme.BORDER_HEX}; }}"
         )
-        slider_qss = (
-            "QSlider::groove:horizontal {"
-            f"height: 4px; background: {theme.BORDER_HEX}; border-radius: 2px; }}"
-            "QSlider::sub-page:horizontal {"
-            f"background: {theme.TEXT_2}; border-radius: 2px; }}"
-            "QSlider::handle:horizontal {"
-            f"background: {theme.ACCENT}; border: 1px solid {theme.BORDER_HEX};"
-            "width: 12px; margin: -5px 0; border-radius: 6px; }"
-            "QSlider::handle:horizontal:hover {"
-            f"background: {theme.ACCENT_HOVER}; }}"
-        )
-        self.energy_slider.setStyleSheet(slider_qss)
-        self.scan_slider.setStyleSheet(slider_qss)
         for button in (self.undo_button, self.clear_button, self.close_button, self.save_button):
             theme.style_push_button(button, "secondary")
         theme.style_push_button(self.apply_button, "primary")
@@ -362,11 +464,10 @@ class MomentumCalibrationDialog(QDialog):
         self.figure.set_facecolor(theme.BG_1)
         self.axes.set_facecolor(theme.CANVAS_BG)
         self.axes.tick_params(colors=theme.TEXT_2, labelsize=9)
+        self.axes.xaxis.label.set_color(theme.TEXT_2)
+        self.axes.yaxis.label.set_color(theme.TEXT_2)
         for spine in self.axes.spines.values():
             spine.set_color(theme.BORDER_HEX)
-        self.colorbar.ax.tick_params(colors=theme.TEXT_2, labelsize=8)
-        self.colorbar.outline.set_edgecolor(theme.BORDER_HEX)
-        self.colorbar.ax.yaxis.label.set_color(theme.TEXT_2)
         self._set_status(self.status_label.text(), error=self._status_error)
         self.canvas.draw_idle()
 
@@ -527,7 +628,7 @@ class MomentumCalibrationDialog(QDialog):
             self.distance_input.blockSignals(False)
             self.scale_label.setText(f"{float(self.distance_input.value()) / source:.7g} ×")
 
-    def _on_slice_changed(self, _value):
+    def _on_slice_changed(self, *_args):
         self._invalidate_application()
         self._refresh_slice()
 
@@ -540,14 +641,15 @@ class MomentumCalibrationDialog(QDialog):
         low = float(finite.min()) if finite.size else 0.0
         high = float(finite.max()) if finite.size else 1.0
         self.image.set_clim(low, high if high > low else low + 1.0)
-        self.colorbar.update_normal(self.image)
         energy_unit = str(self.core.coord_units.get("E") or "")
         self.energy_value_label.setText(
-            f"{self.energy[energy_index]:.5g} {energy_unit} · {energy_index + 1}/{self.raw_data.shape[2]}".strip()
+            self._slice_value_text(
+                self.energy, self.energy_slider, energy_index, energy_unit
+            )
         )
         scan_unit = str(getattr(self.core, "scan_unit", None) or self.core.coord_units.get("delay") or "")
         self.scan_value_label.setText(
-            f"{self.scan[scan_index]:.5g} {scan_unit} · {scan_index + 1}/{self.raw_data.shape[3]}".strip()
+            self._slice_value_text(self.scan, self.scan_slider, scan_index, scan_unit)
         )
         show_scan = self.raw_data.shape[3] > 1
         for widget in self.scan_widgets:
@@ -557,6 +659,14 @@ class MomentumCalibrationDialog(QDialog):
         self.axes.set_xlabel(f"Kx ({x_unit})" if x_unit else "Kx")
         self.axes.set_ylabel(f"Ky ({y_unit})" if y_unit else "Ky")
         self.canvas.draw_idle()
+
+    @staticmethod
+    def _slice_value_text(coordinates, slider, index, unit):
+        text = f"中心 {coordinates[index]:.5g} {unit} · {index + 1}/{len(coordinates)}"
+        if slider.interval.length > 0.0:
+            low, up = slider.selected_indices()
+            text += f" · 端点 {low + 1}–{up + 1}"
+        return text.strip()
 
     def _on_distance_changed(self, _value):
         self._distance_touched = True
@@ -626,7 +736,6 @@ class MomentumCalibrationDialog(QDialog):
         )
         self.axes.set_xlim(float(np.min(x_edges)), float(np.max(x_edges)))
         self.axes.set_ylim(float(np.min(y_edges)), float(np.max(y_edges)))
-        self.colorbar.update_normal(self.image)
         self._refresh_slice()
         self._refresh_point_labels()
         self._refresh_overlay()

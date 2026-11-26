@@ -6,7 +6,7 @@
 - 把随数据源变化的窗口状态整体捕获 / 安装（数组按引用保存）；全局分组及其
   页面副本不进入会话状态包，切源时保持不变，副本激活时按页面归属切回所属源；
 - 新数据先独立准备，成功后才登记会话；失败不改变已有会话；轴重设复用同一事务，
-  只有原始主页时更新当前源，已有分析时新增源；Kx / Ky 定标只换坐标并原位保留页面与源；
+  只有原始主页时更新当前源，已有分析时新增源；Kx / Ky 与能量定标只换坐标并原位保留页面与源；
 - 切源时先提交当前页、保存旧源状态、失效旧源显示任务与交互对象，再绑定目标
   会话，最后只触发一次页面激活与刷新；
 - 根视图删除走源级关闭事务：先摘页面记录再清理，避免逐页删除时误激活。
@@ -503,6 +503,11 @@ class SourceWorkspaceMixin:
             calibration_requested.connect(
                 lambda: self._open_momentum_calibration(dialog)
             )
+        energy_calibration_requested = getattr(dialog, "energy_calibration_requested", None)
+        if energy_calibration_requested is not None:
+            energy_calibration_requested.connect(
+                lambda: self._open_energy_calibration(dialog)
+            )
         result = dialog.exec_()
         calibration_applied = getattr(
             dialog,
@@ -590,6 +595,47 @@ class SourceWorkspaceMixin:
             axis_dialog.done(axis_dialog.CALIBRATION_APPLIED)
         return applied
 
+    def _open_energy_calibration(self, axis_dialog):
+        from bandscope.ui.energy_calibration_dialog import EnergyCalibrationDialog
+
+        _energy_index, scan_index = self._momentum_calibration_indices()
+        calibration = EnergyCalibrationDialog(
+            self.core,
+            plane="XZ",
+            normal_index=0,
+            scan_index=scan_index,
+            parent=axis_dialog,
+        )
+        applied = False
+
+        def apply_requested(reference_index, second_index, target_spacing, unit):
+            nonlocal applied
+            try:
+                candidate = self.core.copy_with_energy_calibration(
+                    reference_index, second_index, target_spacing, unit=unit
+                )
+                if candidate.raw_data.shape != self.core.raw_data.shape:
+                    raise ValueError("定标后的数据维度发生变化。")
+                self._install_energy_calibration(candidate)
+            except Exception as exc:  # Qt 槽不得让异常逃逸
+                calibration.set_applied(False, str(exc))
+                return False
+            applied = True
+            calibration.set_applied(True, "能量定标已应用。", core=self.core)
+            return True
+
+        calibration.apply_requested.connect(apply_requested)
+        calibration.save_requested.connect(
+            lambda: self._save_momentum_calibration(calibration)
+        )
+        try:
+            calibration.exec_()
+        finally:
+            calibration.deleteLater()
+        if applied:
+            axis_dialog.done(axis_dialog.CALIBRATION_APPLIED)
+        return applied
+
     @staticmethod
     def _momentum_calibration_scale(previous_core, candidate):
         import math
@@ -650,6 +696,66 @@ class SourceWorkspaceMixin:
             params["crop_regions"] = updated_regions
         return undo
 
+    def _remap_energy_page_geometry(self, previous_core, candidate):
+        import math
+
+        def map_value(value):
+            logical = previous_core.physical_to_logical("E", float(value), clamp=False)
+            mapped = candidate.logical_to_physical("E", logical, clamp=False)
+            if not math.isfinite(mapped):
+                raise ValueError("定标后的能量范围包含非有限值。")
+            return mapped
+
+        def map_pair(values, low_key, up_key):
+            if values.get(low_key) is not None:
+                values[low_key] = map_value(values[low_key])
+            if values.get(up_key) is not None:
+                values[up_key] = map_value(values[up_key])
+            if (
+                values.get(low_key) is not None
+                and values.get(up_key) is not None
+                and values[low_key] > values[up_key]
+            ):
+                values[low_key], values[up_key] = values[up_key], values[low_key]
+
+        undo = []
+        for spec in self.left_workspace.page_specs.values():
+            params = spec.params
+            interval = params.get("axis_interval")
+            if isinstance(interval, dict) and interval.get("axis_key") == "E":
+                undo.append((params, "axis_interval", interval))
+                updated = copy.deepcopy(interval)
+                map_pair(updated, "minimum", "maximum")
+                map_pair(updated, "low", "up")
+                params["axis_interval"] = updated
+
+            domain = params.get("axis_domain")
+            if isinstance(domain, dict) and self._axis_index_for_interval(spec) == 2:
+                undo.append((params, "axis_domain", domain))
+                updated = copy.deepcopy(domain)
+                map_pair(updated, "minimum", "maximum")
+                params["axis_domain"] = updated
+
+            regions = params.get("crop_regions")
+            if not regions:
+                continue
+            undo.append((params, "crop_regions", regions))
+            updated_regions = copy.deepcopy(regions)
+            for region in updated_regions:
+                axes = list(region.get("axes") or ())
+                bounds = list(region.get("bounds") or ())
+                for axis_index, key in enumerate(axes):
+                    bound_index = 2 * axis_index
+                    if key != "E" or bound_index + 1 >= len(bounds):
+                        continue
+                    low = map_value(bounds[bound_index])
+                    up = map_value(bounds[bound_index + 1])
+                    bounds[bound_index] = min(low, up)
+                    bounds[bound_index + 1] = max(low, up)
+                region["bounds"] = bounds
+            params["crop_regions"] = updated_regions
+        return undo
+
     def _install_momentum_calibration(self, candidate):
         manager = self.__dict__.get("source_manager")
         active = manager.active() if manager is not None else None
@@ -662,6 +768,43 @@ class SourceWorkspaceMixin:
             self._invalidate_pending_tasks()
             self._clear_interaction_objects()
             geometry_undo = self._scale_momentum_page_geometry(scale)
+            self.core = candidate
+            self.original_raw_data = candidate.raw_data
+            self.base_raw_data = candidate.raw_data
+            self.original_coords = self._clone_coords(candidate.coords)
+            self.base_coords = self._clone_coords(candidate.coords)
+            self.axis_space = None
+            self.axis_interval = None
+            self._axis_prefix_cache = None
+            self._second_derivative_volume_cache = None
+            self._rotation_cache.clear()
+            self._computed_volume_cache.clear()
+            self.backend_manager.clear_caches()
+            self._last_ui_transfer_signature = None
+            self._render_exact_ready = True
+            self._activate_current_session()
+            self._sync_source_switcher()
+            active.state = self._capture_source_state()
+        except Exception:
+            for params, key, value in reversed(geometry_undo):
+                params[key] = value
+            active.state = previous_state
+            self._install_source_state(previous_state)
+            self._activate_current_session()
+            raise
+
+    def _install_energy_calibration(self, candidate):
+        manager = self.__dict__.get("source_manager")
+        active = manager.active() if manager is not None else None
+        if active is None:
+            raise RuntimeError("当前没有可定标的数据源。")
+        previous_core = self.core
+        previous_state = self._store_active_session().state
+        geometry_undo = []
+        try:
+            self._invalidate_pending_tasks()
+            self._clear_interaction_objects()
+            geometry_undo = self._remap_energy_page_geometry(previous_core, candidate)
             self.core = candidate
             self.original_raw_data = candidate.raw_data
             self.base_raw_data = candidate.raw_data

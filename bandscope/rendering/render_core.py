@@ -951,6 +951,12 @@ class VisualEngine:
                     if overlay.axes is not None:
                         overlay.remove()
                 ax._arpes_enhancement_images = []
+            has_region_layers = bool(existing_layers) or (
+                display_fields is not None and any(
+                    region.get("status") in {"ready", "constant"}
+                    for region in display_fields.get("regions", ())
+                )
+            )
             b, g, w = levels_params
             xp, yp, zp = coords['X'], coords['Y'], coords['E']
 
@@ -1030,7 +1036,7 @@ class VisualEngine:
                     atol=1e-12,
                 )
             )
-            if is_preview and can_update and same_extent and display_fields is None:
+            if is_preview and can_update and same_extent and not has_region_layers:
                 preview_img = img
                 if getattr(image, "_arpes_transfer_signature", None) == transfer_signature:
                     display_cmap = image.get_cmap()

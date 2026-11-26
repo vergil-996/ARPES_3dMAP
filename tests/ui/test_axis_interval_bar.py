@@ -238,7 +238,14 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertAlmostEqual(self.controller.interval.low, before)
         self.assertFalse(popup.isVisible())
 
-    def test_length_resizes_about_center_and_zero_locks(self):
+    def test_length_input_is_hidden_and_not_in_the_layout(self):
+        QApplication.processEvents()
+
+        self.assertTrue(self.control.input_length.isHidden())
+        self.assertFalse(self.control.input_length.isVisible())
+        self.assertEqual(self.control.layout().indexOf(self.control.input_length), -1)
+
+    def test_hidden_length_input_retains_programmatic_edit_protocol(self):
         self.control.input_length.setValue(0.4)
         self.control.input_length.editingFinished.emit()
         self.assertAlmostEqual(self.controller.interval.center, 0.0)
@@ -343,15 +350,12 @@ class DualIntervalMouseTests(unittest.TestCase):
         self.assertLess(pixel("low", 5).lightness(), pixel("low", 0).lightness())
         self.assertLess(pixel("up", 5).lightness(), pixel("up", 0).lightness())
 
-    def test_track_is_centered_with_title_and_length_box(self):
+    def test_track_is_centered_with_title(self):
         self.control.resize(720, 60)
         QApplication.processEvents()
         track_y = self.slider.y() + self.slider.TRACK_Y
         self.assertAlmostEqual(
             track_y, self.control.title_label.geometry().center().y(), delta=1
-        )
-        self.assertAlmostEqual(
-            track_y, self.control.input_length.geometry().center().y(), delta=1
         )
 
     def test_lock_badge_stays_clear_of_the_handle(self):

@@ -30,7 +30,7 @@ configure_qt_plugin_path()
 
 from PyQt5.QtCore import QPointF, QSettings, Qt, QTimer
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QFileDialog, QLineEdit, QPushButton, QSlider
+from PyQt5.QtWidgets import QApplication, QDoubleSpinBox, QFileDialog, QLineEdit, QPushButton
 
 QSettings.setDefaultFormat(QSettings.IniFormat)
 for _scope in (QSettings.UserScope, QSettings.SystemScope):
@@ -149,6 +149,9 @@ def _find_canvas(dialog):
 def main():
     import argparse
 
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data", nargs="?", type=Path, default=REPO_ROOT / ".local/data/WSe2_step.npz")
     parser.add_argument(
@@ -168,7 +171,11 @@ def main():
     from bandscope.core.analyzer_core import AnalyzerCore
     from bandscope.ui import theme
     from bandscope.ui.axis_assignment_dialog import AxisAssignmentDialog
-    from bandscope.ui.momentum_calibration_dialog import MomentumCalibrationDialog
+    from bandscope.ui.axis_interval_bar import DualRangeSlider
+    from bandscope.ui.momentum_calibration_dialog import (
+        CalibrationSliceSlider,
+        MomentumCalibrationDialog,
+    )
 
     refactored_app.UpdateController = _NullUpdateController
     app = QApplication.instance() or QApplication(sys.argv)
@@ -301,14 +308,25 @@ def main():
         dialog.save_requested.connect(lambda: state.__setitem__("save_requests", state["save_requests"] + 1))
         state["apply_button"] = _find_button(dialog, ("apply_button",), "应用")
         state["save_button"] = _find_button(dialog, ("save_button",), "保存")
-        state["energy_slider"] = _named_widget(
-            dialog, ("energy_slider", "slice_slider"), QSlider
+        state["energy_slider"] = dialog.energy_slider
+        state["scan_slider"] = dialog.scan_slider
+        sliders = (state["energy_slider"], state["scan_slider"])
+        record(
+            "能量与扫描切片均为共享双端滑条且无长度输入框",
+            all(
+                isinstance(slider, CalibrationSliceSlider)
+                and isinstance(slider, DualRangeSlider)
+                and not hasattr(slider, "input_length")
+                and not slider.findChildren(QDoubleSpinBox)
+                for slider in sliders
+            ),
         )
-        if state["energy_slider"] is None:
-            sliders = dialog.findChildren(QSlider)
-            if len(sliders) != 1:
-                raise AssertionError("无法唯一确定能量切片滑条")
-            state["energy_slider"] = sliders[0]
+        record(
+            "定标 figure 只有一个 axes 且没有 colorbar",
+            len(dialog.figure.axes) == 1
+            and dialog.axes is dialog.figure.axes[0]
+            and not hasattr(dialog, "colorbar"),
+        )
         distance_input = _named_widget(dialog, ("distance_input",), QDoubleSpinBox)
         if distance_input is None:
             raise AssertionError("未找到两点实际间距输入框")
@@ -422,15 +440,77 @@ def main():
         np.testing.assert_allclose(loaded.coordinate_candidates["kx"], expected.coords["X"])
         np.testing.assert_allclose(loaded.coordinate_candidates["ky"], expected.coords["Y"])
         record(f"{label} 往返保留完整数据体与 Kx/Ky/E/T 坐标", True)
-        loaded_layout = dict(loaded.source_layout)
-        expected_layout = dict(expected.source_layout)
-        loaded_layout.pop("manual", None)
-        expected_layout.pop("manual", None)
-        record(f"{label} 往返保留轴分配与扫描信息",
-               loaded_layout == expected_layout
-               and loaded.scan_kind == expected.scan_kind
-               and loaded.scan_name == expected.scan_name
-               and loaded.scan_unit == expected.scan_unit)
+        loaded_coordinates = dict(loaded.source_layout)
+        expected_coordinates = dict(expected.source_layout)
+        loaded_layout = dict(loaded_coordinates)
+        expected_layout = dict(expected_coordinates)
+        for name in ("manual", "coord_keys", "coord_sources", "coord_units"):
+            loaded_layout.pop(name, None)
+            expected_layout.pop(name, None)
+        missing = object()
+        layout_differences = [
+            {
+                "field": key,
+                "host": expected_layout.get(key, "<缺失>"),
+                "loaded": loaded_layout.get(key, "<缺失>"),
+            }
+            for key in sorted(set(expected_layout) | set(loaded_layout))
+            if expected_layout.get(key, missing) != loaded_layout.get(key, missing)
+        ]
+        for name in ("scan_kind", "scan_name", "scan_unit"):
+            host_value = getattr(expected, name)
+            loaded_value = getattr(loaded, name)
+            if loaded_value != host_value:
+                layout_differences.append({
+                    "field": name, "host": host_value, "loaded": loaded_value,
+                })
+        record(
+            f"{label} 往返保留轴分配与扫描信息",
+            not layout_differences,
+            {"differences": layout_differences} if layout_differences else "非坐标字段逐项一致",
+        )
+
+        coordinate_differences = []
+
+        def check_coordinate(field, role, expected_value, *, requirement=None):
+            loaded_value = (loaded_coordinates.get(field) or {}).get(role)
+            if requirement == "nonempty":
+                valid = bool(loaded_value and str(loaded_value).strip())
+            else:
+                valid = loaded_value == expected_value
+            if not valid:
+                coordinate_differences.append({
+                    "field": f"{field}.{role}",
+                    "expected": "非空值" if requirement == "nonempty" else expected_value,
+                    "loaded": loaded_value,
+                })
+
+        for role in ("X", "Y", "T"):
+            check_coordinate(
+                "coord_keys", role, (expected_coordinates.get("coord_keys") or {}).get(role)
+            )
+        for role in ("X", "Y", "delay"):
+            check_coordinate(
+                "coord_sources", role,
+                (expected_coordinates.get("coord_sources") or {}).get(role),
+            )
+        for role in ("X", "Y"):
+            check_coordinate("coord_units", role, "Å⁻¹")
+        check_coordinate(
+            "coord_units", "delay",
+            (expected_coordinates.get("coord_units") or {}).get("delay"),
+        )
+        check_coordinate("coord_keys", "E", None, requirement="nonempty")
+        check_coordinate("coord_sources", "E", "file")
+        check_coordinate(
+            "coord_units", "E", (expected_coordinates.get("coord_units") or {}).get("E")
+        )
+        record(
+            f"{label} 往返坐标键、来源与单位符合定标契约",
+            not coordinate_differences,
+            {"differences": coordinate_differences}
+            if coordinate_differences else "坐标元数据逐项符合 Kx/Ky 定标契约",
+        )
 
     def step_save_npz():
         output_path = args.output_dir / "calibrated-source.npz"

@@ -43,6 +43,7 @@ _UNSET = object()
 
 class AxisAssignmentDialog(QDialog):
     calibration_requested = pyqtSignal()
+    energy_calibration_requested = pyqtSignal()
     CALIBRATION_APPLIED = QDialog.Accepted + 1
 
     def __init__(
@@ -179,6 +180,13 @@ class AxisAssignmentDialog(QDialog):
         )
         self.calibration_button.clicked.connect(self.calibration_requested.emit)
         buttons_row.addWidget(self.calibration_button)
+        self.energy_calibration_button = QPushButton("能量定标", self)
+        self.energy_calibration_button.setAccessibleName("能量两点间距定标")
+        self.energy_calibration_button.setToolTip(
+            "在 XZ 或 YZ 切片上选择两条水平线并输入能量间距；重新生成均匀能量坐标。"
+        )
+        self.energy_calibration_button.clicked.connect(self.energy_calibration_requested.emit)
+        buttons_row.addWidget(self.energy_calibration_button)
         buttons_row.addStretch(1)
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self

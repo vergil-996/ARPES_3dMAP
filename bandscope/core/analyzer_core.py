@@ -13,6 +13,7 @@ from bandscope.core.axis_assignment import (
     numeric_coordinate_candidates,
     validate_assignment,
 )
+from bandscope.processing.energy_calibration import calibrate_energy_axis
 from bandscope.processing.momentum_calibration import calibrate_momentum_axes
 
 
@@ -256,6 +257,42 @@ class AnalyzerCore(QObject):
         }
         for role, key in (("X", "kx"), ("Y", "ky")):
             candidate_units.setdefault(role, {})[key] = calibration.unit or None
+        candidate._apply_assignment(
+            self.source_array,
+            updated,
+            candidates=candidates,
+            automatic=self.auto_axis_assignment,
+            candidate_units=candidate_units,
+            original_candidates=self.original_coordinate_candidates,
+            original_candidate_units=self.original_coordinate_candidate_units,
+        )
+        return candidate
+
+    def copy_with_energy_calibration(
+        self, reference_index, second_index, target_spacing, unit=""
+    ):
+        if self.source_array is None or self.axis_assignment is None:
+            raise ValueError("当前数据源没有可定标的原始数组。")
+        calibration = calibrate_energy_axis(
+            self.coords["E"],
+            reference_index,
+            second_index,
+            target_spacing,
+            unit=unit,
+        )
+        candidate = AnalyzerCore()
+        candidate.source_identity = self.source_identity
+        updated = self.axis_assignment.clone()
+        updated.manual = True
+        updated.coord_keys["E"] = "E"
+        updated.coord_units["E"] = calibration.unit or None
+        candidates = dict(self.coordinate_candidates)
+        candidates["E"] = calibration.energy
+        candidate_units = {
+            role: dict(values)
+            for role, values in self.coordinate_candidate_units.items()
+        }
+        candidate_units.setdefault("E", {})["E"] = calibration.unit or None
         candidate._apply_assignment(
             self.source_array,
             updated,

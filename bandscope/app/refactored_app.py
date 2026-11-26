@@ -59,7 +59,7 @@ from bandscope.ui.camera_view_controls import (
 from bandscope.ui.crop_controls import CropController
 from bandscope.ui.day_night_switch import DayNightSwitch
 from bandscope.app.crop_integration import CropInteractionMixin
-from bandscope.app.edc_integration import EdcIntegrationMixin
+from bandscope.app.edc_integration import EDC_SOURCE_KEY, EdcIntegrationMixin
 from bandscope.app.path_slice_integration import PathSliceController
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.app.source_workspace import SourceWorkspaceMixin
@@ -1474,6 +1474,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def _volume_source_descriptor(self, spec, request):
         if spec is None or spec.page_kind in {"control_panel", self.COMPARISON_PAGE_KIND, "slice_dos"}:
+            return None
+        if self._edc_time_recomputable(spec):
             return None
         raw_data, _coords = self._get_display_state_for_spec(spec)
         if raw_data is None or raw_data.ndim != 4:
@@ -3888,6 +3890,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         for key in ("curve_metadata", "source_scope_metadata", "source_rotation_angle"):
             if key in spec.params:
                 log_params[key] = copy.deepcopy(spec.params[key])
+        if spec.page_kind != self.LOG_1D_PAGE_KIND and self._edc_time_recomputable(spec):
+            log_params[EDC_SOURCE_KEY] = copy.deepcopy(spec.params[EDC_SOURCE_KEY])
+            if context.get("curve_metadata") is not None:
+                log_params["curve_metadata"] = copy.deepcopy(context["curve_metadata"])
         new_spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=self._make_unique_page_title(f"log10 - {base_title}"),
@@ -5295,7 +5301,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         }
 
     def _get_edc_curve_context(self, spec, raw_data, coords):
-        snapshot = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        dynamic = self._recompute_edc_time_curves(spec)
+        metadata_items = (
+            dynamic["curve_metadata"]
+            if dynamic is not None
+            else spec.params.get("curve_metadata", ())
+        )
+        saved_curve = dynamic["curves"][0] if dynamic is not None else spec.params.get("base_curve")
+        snapshot = self._normalize_curve_snapshot(saved_curve)
         if snapshot is None:
             return self._build_edc_curve_context_from_params(raw_data, coords, spec.params)
         context = {
@@ -5308,15 +5321,17 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         }
         metadata = next(
             (
-                item for item in spec.params.get("curve_metadata", ())
+                item for item in metadata_items
                 if item.get("curve_id") == snapshot.get("curve_id")
             ),
             None,
         )
-        if metadata is None and spec.params.get("curve_metadata"):
-            metadata = spec.params["curve_metadata"][0]
+        if metadata is None and metadata_items:
+            metadata = metadata_items[0]
         if metadata:
             context.update(copy.deepcopy(metadata))
+        if dynamic is not None:
+            context["curve_metadata"] = copy.deepcopy(metadata_items)
         return context
 
     def _get_curve_comparison_context(self, spec):
@@ -5324,7 +5339,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if comparison_kind not in self.COMPARABLE_1D_PAGE_KINDS:
             return None
 
-        base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        dynamic = self._recompute_edc_time_curves(spec)
+        saved_curves = (
+            dynamic["curves"]
+            if dynamic is not None
+            else [spec.params.get("base_curve"), *(spec.params.get("overlay_curves") or ())]
+        )
+        base_curve = self._normalize_curve_snapshot(saved_curves[0])
         if base_curve is None:
             return None
         base_curve["curve_kind"] = comparison_kind
@@ -5332,7 +5353,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                           palette_slot=base_curve.get("palette_slot", 0))
 
         curves = [base_curve]
-        for index, curve in enumerate(spec.params.get("overlay_curves", [])):
+        for index, curve in enumerate(saved_curves[1:]):
             normalized = self._normalize_curve_snapshot(curve)
             if normalized is None:
                 continue
@@ -5346,7 +5367,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                               is_base=False, palette_slot=normalized.get("palette_slot", index + 1))
             curves.append(normalized)
 
-        return {
+        context = {
             "view": "1d_comparison",
             "title": spec.title,
             "xlabel": base_curve.get("xlabel") or "",
@@ -5355,9 +5376,24 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "x_match_policy": spec.params.get("x_match_policy", "shared"),
             "curves": curves,
         }
+        if dynamic is not None:
+            context["curve_metadata"] = copy.deepcopy(dynamic["curve_metadata"])
+        return context
 
     def _get_log_curve_context(self, spec):
-        base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve"))
+        dynamic = self._recompute_edc_time_curves(spec)
+        if dynamic is not None:
+            saved_curves = []
+            for curve in dynamic["curves"]:
+                logged = copy.deepcopy(curve)
+                logged["y_data"] = self._log10_curve_y(curve["y_data"]).astype(float).tolist()
+                saved_curves.append(logged)
+        else:
+            saved_curves = [
+                spec.params.get("base_curve"),
+                *(spec.params.get("overlay_curves") or ()),
+            ]
+        base_curve = self._normalize_curve_snapshot(saved_curves[0])
         if base_curve is None:
             return None
         base_curve["curve_kind"] = self.LOG_1D_PAGE_KIND
@@ -5365,7 +5401,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                           palette_slot=base_curve.get("palette_slot", 0))
 
         curves = [base_curve]
-        for index, curve in enumerate(spec.params.get("overlay_curves", [])):
+        for index, curve in enumerate(saved_curves[1:]):
             normalized = self._normalize_curve_snapshot(curve)
             if normalized is None:
                 continue
@@ -5379,7 +5415,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         if len(curves) == 1:
             curve = curves[0]
-            return {
+            context = {
                 "view": "1d",
                 "x_data": curve["x_data"],
                 "y_data": curve["y_data"],
@@ -5388,15 +5424,19 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 "ylabel": "log10(Intensity) (a.u.)",
                 "x_match_policy": spec.params.get("x_match_policy", "shared"),
             }
-        return {
-            "view": "1d_comparison",
-            "title": spec.title,
-            "xlabel": base_curve.get("xlabel") or "",
-            "ylabel": "log10(Intensity) (a.u.)",
-            "comparison_kind": self.LOG_1D_PAGE_KIND,
-            "x_match_policy": spec.params.get("x_match_policy", "shared"),
-            "curves": curves,
-        }
+        else:
+            context = {
+                "view": "1d_comparison",
+                "title": spec.title,
+                "xlabel": base_curve.get("xlabel") or "",
+                "ylabel": "log10(Intensity) (a.u.)",
+                "comparison_kind": self.LOG_1D_PAGE_KIND,
+                "x_match_policy": spec.params.get("x_match_policy", "shared"),
+                "curves": curves,
+            }
+        if dynamic is not None:
+            context["curve_metadata"] = copy.deepcopy(dynamic["curve_metadata"])
+        return context
 
     def _get_plugin_curve_context(self, spec):
         """插件分析结果页：数据完全来自结果快照，不重算、不依赖当前数据。
@@ -8091,7 +8131,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if enhancement_state and context.get("view") == "3d":
             # ROI 去噪在后台线程跑；等待期间照常渲染缓存数据，不阻塞界面。
             self._schedule_enhancement_roi(context, spec, enhancement_state)
-        if self._prepare_display_statistics(context, spec, enhancement_state):
+        if (quality == RenderQuality.EXACT
+                and self._prepare_display_statistics(context, spec, enhancement_state)):
             self._sync_enhancement_controls(spec, context)
             return
         display_fields = self._enhancement_display(
@@ -8241,7 +8282,14 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._sync_enhancement_controls(spec, context)
         if spec.page_kind == self.PATH_SLICE_PAGE_KIND:
             self._path_slices().sync_display_controls(spec)
-        self._draw_enhancement_regions(context, display_fields)
+        redraw_enhancement = not (
+            quality == RenderQuality.PREVIEW
+            and render_context["view"] == "2d"
+            and preview_blitted
+        )
+        self._draw_enhancement_regions(
+            context, display_fields, redraw=redraw_enhancement
+        )
         # 体数据、框、标签与色带更新完之后只渲染一次；辅助对象自己不再 render。
         is_3d_view = render_context["view"] == "3d"
         plotter = self.__dict__.get("plotter")
@@ -8446,17 +8494,16 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     def _build_frozen_edc_curves_export_payload(self, spec, context, title):
         metadata_by_id = {
             item.get("curve_id"): item
-            for item in spec.params.get("curve_metadata", ())
+            for item in context.get(
+                "curve_metadata", spec.params.get("curve_metadata", ())
+            )
             if isinstance(item, dict)
         }
         curves = context.get("curves")
         if curves is None:
             base_curve = self._normalize_curve_snapshot(spec.params.get("base_curve")) or {}
-            curves = [{
-                "curve_id": base_curve.get("curve_id"),
-                "x_data": context["x_data"],
-                "y_data": context["y_data"],
-            }]
+            base_curve.update(x_data=context["x_data"], y_data=context["y_data"])
+            curves = [base_curve]
         export_data = {}
         for index, curve in enumerate(curves, 1):
             export_data[f"E_{index}"] = np.asarray(curve["x_data"], dtype=np.float32)

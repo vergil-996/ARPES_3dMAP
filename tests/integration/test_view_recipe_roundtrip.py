@@ -11,6 +11,7 @@ from PyQt5.QtWidgets import QApplication
 
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.app.view_recipe_integration import RecipeEvaluator
+from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.view_recipe import RecipeError, ViewRecipeDocument, plain, state_digest
 from bandscope.exporting.publication_export import capture_snapshot
 from bandscope.processing.denoise_config import (
@@ -579,6 +580,81 @@ class RecipeRoundtripTests(unittest.TestCase):
         after = capture_snapshot(w)
         np.testing.assert_allclose(after.payload["volume"], before.payload["volume"], equal_nan=True)
 
+    def test_native_edc_and_log_roundtrip_recompute_at_new_times(self):
+        w = self.window
+        home = w.left_workspace.current_spec()
+        home.params["time_interval"] = AxisInterval.from_indices(
+            w.core.coords["delay"], 0, 0, locked=True, axis_key="delay"
+        ).as_dict()
+        w._bind_time_interval(home, animate=False)
+        context = w.current_render_context
+        w.crop_controller.activate(home.page_id, context)
+        w.crop_controller.set_selection(
+            CropSelection("3d", ("X", "Y", "E"), (-1.0, -0.5, -2.0, 2.0, -1.0, 1.0)),
+            notify=False,
+        )
+        self.assertIsNotNone(w._create_edc_result_from_selections())
+        edc = w.left_workspace.current_spec()
+        curve_id = edc.params["base_curve"]["curve_id"]
+        self.assertTrue(w._apply_log_to_current_curves())
+        path, _snapshot = self.save()
+
+        other = control_window()
+        self.addCleanup(other.close)
+        self.assertTrue(other._load_view_recipe(
+            path, confirm=False, relocate=lambda _: str(self.path)
+        ))
+        restored_log = other.active_page_spec
+        restored_edc = other.left_workspace.page_by_id(restored_log.source_page_id)
+        self.assertEqual(restored_log.page_kind, "log_curve")
+        self.assertEqual(restored_edc.page_kind, "edc_curve")
+        self.assertTrue(other._time_page_editable(restored_log))
+        self.assertTrue(other._time_page_editable(restored_edc))
+        self.assertEqual(restored_log.params["base_curve"]["curve_id"], curve_id)
+        self.assertEqual(restored_edc.params["base_curve"]["curve_id"], curve_id)
+
+        def expected(spec, time_index):
+            x_low, x_up, y_low, y_up, e_low, e_up = spec.params["curve_metadata"][0]["index_bounds"]
+            return np.sum(
+                self.raw[
+                    x_low:x_up + 1,
+                    y_low:y_up + 1,
+                    e_low:e_up + 1,
+                    time_index,
+                ],
+                axis=(0, 1),
+                dtype=np.float64,
+            )
+
+        other.timeline_bar.time_interval_control.endpointPreview.emit(
+            "low", float(other.core.coords["delay"][2])
+        )
+        np.testing.assert_allclose(
+            other.current_render_context["y_data"],
+            np.log10(expected(restored_log, 2)),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        _title, _name, exported = other._build_edc_log_export_payload(restored_log)
+        np.testing.assert_allclose(
+            exported["intensity_1"], other.current_render_context["y_data"], rtol=1e-6
+        )
+        np.testing.assert_array_equal(exported["source_t_indices_1"], [2, 2])
+
+        other.left_workspace.activate_page(restored_edc.page_id)
+        other.timeline_bar.time_interval_control.endpointPreview.emit(
+            "low", float(other.core.coords["delay"][1])
+        )
+        np.testing.assert_allclose(
+            other.current_render_context["y_data"],
+            expected(restored_edc, 1),
+            rtol=1e-12,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            other.current_render_context["x_data"], edc.params["base_curve"]["x_data"]
+        )
+
     def test_cross_file_comparison_and_log_retain_source_recipes(self):
         w = self.window
         def energy_page(pid):
@@ -595,6 +671,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         w.load_data(str(second))
         energy_page("from_b")
         self.assertTrue(w._paste_curve_to_comparison_page())
+        before_comparison = copy.deepcopy(w.current_render_context)
         self.assertTrue(w._apply_log_to_current_curves())
         before = copy.deepcopy(w.current_render_context)
         path, snapshot = self.save()
@@ -605,6 +682,22 @@ class RecipeRoundtripTests(unittest.TestCase):
         self.assertEqual(w.active_page_spec.page_kind, "log_curve")
         for a, b in zip(before["curves"], w.current_render_context["curves"]):
             np.testing.assert_allclose(a["y_data"], b["y_data"], equal_nan=True)
+        restored_log = w.active_page_spec
+        restored_comparison = w.left_workspace.page_by_id(restored_log.source_page_id)
+        for spec, frozen in (
+            (restored_log, before),
+            (restored_comparison, before_comparison),
+        ):
+            self.assertNotIn("edc_source", spec.params)
+            self.assertFalse(w._time_page_editable(spec))
+            spec.params["time_interval"] = AxisInterval.from_indices(
+                w.core.coords["delay"], 2, 2, locked=True, axis_key="delay"
+            ).as_dict()
+            changed = w._compute_render_context(spec)
+            for original_curve, changed_curve in zip(frozen["curves"], changed["curves"]):
+                np.testing.assert_allclose(
+                    original_curve["y_data"], changed_curve["y_data"], equal_nan=True
+                )
 
     def test_missing_plugin_restores_waterfall_and_successful_params(self):
         w = self.window

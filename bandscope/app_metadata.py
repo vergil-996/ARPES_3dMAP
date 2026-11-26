@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 APP_NAME = "BandScope"
-APP_VERSION = "1.22.6"
+APP_VERSION = "1.23.0"
 APP_PUBLISHER = "vergil-996"
 
 GITHUB_OWNER = "vergil-996"

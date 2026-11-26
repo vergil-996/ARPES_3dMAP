@@ -1,10 +1,10 @@
 ; BandScope per-user installer.
 ; Build examples:
-;   ISCC.exe /DAppVersion=1.22.6 /DBuildFlavor=CPU BandScope.iss
-;   ISCC.exe /DAppVersion=1.22.6 /DBuildFlavor=NVIDIA BandScope.iss
+;   ISCC.exe /DAppVersion=1.23.0 /DBuildFlavor=CPU BandScope.iss
+;   ISCC.exe /DAppVersion=1.23.0 /DBuildFlavor=NVIDIA BandScope.iss
 
 #ifndef AppVersion
-  #define AppVersion "1.22.6"
+  #define AppVersion "1.23.0"
 #endif
 
 #ifndef BuildFlavor

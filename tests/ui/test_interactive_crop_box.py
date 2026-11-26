@@ -197,7 +197,8 @@ class InteractiveCropBoxTests(unittest.TestCase):
         self.assertEqual(visibility_during_draw, [False])
         self.assertIn(label, self.box.artists)
         self.assertNotIn(label, self.box._get_animated_artists())
-        background = self.box._load_blit_background()
+        # matplotlib 的 update_background 直接把捕获结果存在 background 上。
+        background = self.box.background
         self.assertIsNotNone(background)
         self.assertTrue(label.get_visible())
 

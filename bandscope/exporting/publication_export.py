@@ -339,7 +339,12 @@ def _freeze_enhancement(window, snapshot, spec, context, render_context, *, disp
 def _build_source_desc(window, spec, render_context) -> str:
     """面板顶部展示的来源信息（位于预览图片之外）。"""
     parts = [str(spec.title)]
-    if spec.page_kind in window.TIME_INTERVAL_PAGE_KINDS and window.core.has_time_axis:
+    time_page_editable = getattr(window, "_time_page_editable", None)
+    if callable(time_page_editable):
+        time_enabled = bool(time_page_editable(spec))
+    else:
+        time_enabled = spec.page_kind in getattr(window, "TIME_INTERVAL_PAGE_KINDS", ())
+    if time_enabled and window.core.has_time_axis:
         t_low, t_up = window._time_indices_for_spec(spec)
         delay_coords = window.core.coords.get("delay")
         delays = np.asarray([] if delay_coords is None else delay_coords, dtype=np.float64).ravel()

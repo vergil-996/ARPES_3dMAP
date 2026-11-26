@@ -4,12 +4,14 @@ import unittest
 
 import numpy as np
 from matplotlib.colors import to_hex
-from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QMouseEvent
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.ui import theme
+from bandscope.ui.axis_interval_bar import DualRangeSlider
 from bandscope.ui.momentum_calibration_dialog import MomentumCalibrationDialog
 
 
@@ -21,6 +23,7 @@ class MomentumCalibrationDialogTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self._process_deferred_deletes)
         self.raw = np.arange(4 * 3 * 2 * 2, dtype=np.float32).reshape(4, 3, 2, 2)
         self.x = np.asarray([-2.0, -0.5, 0.25, 2.0])
         self.y = np.asarray([3.0, 1.0, -2.0])
@@ -42,6 +45,10 @@ class MomentumCalibrationDialogTests(unittest.TestCase):
         self.core = AnalyzerCore()
         success, info = self.core.load_npz(path)
         self.assertTrue(success, info)
+
+    def _process_deferred_deletes(self):
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
 
     def dialog(self, **kwargs):
         dialog = MomentumCalibrationDialog(self.core, **kwargs)
@@ -99,6 +106,66 @@ class MomentumCalibrationDialogTests(unittest.TestCase):
         np.testing.assert_allclose(dialog.point_a, (1.0, 2.0), atol=0.005)
         self.assertIn("-0.2 eV", dialog.energy_value_label.text())
         self.assertIn("-1 fs", dialog.scan_value_label.text())
+
+    def test_slice_controls_share_dual_range_style_without_colorbar(self):
+        dialog = self.dialog(energy_index=1, scan_index=1)
+        self.assertIsInstance(dialog.energy_slider, DualRangeSlider)
+        self.assertIsInstance(dialog.scan_slider, DualRangeSlider)
+        for slider, index in ((dialog.energy_slider, 1), (dialog.scan_slider, 1)):
+            self.assertEqual(slider.value(), index)
+            self.assertTrue(slider.interval.locked)
+            self.assertEqual(slider.interval.length, 0.0)
+            self.assertTrue(slider.lock_badge.isVisible())
+        self.assertFalse(hasattr(dialog, "colorbar"))
+        self.assertEqual(len(dialog.figure.axes), 1)
+        self.assertEqual(dialog.image.get_cmap().name, "magma")
+        self.assertIn("区间中心", dialog.subtitle_label.text())
+        self.assertFalse(hasattr(dialog.energy_slider, "input_length"))
+
+    def test_mouse_unlock_separates_and_pans_slice_interval_then_setvalue_collapses(self):
+        dialog = self.dialog(energy_index=1)
+        slider = dialog.energy_slider
+        self.addCleanup(slider.coordinate_popup.close)
+        slider.lock_badge.click()
+        self.app.processEvents()
+        self.assertFalse(slider.interval.locked)
+
+        def drag(start, end):
+            press = QMouseEvent(
+                QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
+            )
+            move = QMouseEvent(
+                QEvent.MouseMove, end, Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
+            )
+            release = QMouseEvent(
+                QEvent.MouseButtonRelease, end, Qt.LeftButton, Qt.NoButton, Qt.NoModifier
+            )
+            QApplication.sendEvent(slider, press)
+            QApplication.sendEvent(slider, move)
+            QApplication.sendEvent(slider, release)
+            self.app.processEvents()
+
+        start = QPoint(int(slider.handle_center("low")) - 2, slider.TRACK_Y)
+        target = QPoint(int(slider._x_for(-0.05)), slider.TRACK_Y)
+        drag(start, target)
+        self.assertGreater(slider.interval.length, 0.0)
+        self.assertFalse(slider.interval.locked)
+        self.assertIn("端点", dialog.energy_value_label.text())
+        previous_length = slider.interval.length
+        previous_center = slider.interval.center
+        center = slider.center_handle_center()
+        drag(
+            QPoint(int(center.x()), int(center.y())),
+            QPoint(int(center.x()) - 24, int(center.y())),
+        )
+        self.assertAlmostEqual(slider.interval.length, previous_length, delta=0.002)
+        self.assertLess(slider.interval.center, previous_center)
+
+        slider.setValue(0)
+        self.assertEqual(dialog.energy_index, 0)
+        self.assertTrue(slider.interval.locked)
+        self.assertEqual(slider.interval.length, 0.0)
+        np.testing.assert_array_equal(dialog.image.get_array(), self.raw[:, :, 0, 0].T)
 
     def test_real_mouse_selection_replaces_p2_and_undo_clear_redraw(self):
         dialog = self.dialog()
@@ -296,6 +363,14 @@ class MomentumCalibrationDialogTests(unittest.TestCase):
                 self.assertIn(theme.BG_2, dialog.styleSheet())
                 self.assertIn(theme.TEXT_2, dialog.point_hint_label.styleSheet())
                 self.assertIn(theme.TEXT_1, dialog.title_label.styleSheet())
+                for axis_label in (dialog.axes.xaxis.label, dialog.axes.yaxis.label):
+                    self.assertEqual(
+                        to_hex(axis_label.get_color()).upper(), theme.TEXT_2.upper()
+                    )
+                self.assertEqual(
+                    to_hex(dialog.axes.spines["bottom"].get_edgecolor()).upper(),
+                    theme.BORDER_HEX.upper(),
+                )
         finally:
             theme.set_theme(previous)
 

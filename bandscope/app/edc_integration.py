@@ -18,6 +18,9 @@ from bandscope.processing.edc import integrate_edc, selection_index_bounds
 from bandscope.ui.result_workspace import AnalysisPageSpec
 
 
+EDC_SOURCE_KEY = "edc_source"
+
+
 @dataclass(frozen=True)
 class _EdcSource:
     data: Any
@@ -388,6 +391,9 @@ class EdcIntegrationMixin:
             "base_curve": curves[0],
             "overlay_curves": curves[1:],
             "curve_metadata": curve_metadata,
+            EDC_SOURCE_KEY: self._freeze_edc_source(
+                current_spec, context, source_rotation_angle
+            ),
             "source_page_id": str(current_spec.page_id),
             "source_page_kind": str(current_spec.page_kind),
             "source_view": source.view,
@@ -411,6 +417,174 @@ class EdcIntegrationMixin:
         self._seed_control_state_for_spec(spec)
         self.left_workspace.add_page(spec)
         return page_id
+
+    def _freeze_edc_source(self, spec, context, rotation_angle):
+        source_params = copy.deepcopy(spec.params or {})
+        if spec.page_kind == "home":
+            source_params["home_slice_info"] = copy.deepcopy(
+                (spec.params or {}).get("home_slice_info")
+            )
+            if "clip_ranges" not in source_params:
+                source_params["clip_ranges"] = copy.deepcopy(context.get("clip_ranges"))
+        elif spec.page_kind in {"axis_integral", "axis_integral_crop"}:
+            resolved = self._resolved_axis_integral_params(spec)
+            if resolved is not None:
+                source_params.update(copy.deepcopy(resolved))
+        return {
+            "page_kind": str(spec.page_kind),
+            "params": source_params,
+            "data_scope_id": str(getattr(spec, "data_scope_id", "full")),
+            "rotation_angle": float(rotation_angle),
+        }
+
+    def _edc_time_recomputable(self, spec):
+        if spec is None:
+            return False
+        params = getattr(spec, "params", None) or {}
+        page_kind = getattr(spec, "page_kind", None)
+        if page_kind == "edc_curve":
+            pass
+        elif page_kind == "curve_comparison_1d":
+            if params.get("comparison_kind") != "edc_curve":
+                return False
+        elif page_kind == "log_curve":
+            if (
+                params.get("comparison_kind") != "edc_curve"
+                or params.get("log_base") != "log10"
+            ):
+                return False
+        else:
+            return False
+
+        source = params.get(EDC_SOURCE_KEY)
+        if not isinstance(source, dict) or source.get("page_kind") not in {
+            "home", "axis_integral", "axis_integral_crop"
+        }:
+            return False
+        if not isinstance(source.get("params"), dict):
+            return False
+        try:
+            if not np.isfinite(float(source.get("rotation_angle"))):
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+        curves = [params.get("base_curve"), *(params.get("overlay_curves") or ())]
+        metadata = params.get("curve_metadata")
+        if (
+            not curves
+            or any(not isinstance(curve, dict) for curve in curves)
+            or not isinstance(metadata, (list, tuple))
+            or len(metadata) != len(curves)
+        ):
+            return False
+        metadata_by_id = {
+            str(item.get("curve_id")): item
+            for item in metadata
+            if isinstance(item, dict)
+        }
+        curve_ids = set()
+        for curve in curves:
+            curve_id = str(curve.get("curve_id") or "")
+            item = metadata_by_id.get(curve_id)
+            if (
+                curve.get("recipe_id")
+                or not curve_id
+                or curve_id in curve_ids
+                or item is None
+                or not isinstance(item.get("selection"), dict)
+            ):
+                return False
+            try:
+                if len(tuple(item.get("index_bounds"))) != 6:
+                    return False
+            except TypeError:
+                return False
+            curve_ids.add(curve_id)
+        return True
+
+    def _edc_source_spec_for_time(self, spec):
+        source = spec.params[EDC_SOURCE_KEY]
+        params = copy.deepcopy(source["params"])
+        time_interval = (spec.params or {}).get("time_interval")
+        if time_interval is not None:
+            params["time_interval"] = copy.deepcopy(time_interval)
+        return AnalysisPageSpec(
+            page_id="__edc_time_source__",
+            title="EDC source",
+            page_kind=str(source["page_kind"]),
+            source_module="edc",
+            params=params,
+            data_scope_id=str(source.get("data_scope_id") or "full"),
+        )
+
+    def _recompute_edc_time_curves(self, spec):
+        if not self._edc_time_recomputable(spec):
+            return None
+        previous_rotation = float(self.__dict__.get("rotation_angle", 0.0) or 0.0)
+        try:
+            source_state = spec.params[EDC_SOURCE_KEY]
+            self.rotation_angle = float(source_state["rotation_angle"])
+            source_spec = self._edc_source_spec_for_time(spec)
+            if source_spec.page_kind == "home":
+                source_context = self._compute_render_context(source_spec)
+            else:
+                resolved = self._resolved_axis_integral_params(source_spec)
+                axis_info = self._axis_plot_info(int(resolved["axis_index"]))
+                source_context = {
+                    "view": "2d",
+                    "plot_axes": {
+                        "x_key": axis_info["x_key"],
+                        "y_key": axis_info["y_key"],
+                    },
+                }
+            if source_context is None or source_context.get("crop_empty"):
+                return None
+            source = self._prepare_edc_selection_source(source_spec, source_context)
+            time_metadata = _time_metadata(self, spec, source.coords)
+            metadata_by_id = {
+                str(item.get("curve_id")): item
+                for item in spec.params.get("curve_metadata", ())
+            }
+            saved_curves = [
+                spec.params["base_curve"],
+                *(spec.params.get("overlay_curves") or ()),
+            ]
+            curves = []
+            curve_metadata = []
+            for saved in saved_curves:
+                metadata = metadata_by_id[str(saved.get("curve_id"))]
+                curve = integrate_edc(
+                    source.data,
+                    source.coords["E"],
+                    tuple(int(value) for value in metadata["index_bounds"]),
+                )
+                if curve is None or curve.energy.size == 0:
+                    return None
+                if not np.array_equal(
+                    curve.energy,
+                    np.asarray(saved.get("x_data"), dtype=np.float64),
+                ):
+                    return None
+                updated = copy.deepcopy(saved)
+                updated["x_data"] = np.asarray(
+                    curve.energy, dtype=np.float64
+                ).tolist()
+                updated["y_data"] = np.asarray(
+                    curve.intensity, dtype=np.float64
+                ).tolist()
+                updated_metadata = copy.deepcopy(metadata)
+                updated_metadata["index_bounds"] = tuple(
+                    int(value) for value in curve.index_bounds
+                )
+                updated_metadata.update(copy.deepcopy(time_metadata))
+                curves.append(updated)
+                curve_metadata.append(updated_metadata)
+            return {"curves": curves, "curve_metadata": curve_metadata}
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return None
+        finally:
+            self.rotation_angle = previous_rotation
 
     def _prepare_edc_selection_source(self, spec, context) -> _EdcSource:
         if spec.page_kind == "home" and context.get("view") == "3d":

@@ -20,6 +20,7 @@ python -m unittest discover -s tests/extensions -t . -v
 python -m unittest tests.core.test_axis_mapping -v
 python -m unittest tests.core.test_axis_assignment tests.ui.test_axis_assignment_dialog tests.integration.test_axis_assignment -v
 python -m unittest tests.processing.test_momentum_calibration tests.core.test_momentum_calibration tests.ui.test_momentum_calibration_dialog tests.exporting.test_calibrated_source tests.integration.test_momentum_calibration tests.integration.test_axis_assignment -v
+python -m unittest tests.processing.test_energy_calibration tests.ui.test_energy_calibration_dialog tests.integration.test_energy_calibration -v
 python -m unittest tests.integration.test_edc_integration tests.integration.test_multi_region_interaction tests.processing.test_edc -v
 python -m compileall -q bandscope plugins scripts tests start.py
 ```
@@ -47,6 +48,8 @@ python scripts/validation/verify_time_axis_visibility.py .local/data/scan07_dyna
 python scripts/validation/verify_axis_assignment.py .local/data/WSe2_step.npz
 python scripts/validation/verify_momentum_calibration.py .local/data/WSe2_step.npz
 python scripts/validation/verify_momentum_calibration.py --synthetic-only
+python scripts/validation/verify_energy_calibration.py .local/data/WSe2_step.npz
+python scripts/validation/verify_energy_calibration.py --synthetic-only
 python scripts/validation/verify_multi_region_edc.py .local/data/WSe2_step.npz
 python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_flat_band_alpha.py --bands 5
@@ -87,7 +90,9 @@ python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blende
 
 `verify_axis_assignment.py` 默认用 WSe₂ 复核时间轴兼容性，再生成降序非均匀温度扫描，通过数据源卡片交换等长 Kx/Ky、修改扫描名称，并检查「重新分配轴」窗口内的扫描轴滑块停靠／整段平移设置随重设生效，实际生成强度曲线、出版 PNG 和数值 NPZ；输出窗口／对话框截图及 `report.json`。缺少 WSe₂ 时可显式使用 `--synthetic-only` 只验收温度流程，报告会记录 `wse2_executed: false`，不能据此宣称时间真实数据验收已通过。
 
-`verify_momentum_calibration.py` 默认用 WSe₂，从数据体卡片进入真实轴分配与两点定标窗口，在 XY 切片上鼠标选点、调整能量切片、输入实际间距并应用；随后通过同一个独立保存按钮依次导出完整 NPZ 与 MAT，NPZ 直接回读，MAT 经 `data_trans.convert` 转换后回读，分别用 `AnalyzerCore` 核对强度、坐标、轴分配和扫描信息。脚本截取包含切片、选点、距离及两个固定动作按钮的定标窗口与主窗口深浅主题图。输出至 `.local/outputs/momentum-calibration/`，`report.json` 分项记录实际执行与未执行内容；`--synthetic-only` 使用小型非均匀、降序坐标合成数据，不代表真实 WSe₂ 已验收，也不把自动截图记为人工视觉复核通过。
+`verify_momentum_calibration.py` 默认用 WSe₂，从数据体卡片进入真实轴分配与两点定标窗口，在 XY 切片上鼠标选点、调整能量切片、输入实际间距并应用；检查能量与扫描控件均为共享 `DualRangeSlider`／`CalibrationSliceSlider` 双端样式、无长度输入框，figure 只有一个 axes 且没有 colorbar；随后通过同一个独立保存按钮依次导出完整 NPZ 与 MAT，NPZ 直接回读，MAT 经 `data_trans.convert` 转换后回读，分别用 `AnalyzerCore` 核对强度与坐标，严格比较轴分配的非坐标字段和扫描信息，并逐项检查 Kx/Ky 定标后坐标键、来源与单位的预期规范化；若有不符，报告列出具体字段的宿主值、加载值或预期值。脚本截取包含切片、选点、距离及两个固定动作按钮的定标窗口与主窗口深浅主题图。输出至 `.local/outputs/momentum-calibration/`，`report.json` 分项记录实际执行与未执行内容；`--synthetic-only` 使用小型非均匀、降序坐标合成数据，不代表真实 WSe₂ 已验收，也不把自动截图记为人工视觉复核通过。
+
+`verify_energy_calibration.py` 默认用 WSe₂，从数据体卡片经轴分配的「能量定标」按钮进入真实窗口，核对默认 XZ 切片数组、法向与扫描共享双端滑条、无长度输入框和无色带，再切换 YZ、垂直翻转并用鼠标拖动两个图外 E1/E2 手柄。输入目标间距与单位后应用，核对 E1 为零、E2 为目标间距、能量坐标均匀、强度不变及宿主 core 同步，随后截取定标窗口和主窗口深浅主题图并关闭嵌套窗口。输出至 `.local/outputs/energy-calibration/`，`report.json` 区分自动执行、未执行的保存回读和截图人工视觉复核；`--synthetic-only` 使用小型非均匀、降序坐标合成数据，不代表真实 WSe₂ 已验收。
 
 `verify_multi_region_edc.py` 使用真实窗口验收画布工具条：「裁剪」「裁空」位于画布初级工具栏，「新增框选范围」「生成 EDC」「切片内强度积分」位于「框选范围」次级栏。脚本点击这些真实入口，检查重复展开后草稿保留、裁剪／裁空只作用活动选区，以及每个 2D 选框与 3D 交互盒都有稳定的 `Z{id}` 标号；随后分别在 2D 手柄和 3D 手柄上右键，核对弹窗对应该盒的各轴上下限，点击移除并确认其他选区不受影响。
 

@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication
 from bandscope.ui import theme
 from bandscope.ui.opacity_controls import OpacityCurveEditor
 from bandscope.ui.opacity_interpolation_switch import OpacityInterpolationSwitch
+from tests.support.pixels import render_unit_image
 
 
 def drag_to(widget, position):
@@ -103,11 +104,11 @@ class OpacityCurveEditorTests(unittest.TestCase):
             with self.subTest(theme=name):
                 theme.set_theme(name)
                 QApplication.processEvents()
-                image = curve.grab().toImage()
-                ratio = image.devicePixelRatio() or 1.0
-                x = int(round(curve._x(0.2) * ratio))
+                # 1:1 逻辑像素渲染，避免系统缩放把相邻取样行混到同一物理行。
+                image = render_unit_image(curve)
+                x = int(round(curve._x(0.2)))
                 colors = [
-                    image.pixelColor(x, int(round(logical_y * ratio)))
+                    image.pixelColor(x, logical_y)
                     for logical_y in range(rail.top() + 3, rail.bottom() - 2)
                 ]
                 self.assertGreater(len({color.rgba() for color in colors}), 1)

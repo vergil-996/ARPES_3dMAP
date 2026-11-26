@@ -359,7 +359,8 @@ class CropController(QObject):
         return True
 
     def _remove_active_selection(self):
-        self.remove_selection(self.active_selection_id)
+        if self.remove_selection(self.active_selection_id):
+            self.popup.hide()
 
     def set_operation(self, operation):
         self.operation = operation

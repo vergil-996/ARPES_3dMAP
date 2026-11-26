@@ -11,6 +11,7 @@ from bandscope.processing.local_enhancement import cumulative_histogram
 from bandscope.ui import theme
 from bandscope.ui.levels_controls import ColormapRangeEditor, LevelsEditor
 from bandscope.ui.page_render_control import RenderControlPage
+from tests.support.pixels import render_unit_image
 
 
 def drag_to(widget, position):
@@ -21,10 +22,9 @@ def drag_to(widget, position):
 
 
 def grab_pixel(widget, x, y):
-    image = widget.grab().toImage()
-    scale_x = image.width() / max(widget.width(), 1)
-    scale_y = image.height() / max(widget.height(), 1)
-    return image.pixelColor(int(round(x * scale_x)), int(round(y * scale_y)))
+    # 以 1:1 逻辑像素渲染，避免系统缩放把相邻取样行混到同一物理行。
+    image = render_unit_image(widget)
+    return image.pixelColor(int(round(x)), int(round(y)))
 
 
 class LevelsEditorTests(unittest.TestCase):

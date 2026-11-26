@@ -1,13 +1,19 @@
 import unittest
-from types import SimpleNamespace
-from unittest.mock import Mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import MethodType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
+from PyQt5.QtWidgets import QApplication
 
+from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.core.display_style import new_display_style, new_render_quality
+from bandscope.processing.local_enhancement import clear_range_cache
 from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.rendering.render_core import VisualEngine, opacity_ramp_points
+from tests.support.view_recipe import control_window, synthetic_npz
 
 
 class TimePreviewTests(unittest.TestCase):
@@ -101,6 +107,113 @@ class TimePreviewTests(unittest.TestCase):
         preview = analyzer.volume_session.render.call_args
         self.assertEqual(preview.args[0].shape, (69, 70, 67))
         self.assertEqual(float(np.max(preview.args[0])), 1.0)
+
+
+class Interactive2DPreviewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(clear_range_cache)
+        path = Path(self.temp.name) / "source.npz"
+        synthetic_npz(path, seed=43)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(str(path)))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
+        self.spec = self.window._build_canvas_axis_slice_spec(
+            self.window.left_workspace.current_spec(), 0
+        )
+        self.window.left_workspace.add_page(self.spec)
+        self.window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        self.window.canvas_2d.draw()
+        self.window._prepare_display_statistics = MethodType(
+            EnhancementInteractionMixin._prepare_display_statistics, self.window
+        )
+
+    def _render_preview(self, cause):
+        clear_range_cache()
+        self.window._enhancement_cache = None
+        calls = []
+        original = VisualEngine.render_2d_slice
+
+        def record(*args, **kwargs):
+            result = original(*args, **kwargs)
+            calls.append((args, kwargs, result))
+            return result
+
+        with patch.object(VisualEngine, "render_2d_slice", record):
+            self.window._render_active_page(RenderQuality.PREVIEW, cause)
+        self.assertEqual(len(calls), 1)
+        return calls[0]
+
+    def _expected_axis_integral(self, frame):
+        low = int(self.spec.params["low"])
+        up = int(self.spec.params["up"])
+        return self.window.core.raw_data[low:up + 1, :, :, frame].sum(
+            axis=0, dtype=np.float64
+        )
+
+    def test_time_preview_reaches_2d_renderer_with_current_frame(self):
+        self.window.timeline_bar.slider_time.setValue(1)
+
+        args, kwargs, result = self._render_preview(RefreshCause.DATA_SOURCE)
+
+        np.testing.assert_allclose(
+            args[2], self._expected_axis_integral(1), rtol=2e-6, atol=2e-6
+        )
+        self.assertIs(kwargs["quality"], RenderQuality.PREVIEW)
+        self.assertTrue(result)
+
+    def test_axis_preview_reaches_2d_renderer_with_current_interval(self):
+        coords = self.window.core.coords["X"]
+        self.window.axis_interval.set_low(float(coords[0]))
+        self.window.axis_interval.set_up(float(coords[1]))
+        self.window._persist_axis_interval_for_current_page()
+
+        args, kwargs, result = self._render_preview(RefreshCause.ANALYSIS)
+
+        np.testing.assert_allclose(
+            args[2], self._expected_axis_integral(0), rtol=2e-6, atol=2e-6
+        )
+        self.assertIs(kwargs["quality"], RenderQuality.PREVIEW)
+        self.assertTrue(result)
+
+    def test_blit_preview_does_not_queue_stale_exact_artist_redraw(self):
+        canvas = self.window.canvas_2d
+        initial_frame = np.asarray(canvas.buffer_rgba()).copy()
+        initial_artist = np.asarray(self.window.ax_2d._arpes_image.get_array()).copy()
+        queued_draws = []
+
+        def flush_queued_draw():
+            queued_draws.append(True)
+            canvas.draw()
+
+        canvas.draw_idle = flush_queued_draw
+        self.window.timeline_bar.slider_time.setValue(1)
+        _args, _kwargs, blitted = self._render_preview(RefreshCause.DATA_SOURCE)
+        displayed_frame = np.asarray(canvas.buffer_rgba()).copy()
+
+        self.assertTrue(blitted)
+        self.assertFalse(np.array_equal(displayed_frame, initial_frame))
+        self.assertEqual(queued_draws, [])
+        np.testing.assert_array_equal(
+            np.asarray(self.window.ax_2d._arpes_image.get_array()), initial_artist
+        )
+
+    def test_exact_2d_render_still_waits_for_display_statistics(self):
+        self.window.timeline_bar.slider_time.setValue(1)
+        clear_range_cache()
+        with patch.object(VisualEngine, "render_2d_slice") as render:
+            self.window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+
+        render.assert_not_called()
+        self.assertIsNotNone(self.window._display_stats_job)
 
 
 if __name__ == "__main__":

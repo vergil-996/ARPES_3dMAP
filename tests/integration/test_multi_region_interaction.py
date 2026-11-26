@@ -229,6 +229,7 @@ class MultiRegion2DTests(unittest.TestCase):
         self.assertEqual(self.controller.active_selection_id, second)
         self.assertEqual(set(self.host.axis_crop_selectors), {second})
         self.assertEqual(self.controller.popup.title_label.text(), f"裁剪范围 Z{second}")
+        self.assertFalse(self.controller.popup.isVisible())
         applications.assert_not_called()
 
     def test_right_click_away_from_handles_keeps_generic_popup_and_axis_menu(self):

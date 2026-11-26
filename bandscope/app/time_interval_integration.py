@@ -20,6 +20,8 @@ class TimeIntervalMixin:
         "axis_integral_crop",
         "energy_dos",
         "edc_curve",
+        "curve_comparison_1d",
+        "log_curve",
         "second_derivative",
         "path_slice",
         "plugin_derived",
@@ -48,6 +50,10 @@ class TimeIntervalMixin:
             return False
         if spec.page_kind not in self.TIME_INTERVAL_PAGE_KINDS:
             return False
+        if spec.page_kind in {"curve_comparison_1d", "log_curve"}:
+            return self._edc_time_recomputable(spec)
+        if spec.page_kind == "edc_curve" and spec.params.get("base_curve") is not None:
+            return self._edc_time_recomputable(spec)
         if spec.page_kind == self.PLUGIN_DERIVED_PAGE_KIND:
             session = self._plugin_session()
             record = None
