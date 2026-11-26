@@ -22,6 +22,7 @@ from bandscope.core.axis_interval import (
 from bandscope.ui import theme
 from bandscope.ui.axis_interval_bar import AxisIntervalControl
 from bandscope.ui.axis_interval_controller import AxisIntervalController, IntervalEditMode
+from tests.support.pixels import render_unit_image
 
 configure_qt_plugin_path()
 
@@ -275,25 +276,21 @@ class DualIntervalMouseTests(unittest.TestCase):
                 theme.set_theme(name)
                 self.slider.update()
                 QApplication.processEvents()
-                image = self.slider.grab().toImage()
-                ratio = image.devicePixelRatio()
+                # 1:1 逻辑像素渲染，避免系统缩放改变取样点落在描边还是填充上。
+                image = render_unit_image(self.slider)
                 center = self.slider.center_handle_center()
-                x = int(center.x() * ratio)
-                y = int(center.y() * ratio)
+                x = int(round(center.x()))
+                y = int(round(center.y()))
 
                 fill = QColor(image.pixel(x, y))
                 outline_samples = [
-                    QColor(image.pixel(
-                        int((center.x() + dx) * ratio),
-                        int((center.y() + dy) * ratio),
-                    ))
-                    for dx, dy in (
-                        (-4, 0), (4, 0), (0, -4), (0, 4),
-                        (-3, 0), (3, 0), (0, -3), (0, 3),
-                    )
+                    QColor(image.pixel(x + dx, y + dy))
+                    for dx in range(-5, 6)
+                    for dy in range(-5, 6)
+                    if 3 <= max(abs(dx), abs(dy)) <= 5
                 ]
                 stem_colors = {
-                    QColor(image.pixel(x, int(stem_y * ratio))).rgba()
+                    QColor(image.pixel(x, stem_y)).rgba()
                     for stem_y in range(
                         self.slider.TRACK_Y + 4,
                         self.slider.CENTER_HANDLE_Y - self.slider.CENTER_HANDLE_RADIUS,
@@ -301,10 +298,18 @@ class DualIntervalMouseTests(unittest.TestCase):
                 }
                 if name == "light":
                     self.assertGreater(fill.lightness(), 200)
-                    self.assertLess(min(color.lightness() for color in outline_samples), 100)
+                    # 深色描边与白色填充的对比才是主题契约；100% 缩放时 0.9 px
+                    # 描边经抗锯齿后不会出现纯黑/纯白像素，比值改为亮度差。
+                    self.assertLess(
+                        min(color.lightness() for color in outline_samples),
+                        fill.lightness() - 100,
+                    )
                 else:
                     self.assertLess(fill.lightness(), 60)
-                    self.assertGreater(max(color.lightness() for color in outline_samples), 200)
+                    self.assertGreater(
+                        max(color.lightness() for color in outline_samples),
+                        fill.lightness() + 100,
+                    )
                 self.assertGreater(len(stem_colors), 1)
 
         self.controller.interval.set_up(self.controller.interval.low)

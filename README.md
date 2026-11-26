@@ -20,7 +20,7 @@ BandScope 是面向本地桌面实验环境的多维 ARPES 可视化与分析工
 
 验证（Windows、仓库 `.venv`）：
 
-- 全量 `python -m unittest discover -s tests -t .`：**2335 项通过**（2026-11-26，199.181 秒，单进程，日志 `.local/logs/release-1.23.0-full.log`）；`compileall` 通过。
+- 全量 `python -m unittest discover -s tests -t .`：**2335 项通过**（2026-11-26，190.359 秒，单进程，日志 `.local/logs/release-1.23.0-full2.log`）；`compileall` 通过。
 - `check_release_version.py v1.23.0`、`scripts/validation/verify_plugin_release_flow.py` 与 `git diff --check` 通过。
 - 真实窗口（`.local/data/WSe2_step.npz`）：`verify_energy_calibration.py` 报 `[result] PASS`（入口、XZ／YZ 切换、垂直翻转、图外手柄拖动、应用后数值契约与关闭复核），截图与 `report.json` 在 `.local/outputs/energy-calibration/`；`verify_momentum_calibration.py` 报 `[result] PASS`（共享双端滑条、无长度输入框与色条、NPZ／MAT 保存回读的坐标键与单位契约）。
 - 未执行：能量定标的 NPZ／MAT 保存回读与截图人工视觉复核；维护者人工视觉复核（定标手柄手感、区间条加宽后的布局、深浅主题）；冻结安装包与安装器的人工安装验收（以 CI 产物为准）。

@@ -505,7 +505,9 @@ class Denoise4DTests(unittest.TestCase):
                 )
                 self.assertEqual(actual.dtype, np.float32)
                 self.assertEqual(actual.shape, data.shape)
-                np.testing.assert_array_equal(actual, expected)
+                # 逐帧与管线两条路径的浮点运算顺序可能不同（相邻切片是否连续、
+                # scipy 版本间的实现差异），允许 float32 量级的舍入误差。
+                np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
     def test_all_six_methods_allow_an_empty_time_axis(self):
         data = np.empty((8, 8, 8, 0), dtype=np.float32)
