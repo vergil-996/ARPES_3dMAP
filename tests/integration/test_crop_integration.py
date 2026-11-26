@@ -24,6 +24,7 @@ from bandscope.core.crop_model import (
     waterfall_offsets,
 )
 from bandscope.app.refactored_app import My3DAnalyzer
+from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.data_scope import DataScopeDescriptor, ScopedDataVolume
 from bandscope.rendering.refresh_pipeline import RefreshCause
@@ -63,6 +64,7 @@ def _stub_analyzer(spec):
     analyzer.clip_ranges = None
     analyzer.precise_logical_bounds = None
     analyzer.current_render_context = None
+    analyzer.rotation_angle = 0.0
     analyzer._context_for_publication_capture = lambda _spec: analyzer.current_render_context
     analyzer.timeline_bar = SimpleNamespace(
         slider_time=SimpleNamespace(value=lambda: 0),
@@ -264,9 +266,9 @@ class DerivativePropagationTests(unittest.TestCase):
         self.assertEqual(result.params["slice_axis"], 0)
         self.assertEqual(result.params["slice_index"], 2)
         self.assertEqual(result.params["derivative_axis"], 2)
-        # Only the 2D tail is propagated; the collapsing 3D region is not.
-        self.assertEqual(len(result.params["crop_regions"]), 1)
-        self.assertEqual(result.params["crop_regions"][0]["view"], "2d")
+        frozen_regions = result.params["derivative_source"]["params"]["crop_regions"]
+        self.assertEqual(len(frozen_regions), 2)
+        self.assertEqual(frozen_regions[-1]["view"], "2d")
 
     def test_cropped_transient_slice_keeps_full_2d_chain(self):
         regions = [CropSelection("2d", ("Y", "E"), (0.0, 2.0, 3.0, 6.0)).to_dict()]
@@ -282,7 +284,7 @@ class DerivativePropagationTests(unittest.TestCase):
         result = analyzer._build_second_derivative_spec()
         self.assertIsNotNone(result)
         self.assertEqual(result.params["slice_axis"], 0)
-        self.assertEqual(len(result.params["crop_regions"]), 1)
+        self.assertEqual(len(result.params["derivative_source"]["params"]["crop_regions"]), 1)
 
     def test_uncropped_home_keeps_legacy_3d_derivative(self):
         spec = AnalysisPageSpec("home", "原始视图", "home", "system", params={})
@@ -317,10 +319,11 @@ class DerivativePropagationTests(unittest.TestCase):
         self.assertEqual(result.params["time_interval"]["low"], 0.0)
         self.assertEqual(result.params["time_interval"]["up"], 2.0)
         self.assertNotIn("source_mode", result.params)
-        self.assertEqual(len(result.params.get("crop_regions", [])), 1)
+        frozen_regions = result.params["derivative_source"]["params"]["crop_regions"]
+        self.assertEqual(len(frozen_regions), 1)
         # Deep copy: mutating the source chain must not leak into the child.
         spec.params["crop_regions"][0]["bounds"] = (0, 0, 0, 0, 0, 0)
-        self.assertNotEqual(result.params["crop_regions"][0]["bounds"], (0, 0, 0, 0, 0, 0))
+        self.assertNotEqual(frozen_regions[0]["bounds"], (0, 0, 0, 0, 0, 0))
 
     def test_axis_integral_derivative_uses_final_rect_without_regions(self):
         spec = AnalysisPageSpec(
@@ -337,8 +340,8 @@ class DerivativePropagationTests(unittest.TestCase):
         analyzer = _stub_analyzer(spec)
         result = analyzer._build_second_derivative_spec()
         self.assertIsNotNone(result)
-        # crop_k/e metadata carries the final rect; the display chain is not
-        # copied (it would double-crop after the rect inheritance).
+        # crop_k/e metadata carries the final rect; the complete display chain
+        # lives in derivative_source instead of being duplicated at the top level.
         self.assertEqual(result.params["crop_k_low"], 1)
         self.assertEqual(result.params["crop_e_up"], 6)
         self.assertNotIn("crop_regions", result.params)
@@ -741,6 +744,14 @@ class OnCutTests(unittest.TestCase):
         analyzer._make_page_id = Mock(side_effect=["child1", "child2", "child3"])
         analyzer.rotation_angle = 0.0
         analyzer.errors = []
+        if context.get("view") == "3d":
+            analyzer.core = AnalyzerCore()
+            analyzer.core.coords = context["coords"]
+            analyzer.core.raw_data = context["data"]
+            analyzer.original_raw_data = np.asarray(context["data"])[..., None]
+            analyzer.global_denoise_methods = {}
+            analyzer._validate_denoise_for_descriptor = Mock()
+            analyzer._register_roi_scope = Mock()
         return analyzer
 
     def test_child_params_are_independent_deepcopy(self):
@@ -805,15 +816,26 @@ class OnCutTests(unittest.TestCase):
         self.assertIsNone(analyzer.added)
         analyzer.crop_controller.popup.set_error.assert_called_once()
 
-    def test_home_volume_roi_rejected_while_rotated(self):
+    def test_home_volume_crop_uses_rotated_history_and_inherits_source_scope(self):
         context = _grid_context()
         selection = CropSelection("3d", ("X", "Y", "E"), (-1.0, 0.5, 0.5, 2.5, 3.0, 8.0))
-        spec = AnalysisPageSpec("home", "原始视图", "home", "system", params={})
+        spec = AnalysisPageSpec(
+            "home", "原始视图", "home", "system", params={}, data_scope_id="roi-parent"
+        )
         analyzer = self._make_analyzer(spec, context, selection)
         analyzer.rotation_angle = 15.0
         analyzer.on_cut()
-        self.assertIsNone(analyzer.added)
-        analyzer.crop_controller.popup.set_error.assert_called_once()
+        child = analyzer.added
+        self.assertIsNotNone(child)
+        self.assertEqual(child.source_page_id, spec.page_id)
+        self.assertEqual(child.data_scope_id, "roi-parent")
+        analyzer._register_roi_scope.assert_not_called()
+        analyzer._validate_denoise_for_descriptor.assert_called_once()
+        region = child.params["crop_regions"][0]
+        self.assertEqual(region["rotation_angle"], 15.0)
+        self.assertEqual(len(region["logical_bounds"]), 6)
+        self.assertNotIn("clip_ranges", child.params)
+        self.assertTrue(child.params["local_crop_denoise"])
 
     def test_home_volume_roi_registers_scope_without_regions(self):
         context = _grid_context()
@@ -834,6 +856,7 @@ class OnCutTests(unittest.TestCase):
         self.assertEqual(child.page_kind, "home")
         self.assertEqual(child.data_scope_id, "roi-1")
         self.assertNotIn("crop_regions", child.params)
+        self.assertNotIn("local_crop_denoise", child.params)
         self.assertEqual(child.params["clip_ranges"], list(child.params["precise_logical_bounds"]))
 
 

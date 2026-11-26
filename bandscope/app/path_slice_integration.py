@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication, QMenu, QMessageBox
 
 import bandscope.ui.theme as theme
 from bandscope.core.data_scope import scoped_descriptor_from_array
+from bandscope.core.rotation_geometry import xy_canvas_mask
 from bandscope.core.display_style import DEFAULT_OPACITY_MODE
 from bandscope.core.path_slice import (
     PATH_SELECTED_KEY,
@@ -404,11 +405,18 @@ class PathSliceController:
                     "crop_e_up": int(crop_rect["y_up"]),
                 })
             params["source_page_kind"] = spec.page_kind
+            params["clip_ranges"] = copy.deepcopy(spec.params.get("clip_ranges"))
+            params["rotation_angle"] = float(self.window._rotation_angle_for_spec(spec))
+            params["data_scope_id"] = str(getattr(spec, "data_scope_id", "full"))
             return params
         info = copy.deepcopy(spec.params.get("home_slice_info") or self.window.home_slice_info)
         return {
             "source_page_kind": "home",
             "home_slice_info": info,
+            "clip_ranges": copy.deepcopy(spec.params.get("clip_ranges")),
+            "crop_regions": copy.deepcopy(spec.params.get("crop_regions") or []),
+            "rotation_angle": float(self.window._rotation_angle_for_spec(spec)),
+            "data_scope_id": str(getattr(spec, "data_scope_id", "full")),
         }
 
     def generate_page(self) -> Optional[str]:
@@ -467,57 +475,85 @@ class PathSliceController:
                 source_module="path_slice",
                 params={
                     "home_slice_info": copy.deepcopy(source.get("home_slice_info")),
+                    "clip_ranges": copy.deepcopy(source.get("clip_ranges")),
                 },
             )
         source_spec.params.update(self.window._time_interval_params_for_spec(spec))
+        source_spec.params["clip_ranges"] = copy.deepcopy(source.get("clip_ranges"))
+        source_spec.params["source_rotation_angle"] = float(source.get(
+            "rotation_angle", getattr(self.window, "rotation_angle", 0.0)
+        ) or 0.0)
+        source_spec.data_scope_id = str(source.get("data_scope_id", "full"))
+        if source.get("crop_regions") is not None:
+            source_spec.params["crop_regions"] = copy.deepcopy(source["crop_regions"])
         return source_spec
 
-    def _valid_mask(self, source_volume, raw_data, source: Mapping[str, Any], angle: float):
+    def _valid_mask(self, source_context, display_context, raw_data, source: Mapping[str, Any], angle: float, coords):
+        source_volume = source_context["data"]
         descriptor = scoped_descriptor_from_array(source_volume)
+        full_shape = tuple(int(np.asarray(coords[key]).size) for key in ("X", "Y", "E"))
         if descriptor is not None:
             full = np.zeros(descriptor.full_shape[:3], dtype=np.float64)
             full[descriptor.spatial_slices] = np.asarray(source_volume, dtype=np.float64)
             mask = np.zeros(descriptor.full_shape[:3], dtype=bool)
-            mask[descriptor.spatial_slices] = True
+            local_mask = np.ones(np.asarray(source_volume).shape, dtype=bool)
+            for key in ("spatial_valid_mask", "canvas_mask"):
+                valid = source_context.get(key)
+                if valid is not None and np.asarray(valid).shape == local_mask.shape:
+                    local_mask &= np.asarray(valid, dtype=bool)
+            mask[descriptor.spatial_slices] = local_mask
         else:
             full = np.asarray(source_volume, dtype=np.float64)
-            raw_descriptor = getattr(raw_data, "descriptor", None)
             mask = np.ones(full.shape, dtype=bool)
-            if raw_descriptor is not None and not raw_descriptor.is_full:
-                mask[:] = False
-                mask[raw_descriptor.spatial_slices] = True
-        if abs(float(angle)) >= 1e-6 and getattr(raw_data, "descriptor", None) is not None:
-            rotated = self.window.backend_manager.cpu.rotate_volume(mask.astype(np.float32), float(angle))
-            mask = np.asarray(rotated) >= 0.5
-        crop_rect = self.window._axis_crop_rect_from_params(source)
-        if crop_rect is not None:
-            x0 = max(0, int(crop_rect["x_low"]))
-            x1 = min(mask.shape[0] - 1, int(crop_rect["x_up"]))
-            y0 = max(0, int(crop_rect["y_low"]))
-            y1 = min(mask.shape[1] - 1, int(crop_rect["y_up"]))
-            cropped = np.zeros_like(mask)
-            if x0 <= x1 and y0 <= y1:
-                cropped[x0:x1 + 1, y0:y1 + 1, :] = True
-            mask &= cropped
-        for region in source.get("crop_regions") or ():
-            axes = tuple(region.get("axes") or ())
-            if set(axes) != {"X", "Y"}:
-                continue
-            bounds = region.get("bounds") or ()
-            if len(bounds) != 4:
-                continue
-            rect = np.zeros_like(mask)
-            x0, x1 = sorted((int(np.floor(bounds[0])), int(np.ceil(bounds[1]))))
-            y0, y1 = sorted((int(np.floor(bounds[2])), int(np.ceil(bounds[3]))))
-            x0, x1 = max(0, x0), min(mask.shape[0] - 1, x1)
-            y0, y1 = max(0, y0), min(mask.shape[1] - 1, y1)
-            if x0 > x1 or y0 > y1:
-                continue
-            rect[x0:x1 + 1, y0:y1 + 1, :] = True
-            if str(region.get("operation") or "crop") == "erase":
-                mask &= ~rect
-            else:
-                mask &= rect
+            for key in ("spatial_valid_mask", "canvas_mask"):
+                valid = source_context.get(key)
+                if valid is not None and np.asarray(valid).shape == mask.shape:
+                    mask &= np.asarray(valid, dtype=bool)
+
+        source_bounds = source_context.get("source_data_bounds")
+        raw_descriptor = getattr(raw_data, "descriptor", None)
+        if source_bounds is None and raw_descriptor is not None and not raw_descriptor.is_full:
+            source_bounds = raw_descriptor.spatial_bounds
+        if source_bounds is not None and source_context.get("canvas_mask") is None:
+            canvas = np.broadcast_to(
+                xy_canvas_mask(
+                    full_shape[:2], float(angle), source_bounds=tuple(source_bounds[:4]),
+                )[:, :, None],
+                full_shape,
+            ).copy()
+            energy_low, energy_up = (int(value) for value in source_bounds[4:6])
+            energy = np.zeros(full_shape[2], dtype=bool)
+            energy[energy_low:energy_up + 1] = True
+            mask &= canvas & energy[None, None, :]
+
+        plot_bounds = display_context["plot_logical_bounds"]
+        x_low = max(0, int(plot_bounds["x_low"]))
+        x_up = min(full_shape[0] - 1, int(plot_bounds["x_up"]))
+        y_low = max(0, int(plot_bounds["y_low"]))
+        y_up = min(full_shape[1] - 1, int(plot_bounds["y_up"]))
+        local_display_mask = np.isfinite(display_context["data"])
+        for key in ("spatial_valid_mask", "canvas_mask"):
+            valid = display_context.get(key)
+            if valid is not None and np.asarray(valid).shape == local_display_mask.shape:
+                local_display_mask &= np.asarray(valid, dtype=bool)
+        display_mask = np.zeros(full_shape[:2], dtype=bool)
+        if x_low <= x_up and y_low <= y_up:
+            expected_shape = (x_up - x_low + 1, y_up - y_low + 1)
+            if local_display_mask.shape != expected_shape:
+                raise ValueError("路径来源切片与其逻辑边界不匹配。")
+            display_mask[x_low:x_up + 1, y_low:y_up + 1] = local_display_mask
+        mask &= display_mask[:, :, None]
+
+        clip_ranges = source_context.get("clip_ranges", source.get("clip_ranges"))
+        if clip_ranges is not None and source_bounds is None:
+            x0, x1, y0, y1, e0, e1 = (int(value) for value in clip_ranges)
+            clipped = np.zeros(full_shape, dtype=bool)
+            x0, x1 = max(0, x0), min(full_shape[0] - 1, x1)
+            y0, y1 = max(0, y0), min(full_shape[1] - 1, y1)
+            e0, e1 = max(0, e0), min(full_shape[2] - 1, e1)
+            if x0 <= x1 and y0 <= y1 and e0 <= e1:
+                clipped[x0:x1 + 1, y0:y1 + 1, e0:e1 + 1] = True
+            mask &= clipped
         return full, mask
 
     def compute_context(self, spec):
@@ -531,9 +567,15 @@ class PathSliceController:
             return None
         source_spec = self._source_spec(spec, source)
         source_context = self.window._get_3d_source_context_for_axis(source_spec, raw_data)
-        source_volume = source_context["data"]
-        angle = float(getattr(self.window, "rotation_angle", 0.0) or 0.0)
-        volume, valid_mask = self._valid_mask(source_volume, raw_data, source, angle)
+        display_context = self.window._compute_render_context(source_spec)
+        if display_context is None or display_context.get("crop_empty"):
+            raise ValueError("路径来源范围内没有有效数据。")
+        angle = float(source.get(
+            "rotation_angle", getattr(self.window, "rotation_angle", 0.0)
+        ) or 0.0)
+        volume, valid_mask = self._valid_mask(
+            source_context, display_context, raw_data, source, angle, coords
+        )
         energy_indices = np.flatnonzero(valid_mask.any(axis=(0, 1)))
         if energy_indices.size == 0:
             raise ValueError("来源范围内没有有效的能量数据。")

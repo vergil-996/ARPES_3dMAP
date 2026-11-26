@@ -149,14 +149,16 @@ class TimeIntervalMixin:
             return raw_data[..., int(low)]
         return np.sum(raw_data[..., int(low):int(up) + 1], axis=3, dtype=np.float32)
 
-    def _get_rotated_time_range(self, raw_data, low, up):
+    def _get_rotated_time_range(self, raw_data, low, up, *, angle=None):
         shape = tuple(raw_data.shape)
         maximum = max(int(shape[3]) - 1, 0) if len(shape) > 3 else 0
         low = int(np.clip(int(low), 0, maximum))
         up = int(np.clip(int(up), 0, maximum))
         if low > up:
             low, up = up, low
-        angle = float(self.rotation_angle or 0.0)
+        if angle is None:
+            angle = self.rotation_angle
+        angle = float(angle or 0.0)
         key = (
             "time_range",
             self._raw_data_identity(raw_data),
@@ -182,9 +184,19 @@ class TimeIntervalMixin:
         self._rotation_cache_store(key, rotated)
         return rotated
 
+    def _rotation_angle_for_spec(self, spec):
+        params = (getattr(spec, "params", None) or {})
+        angle = params.get("source_rotation_angle")
+        source_3d = params.get("source_3d")
+        if angle is None and isinstance(source_3d, dict):
+            angle = source_3d.get("rotation_angle")
+        return float(self.rotation_angle if angle is None else angle)
+
     def _get_rotated_time_range_for_spec(self, raw_data, spec):
         low, up = self._time_indices_for_spec(spec)
-        return self._get_rotated_time_range(raw_data, low, up)
+        return self._get_rotated_time_range(
+            raw_data, low, up, angle=self._rotation_angle_for_spec(spec)
+        )
 
     def _bind_time_interval(self, spec, *, animate=True):
         controller = self.__dict__.get("time_interval_controller")

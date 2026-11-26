@@ -11,7 +11,7 @@ from PyQt5.QtGui import QContextMenuEvent
 
 import bandscope.ui.theme as theme
 from bandscope.core.axis_interval import nearest_index
-from bandscope.core.crop_model import apply_selection
+from bandscope.core.crop_model import apply_selection, capture_selection_geometry
 from bandscope.core.data_scope import DataScopeDescriptor
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from bandscope.ui.interactive_crop_box import CropBoxGestureCoordinator, InteractiveCropBox
@@ -498,20 +498,28 @@ class CropInteractionMixin:
         context = self._compute_render_context(source)
         if context is None:
             return
-        cropped = apply_selection(context, selection)
+        rotation_angle = float(context.get(
+            "rotation_angle", self.__dict__.get("rotation_angle", 0.0)
+        ) or 0.0)
+        if selection.view in {"3d", "2d"}:
+            selection = capture_selection_geometry(
+                context, selection, rotation_angle=rotation_angle
+            )
+            cropped = apply_selection(context, selection, rotation_angle=rotation_angle)
+        else:
+            cropped = apply_selection(context, selection)
         if cropped.get("crop_empty") and not erasing:
             controller.popup.set_error("裁剪范围内没有有效数据。")
             return
-        volume_roi = (not erasing and not source.params.get("crop_regions")
-                      and source.page_kind == "home" and selection.view == "3d" and cropped["view"] == "3d")
-        if volume_roi and abs(float(self.rotation_angle)) >= 1e-6:
-            controller.popup.set_error("请先将 Z 轴旋转恢复为 0°，再裁剪全帧 ROI。")
-            return
+        home_volume_crop = (not erasing and not source.params.get("crop_regions")
+                            and source.page_kind == "home" and selection.view == "3d"
+                            and cropped["view"] == "3d")
+        volume_roi = home_volume_crop and abs(rotation_angle) < 1e-6
         self._persist_active_page_state()
         params = copy.deepcopy(source.params)
         kind = source.page_kind
         scope_id = source.data_scope_id
-        if volume_roi:
+        if home_volume_crop:
             bounds = tuple(int(v) for v in cropped["data_bounds"])
             candidate = DataScopeDescriptor("candidate", tuple(self.original_raw_data.shape), bounds)
             try:
@@ -519,12 +527,16 @@ class CropInteractionMixin:
             except ValueError as exc:
                 controller.popup.set_error(str(exc))
                 return
+        if volume_roi:
             descriptor = self._register_roi_scope(bounds)
             scope_id = descriptor.scope_id
             params.update(clip_ranges=list(bounds), home_slice_info=None,
                           precise_logical_bounds=list(bounds), data_scope_label=descriptor.label)
             params.pop("crop_regions", None)
+            params.pop("local_crop_denoise", None)
         else:
+            if home_volume_crop and not volume_roi:
+                params["local_crop_denoise"] = True
             regions = list(params.get("crop_regions", []))
             if kind in {"axis_integral", "axis_integral_crop"}:
                 if not regions:
@@ -536,7 +548,8 @@ class CropInteractionMixin:
             if selection.view == "3d" and selection.e_flip:
                 # Persist canonical physical coordinates so slice-position
                 # controls and subsequent pages use the original axis domain.
-                physical = self.core.logical_bounds_to_physical_bounds(self._crop_logical_bounds(), clamp=False)
+                logical = selection.logical_bounds or self._crop_logical_bounds(selection)
+                physical = self.core.logical_bounds_to_physical_bounds(logical, clamp=False)
                 physical = tuple(v for i in range(3) for v in sorted(physical[2*i:2*i+2]))
                 selection = replace(selection, bounds=physical, e_flip=False)
             regions.append(selection.to_dict())

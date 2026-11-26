@@ -55,8 +55,10 @@ class PathSliceHostTests(unittest.TestCase):
         self.window.original_raw_data = self.raw
         self.window.original_coords = self.coords
         self.window.rotation_angle = 0.0
+        self.window.global_denoise_methods = []
         self.window.shared_denoise_version = 0
         self.window._rotation_cache = {}
+        self.window._axis_prefix_cache = None
         self.window._computed_volume_cache = ArrayLRUCache()
         self.window.backend_manager = BackendManager("CPU")
         self.window._get_display_state_for_spec = lambda _spec: (self.raw, self.coords)

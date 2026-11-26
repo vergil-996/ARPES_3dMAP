@@ -3,18 +3,25 @@ from __future__ import annotations
 
 import copy
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
 
-from bandscope.core.crop_model import CropSelection, SPATIAL_KEYS, apply_selection
+from bandscope.core.crop_model import (
+    CropSelection,
+    SPATIAL_KEYS,
+    apply_selection,
+    capture_selection_geometry,
+    selection_grid_mask,
+)
 from bandscope.core.data_scope import (
     DataScopeDescriptor,
     ScopedSpatialArray,
     scoped_descriptor_from_array,
 )
-from bandscope.processing.edc import integrate_edc, selection_index_bounds
+from bandscope.core.rotation_geometry import xy_canvas_mask
+from bandscope.processing.edc import integrate_edc
 from bandscope.ui.result_workspace import AnalysisPageSpec
 
 
@@ -31,14 +38,53 @@ class _EdcSource:
     data_bounds: tuple[int, int, int, int, int, int]
     axis_index: int | None
     normal_index_bounds: tuple[int, int] | None
+    valid_mask: Any = None
+    rotation_angle: float = 0.0
 
 
 def _full_shape_from_coords(coords) -> tuple[int, int, int]:
     return tuple(int(np.asarray(coords[key]).size) for key in ("X", "Y", "E"))
 
 
-def _spatial_source(context, coords, raw_data) -> tuple[Any, tuple[int, int, int], tuple]:
+def _context_valid_mask(context):
+    valid = context.get("spatial_valid_mask", context.get("valid_mask"))
+    canvas = context.get("canvas_mask")
+    if valid is None:
+        return None if canvas is None else np.asarray(canvas, dtype=bool)
+    valid = np.asarray(valid, dtype=bool)
+    if canvas is not None:
+        valid = valid & np.asarray(canvas, dtype=bool)
+    return valid
+
+
+def _source_domain_mask(context, raw_data, full_shape):
+    bounds = context.get("source_data_bounds")
+    if bounds is None:
+        descriptor = scoped_descriptor_from_array(raw_data)
+        if descriptor is None or descriptor.is_full:
+            return None
+        bounds = descriptor.spatial_bounds
+    descriptor = DataScopeDescriptor(
+        "edc-source-domain",
+        tuple(full_shape) + (1,),
+        tuple(bounds),
+    )
+    bounds = descriptor.spatial_bounds
+    angle = float(context.get("rotation_angle", 0.0) or 0.0)
+    xy = xy_canvas_mask(
+        full_shape[:2], angle, source_bounds=bounds[:4]
+    )
+    energy = np.zeros(full_shape[2], dtype=bool)
+    energy_low, energy_up = bounds[4:]
+    energy[energy_low:energy_up + 1] = True
+    return xy[:, :, None] & energy[None, None, :]
+
+
+def _spatial_source(
+    context, coords, raw_data
+) -> tuple[Any, tuple[int, int, int], tuple, Any]:
     source_data = context.get("data")
+    valid_mask = _context_valid_mask(context)
     descriptor = scoped_descriptor_from_array(source_data)
     data_bounds = context.get("data_bounds")
     if descriptor is None and data_bounds is not None:
@@ -56,13 +102,26 @@ def _spatial_source(context, coords, raw_data) -> tuple[Any, tuple[int, int, int
         )
         source_data = ScopedSpatialArray(np.asarray(source_data), descriptor)
     if descriptor is not None:
-        return source_data, descriptor.full_shape[:3], descriptor.spatial_bounds
+        return (
+            source_data,
+            descriptor.full_shape[:3],
+            descriptor.spatial_bounds,
+            valid_mask,
+        )
 
     data = np.asarray(source_data)
     if data.ndim != 3:
         raise ValueError("EDC source must be a three-dimensional spatial array.")
     full_shape = tuple(int(size) for size in data.shape)
-    return data, full_shape, tuple(value for size in full_shape for value in (0, size - 1))
+    source_domain = _source_domain_mask(context, raw_data, full_shape)
+    if source_domain is not None:
+        valid_mask = (
+            source_domain
+            if valid_mask is None
+            else valid_mask & source_domain
+        )
+    data_bounds = tuple(value for size in full_shape for value in (0, size - 1))
+    return data, full_shape, data_bounds, valid_mask
 
 
 def _selection_snapshot(value) -> CropSelection:
@@ -71,6 +130,39 @@ def _selection_snapshot(value) -> CropSelection:
     if isinstance(value, dict):
         return CropSelection.from_dict(copy.deepcopy(value))
     raise ValueError("Invalid EDC selection snapshot.")
+
+
+def _selection_at_source_rotation(context, selection, rotation_angle):
+    if selection.rotation_angle is not None:
+        return selection
+    capture_context = dict(context)
+    if selection.view == "2d":
+        slice_info = dict(capture_context.get("slice_info") or {})
+        normal_range = slice_info.get("range")
+        if normal_range is not None:
+            slice_info.setdefault("index", int(normal_range[0]))
+        capture_context["slice_info"] = slice_info
+    return capture_selection_geometry(
+        capture_context, selection, rotation_angle=float(rotation_angle)
+    )
+
+
+def _source_rotation_angle(context, fallback) -> float:
+    value = fallback if fallback is not None else context.get("rotation_angle", 0.0)
+    angle = float(value or 0.0)
+    if not np.isfinite(angle):
+        raise ValueError("EDC source rotation angle is invalid.")
+    return angle
+
+
+def _source_rotation_for_spec(host, spec, context) -> float:
+    resolver = getattr(host, "_rotation_angle_for_spec", None)
+    fallback = (
+        resolver(spec)
+        if callable(resolver)
+        else host.__dict__.get("rotation_angle")
+    )
+    return _source_rotation_angle(context, fallback)
 
 
 def _nonzero_range(low, up) -> tuple[float, float]:
@@ -118,12 +210,12 @@ def _axis_volume_selection(
             coords, normal_key, *normal_index_bounds
         )
     ranges[normal_key] = normal_range
-    return CropSelection(
-        "3d",
-        SPATIAL_KEYS,
-        tuple(value for key in SPATIAL_KEYS for value in ranges[key]),
-        e_flip=selection.e_flip,
-        operation=selection.operation,
+    return replace(
+        selection,
+        view="3d",
+        axes=SPATIAL_KEYS,
+        bounds=tuple(value for key in SPATIAL_KEYS for value in ranges[key]),
+        logical_bounds=None,
     )
 
 
@@ -210,6 +302,11 @@ def _restore_volume_crop(context, full_shape):
         full_shape=full_shape,
         data_bounds=tuple(bounds),
     )
+    for key in ("spatial_valid_mask", "canvas_mask", "valid_mask"):
+        if context.get(key) is not None:
+            restored[key] = np.expand_dims(
+                np.asarray(context[key], dtype=bool), axis=collapsed_axis
+            )
     for key in ("slice_info", "plot_axes", "plot_logical_bounds", "crop_rect"):
         restored.pop(key, None)
     return restored
@@ -227,10 +324,25 @@ def _legacy_crop_rectangle(params):
     }
 
 
+def _apply_selection_at_rotation(context, selection, rotation_angle):
+    context = dict(context, rotation_angle=float(rotation_angle))
+    return apply_selection(
+        context, selection, rotation_angle=float(rotation_angle)
+    )
+
+
 def _replay_axis_source_crops(
-    spec, source_context, coords, raw_data, plot_axes, normal_index_bounds
+    spec,
+    source_context,
+    coords,
+    raw_data,
+    plot_axes,
+    normal_index_bounds,
+    rotation_angle,
 ):
-    data, full_shape, data_bounds = _spatial_source(source_context, coords, raw_data)
+    data, full_shape, data_bounds, valid_mask = _spatial_source(
+        source_context, coords, raw_data
+    )
     replayed = dict(
         source_context,
         view="3d",
@@ -238,7 +350,10 @@ def _replay_axis_source_crops(
         coords=coords,
         full_shape=full_shape,
         data_bounds=data_bounds,
+        rotation_angle=float(rotation_angle),
     )
+    if valid_mask is not None and replayed.get("spatial_valid_mask") is None:
+        replayed["spatial_valid_mask"] = valid_mask
     regions = list(spec.params.get("crop_regions") or ())
     base_rect = None
     if spec.page_kind == "axis_integral_crop":
@@ -261,11 +376,58 @@ def _replay_axis_source_crops(
         for region in regions
     )
     for selection in selections:
-        replayed = apply_selection(replayed, selection)
+        replayed = _apply_selection_at_rotation(
+            replayed, selection, rotation_angle
+        )
         if replayed.get("crop_empty"):
             raise ValueError("An EDC axis crop leaves no three-dimensional source data.")
         replayed = _restore_volume_crop(replayed, full_shape)
     return _spatial_source(replayed, coords, raw_data)
+
+
+def _integrate_source_selection(source, selection):
+    selection_mask = selection_grid_mask(
+        selection,
+        source.coords,
+        source.full_shape,
+        rotation_angle=source.rotation_angle,
+        normal_index_bounds=source.normal_index_bounds,
+    )
+    samples = np.where(selection_mask)
+    if not samples[0].size:
+        raise ValueError("An EDC selection does not intersect the source coordinates.")
+    index_bounds = tuple(
+        int(value)
+        for axis in range(3)
+        for value in (samples[axis].min(), samples[axis].max())
+    )
+    valid_mask = selection_mask
+    if source.valid_mask is not None:
+        source_mask = np.asarray(source.valid_mask, dtype=bool)
+        if source_mask.shape != source.full_shape:
+            compact_shape = tuple(
+                source.data_bounds[2 * axis + 1] - source.data_bounds[2 * axis] + 1
+                for axis in range(3)
+            )
+            if source_mask.shape != compact_shape:
+                raise ValueError("EDC source validity does not match its data scope.")
+            full_source_mask = np.zeros(source.full_shape, dtype=bool)
+            slices = tuple(
+                slice(source.data_bounds[2 * axis], source.data_bounds[2 * axis + 1] + 1)
+                for axis in range(3)
+            )
+            full_source_mask[slices] = source_mask
+            source_mask = full_source_mask
+        valid_mask = valid_mask & source_mask
+    curve = integrate_edc(
+        source.data,
+        source.coords["E"],
+        index_bounds,
+        valid_mask=valid_mask,
+    )
+    if curve is None or curve.energy.size == 0:
+        raise ValueError("An EDC selection does not intersect the prepared source ROI.")
+    return curve
 
 
 def _time_metadata(host, spec, coords) -> dict:
@@ -306,9 +468,16 @@ class EdcIntegrationMixin:
         try:
             source = self._prepare_edc_selection_source(current_spec, context)
             source_scope_metadata = self._edc_source_scope_metadata(current_spec, source)
-            source_rotation_angle = float(self.__dict__.get("rotation_angle", 0.0) or 0.0)
+            source_rotation_angle = source.rotation_angle
             selections = [
-                (str(selection_id), _selection_snapshot(selection))
+                (
+                    str(selection_id),
+                    _selection_at_source_rotation(
+                        context,
+                        _selection_snapshot(selection),
+                        source_rotation_angle,
+                    ),
+                )
                 for selection_id, selection in snapshots
             ]
             if source.view == "3d":
@@ -327,17 +496,7 @@ class EdcIntegrationMixin:
             time_metadata = _time_metadata(self, source.time_spec, source.coords)
             integrated = []
             for selection_id, selection in selections:
-                index_bounds = selection_index_bounds(
-                    selection,
-                    source.coords,
-                    source.full_shape,
-                    normal_index_bounds=source.normal_index_bounds,
-                )
-                if index_bounds is None:
-                    raise ValueError("An EDC selection does not intersect the source coordinates.")
-                curve = integrate_edc(source.data, source.coords["E"], index_bounds)
-                if curve is None or curve.energy.size == 0:
-                    raise ValueError("An EDC selection does not intersect the prepared source ROI.")
+                curve = _integrate_source_selection(source, selection)
                 if np.all(np.isnan(curve.intensity)):
                     raise ValueError("An EDC selection contains no valid intensity samples.")
                 integrated.append((selection_id, selection, curve))
@@ -540,6 +699,10 @@ class EdcIntegrationMixin:
                 }
             if source_context is None or source_context.get("crop_empty"):
                 return None
+            source_context = dict(
+                source_context,
+                rotation_angle=float(source_state["rotation_angle"]),
+            )
             source = self._prepare_edc_selection_source(source_spec, source_context)
             time_metadata = _time_metadata(self, spec, source.coords)
             metadata_by_id = {
@@ -554,13 +717,8 @@ class EdcIntegrationMixin:
             curve_metadata = []
             for saved in saved_curves:
                 metadata = metadata_by_id[str(saved.get("curve_id"))]
-                curve = integrate_edc(
-                    source.data,
-                    source.coords["E"],
-                    tuple(int(value) for value in metadata["index_bounds"]),
-                )
-                if curve is None or curve.energy.size == 0:
-                    return None
+                selection = _selection_snapshot(metadata["selection"])
+                curve = _integrate_source_selection(source, selection)
                 if not np.array_equal(
                     curve.energy,
                     np.asarray(saved.get("x_data"), dtype=np.float64),
@@ -592,9 +750,21 @@ class EdcIntegrationMixin:
             coords = context.get("coords") or display_coords
             if coords is None:
                 raise ValueError("EDC source coordinates are unavailable.")
-            data, full_shape, data_bounds = _spatial_source(context, coords, raw_data)
+            data, full_shape, data_bounds, valid_mask = _spatial_source(
+                context, coords, raw_data
+            )
+            rotation_angle = _source_rotation_for_spec(self, spec, context)
             return _EdcSource(
-                data, coords, full_shape, spec, "3d", data_bounds, None, None
+                data,
+                coords,
+                full_shape,
+                spec,
+                "3d",
+                data_bounds,
+                None,
+                None,
+                valid_mask,
+                rotation_angle,
             )
 
         if spec.page_kind not in {"axis_integral", "axis_integral_crop"} or context.get("view") != "2d":
@@ -625,13 +795,15 @@ class EdcIntegrationMixin:
             if axis_index == 2
             else tuple(sorted((int(resolved["low"]), int(resolved["up"]))))
         )
-        data, full_shape, data_bounds = _replay_axis_source_crops(
+        rotation_angle = _source_rotation_for_spec(self, spec, context)
+        data, full_shape, data_bounds, valid_mask = _replay_axis_source_crops(
             spec,
             source_context,
             coords,
             raw_data,
             plot_axes,
             normal_index_bounds,
+            rotation_angle,
         )
         return _EdcSource(
             data,
@@ -642,6 +814,8 @@ class EdcIntegrationMixin:
             data_bounds,
             axis_index,
             normal_index_bounds,
+            valid_mask,
+            rotation_angle,
         )
 
     def _edc_source_scope_metadata(self, spec, source) -> dict:

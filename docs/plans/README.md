@@ -2,6 +2,7 @@
 
 本索引只列尚待设计或实施的工作；按任务选择对应计划，不批量读取本目录。
 
+- [Z 轴旋转后的裁剪、裁空与分析页](z-rotation-crop-analysis.md)（已实施；2380 项全量回归与 WSe₂ 实窗自动验收 63/63 通过；维护者人工视觉、鼠标手感与科研出图认可待验）
 - [BandScope 按钮图标高 DPI 优化交接计划](fluent-icon-high-dpi.md)（已实施；2012 项全量回归、多倍率像素与单屏实窗验收通过；真实双屏跨屏移动待验；v1.22.4 已发布 GitHub 与 MatElab）
 - [BandScope 自动轴分配与加载后重设](axis-assignment.md)（已实施；自动化与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab；2026-11-23 扫描滑块设置移入轴分配窗口，v1.22.5 已发布 GitHub 与 MatElab）
 - [BandScope 画布工具栏与 Z 轴旋钮改造](canvas-toolbar-rotation-dial.md)（已实施；定向测试与 WSe₂ 真实窗口验收通过；v1.22.1 已发布 GitHub 与 MatElab）

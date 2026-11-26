@@ -66,7 +66,10 @@ from bandscope.app.source_workspace import SourceWorkspaceMixin
 from bandscope.app.time_interval_integration import TimeIntervalMixin
 from bandscope.app.blender_recipe_integration import BlenderRecipeMixin
 from bandscope.app.view_recipe_integration import ViewRecipeMixin
-from bandscope.core.crop_model import CropSelection, apply_crop_regions, export_cropped_context, waterfall_offsets
+from bandscope.core.crop_model import (
+    CropSelection, apply_crop_regions, capture_selection_geometry,
+    export_cropped_context, selection_grid_mask, waterfall_offsets,
+)
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.axis_interval import AxisInterval, AxisSpace, nearest_index
 from bandscope.core.axis_units import resolve_axis_unit
@@ -189,6 +192,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self.data_scopes = {}
         self._scope_generation = 0
         self._scope_data_cache = ArrayLRUCache()
+        self._local_crop_denoise_cache = ArrayLRUCache()
         self._scope_committed_signatures = {}
         self._pending_denoise_methods = None
         self._pending_denoise_signature = None
@@ -1507,11 +1511,26 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         prefix_spec = spec
         if spec.page_kind == self.PLUGIN_DERIVED_PAGE_KIND:
             prefix_spec = synthetic_source_spec_from_params(params)
+        frozen_source = (prefix_spec.params.get("source_3d") or {}) if prefix_spec is not None else {}
+        frozen_params = frozen_source.get("params") or {}
+        frozen_angle = frozen_source.get("rotation_angle")
+        needs_source_replay = bool(
+            frozen_params.get("crop_regions")
+            or frozen_params.get("local_crop_denoise")
+            or (
+                frozen_source
+                and frozen_source.get("page_kind") != "home"
+            )
+            or (
+                frozen_angle is not None
+                and abs(float(frozen_angle) - angle) >= 1e-6
+            )
+        )
         if prefix_spec is not None and spec.page_kind in {
             "axis_integral",
             "axis_integral_crop",
             self.PLUGIN_DERIVED_PAGE_KIND,
-        }:
+        } and not needs_source_replay:
             resolved = self._resolved_axis_integral_params(prefix_spec)
             prefix_key = self._axis_prefix_cache_key(prefix_spec, resolved, raw_data)
             if self._axis_prefix_cache is None or self._axis_prefix_cache.get("key") != prefix_key:
@@ -1525,7 +1544,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     }
                 )
 
-        if spec.page_kind == "second_derivative" and params.get("source_view") == "3d":
+        if (
+            spec.page_kind == "second_derivative"
+            and params.get("source_view") == "3d"
+            and not params.get("derivative_source")
+        ):
             derivative_axis = int(params.get("derivative_axis", 2))
             coordinate_key = {0: "X", 1: "Y", 2: "E"}[derivative_axis]
             coordinate_values = np.asarray(self.original_coords[coordinate_key], dtype=np.float64)
@@ -2197,6 +2220,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         # 可重建的 ROI / 去噪结果缓存：每个源一个缓存对象，预算由会话管理器
         # 按源数平分全应用总预算（min(4 GiB, 物理内存×20%)），不逐源倍增。
         self._scope_data_cache = ArrayLRUCache()
+        self._local_crop_denoise_cache = ArrayLRUCache()
         self._scope_committed_signatures[descriptor.scope_id] = self._denoise_signature([])
 
     def _full_domain_spatial_shape(self):
@@ -2645,6 +2669,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     def _invalidate_denoise_dependents(self):
         self._rotation_cache.clear()
         self._computed_volume_cache.clear()
+        local_crop_cache = self.__dict__.get("_local_crop_denoise_cache")
+        if local_crop_cache is not None:
+            local_crop_cache.clear()
         self._second_derivative_volume_cache = None
         self._clear_axis_prefix_cache()
 
@@ -2772,6 +2799,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         return shared
 
     def _request_scope_denoise_if_needed(self, spec):
+        if (getattr(spec, "params", None) or {}).get("local_crop_denoise"):
+            return False
         methods = self._normalize_denoise_methods(self.global_denoise_methods)
         descriptor = self._scope_for_spec(spec)
         if not methods or descriptor is None:
@@ -3000,7 +3029,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             posinf=0.0, neginf=0.0,
         )
         descriptor = scoped_descriptor_from_array(source_context["data"])
-        if cache is None or cache.get("key") != cache_key:
+        cache_valid = (
+            cache is not None
+            and cache.get("key") == cache_key
+            and tuple(np.asarray(cache.get("prefix", ())).shape) == tuple(source_data.shape)
+        )
+        if not cache_valid:
             prefix = AnalyzerCore.build_axis_prefix_sum(source_data, axis_index)
             cache = {
                 "key": cache_key,
@@ -3069,6 +3103,84 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return ScopedSpatialArray(source, descriptor)
         return value
 
+    def _local_crop_denoise_source(self, spec, descriptor, methods):
+        regions = (getattr(spec, "params", None) or {}).get("crop_regions") or ()
+        if not regions or self.original_raw_data is None:
+            if descriptor.is_full:
+                return self.original_raw_data
+            return ScopedDataVolume(descriptor, descriptor.extract(self.original_raw_data))
+
+        first = regions[0]
+        owner = str(getattr(spec, "_local_crop_cache_owner", spec.page_id))
+        signature = self._denoise_signature(methods)
+        cache_key = (
+            self._source_cache_namespace(), owner, descriptor.scope_id,
+            signature, repr(first),
+        )
+        full_shape = tuple(int(size) for size in self.original_raw_data.shape[:3])
+        selected = selection_grid_mask(
+            CropSelection.from_dict(first), self.original_coords, full_shape,
+            rotation_angle=0.0,
+        )
+        if not descriptor.is_full:
+            domain = np.zeros(full_shape, dtype=bool)
+            domain[descriptor.spatial_slices] = True
+            selected &= domain
+        samples = np.where(selected)
+        if not samples[0].size:
+            if descriptor.is_full:
+                return self.original_raw_data
+            return ScopedDataVolume(descriptor, descriptor.extract(self.original_raw_data))
+        bounds = tuple(
+            int(value)
+            for axis in samples
+            for value in (axis.min(), axis.max())
+        )
+        slices = tuple(
+            slice(bounds[2 * axis], bounds[2 * axis + 1] + 1)
+            for axis in range(3)
+        )
+        def embed(values):
+            if descriptor.is_full:
+                output = np.zeros(self.original_raw_data.shape, dtype=np.float32)
+                output[slices + (slice(None),)] = values
+                return output
+            output = np.zeros(descriptor.compact_shape, dtype=np.float32)
+            local_slices = tuple(
+                slice(
+                    bounds[2 * axis] - descriptor.spatial_bounds[2 * axis],
+                    bounds[2 * axis + 1] - descriptor.spatial_bounds[2 * axis] + 1,
+                )
+                for axis in range(3)
+            )
+            output[local_slices + (slice(None),)] = values
+            return ScopedDataVolume(descriptor, output)
+
+        cache = self.__dict__.get("_local_crop_denoise_cache")
+        if cache is None:
+            cache = ArrayLRUCache()
+            self.__dict__["_local_crop_denoise_cache"] = cache
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return embed(cached)
+
+        from bandscope.processing.denoise_engines import DenoiseEngines
+
+        local = np.asarray(
+            self.original_raw_data[slices + (slice(None),)], dtype=np.float32,
+        )
+        local = np.where(selected[slices][..., None], local, 0.0)
+        cpu = getattr(getattr(self, "backend_manager", None), "cpu", None)
+        processed = DenoiseEngines.apply_pipeline(
+            local,
+            methods,
+            max_workers=getattr(cpu, "max_workers", None),
+        )
+        processed = np.ascontiguousarray(processed, dtype=np.float32)
+        processed.setflags(write=False)
+        cache.put(cache_key, processed)
+        return embed(processed)
+
     def _get_display_state_for_spec(self, spec):
         if self.original_raw_data is None or self.original_coords is None:
             return None, None
@@ -3076,13 +3188,18 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         descriptor = self._scope_for_spec(spec)
         if descriptor is None:
             return None, None
-        values = self._scope_values(descriptor)
-        if values is None:
-            return None, None
-        if descriptor.is_full:
-            raw_data = values
+        params = getattr(spec, "params", None) or {}
+        methods = self._normalize_denoise_methods(self.global_denoise_methods)
+        if params.get("local_crop_denoise") and methods:
+            raw_data = self._local_crop_denoise_source(spec, descriptor, methods)
         else:
-            raw_data = ScopedDataVolume(descriptor, values)
+            values = self._scope_values(descriptor)
+            if values is None:
+                return None, None
+            if descriptor.is_full:
+                raw_data = values
+            else:
+                raw_data = ScopedDataVolume(descriptor, values)
 
         coords = self._clone_coords(self.original_coords)
         return raw_data, coords
@@ -4576,6 +4693,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
         slice_info = {
             "axis": axis_index,
+            "index": int(params["mid"]),
             "mode": "integral",
             "range": (int(params["low"]), int(params["up"])),
         }
@@ -4619,6 +4737,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "plot_logical_bounds": plot_bounds,
             "crop_rect": crop_rect,
             "integral_params": params,
+            "rotation_angle": self._rotation_angle_for_spec(spec),
         }
         descriptor = raw_data.descriptor if isinstance(raw_data, ScopedDataVolume) else None
         if (
@@ -4914,6 +5033,26 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return data_3d[:, safe_index, :]
         return data_3d[:, :, safe_index]
 
+    @staticmethod
+    def _source_domain_metadata(raw_data, data_3d):
+        source_descriptor = (
+            raw_data.descriptor if isinstance(raw_data, ScopedDataVolume)
+            else scoped_descriptor_from_array(data_3d)
+        )
+        metadata = {}
+        if source_descriptor is not None and not source_descriptor.is_full:
+            metadata.update(
+                source_data_bounds=source_descriptor.spatial_bounds,
+                full_shape=source_descriptor.full_shape[:3],
+            )
+        current_descriptor = scoped_descriptor_from_array(data_3d)
+        if current_descriptor is not None and not current_descriptor.is_full:
+            metadata.update(
+                data_bounds=current_descriptor.spatial_bounds,
+                full_shape=current_descriptor.full_shape[:3],
+            )
+        return metadata
+
     def _get_home_render_context(self, spec, raw_data, coords):
         if raw_data is None:
             return None
@@ -4921,6 +5060,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         params = spec.params or {}
         data_3d = self._get_rotated_time_range_for_spec(raw_data, spec)
 
+        rotation_angle = self._rotation_angle_for_spec(spec)
         slice_info = params.get("home_slice_info", self.home_slice_info)
         if slice_info is not None:
             axis_index = int(slice_info["axis"])
@@ -4929,7 +5069,11 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 data_2d = self._get_axis_integrated_data_from_raw(data_3d, axis_index, low, up)
             else:
                 data_2d = self._extract_slice_data(data_3d, axis_index, slice_info["index"])
-            return {"view": "2d", "data": data_2d, "slice_info": slice_info, "coords": coords}
+            return {
+                "view": "2d", "data": data_2d, "slice_info": slice_info,
+                "coords": coords, "rotation_angle": rotation_angle,
+                **self._source_domain_metadata(raw_data, data_3d),
+            }
 
         descriptor = scoped_descriptor_from_array(data_3d)
         context = {
@@ -4937,6 +5081,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "data": data_3d,
             "clip_ranges": params.get("clip_ranges", self.clip_ranges),
             "coords": coords,
+            "rotation_angle": rotation_angle,
+            **self._source_domain_metadata(raw_data, data_3d),
         }
         if descriptor is not None and not descriptor.is_full:
             context.update(
@@ -5002,6 +5148,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             params=params,
             data_scope_id=str(snapshot.get("data_scope_id", "full")),
         )
+        source_spec._local_crop_cache_owner = str(
+            snapshot.get("cache_page_id", source_spec.page_id)
+        )
         previous_rotation = self.rotation_angle
         try:
             self.rotation_angle = float(snapshot.get("rotation_angle", previous_rotation))
@@ -5019,24 +5168,79 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             context = dict(context, data=ScopedSpatialArray(context["data"], descriptor))
         return context
 
+    def _derived_source_spec(self, snapshot, *, time_interval=None):
+        if not isinstance(snapshot, dict):
+            return None
+        kind = str(snapshot.get("page_kind") or "")
+        if kind not in {"home", "axis_integral", "axis_integral_crop", "second_derivative"}:
+            return None
+        params = copy.deepcopy(snapshot.get("params") or {})
+        if isinstance(time_interval, dict):
+            params["time_interval"] = copy.deepcopy(time_interval)
+        source_spec = AnalysisPageSpec(
+            page_id="__derived_spatial_source__",
+            title="派生页来源",
+            page_kind=kind,
+            source_module="derived_source",
+            params=params,
+            data_scope_id=str(snapshot.get("data_scope_id", "full")),
+        )
+        source_spec._local_crop_cache_owner = str(
+            snapshot.get("cache_page_id", source_spec.page_id)
+        )
+        return source_spec
+
+    def _compute_derived_source_context(self, snapshot, *, time_interval=None):
+        source_spec = self._derived_source_spec(snapshot, time_interval=time_interval)
+        if source_spec is None:
+            return None, None, None
+        previous_rotation = self.rotation_angle
+        try:
+            self.rotation_angle = float(snapshot.get("rotation_angle", previous_rotation))
+            raw_data, coords = self._get_display_state_for_spec(source_spec)
+            if raw_data is None or coords is None:
+                return None, None, None
+            context = self._compute_render_context(source_spec)
+        finally:
+            self.rotation_angle = previous_rotation
+        return raw_data, coords, context
+
     def _get_3d_source_context_for_axis(self, spec, raw_data):
         if spec.params.get("source_3d"):
             return self._compute_frozen_axis_source(
                 spec.params["source_3d"],
                 time_interval=spec.params.get("time_interval"),
             )
-        context = {"view": "3d", "data": self._get_rotated_time_range_for_spec(raw_data, spec)}
+        data_3d = self._get_rotated_time_range_for_spec(raw_data, spec)
+        context = {
+            "view": "3d",
+            "data": data_3d,
+            "rotation_angle": self._rotation_angle_for_spec(spec),
+            "clip_ranges": copy.deepcopy(spec.params.get("clip_ranges")),
+            **self._source_domain_metadata(raw_data, data_3d),
+        }
         descriptor = scoped_descriptor_from_array(context["data"])
         if descriptor is not None:
             context["data_scope"] = descriptor
         return context
 
-    def _compute_slice_dos(self, raw_data, logical_bounds):
+    def _compute_slice_dos(self, raw_data, logical_bounds, *, angle=None):
         clip_info = self._get_clip_slices(logical_bounds)
         if clip_info is None:
             return None
 
         slices, index_bounds = clip_info
+        angle = float(self.rotation_angle if angle is None else angle)
+        if abs(angle) >= 1e-6:
+            intensities = []
+            for t_index in range(raw_data.shape[3]):
+                frame = self._get_rotated_time_range(
+                    raw_data, t_index, t_index, angle=angle
+                )
+                intensities.append(np.sum(
+                    frame[slices[0], slices[1], slices[2]], dtype=np.float64
+                ))
+            return np.asarray(intensities)
         if isinstance(raw_data, ScopedDataVolume):
             compact, _intersection = raw_data.extract_bounds(tuple(index_bounds))
             if compact.size == 0:
@@ -5060,7 +5264,32 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
     def _compute_slice_dos_for_spec(self, spec, raw_data, coords):
         source = spec.params.get("slice_source")
         if source is None:
-            return self._compute_slice_dos(raw_data, spec.params["clip_ranges"])
+            return self._compute_slice_dos(
+                raw_data,
+                spec.params["clip_ranges"],
+                angle=spec.params.get("source_rotation_angle"),
+            )
+
+        source_page = source.get("source_page")
+        if isinstance(source_page, dict):
+            regions = source_page.get("params", {}).get("crop_regions") or ()
+            has_erasure = any(region.get("operation") == "erase" for region in regions)
+            intensities = []
+            for t_index in range(raw_data.shape[3]):
+                interval = AxisInterval.from_indices(
+                    coords["delay"], t_index, t_index, locked=True, axis_key="delay"
+                )
+                _source_raw, _source_coords, context = self._compute_derived_source_context(
+                    source_page,
+                    time_interval=interval.as_dict(),
+                )
+                if context is None or context.get("crop_empty"):
+                    intensities.append(np.nan)
+                elif has_erasure:
+                    intensities.append(np.nansum(context["data"], dtype=np.float64))
+                else:
+                    intensities.append(np.sum(context["data"], dtype=np.float64))
+            return np.asarray(intensities)
 
         # Rebuild the frozen spatial source for each delay, then replay the
         # same crop chain as the 2D view. Never read the live source page here.
@@ -5155,7 +5384,81 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return self._get_axis_integral_crop_context(source_spec, raw_data, coords)
         return self._get_axis_integral_context(source_spec, raw_data, coords)
 
+    def _get_frozen_energy_dos_context(self, spec, coords):
+        snapshot = spec.params.get("energy_source")
+        if not isinstance(snapshot, dict):
+            return None
+        _source_raw, source_coords, context = self._compute_derived_source_context(
+            snapshot, time_interval=spec.params.get("time_interval")
+        )
+        if context is None or context.get("crop_empty"):
+            return None
+        source_coords = source_coords or coords
+        t_low, t_up = self._time_indices_for_spec(spec)
+        delay_text = self._current_delay_text(t_low)
+        if t_up != t_low:
+            delay_text = f"{delay_text}~{self._current_delay_text(t_up)}"
+
+        if context.get("view") == "2d":
+            plot_axes = context["plot_axes"]
+            if plot_axes.get("y_key") != "E":
+                return None
+            plot_bounds = context["plot_logical_bounds"]
+            y_low = int(plot_bounds["y_low"])
+            y_up = int(plot_bounds["y_up"])
+            energy_axis = np.asarray(source_coords["E"], dtype=np.float64)[y_low:y_up + 1]
+            axis_label = {
+                0: "X-integral", 1: "Y-integral"
+            }.get(int(spec.params.get("axis_index", -1)), "Axis-integral")
+            crop_suffix = self._crop_rect_title_suffix(spec.params)
+            return {
+                "view": "1d",
+                "x_data": energy_axis,
+                "y_data": np.nansum(context["data"], axis=0, dtype=np.float64),
+                "title": f"Energy DOS ({axis_label}{crop_suffix})",
+                "xlabel": "Energy (eV)",
+                "plot_axes": plot_axes,
+                "plot_logical_bounds": plot_bounds,
+            }
+        if context.get("view") != "3d":
+            return None
+
+        data_3d = context["data"]
+        descriptor = scoped_descriptor_from_array(data_3d)
+        data_bounds = context.get("data_bounds")
+        energy_axis = np.asarray(source_coords["E"], dtype=np.float64)
+        clipped = False
+        clip_ranges = spec.params.get("clip_ranges")
+        if clip_ranges is not None and descriptor is None and data_bounds is None:
+            clip_info = self._get_clip_slices(clip_ranges)
+            if clip_info is not None:
+                slices, _ = clip_info
+                data_3d = data_3d[slices[0], slices[1], slices[2]]
+                energy_axis = energy_axis[slices[2]]
+                clipped = True
+        if descriptor is not None and not descriptor.is_full:
+            compact_intensity = np.nansum(
+                np.asarray(data_3d), axis=(0, 1), dtype=np.float64
+            )
+            intensity = np.zeros(descriptor.full_shape[2], dtype=np.float64)
+            intensity[descriptor.spatial_slices[2]] = compact_intensity
+        elif data_bounds is not None:
+            e_low, e_up = (int(value) for value in data_bounds[4:6])
+            energy_axis = energy_axis[e_low:e_up + 1]
+            intensity = np.nansum(data_3d, axis=(0, 1), dtype=np.float64)
+        else:
+            intensity = np.nansum(data_3d, axis=(0, 1), dtype=np.float64)
+        return {
+            "view": "1d",
+            "x_data": energy_axis,
+            "y_data": intensity,
+            "title": f"Energy DOS ({'Clipped, ' if clipped else ''}T={delay_text})",
+            "xlabel": "Energy (eV)",
+        }
+
     def _get_energy_dos_context(self, spec, raw_data, coords):
+        if spec.params.get("energy_source") is not None:
+            return self._get_frozen_energy_dos_context(spec, coords)
         source_kind = spec.params.get("source_page_kind", "home")
         if source_kind == "axis_integral":
             source_context = self._build_axis_like_context_from_params(raw_data, coords, spec.params)
@@ -5781,9 +6084,112 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "compact_bounds": compact_plot_bounds,
         }
 
+    def _build_frozen_second_derivative_context(self, coords, params):
+        snapshot = params.get("derivative_source")
+        if not isinstance(snapshot, dict):
+            return None
+        snapshot = copy.deepcopy(snapshot)
+        if params.get("source_view") == "2d":
+            source_params = snapshot.setdefault("params", {})
+            if params.get("source_page_kind") == "home":
+                slice_axis = int(params.get("slice_axis", -1))
+                slice_index = int(params.get("slice_index", 0))
+                low = int(params.get("integral_low", slice_index))
+                up = int(params.get("integral_up", slice_index))
+                source_params["home_slice_info"] = {
+                    "axis": slice_axis,
+                    "index": slice_index,
+                    "mode": "integral",
+                    "range": (low, up),
+                }
+            elif params.get("source_page_kind") == "axis_integral":
+                for key in ("low", "up", "mid"):
+                    value = params.get(f"integral_{key}")
+                    if value is not None:
+                        source_params[key] = int(value)
+        t_low, t_up = self._time_indices_for_params(params, page_kind="second_derivative")
+        time_interval = params.get("time_interval")
+        source_raw, source_coords, source = self._compute_derived_source_context(
+            snapshot, time_interval=time_interval
+        )
+        if source is None or source.get("crop_empty"):
+            return None
+        source_coords = source_coords or coords
+        source_metadata = {
+            "source_t_index": t_low,
+            "source_t_indices": (t_low, t_up),
+        }
+        sd_params = params.get("second_derivative_params") or {}
+        threshold = float(sd_params.get("threshold", 0.0))
+
+        if params.get("source_view") == "3d":
+            if source.get("view") != "3d":
+                return None
+            derivative_axis = int(params.get("derivative_axis", -1))
+            if derivative_axis not in (0, 1, 2):
+                return None
+            data_3d = source["data"]
+            if (
+                scoped_descriptor_from_array(data_3d) is None
+                and source.get("data_bounds") is not None
+            ):
+                full_shape = tuple(
+                    int(np.asarray(source_coords[key]).size) for key in ("X", "Y", "E")
+                ) + (int(np.asarray(source_coords["delay"]).size),)
+                descriptor = DataScopeDescriptor(
+                    "second_derivative_source", full_shape,
+                    tuple(int(value) for value in source["data_bounds"]),
+                )
+                data_3d = ScopedSpatialArray(data_3d, descriptor)
+            previous_rotation = self.rotation_angle
+            try:
+                self.rotation_angle = float(snapshot.get("rotation_angle", previous_rotation))
+                derivative = self._get_cached_3d_second_derivative(
+                    source_raw,
+                    data_3d,
+                    source_coords,
+                    derivative_axis,
+                    ("frozen_source", repr(snapshot), t_low, t_up),
+                    threshold=threshold,
+                )
+            finally:
+                self.rotation_angle = previous_rotation
+            return dict(
+                source,
+                data=derivative,
+                coords=source_coords,
+                derivative_axis=derivative_axis,
+                **source_metadata,
+            )
+
+        if source.get("view") != "2d":
+            return None
+        plot_axes = source.get("plot_axes") or {}
+        if plot_axes.get("y_key") != "E":
+            return None
+        source_slice_info = dict(source.get("slice_info") or {})
+        plot_bounds = source["plot_logical_bounds"]
+        energy_low = int(plot_bounds["y_low"])
+        energy_up = int(plot_bounds["y_up"])
+        energy_axis = np.asarray(source_coords["E"], dtype=np.float64)[energy_low:energy_up + 1]
+        derivative = self._compute_energy_second_derivative(
+            source["data"], energy_axis=energy_axis, threshold=threshold
+        )
+        title = f"Energy Second Derivative - {self._second_derivative_plot_label(params)}"
+        source_slice_info["title_override"] = title
+        return dict(
+            source,
+            data=derivative,
+            slice_info=source_slice_info,
+            coords=source_coords,
+            **source_metadata,
+        )
+
     def _build_second_derivative_context_from_params(self, raw_data, coords, params):
         if raw_data is None or coords is None:
             return None
+        if params.get("derivative_source") is not None:
+            return self._build_frozen_second_derivative_context(coords, params)
 
         source_kind = params.get("source_page_kind")
         if params.get("source_view") == "3d" and source_kind == "home":
@@ -5884,6 +6290,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if context is None:
             return None
         regions = list(spec.params.get("crop_regions", ()))
+        if spec.params.get("derivative_source") is not None:
+            regions = []
         slice_info = spec.params.get("home_slice_info") or {}
         if (
             spec.page_kind == "home" and slice_info.get("mode") == "integral"
@@ -5893,12 +6301,24 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             axis_index = int(slice_info["axis"])
             remaining = [index for index in range(3) if index != axis_index]
             bounds = tuple(value for index in remaining for value in first["bounds"][2 * index:2 * index + 2])
+            first_logical = first.get("logical_bounds") or ()
+            logical_bounds = None
+            if len(first_logical) == 6:
+                logical_bounds = tuple(
+                    value for index in remaining
+                    for value in first_logical[2 * index:2 * index + 2]
+                )
             selection = CropSelection(
                 "2d", tuple(("X", "Y", "E")[index] for index in remaining), bounds,
                 bool(first.get("e_flip")), str(first.get("operation", "crop")),
+                rotation_angle=first.get("rotation_angle"),
+                logical_bounds=logical_bounds,
             )
             regions.insert(0, selection.to_dict())
-        return apply_crop_regions(context, regions)
+        rotation_angle = float(context.get(
+            "rotation_angle", self._rotation_angle_for_spec(spec)
+        ) or 0.0)
+        return apply_crop_regions(context, regions, rotation_angle=rotation_angle)
 
     def _get_derived_render_context(self, spec):
         """派生结果页的渲染上下文：由插件同步计算，宿主负责缓存与回退。"""
@@ -6953,11 +7373,24 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                             QMessageBox.Warning,
                         )
                         return None
+                    selection_angle = float(base.get(
+                        "rotation_angle", self.rotation_angle
+                    ) or 0.0)
+                    if abs(selection_angle) >= 1e-6:
+                        selection = capture_selection_geometry(
+                            base, selection, rotation_angle=selection_angle
+                        )
                     region = copy.deepcopy(selection.to_dict())
                     region["operation"] = "crop"
                     regions.append(region)
-                context = apply_crop_regions(base, regions)
-                if context.get("view") == "2d":
+                if current.page_kind == "home":
+                    context = self._compute_render_context(current)
+                else:
+                    context = apply_crop_regions(
+                        base, regions,
+                        rotation_angle=float(base.get("rotation_angle", self.rotation_angle) or 0.0),
+                    )
+                if context.get("view") == "2d" or regions:
                     if context.get("crop_empty"):
                         self._show_message("无法积分", "当前裁剪范围内没有有效数据。", QMessageBox.Warning)
                         return None
@@ -6985,9 +7418,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                         title=f"切片内强度积分 - {current.title}",
                         page_kind="slice_dos", source_module="data_process",
                         source_page_id=current.page_id,
+                        data_scope_id=current.data_scope_id,
                         params={"slice_source": {
                             "context": template,
                             "crop_regions": regions,
+                            "source_page": self._freeze_derived_source(
+                                current, regions=regions
+                            ),
                         }},
                     )
                     self._seed_control_state_for_spec(spec)
@@ -7006,8 +7443,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             title=f"切片内强度积分 [{x1}:{x2}, {y1}:{y2}, {z1}:{z2}]",
             page_kind="slice_dos",
             source_module="data_process",
-            params={"clip_ranges": list(self.clip_ranges)},
+            params={
+                "clip_ranges": list(self.clip_ranges),
+                "source_rotation_angle": float(self.rotation_angle),
+            },
             source_page_id=source_spec.page_id if source_spec is not None else self.left_workspace.home_page_id,
+            data_scope_id=getattr(source_spec or current, "data_scope_id", "full"),
         )
         self._seed_control_state_for_spec(spec)
         return spec
@@ -7085,20 +7526,29 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                     }
                 )
             title = f"Energy-DOS [{self._second_derivative_plot_label(spec_params)}{self._crop_rect_title_suffix(spec_params)}]"
-        elif (
-            current_spec.page_kind == "home"
-            and self.clip_ranges is not None
-            and (self._scope_for_spec(current_spec) or DataScopeDescriptor.full(self.original_raw_data.shape)).is_full
-        ):
-            spec_params["clip_ranges"] = list(self.clip_ranges)
-            title = f"Energy-DOS [Clipped T={t_low}/{delay_text}]"
+        elif current_spec.page_kind == "home":
+            if self._integration_home_slice_axis(current_spec) == 2:
+                self._show_message(
+                    "无法生成 Energy DOS", "当前 XY 切面不包含能量轴。", QMessageBox.Warning
+                )
+                return None
+            if (
+                self.clip_ranges is not None
+                and not current_spec.params.get("crop_regions")
+                and (self._scope_for_spec(current_spec) or DataScopeDescriptor.full(self.original_raw_data.shape)).is_full
+            ):
+                spec_params["clip_ranges"] = list(self.clip_ranges)
+                title = f"Energy-DOS [Clipped T={t_low}/{delay_text}]"
 
+        spec_params["energy_source"] = self._freeze_derived_source(current_spec)
+        spec_params["source_rotation_angle"] = spec_params["energy_source"]["rotation_angle"]
         spec = AnalysisPageSpec(
             page_id=self._make_page_id(),
             title=title,
             page_kind="energy_dos",
             source_module="data_process",
             source_page_id=current_spec.page_id,
+            data_scope_id=current_spec.data_scope_id,
             params=spec_params,
         )
         self._seed_control_state_for_spec(spec)
@@ -7283,6 +7733,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             )
             return None
 
+        spec.data_scope_id = current_spec.data_scope_id
+        spec.params["derivative_source"] = self._freeze_derived_source(current_spec)
+        spec.params["source_rotation_angle"] = spec.params["derivative_source"]["rotation_angle"]
         sd_params = self.page_control_blank.get_second_derivative_params()
         spec.params["second_derivative_params"] = sd_params
 
@@ -7390,8 +7843,21 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             "page_kind": source.page_kind,
             "params": params,
             "data_scope_id": source.data_scope_id,
-            "rotation_angle": float(self.rotation_angle),
+            "rotation_angle": self._rotation_angle_for_spec(source),
+            "cache_page_id": str(source.page_id),
         }
+
+    def _freeze_derived_source(self, source, *, regions=None):
+        snapshot = self._freeze_axis_source_page(source)
+        params = snapshot["params"]
+        if source.page_kind in {"axis_integral", "axis_integral_crop"}:
+            resolved = self._resolved_axis_integral_params(source)
+            if resolved is not None:
+                params.update(copy.deepcopy(resolved))
+        if regions is not None:
+            params["crop_regions"] = copy.deepcopy(list(regions))
+        params["source_rotation_angle"] = float(snapshot["rotation_angle"])
+        return snapshot
 
     def _build_canvas_axis_slice_spec(self, source, axis_index):
         snapshot = self._freeze_axis_source_page(source)
@@ -7591,6 +8057,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return (
                 self._integration_home_slice_axis(spec) in (0, 1, 2)
                 or self._integration_home_has_clip_range(spec)
+                or any(
+                    isinstance(region, dict) and region.get("view") == "3d"
+                    for region in (getattr(spec, "params", {}) or {}).get("crop_regions") or ()
+                )
             )
         if action_key == "builtin:energy_dos":
             return kind == "home" or (integral_kind and axis_index in (0, 1))
@@ -8282,13 +8752,13 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         self._sync_enhancement_controls(spec, context)
         if spec.page_kind == self.PATH_SLICE_PAGE_KIND:
             self._path_slices().sync_display_controls(spec)
-        redraw_enhancement = not (
+        redraw_overlays = not (
             quality == RenderQuality.PREVIEW
             and render_context["view"] == "2d"
             and preview_blitted
         )
         self._draw_enhancement_regions(
-            context, display_fields, redraw=redraw_enhancement
+            context, display_fields, redraw=redraw_overlays
         )
         # 体数据、框、标签与色带更新完之后只渲染一次；辅助对象自己不再 render。
         is_3d_view = render_context["view"] == "3d"
@@ -8308,7 +8778,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             # 相机快照 / E 轴翻转 / 程序恢复都已在上面落定，这里回读最终姿态。
             self._sync_camera_view_controls()
         path_controller = self._path_slices()
-        if path_controller is not None:
+        if path_controller is not None and redraw_overlays:
             path_controller.redraw_draft()
 
     def on_result_page_closed(self, page_id):

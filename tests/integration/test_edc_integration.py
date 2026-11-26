@@ -60,6 +60,10 @@ class _EdcHost(EdcIntegrationMixin):
     def _resolved_axis_integral_params(self, spec):
         return copy.deepcopy(spec.params)
 
+    def _rotation_angle_for_spec(self, spec):
+        angle = (spec.params or {}).get("source_rotation_angle")
+        return float(self.rotation_angle if angle is None else angle)
+
     def _build_axis_source_spec_from_params(self, params):
         self.axis_build_calls.append(copy.deepcopy(params))
         return AnalysisPageSpec(
@@ -69,6 +73,13 @@ class _EdcHost(EdcIntegrationMixin):
             "test",
             params=copy.deepcopy(params),
         )
+
+    @staticmethod
+    def _axis_plot_info(axis_index):
+        keys = tuple(
+            key for index, key in enumerate(("X", "Y", "E")) if index != axis_index
+        )
+        return {"x_key": keys[0], "y_key": keys[1]}
 
     def _get_3d_source_context_for_axis(self, spec, raw_data):
         self.axis_source_calls += 1
@@ -183,6 +194,12 @@ class EdcIntegrationTests(unittest.TestCase):
                     for key in plot_keys
                 )
             ),
+            "coords": self.coords,
+            "slice_info": {
+                "axis": axis_index,
+                "mode": "integral",
+                "range": (low, up),
+            },
             "plot_axes": {"x_key": plot_keys[0], "y_key": plot_keys[1]},
         }
         return _EdcHost(spec, context, selections, self.raw_data, self.coords)
@@ -586,6 +603,38 @@ class EdcIntegrationTests(unittest.TestCase):
                 metadata = page.params["curve_metadata"][0]
                 self.assertEqual(metadata["index_bounds"], (1, 1, 0, 1, 1, 4))
                 self.assertEqual(page.params["source_data_bounds"], bounds)
+
+    def test_axis_page_source_angle_overrides_live_window_angle(self):
+        selection = CropSelection("2d", ("X", "Y"), (-1.0, -0.5, 0.0, 1.0))
+        host = self._axis_host([("xy", selection)], page_kind="axis_integral")
+        host.left_workspace.spec.params["source_rotation_angle"] = 17.5
+        host.rotation_angle = 62.0
+
+        page_id = host._create_edc_result_from_selections()
+
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        self.assertEqual(page.params["source_rotation_angle"], 17.5)
+        frozen = page.params["curve_metadata"][0]["selection"]
+        self.assertEqual(frozen["rotation_angle"], 17.5)
+        self.assertEqual(frozen["logical_bounds"], (0, 1, 0, 1))
+
+    def test_legacy_saved_selection_without_angle_keeps_rectangular_recompute(self):
+        selection = CropSelection("2d", ("X", "Y"), (-1.0, -0.5, 0.0, 1.0))
+        host = self._axis_host([("xy", selection)], page_kind="axis_integral")
+        page_id = host._create_edc_result_from_selections()
+        self.assertIsNotNone(page_id)
+        page = host.left_workspace.added[0]
+        metadata = page.params["curve_metadata"][0]
+        metadata["selection"].pop("rotation_angle")
+        metadata["selection"].pop("logical_bounds")
+        expected = np.asarray(page.params["base_curve"]["y_data"])
+
+        recomputed = host._recompute_edc_time_curves(page)
+
+        self.assertIsNotNone(recomputed)
+        np.testing.assert_allclose(recomputed["curves"][0]["y_data"], expected)
+        self.assertNotIn("rotation_angle", recomputed["curve_metadata"][0]["selection"])
 
     def test_source_scope_and_rotation_are_frozen_in_page_params(self):
         bounds = (1, 3, 0, 2, 0, 4)

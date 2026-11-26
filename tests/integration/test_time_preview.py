@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -5,6 +6,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
@@ -214,6 +216,137 @@ class Interactive2DPreviewTests(unittest.TestCase):
 
         render.assert_not_called()
         self.assertIsNotNone(self.window._display_stats_job)
+
+
+class XYSlowPreviewTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.addCleanup(clear_range_cache)
+        path = Path(self.temp.name) / "xy-source.npz"
+        synthetic_npz(path, seed=61)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(str(path)))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
+        self.spec = self.window._build_canvas_axis_slice_spec(
+            self.window.left_workspace.current_spec(), 2
+        )
+        self.window.left_workspace.add_page(self.spec)
+        self.window.request_refresh = MethodType(
+            My3DAnalyzer.request_refresh, self.window
+        )
+        self.window.global_refresh = MethodType(
+            My3DAnalyzer.global_refresh, self.window
+        )
+        self.window._prepare_display_statistics = MethodType(
+            EnhancementInteractionMixin._prepare_display_statistics, self.window
+        )
+        self.window.global_refresh()
+        self.assertTrue(self._settle())
+        QTest.qWait(40)
+
+    def _settle(self):
+        deadline = time.perf_counter() + 10.0
+        while time.perf_counter() < deadline:
+            self.app.processEvents()
+            coordinator = self.window.refresh_coordinator
+            if (
+                self.window._render_exact_ready
+                and self.window._display_stats_job is None
+                and coordinator._running is None
+                and coordinator._pending_compute is None
+                and not coordinator._preview_timer.isActive()
+                and not coordinator._exact_timer.isActive()
+            ):
+                return True
+            QTest.qWait(5)
+        return False
+
+    def _expected_xy(self, frame):
+        low = int(self.spec.params["low"])
+        up = int(self.spec.params["up"])
+        return self.window.core.raw_data[:, :, low:up + 1, frame].sum(
+            axis=2, dtype=np.float64
+        )
+
+    def test_slow_xy_preview_does_not_redraw_intermediate_exact_frame(self):
+        window = self.window
+        canvas = window.canvas_2d
+        self.assertTrue(window.path_slice_controller.can_use_source(self.spec))
+        self.assertEqual(float(window.ax_2d.get_aspect()), 1.0)
+        blit_frames = []
+        draw_events = []
+        original_blit = canvas.blit
+
+        def record_blit(*args, **kwargs):
+            result = original_blit(*args, **kwargs)
+            blit_frames.append({
+                "pixels": np.asarray(canvas.buffer_rgba()).copy(),
+                "background": window.ax_2d._arpes_preview_background,
+                "bbox": tuple(window.ax_2d.bbox.bounds),
+            })
+            return result
+
+        draw_cid = canvas.mpl_connect(
+            "draw_event", lambda _event: draw_events.append(True)
+        )
+        self.addCleanup(canvas.mpl_disconnect, draw_cid)
+        with patch.object(canvas, "blit", record_blit):
+            window.timeline_bar.slider_time.setValue(1)
+            QTest.qWait(80)
+            QTest.qWait(250)
+            self.assertTrue(self._settle())
+            QTest.qWait(40)
+            exact_artist = np.asarray(window.ax_2d._arpes_image.get_array()).copy()
+            np.testing.assert_allclose(
+                exact_artist, self._expected_xy(1).T, rtol=2e-6, atol=2e-6
+            )
+            blit_frames.clear()
+            draw_events.clear()
+
+            window.timeline_bar.slider_time.setValue(2)
+            QTest.qWait(80)
+            self.assertEqual(len(blit_frames), 1)
+            preview = blit_frames[0]
+            displayed = np.asarray(canvas.buffer_rgba()).copy()
+            preview_levels = dict(
+                window._enhancement_cache[1]["background_level_info"]
+            )
+
+            np.testing.assert_array_equal(displayed, preview["pixels"])
+            self.assertEqual(draw_events, [])
+            np.testing.assert_allclose(
+                window.current_render_context["data"], self._expected_xy(2),
+                rtol=2e-6, atol=2e-6,
+            )
+            np.testing.assert_array_equal(
+                np.asarray(window.ax_2d._arpes_image.get_array()), exact_artist
+            )
+            self.assertIs(window.ax_2d._arpes_preview_background, preview["background"])
+            self.assertEqual(tuple(window.ax_2d.bbox.bounds), preview["bbox"])
+
+            window.flush_time_interval_refresh()
+            self.assertTrue(self._settle())
+            QTest.qWait(40)
+
+        exact_image = window.ax_2d._arpes_image
+        np.testing.assert_allclose(
+            np.asarray(exact_image.get_array()), self._expected_xy(2).T,
+            rtol=2e-6, atol=2e-6,
+        )
+        self.assertEqual(
+            tuple(exact_image.get_clim()),
+            (preview_levels["black_value"], preview_levels["white_value"]),
+        )
+        self.assertEqual(tuple(window.ax_2d.bbox.bounds), preview["bbox"])
+        self.assertTrue(draw_events)
 
 
 if __name__ == "__main__":

@@ -132,9 +132,13 @@ class RotationWorkflowTests(unittest.TestCase):
             )
 
             window.on_cut()
-            self.assertIs(window.left_workspace.current_spec(), source)
-            self.assertIn("0°", window.crop_controller.popup.error_label.text())
+            rotated = window.left_workspace.current_spec()
+            self.assertIsNot(rotated, source)
+            self.assertEqual(rotated.source_page_id, source.page_id)
+            self.assertEqual(rotated.params["crop_regions"][0]["rotation_angle"], -7.5)
+            self.assertNotIn("恢复为 0°", window.crop_controller.popup.error_label.text())
 
+            window.left_workspace.activate_page(source.page_id)
             overlay.rotation_panel.zero_button.click()
             self.assertEqual(window.rotation_angle, 0.0)
             self.assertFalse(overlay.rotation_button.isChecked())

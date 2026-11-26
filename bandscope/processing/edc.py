@@ -128,9 +128,9 @@ def _index_bounds(index_bounds) -> tuple[int, int, int, int, int, int]:
 
 
 def integrate_edc(
-    data_3d, energy_axis, index_bounds, *, ignore_nan=True
+    data_3d, energy_axis, index_bounds, *, ignore_nan=True, valid_mask=None
 ) -> EdcCurveData | None:
-    """Sum X/Y intensities over the intersection of an absolute ROI and data scope."""
+    """Sum X/Y intensities over an absolute ROI and its valid grid samples."""
     source = np.asarray(data_3d)
     if source.ndim != 3:
         raise ValueError("EDC 积分需要已完成时间缩减的 [X, Y, E] 三维数据。")
@@ -163,12 +163,35 @@ def integrate_edc(
         local_slices.append(slice(low - scope_low, up - scope_low + 1))
 
     selected = source[tuple(local_slices)]
+    selected_mask = None
+    if valid_mask is not None:
+        mask = np.asarray(valid_mask, dtype=bool)
+        if mask.ndim != 3:
+            raise ValueError("EDC 有效掩膜必须是三维布尔网格。")
+        if mask.shape == full_shape:
+            mask_slices = tuple(
+                slice(intersections[2 * axis], intersections[2 * axis + 1] + 1)
+                for axis in range(3)
+            )
+        elif mask.shape == source.shape:
+            mask_slices = tuple(local_slices)
+        else:
+            raise ValueError("EDC 有效掩膜必须匹配完整数据域或紧凑数据形状。")
+        selected_mask = mask[mask_slices]
+
+    if selected_mask is not None:
+        selected = np.where(selected_mask, selected, np.nan)
     if ignore_nan:
         intensity = np.nansum(selected, axis=(0, 1), dtype=np.float64)
         has_valid_sample = np.any(~np.isnan(selected), axis=(0, 1))
         intensity = np.where(has_valid_sample, intensity, np.nan)
     else:
+        if selected_mask is not None:
+            selected = np.where(selected_mask, selected, 0.0)
         intensity = np.sum(selected, axis=(0, 1), dtype=np.float64)
+        if selected_mask is not None:
+            has_selected_sample = np.any(selected_mask, axis=(0, 1))
+            intensity = np.where(has_selected_sample, intensity, np.nan)
     energy_low, energy_up = intersections[4:6]
     return EdcCurveData(
         energy=energy[energy_low:energy_up + 1].copy(),

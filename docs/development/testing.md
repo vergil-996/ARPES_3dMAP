@@ -51,6 +51,7 @@ python scripts/validation/verify_momentum_calibration.py --synthetic-only
 python scripts/validation/verify_energy_calibration.py .local/data/WSe2_step.npz
 python scripts/validation/verify_energy_calibration.py --synthetic-only
 python scripts/validation/verify_multi_region_edc.py .local/data/WSe2_step.npz
+python scripts/validation/verify_rotated_crop_analysis.py
 python scripts/validation/export_acceptance.py .local/data/NiHITP_calibrated_2.npz
 python scripts/validation/verify_flat_band_alpha.py --bands 5
 python scripts/validation/volume_display_quality.py .local/data/WSe2_step.npz D:/ARPES数据/npz_files/西湖/Au_cut.npz D:/ARPES数据/npz_files/西湖/NiHITP_cut.npz --blender D:/blender/blender.exe
@@ -97,6 +98,8 @@ python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blende
 `verify_multi_region_edc.py` 使用真实窗口验收画布工具条：「裁剪」「裁空」位于画布初级工具栏，「新增框选范围」「生成 EDC」「切片内强度积分」位于「框选范围」次级栏。脚本点击这些真实入口，检查重复展开后草稿保留、裁剪／裁空只作用活动选区，以及每个 2D 选框与 3D 交互盒都有稳定的 `Z{id}` 标号；随后分别在 2D 手柄和 3D 手柄上右键，核对弹窗对应该盒的各轴上下限，点击移除并确认其他选区不受影响。
 
 EDC 数值验收覆盖 3D 主页、E 轴积分的 kx–ky 页及 XZ／YZ 页：kx–ky 的框选只限定 Kx／Ky，EDC 必须保留完整能量曲线；XZ／YZ 的范围是框选两轴加该页法向双端滑条区间，脚本按完整 X／Y／E 索引区间独立复算曲线。3D 多盒仍核对各自不同的 E 范围与多选区同页比较。切片内强度积分必须通过次级工具按钮创建，范围为**活动框选 + 当前页法向双端滑条区间**，脚本逐扫描帧复算强度。若法向区间初始锁定，先真实点击锁徽章并确认解锁，再分别提交双端，避免锁定状态下的整体平移。视图右键「处理分析」不再含内置 EDC 或切片内强度积分。脚本输出只代表自动操作、数值断言和截图完成；Z 标号可读性、手柄命中、弹窗布局及科研出图质量仍需人工视觉复核。
+
+`verify_rotated_crop_analysis.py` 使用本机窗口、VTK、原生旋钮、范围浮窗、工具按钮和右键菜单，验收 30° 旋转后的裁剪／裁空及冻结来源分析页，覆盖 EDC、切片内强度积分、XY／XZ／YZ、Energy DOS、二阶导、折线路径、回 0° 切帧和 `log10`。默认读取 `.local/data/WSe2_step.npz`，默认输出 `.local/outputs/rotated-crop-analysis/`，包含 `report.json` 和窗口截图；真实文件缺失时直接失败，不用合成数据替代。严格合成数值回归仍由 `tests/integration/test_rotated_*.py` 负责，实窗脚本不能替代这些回归。自动操作、数值断言和截图完成不等于维护者人工视觉复核，也不代表鼠标手感或科研出图质量已获认可。
 
 `verify_crop_window.py` 真实点击画布初级「裁剪」「裁空」与框选主按钮，检查初级／次级父控件和布局归属、浮窗位置记忆与重绘恢复；范围标题应以「裁剪范围」或「裁空范围」开头并包含对应 `Z{id}`，不能再与无标号旧标题做全等比较。`verify_time_axis_visibility.py` 在启动、动态 3D、动态含能量轴 2D、静态及重新加载页面均确认右键「处理分析」无内置切片积分，同时检查合法动态 2D 页的 `slice_dos_button` 可用、静态 2D 页禁用。
 

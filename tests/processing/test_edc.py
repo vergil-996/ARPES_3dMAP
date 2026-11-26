@@ -218,6 +218,80 @@ class EdcIntegrationTests(unittest.TestCase):
         )
         np.testing.assert_allclose(result.intensity, [np.nan, np.nan, 4.0])
 
+    def test_valid_mask_excludes_samples_and_retains_real_zero(self):
+        data = np.zeros((4, 3, 5), dtype=np.float64)
+        data[1, 0, 2] = 7.0
+        data[2, 1, 2] = 11.0
+        mask = np.zeros(data.shape, dtype=bool)
+        mask[1, 0, 2] = True
+
+        result = integrate_edc(
+            data,
+            self.energy,
+            (1, 2, 0, 1, 2, 2),
+            valid_mask=mask,
+        )
+
+        np.testing.assert_allclose(result.intensity, [7.0])
+        data[1, 0, 2] = 0.0
+        result = integrate_edc(
+            data,
+            self.energy,
+            (1, 2, 0, 1, 2, 2),
+            valid_mask=mask,
+        )
+        np.testing.assert_allclose(result.intensity, [0.0])
+
+    def test_valid_mask_accepts_full_grid_and_compact_scope(self):
+        descriptor = DataScopeDescriptor(
+            "roi", (5, 4, 6, 1), (1, 3, 1, 3, 2, 5)
+        )
+        compact = np.arange(3 * 3 * 4, dtype=np.float64).reshape(3, 3, 4)
+        scoped = ScopedSpatialArray(compact, descriptor)
+        energy = np.array([5.0, 4.0, 3.0, 2.0, 1.0, 0.0])
+        bounds = (2, 3, 1, 2, 2, 4)
+        full_mask = np.zeros(descriptor.full_shape[:3], dtype=bool)
+        full_mask[2:4, 1:3, 2:5] = True
+        full_mask[2, 1, 2] = False
+        compact_mask = full_mask[descriptor.spatial_slices]
+        selected = compact[1:3, 0:2, 0:3]
+        selected_mask = compact_mask[1:3, 0:2, 0:3]
+        expected = np.nansum(
+            np.where(selected_mask, selected, np.nan), axis=(0, 1)
+        )
+
+        for mask in (full_mask, compact_mask):
+            with self.subTest(mask_shape=mask.shape):
+                result = integrate_edc(scoped, energy, bounds, valid_mask=mask)
+                np.testing.assert_allclose(result.intensity, expected)
+
+    def test_all_false_or_mismatched_valid_mask_has_explicit_empty_semantics(self):
+        mask = np.zeros(self.data.shape, dtype=bool)
+        for ignore_nan in (True, False):
+            with self.subTest(ignore_nan=ignore_nan):
+                result = integrate_edc(
+                    self.data,
+                    self.energy,
+                    (1, 2, 0, 1, 1, 3),
+                    ignore_nan=ignore_nan,
+                    valid_mask=mask,
+                )
+                self.assertTrue(np.isnan(result.intensity).all())
+        with self.assertRaises(ValueError):
+            integrate_edc(
+                self.data,
+                self.energy,
+                (1, 2, 0, 1, 1, 3),
+                valid_mask=np.ones((2, 2), dtype=bool),
+            )
+        with self.assertRaises(ValueError):
+            integrate_edc(
+                self.data,
+                self.energy,
+                (1, 2, 0, 1, 1, 3),
+                valid_mask=np.ones((2, 2, 2), dtype=bool),
+            )
+
     def test_invalid_volume_energy_and_bounds_raise_value_error(self):
         with self.assertRaises(ValueError):
             integrate_edc(np.ones((2, 2)), self.energy, (0, 1, 0, 1, 0, 4))
