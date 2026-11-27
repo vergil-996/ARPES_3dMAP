@@ -33,7 +33,9 @@ def _slice_for_axis(axis, coords):
         1: (len(coords["E"]), len(coords["X"])),
         2: (len(coords["Y"]), len(coords["X"])),
     }[axis]
-    data = np.random.rand(*shape)
+    # 固定梯度而不是随机数：预览用例按像素颜色比较，随机数据偶尔会让取样点
+    # 恰好落在色阶最低端，与全零预览同色而误报失败（2026-11-27 全量复现）。
+    data = np.linspace(0.05, 1.0, num=shape[0] * shape[1]).reshape(shape)
     return data, {"axis": axis, "mode": "slice", "index": 0}
 
 
