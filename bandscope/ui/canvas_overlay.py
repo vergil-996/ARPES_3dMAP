@@ -1,9 +1,10 @@
 """画布右侧的视角预设与常用操作工具条。"""
 from PyQt5.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QSignalBlocker, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QRegion
+from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath, QPen, QRegion
 from PyQt5.QtWidgets import QApplication, QFrame, QVBoxLayout
 
 from bandscope.ui import theme
+from bandscope.ui.fluent_icon import FluentIconEngine
 from bandscope.ui.rotation_dial import RotationDialPanel
 from bandscope.ui.ui_controls import ActionButton
 
@@ -19,6 +20,27 @@ class _RotationActionButton(ActionButton):
         font.setPixelSize(9)
         painter.setFont(font)
         painter.drawText(self.rect().adjusted(12, 10, -2, -1), Qt.AlignRight | Qt.AlignBottom, "Z")
+
+
+class _LetterActionButton(ActionButton):
+    def __init__(self, letter, parent=None):
+        super().__init__(parent)
+        self._letter = letter
+        self.setProperty("iconLetter", letter)
+        self.apply_theme()
+
+    def apply_theme(self):
+        paths = {
+            "E": "M11 3H5V13H11M5 8H10",
+            "T": "M4 3H12M8 3V13",
+        }
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+            f'<path d="{paths[self._letter]}" fill="none" stroke="{theme.TEXT_2}" '
+            'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+            '</svg>'
+        ).encode("utf-8")
+        self.setIcon(QIcon(FluentIconEngine(svg)))
 
 
 class CanvasToolOverlay(QFrame):
@@ -146,12 +168,12 @@ class CanvasToolOverlay(QFrame):
         self._selection_layout = selection_layout
         selection_layout.setContentsMargins(4, 4, 4, 4)
         selection_layout.setSpacing(4)
-        self.edc_button = ActionButton(self.selection_panel)
-        self.slice_dos_button = ActionButton(self.selection_panel)
+        self.edc_button = _LetterActionButton("E", self.selection_panel)
+        self.slice_dos_button = _LetterActionButton("T", self.selection_panel)
         self.new_region_button = ActionButton(self.selection_panel)
         for button, name, icon in (
-            (self.edc_button, "生成 EDC", "ic_fluent_data_trending_regular"),
-            (self.slice_dos_button, "切片内强度积分", "ic_fluent_data_trending_filled"),
+            (self.edc_button, "生成 EDC", None),
+            (self.slice_dos_button, "切片内强度积分", None),
             (self.new_region_button, "新增框选范围", "ic_fluent_add_regular"),
         ):
             button.setParent(self.selection_panel)
@@ -426,7 +448,8 @@ class CanvasToolOverlay(QFrame):
         button.setText("")
         button.setAccessibleName(name)
         button.setToolTip(name)
-        theme.set_button_icon(button, icon, 16)
+        if icon is not None:
+            theme.set_button_icon(button, icon, 16)
         button.setIconSize(QSize(16, 16))
         button.setFixedSize(28, 26)
         button.setCursor(Qt.PointingHandCursor)

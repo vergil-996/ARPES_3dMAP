@@ -42,12 +42,12 @@ class CanvasToolOverlayTests(unittest.TestCase):
         self.assertFalse(overlay.selection_panel.windowFlags() & Qt.Popup)
         self.assertTrue(overlay.selection_button.isCheckable())
         self.assertEqual(overlay.selection_button.accessibleName(), "框选范围")
-        for button, name, icon in (
-            (crop_button, "裁剪", "ic_fluent_crop_regular"),
-            (erase_button, "裁空", "ic_fluent_eraser_regular"),
-            (overlay.edc_button, "生成 EDC", "ic_fluent_data_trending_regular"),
-            (overlay.slice_dos_button, "切片内强度积分", "ic_fluent_data_trending_filled"),
-            (overlay.new_region_button, "新增框选范围", "ic_fluent_add_regular"),
+        for button, name, icon, letter in (
+            (crop_button, "裁剪", "ic_fluent_crop_regular", None),
+            (erase_button, "裁空", "ic_fluent_eraser_regular", None),
+            (overlay.edc_button, "生成 EDC", None, "E"),
+            (overlay.slice_dos_button, "切片内强度积分", None, "T"),
+            (overlay.new_region_button, "新增框选范围", "ic_fluent_add_regular", None),
         ):
             expected_parent = (
                 overlay if button in (crop_button, erase_button) else overlay.selection_panel
@@ -57,6 +57,7 @@ class CanvasToolOverlayTests(unittest.TestCase):
             self.assertEqual(button.accessibleName(), name)
             self.assertEqual(button.toolTip(), name)
             self.assertEqual(button.property("fluentIconName"), icon)
+            self.assertEqual(button.property("iconLetter"), letter)
             self.assertFalse(button.icon().isNull())
             self.assertEqual(button.size().width(), 28)
             self.assertEqual(button.size().height(), 26)
@@ -68,6 +69,23 @@ class CanvasToolOverlayTests(unittest.TestCase):
             "ic_fluent_select_object_regular",
         )
         self.assertFalse(overlay.selection_button.icon().isNull())
+
+    def test_letter_tool_icons_have_visible_pixels_after_theme_refresh(self):
+        parent, overlay, _buttons = self.make_overlay()
+
+        theme.apply_widget_theme(parent)
+
+        for button, letter in (
+            (overlay.edc_button, "E"),
+            (overlay.slice_dos_button, "T"),
+        ):
+            self.assertEqual(button.property("iconLetter"), letter)
+            image = button.icon().pixmap(16, 16).toImage()
+            self.assertTrue(any(
+                image.pixelColor(x, y).alpha() > 0
+                for x in range(image.width())
+                for y in range(image.height())
+            ))
 
     def test_selection_button_toggles_panel_and_emits_state_changes(self):
         parent, overlay, _buttons = self.make_overlay()
