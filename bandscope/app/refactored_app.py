@@ -1821,7 +1821,15 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         if request.page_id != self._active_refresh_page_id():
             return
         self._last_compute_backend = result.backend
-        self._render_active_page(request.quality, request.cause)
+        # A late rotation preview uses its own snapshot without moving the dial back.
+        latest_rotation = self.rotation_angle
+        try:
+            self.rotation_angle = round(float(
+                request.snapshot.get("rotation_angle", latest_rotation)
+            ), 2)
+            self._render_active_page(request.quality, request.cause)
+        finally:
+            self.rotation_angle = latest_rotation
         self._finish_ui_refresh(request, result.backend)
 
     def _on_refresh_failed(self, request, message):
@@ -1892,6 +1900,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             self._update_render_status("preview", backend)
         self._last_completed_refresh = request
         self._last_refresh_failure = None
+        self.refresh_coordinator.mark_presented(request)
         self._update_export_button_states()
         self.refreshFinished.emit(request)
 

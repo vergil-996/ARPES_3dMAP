@@ -1,10 +1,16 @@
+import math
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+from PyQt5.QtCore import QEvent, QPointF, Qt
+from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 from scipy.ndimage import rotate as scipy_rotate
 
@@ -257,6 +263,144 @@ class RotationWorkflowTests(unittest.TestCase):
             np.testing.assert_allclose(
                 exported["export_data"]["sample"], expected(-23.0), rtol=2e-6, atol=2e-6
             )
+
+    def test_continuous_drag_presents_completed_previews_before_release(self):
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "source.npz"
+            synthetic_npz(path, seed=4, descending=True)
+            window = control_window()
+            self.addCleanup(window.close)
+            self.assertTrue(window.load_data(str(path)))
+            identity = window.core.source_identity
+            if identity is not None and identity.future is not None:
+                identity.future.result(timeout=30)
+            spec = window._build_canvas_axis_slice_spec(
+                window.left_workspace.current_spec(), 2
+            )
+            window.left_workspace.add_page(spec)
+            window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+            window.canvas_2d.draw()
+            window.request_refresh = MethodType(My3DAnalyzer.request_refresh, window)
+            window.global_refresh = MethodType(My3DAnalyzer.global_refresh, window)
+            window._adaptive_preview_interval_ms = lambda: 5
+            window.refresh_coordinator.exact_idle_ms = 60_000
+
+            gates = {}
+            self.addCleanup(lambda: [release.set() for started, release in gates.values()])
+            original_execute = window.backend_manager.execute
+
+            def controlled_execute(job):
+                angle = round(float(job.payload.get("angle", 0.0)), 2)
+                if angle in gates:
+                    started, release = gates[angle]
+                    started.set()
+                    if not release.wait(timeout=5):
+                        raise TimeoutError(f"Timed out waiting to compute {angle}°")
+                return original_execute(job)
+
+            render_frames = []
+            original_render = window._render_active_page
+
+            def tracked_render(quality=RenderQuality.EXACT, cause=None):
+                result = original_render(quality, cause)
+                context = window.current_render_context or {}
+                if cause == RefreshCause.ROTATION:
+                    render_frames.append({
+                        "quality": quality,
+                        "angle": context.get("rotation_angle"),
+                        "pixels": np.asarray(window.canvas_2d.buffer_rgba()).copy(),
+                    })
+                return result
+
+            window._render_active_page = tracked_render
+            overlay = window.canvas_tool_overlay
+            dial = overlay.rotation_panel.dial
+
+            def point(angle):
+                center = dial.rect().center()
+                radians = math.radians(angle)
+                radius = dial._ring_geometry()[2]
+                return QPointF(
+                    center.x() + math.sin(radians) * radius,
+                    center.y() - math.cos(radians) * radius,
+                )
+
+            def send(event_type, angle, button, buttons):
+                event = QMouseEvent(
+                    event_type, point(angle), button, buttons, Qt.NoModifier
+                )
+                QApplication.sendEvent(dial, event)
+
+            def wait_until(predicate):
+                deadline = time.perf_counter() + 5
+                while time.perf_counter() < deadline:
+                    QApplication.processEvents()
+                    if predicate():
+                        return True
+                    QTest.qWait(2)
+                return False
+
+            send(QEvent.MouseButtonPress, 0, Qt.LeftButton, Qt.LeftButton)
+            with patch.object(window.backend_manager, "execute", side_effect=controlled_execute):
+                send(QEvent.MouseMove, 10, Qt.NoButton, Qt.LeftButton)
+                first_angle = dial.angle()
+                gates[first_angle] = (threading.Event(), threading.Event())
+                coordinator = window.refresh_coordinator
+                self.assertTrue(wait_until(gates[first_angle][0].is_set), {
+                    "dial_angle": dial.angle(),
+                    "window_angle": window.rotation_angle,
+                    "page_kind": window.left_workspace.current_spec().page_kind,
+                    "view": (window.current_render_context or {}).get("view"),
+                    "display_index": window.left_display_stack.currentIndex(),
+                    "pending_preview": coordinator._pending_preview,
+                    "running": coordinator._running,
+                    "pending_compute": coordinator._pending_compute,
+                    "preview_timer": coordinator._preview_timer.isActive(),
+                    "last_failure": getattr(window, "_last_refresh_failure", None),
+                })
+                send(QEvent.MouseMove, 20, Qt.NoButton, Qt.LeftButton)
+                second_angle = dial.angle()
+                gates[second_angle] = (threading.Event(), threading.Event())
+                gates[first_angle][1].set()
+                self.assertTrue(wait_until(gates[second_angle][0].is_set))
+
+                first_previews = [
+                    frame for frame in render_frames
+                    if frame["quality"] == RenderQuality.PREVIEW
+                ]
+                self.assertEqual([frame["angle"] for frame in first_previews], [first_angle])
+                self.assertEqual(window.rotation_angle, second_angle)
+                self.assertTrue(dial._dragging)
+
+                gates[second_angle][1].set()
+                self.assertTrue(wait_until(lambda: any(
+                    frame["quality"] == RenderQuality.PREVIEW
+                    and frame["angle"] == second_angle
+                    for frame in render_frames
+                )))
+                previews = [
+                    frame for frame in render_frames
+                    if frame["quality"] == RenderQuality.PREVIEW
+                ]
+                self.assertEqual(
+                    [frame["angle"] for frame in previews], [first_angle, second_angle]
+                )
+                self.assertFalse(np.array_equal(
+                    previews[0]["pixels"], previews[1]["pixels"]
+                ))
+                self.assertFalse(any(
+                    frame["quality"] == RenderQuality.EXACT for frame in render_frames
+                ))
+
+                send(QEvent.MouseButtonRelease, 20, Qt.LeftButton, Qt.NoButton)
+                self.assertTrue(wait_until(lambda:
+                    window._render_exact_ready
+                    and window.current_render_context is not None
+                    and window.current_render_context.get("rotation_angle") == second_angle
+                    and window._last_completed_refresh.quality == RenderQuality.EXACT
+                ))
+                self.assertEqual(render_frames[-1]["quality"], RenderQuality.EXACT)
+                self.assertEqual(render_frames[-1]["angle"], second_angle)
 
     def test_zero_preserves_camera_and_allows_full_frame_roi_crop(self):
         with TemporaryDirectory() as temp:

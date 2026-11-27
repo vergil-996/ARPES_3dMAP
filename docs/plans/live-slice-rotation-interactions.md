@@ -5,7 +5,7 @@
 ## 目标
 
 - 主页以及 `axis_integral`／`axis_integral_crop` 直接切片使用页面恢复后的当前旋转角度。先按当前角度重建完整来源体，再从同一法向范围提取或积分；法向 `axis_interval`、上下限、坐标上下限和页面区间保持固定。
-- 拖动旋钮期间持续提供合并、过期任务丢弃和自适应节流的预览，松手后得到精确结果。预览缓存不得替代最终精确数组，精确结果完成前继续保护确认裁剪／裁空和需要精确来源的局部增强操作。
+- 拖动旋钮期间持续提供合并和自适应节流的预览；同一次旋转中，已经计算完成的有用预览即使晚于更新的拖动输入也可呈现，避免持续拖动时所有中间帧都被饿死。更新的已呈现帧、其他交互或精确刷新派发后，旧预览仍须丢弃；松手后得到精确结果。预览缓存不得替代最终精确数组，精确结果完成前继续保护确认裁剪／裁空和需要精确来源的局部增强操作。
 - 旋转与框选、裁剪、裁空、局部增强框及折线路径选点共存。打开任一空间工具不再关闭旋钮，打开旋钮也不关闭空间工具；不同空间编辑器之间已有的冲突保护保持不变。
 - 可见交互几何不跟随 Z 旋转：2D 矩形保持原轴对齐边界，3D 裁剪／增强盒保持原逻辑和渲染边界，局部增强区域与路径节点保持原范围或坐标；变化的是框内数据。
 - 旋钮改为不独占鼠标的模式less浮窗，普通外部点击不再自动关闭。再次点击 Z、按 `Esc`、切页／切源或工具条隐藏时仍关闭；同时可见的旋钮、次级栏和范围浮窗需要屏幕边界与矩形避让。
@@ -23,7 +23,7 @@
 ### 定向与全量回归
 
 ```powershell
-.venv\Scripts\python.exe -m unittest tests.ui.test_rotation_dial tests.ui.test_canvas_overlay tests.integration.test_rotation_preview tests.integration.test_canvas_axis_slices tests.integration.test_multi_region_interaction tests.integration.test_local_enhancement_controls tests.integration.test_path_slice tests.core.test_rotation_crop tests.integration.test_rotated_crop tests.integration.test_rotated_edc tests.integration.test_rotated_derived_pages tests.integration.test_view_recipe_roundtrip -v
+.venv\Scripts\python.exe -m unittest tests.ui.test_rotation_dial tests.ui.test_canvas_overlay tests.rendering.test_refresh_pipeline tests.integration.test_rotation_preview tests.integration.test_canvas_axis_slices tests.integration.test_multi_region_interaction tests.integration.test_local_enhancement_controls tests.integration.test_path_slice tests.core.test_rotation_crop tests.integration.test_rotated_crop tests.integration.test_rotated_edc tests.integration.test_rotated_derived_pages tests.integration.test_view_recipe_roundtrip -v
 .venv\Scripts\python.exe -m unittest discover -s tests -t . -v
 .venv\Scripts\python.exe -m compileall -q bandscope plugins scripts tests start.py
 git diff --check
@@ -73,3 +73,12 @@ git diff --check
   1. `axis_integral` 30° 创建精确数组与 −15° 中间预览相对独立参考（float64 直接求和）最大绝对差 1.4e-3，超出脚本 `rtol=3e-5/atol=3e-5`；数据量级约 10³，差异集中在低强度像素。
   2. 45° 最终精确帧的等待在 90 s 后超时；超时时界面角度、渲染上下文与 `_render_exact_ready` 均已是 45°。合成数据版本实施时 28/28 通过，本轮 WSe₂ 结论不记为通过。
 - 下一步：定位 1.4e-3 绝对差来自哪条取数／累加路径（快速复核排除了单纯的前缀求和顺序差异：先累计再旋转为 6.2e-5、先旋转再按 float32 求和为 3.1e-4，均小于实测值），再判断是收紧实现精度还是按数据量级调整脚本容差。轴切片脚本的 45° 等待条件需区分“精确结果已就绪”和“本轮确实派发过 EXACT 帧”，避免检测器漏记导致的假超时。两处都应在真实数据上复验后再关闭本事项的自动验收缺口。
+
+### 2026-11-27 连续拖动中间帧交付修复（本次未发布）
+
+- **根因**：每个新角度都会使正在计算的预览失效，完成结果直接丢弃；大数据连续拖动时因此可能没有任何中间帧，只有停下后的最新帧能呈现。
+- **修复**：同一次旋转中允许交付最近完成且尚未被更新帧超越的预览，结果按请求自己的角度构建画面并恢复旋钮的最新输入角度；更新的已呈现帧、其他交互、页面取消或精确派发均会阻断旧预览。`axis_integral` 的数组与法向区间语义不变。
+- **定向回归**：上述 13 个模块 `Ran 201 tests in 98.408s`，`OK`；日志 `.local/logs/live-rotation-directed.log`。新增受控慢计算测试在修复前稳定得到空预览帧列表，修复后确认松手前两个角度均实际重绘画布，且最后为精确帧。
+- **全量回归与静态检查**：`Ran 2406 tests in 241.851s`，`OK`；`compileall` 和 `git diff --check` 通过。日志 `.local/logs/live-rotation-full.log`。
+- **真实 WSe₂ 连续拖动专项**：通过真实窗口、原生旋钮鼠标事件和计算结果交付门闩，确认鼠标仍按住时依次呈现 10°、20° 两帧预览，画布像素 SHA-256 不同，松手后呈现 20° 精确帧。报告 `.local/outputs/live-rotation-continuous/continuous-report.json`，松手前后截图在同目录。该结果属于自动操作与像素检查，不记为维护者真实鼠标流畅度人工验收。
+- **既有实窗缺口仍在**：原 `verify_canvas_axis_slices.py` 本次为 4/7 通过，仍复现上面已记录的积分容差和 45° 精确帧检测漏记；报告 `.local/outputs/live-rotation-continuous/report.json`。这两项不是本次连续交付修复的通过项，仍需按上一节单独处理。

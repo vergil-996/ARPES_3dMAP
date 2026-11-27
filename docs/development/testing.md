@@ -38,10 +38,10 @@ python -m unittest tests.ui.test_page_tree tests.ui.test_control_page_state test
 ### 实时旋转与空间工具共存定向回归
 
 ```powershell
-python -m unittest tests.ui.test_rotation_dial tests.ui.test_canvas_overlay tests.integration.test_rotation_preview tests.integration.test_canvas_axis_slices tests.integration.test_multi_region_interaction tests.integration.test_local_enhancement_controls tests.integration.test_path_slice tests.core.test_rotation_crop tests.integration.test_rotated_crop tests.integration.test_rotated_edc tests.integration.test_rotated_derived_pages tests.integration.test_view_recipe_roundtrip -v
+python -m unittest tests.ui.test_rotation_dial tests.ui.test_canvas_overlay tests.rendering.test_refresh_pipeline tests.integration.test_rotation_preview tests.integration.test_canvas_axis_slices tests.integration.test_multi_region_interaction tests.integration.test_local_enhancement_controls tests.integration.test_path_slice tests.core.test_rotation_crop tests.integration.test_rotated_crop tests.integration.test_rotated_edc tests.integration.test_rotated_derived_pages tests.integration.test_view_recipe_roundtrip -v
 ```
 
-合成数据必须分别核对 XY／XZ／YZ 的多个当前角度与独立参考数组，覆盖 `axis_integral_crop`、切页恢复和导出一致性；法向区间和坐标不变，预览实际更新且不污染最终精确结果。交互回归覆盖两种面板打开顺序、普通外部点击不误关、Z／`Esc`／切页关闭和面板避让，并确认 2D 框、3D 盒、局部增强框与路径节点在旋转前后保持原几何和活动状态。二阶导、EDC、路径结果及插件派生页仍冻结来源；已提交裁剪／裁空历史的跨角度重放测试不得改成实时显示语义。当前实施状态与实窗验收清单见 [2D 切片实时旋转与空间交互工具共存](../plans/live-slice-rotation-interactions.md)。
+合成数据必须分别核对 XY／XZ／YZ 的多个当前角度与独立参考数组，覆盖 `axis_integral_crop`、切页恢复和导出一致性；法向区间和坐标不变，预览实际更新且不污染最终精确结果。连续拖动回归用受控慢计算和真实旋钮鼠标事件确认：新角度输入后，已完成的旋转预览仍能更新实际画布，但更新的已呈现帧、其他交互、页面取消或精确提交会阻断旧结果。交互回归覆盖两种面板打开顺序、普通外部点击不误关、Z／`Esc`／切页关闭和面板避让，并确认 2D 框、3D 盒、局部增强框与路径节点在旋转前后保持原几何和活动状态。二阶导、EDC、路径结果及插件派生页仍冻结来源；已提交裁剪／裁空历史的跨角度重放测试不得改成实时显示语义。当前实施状态与实窗验收清单见 [2D 切片实时旋转与空间交互工具共存](../plans/live-slice-rotation-interactions.md)。
 
 ## 视觉与真实数据验证
 

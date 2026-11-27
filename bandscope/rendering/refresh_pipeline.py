@@ -74,7 +74,9 @@ class RefreshCoordinator(QObject):
     """Coalesce UI refreshes and run at most one numerical job at a time.
 
     VTK/Qt rendering is deliberately not performed here.  The coordinator only
-    emits requests/results back to the GUI thread.
+    emits requests/results back to the GUI thread. During one continuous rotation,
+    a completed preview can be presented after newer input arrives; a newer presented
+    frame, another interaction, or an exact dispatch still makes it obsolete.
     """
 
     dispatch_requested = pyqtSignal(object)
@@ -88,11 +90,14 @@ class RefreshCoordinator(QObject):
         self.exact_idle_ms = int(exact_idle_ms)
         self._generation = 0
         self._latest_generation: Dict[str, int] = {}
+        self._latest_cause: Dict[str, RefreshCause] = {}
         self._pending_preview: Optional[RefreshRequest] = None
         self._pending_exact: Optional[RefreshRequest] = None
         self._running: Optional[Tuple[RefreshRequest, _ComputeTask]] = None
         self._pending_compute: Optional[Tuple[RefreshRequest, Callable[[], ComputeResult]]] = None
         self._last_preview_started_at = None
+        self._presented_generation: Dict[str, int] = {}
+        self._latest_exact_dispatch: Dict[str, int] = {}
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -132,6 +137,7 @@ class RefreshCoordinator(QObject):
             snapshot=dict(snapshot or {}),
         )
         self._latest_generation[request.page_id] = request.generation
+        self._latest_cause[request.page_id] = request.cause
         return request
 
     def schedule_interactive(
@@ -144,6 +150,7 @@ class RefreshCoordinator(QObject):
         if preview_request.generation != exact_request.generation:
             raise ValueError("Interactive preview and exact requests must share a generation.")
         self._latest_generation[preview_request.page_id] = preview_request.generation
+        self._latest_cause[preview_request.page_id] = preview_request.cause
         self._pending_preview = preview_request
         self._pending_exact = exact_request
         if not self._preview_timer.isActive():
@@ -158,6 +165,7 @@ class RefreshCoordinator(QObject):
 
     def schedule_preview(self, request: RefreshRequest):
         self._latest_generation[request.page_id] = request.generation
+        self._latest_cause[request.page_id] = request.cause
         self._pending_preview = request
         if not self._preview_timer.isActive():
             self._preview_timer.start(self._preview_delay(self.preview_interval_ms))
@@ -165,6 +173,7 @@ class RefreshCoordinator(QObject):
 
     def schedule_exact(self, request: RefreshRequest, *, immediate=False):
         self._latest_generation[request.page_id] = request.generation
+        self._latest_cause[request.page_id] = request.cause
         self._pending_exact = request
         self.status_changed.emit("computing", "")
         if immediate:
@@ -176,10 +185,12 @@ class RefreshCoordinator(QObject):
 
     def dispatch_now(self, request: RefreshRequest):
         self._latest_generation[request.page_id] = request.generation
+        self._latest_cause[request.page_id] = request.cause
         self.dispatch_requested.emit(request)
 
     def submit_compute(self, request: RefreshRequest, work: Callable[[], ComputeResult]):
         self._latest_generation[request.page_id] = request.generation
+        self._latest_cause[request.page_id] = request.cause
         if self._running is not None:
             self._pending_compute = (request, work)
             return
@@ -188,6 +199,10 @@ class RefreshCoordinator(QObject):
     def cancel_page(self, page_id):
         page_id = str(page_id)
         self._latest_generation[page_id] = self._generation + 1
+        self._latest_cause.pop(page_id, None)
+        self._latest_exact_dispatch[page_id] = max(
+            self._latest_exact_dispatch.get(page_id, 0), self._generation
+        )
         if self._pending_preview is not None and self._pending_preview.page_id == page_id:
             self._pending_preview = None
         if self._pending_exact is not None and self._pending_exact.page_id == page_id:
@@ -197,6 +212,16 @@ class RefreshCoordinator(QObject):
 
     def is_current(self, request: RefreshRequest):
         return self._latest_generation.get(request.page_id) == request.generation
+
+    def mark_presented(self, request: RefreshRequest):
+        """Include cache-hit frames that do not pass through the worker queue."""
+        generation = getattr(request, "generation", None)
+        if generation is None:
+            return
+        page_id = str(request.page_id)
+        self._presented_generation[page_id] = max(
+            generation, self._presented_generation.get(page_id, 0)
+        )
 
     def shutdown(self, wait_ms=2000):
         self._preview_timer.stop()
@@ -230,6 +255,10 @@ class RefreshCoordinator(QObject):
         self._pending_exact = None
         if request is not None and self.is_current(request):
             self._cancel_pending_preview(request.page_id)
+            page_id = str(request.page_id)
+            self._latest_exact_dispatch[page_id] = max(
+                request.generation, self._latest_exact_dispatch.get(page_id, 0)
+            )
             self.dispatch_requested.emit(request)
 
     def _start_compute(self, request, work):
@@ -243,9 +272,21 @@ class RefreshCoordinator(QObject):
     @pyqtSlot(object, object)
     def _on_compute_finished(self, request, result):
         self._running = None
-        if self.is_current(request):
+        is_current = self.is_current(request)
+        page_id = str(request.page_id)
+        present_late_preview = bool(
+            not is_current
+            and request.quality == RenderQuality.PREVIEW
+            and request.cause == RefreshCause.ROTATION
+            and self._latest_cause.get(page_id) == request.cause
+            and request.generation > self._presented_generation.get(page_id, 0)
+            and request.generation > self._latest_exact_dispatch.get(page_id, 0)
+        )
+        if is_current or present_late_preview:
             self.result_ready.emit(request, result)
-            self.status_changed.emit("complete", getattr(result, "backend", ""))
+            self.mark_presented(request)
+            if is_current:
+                self.status_changed.emit("complete", getattr(result, "backend", ""))
         self._start_pending_compute()
 
     @pyqtSlot(object, object)

@@ -96,6 +96,106 @@ class RefreshCoordinatorTests(unittest.TestCase):
         self.assertIsNone(coordinator._pending_preview)
         coordinator.shutdown()
 
+    def test_completed_preview_is_presented_while_newer_drag_is_pending(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=10_000, exact_idle_ms=10_000)
+        delivered = []
+        coordinator.result_ready.connect(
+            lambda request, _result: delivered.append(request.generation)
+        )
+        first, _exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            first,
+            lambda: (time.sleep(0.04) or ComputeResult(value=1)),
+        )
+        second, second_exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.schedule_interactive(second, second_exact)
+
+        self.assertTrue(process_until(lambda: coordinator._running is None and delivered))
+        self.assertEqual(delivered, [first.generation])
+        coordinator.shutdown()
+
+    def test_exact_release_blocks_an_older_preview_result(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=10_000, exact_idle_ms=10_000)
+        delivered = []
+        coordinator.result_ready.connect(
+            lambda request, _result: delivered.append(request.generation)
+        )
+        first, _exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            first,
+            lambda: (time.sleep(0.04) or ComputeResult(value=1)),
+        )
+        second, second_exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.schedule_interactive(second, second_exact)
+        coordinator.schedule_exact(second_exact, immediate=True)
+
+        self.assertTrue(process_until(lambda: coordinator._running is None))
+        self.assertEqual(delivered, [])
+        coordinator.shutdown()
+
+    def test_older_preview_does_not_replace_a_newer_presented_frame(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=10_000, exact_idle_ms=10_000)
+        delivered = []
+        coordinator.result_ready.connect(
+            lambda request, _result: delivered.append(request.generation)
+        )
+        first, _exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            first,
+            lambda: (time.sleep(0.04) or ComputeResult(value=1)),
+        )
+        second, second_exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.schedule_interactive(second, second_exact)
+        coordinator.mark_presented(second)
+
+        self.assertTrue(process_until(lambda: coordinator._running is None))
+        self.assertEqual(delivered, [])
+        coordinator.shutdown()
+
+    def test_late_preview_from_another_interaction_is_not_presented(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=10_000, exact_idle_ms=10_000)
+        delivered = []
+        coordinator.result_ready.connect(
+            lambda request, _result: delivered.append(request.generation)
+        )
+        first, _exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            first,
+            lambda: (time.sleep(0.04) or ComputeResult(value=1)),
+        )
+        second, second_exact = coordinator.make_quality_pair("home", RefreshCause.DATA_SOURCE)
+        coordinator.schedule_interactive(second, second_exact)
+
+        self.assertTrue(process_until(lambda: coordinator._running is None))
+        self.assertEqual(delivered, [])
+        coordinator.shutdown()
+
+    def test_cancel_blocks_old_preview_but_not_the_next_rotation(self):
+        coordinator = RefreshCoordinator(preview_interval_ms=10_000, exact_idle_ms=10_000)
+        delivered = []
+        coordinator.result_ready.connect(
+            lambda request, _result: delivered.append(request.generation)
+        )
+        first, _exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            first,
+            lambda: (time.sleep(0.04) or ComputeResult(value=1)),
+        )
+        coordinator.cancel_page("home")
+        self.assertTrue(process_until(lambda: coordinator._running is None))
+        self.assertEqual(delivered, [])
+
+        second, second_exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.submit_compute(
+            second,
+            lambda: (time.sleep(0.04) or ComputeResult(value=2)),
+        )
+        third, third_exact = coordinator.make_quality_pair("home", RefreshCause.ROTATION)
+        coordinator.schedule_interactive(third, third_exact)
+        self.assertTrue(process_until(lambda: coordinator._running is None and delivered))
+        self.assertEqual(delivered, [second.generation])
+        coordinator.shutdown()
+
     def test_running_task_keeps_only_latest_pending_result(self):
         coordinator = RefreshCoordinator()
         delivered = []
