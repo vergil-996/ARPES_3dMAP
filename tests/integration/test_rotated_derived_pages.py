@@ -205,6 +205,10 @@ class RotatedDerivedPageTests(unittest.TestCase):
             self.coords["delay"], frame, frame, locked=True, axis_key="delay"
         ).as_dict()
 
+    def set_angle(self, angle):
+        self.window.timeline_bar.set_rotation_angle(angle)
+        self.window.on_rotation_angle_changed()
+
     def context(self, spec):
         raw, coords = self.window._get_display_state_for_spec(spec)
         return self.window._compute_render_context(spec)
@@ -242,26 +246,46 @@ class RotatedDerivedPageTests(unittest.TestCase):
             rtol=2e-6, atol=2e-6,
         )
 
-    def test_xy_xz_yz_axis_integrals_keep_all_source_operations(self):
+    def test_xy_xz_yz_axis_integrals_rebuild_at_current_angle_with_crop_history(self):
         self.home.params["crop_regions"] = [self.crop, self.erase]
-        self.window.rotation_angle = ANGLE
-        for axis, plot_axes in ((2, ("X", "Y")), (1, ("X", "E")), (0, ("Y", "E"))):
+        for axis in (0, 1, 2):
             with self.subTest(axis=axis):
+                self.window.left_workspace.activate_page(self.home.page_id)
+                self.set_angle(ANGLE)
                 spec = self.window._build_canvas_axis_slice_spec(self.home, axis)
-                low, up = int(spec.params["low"]), int(spec.params["up"])
-                self.window.rotation_angle = -20.0
-                actual = self.context(spec)["data"]
-                rotated = rotate_linear(self.raw[..., 0], ANGLE)
-                mask = combined_mask(self.raw.shape[:3], [self.crop, self.erase], ANGLE)
-                normal = np.zeros(self.raw.shape[axis], dtype=bool)
-                normal[low:up + 1] = True
-                reshape = [1, 1, 1]
-                reshape[axis] = normal.size
-                mask &= normal.reshape(reshape)
-                expected = np.sum(np.where(mask, rotated, 0.0), axis=axis)
+                self.window.left_workspace.add_page(spec)
+                fixed_range = tuple(int(spec.params[key]) for key in ("low", "up", "mid"))
+                fixed_interval = dict(spec.params["axis_interval"])
                 self.assertEqual(spec.params["source_3d"]["rotation_angle"], ANGLE)
-                np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
-                self.window.rotation_angle = ANGLE
+                results = []
+                for current_angle in (-20.0, 0.0, 47.5):
+                    with self.subTest(axis=axis, current_angle=current_angle):
+                        self.set_angle(current_angle)
+                        context = self.context(spec)
+                        actual = context["data"]
+                        rotated = rotate_linear(self.raw[..., 0], current_angle)
+                        mask = combined_mask(
+                            self.raw.shape[:3], [self.crop, self.erase], current_angle
+                        )
+                        low, up = fixed_range[:2]
+                        normal = np.zeros(self.raw.shape[axis], dtype=bool)
+                        normal[low:up + 1] = True
+                        reshape = [1, 1, 1]
+                        reshape[axis] = normal.size
+                        mask &= normal.reshape(reshape)
+                        expected = np.sum(np.where(mask, rotated, 0.0), axis=axis)
+                        np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6)
+                        self.assertEqual(context["rotation_angle"], current_angle)
+                        self.assertEqual(
+                            tuple(int(spec.params[key]) for key in ("low", "up", "mid")),
+                            fixed_range,
+                        )
+                        self.assertEqual(spec.params["axis_interval"], fixed_interval)
+                        self.assertEqual(spec.params["source_3d"]["rotation_angle"], ANGLE)
+                        results.append(actual)
+                self.assertTrue(any(
+                    not np.allclose(results[0], result) for result in results[1:]
+                ))
 
     def test_selection_slice_dos_replays_frozen_source_per_frame(self):
         self.home.params["crop_regions"] = [self.crop, self.erase]
@@ -277,7 +301,7 @@ class RotatedDerivedPageTests(unittest.TestCase):
             volume_expected.append(np.sum(np.where(mask, rotated, 0.0), dtype=np.float64))
         np.testing.assert_allclose(volume_actual, volume_expected, rtol=2e-6, atol=2e-6)
 
-        self.window.rotation_angle = ANGLE
+        self.set_angle(ANGLE)
         axis = self.window._build_canvas_axis_slice_spec(self.home, 1)
         self.window.left_workspace.add_page(axis)
         active = CropSelection.from_dict(selection(
@@ -309,7 +333,7 @@ class RotatedDerivedPageTests(unittest.TestCase):
 
     def test_crop_erase_xz_energy_dos_and_second_derivative_share_source(self):
         self.home.params["crop_regions"] = [self.crop, self.erase]
-        self.window.rotation_angle = ANGLE
+        self.set_angle(ANGLE)
         axis = self.window._build_canvas_axis_slice_spec(self.home, 1)
         axis_erase = selection(
             self.coords, ("X", "E"), (2, 3, 1, 3), ANGLE, operation="erase"
@@ -381,7 +405,7 @@ class RotatedDerivedPageTests(unittest.TestCase):
             operation="erase",
         )
         self.home.params["crop_regions"] = [path_erase]
-        self.window.rotation_angle = ANGLE
+        self.set_angle(ANGLE)
         axis = self.window._build_canvas_axis_slice_spec(self.home, 2)
         self.window.left_workspace.add_page(axis)
         write_draft(axis.params, [PathNode(2, 1, "P1"), PathNode(3, 6, "P2")])
@@ -507,6 +531,7 @@ class RotatedDerivedPageTests(unittest.TestCase):
         np.testing.assert_array_equal(context["canvas_mask"], expected_canvas[slices])
 
         legacy_axis = SimpleNamespace(
+            page_id="legacy-axis",
             page_kind="axis_integral",
             source_page_id=None,
             params={

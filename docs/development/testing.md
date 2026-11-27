@@ -35,6 +35,14 @@ python -m unittest tests.ui.test_page_tree tests.ui.test_control_page_state test
 
 测试需要 NumPy、Qt、VTK 等运行依赖，但不要求 CUDA。加载 NPZ 时会在后台线程计算文件摘要，Windows 上紧接着删除临时目录可能因文件仍被打开而报 WinError 32；`tests/__init__.py` 对**清理动作**做 5 秒有界重试，断言本身不变。Windows 沙箱如果导致 `TemporaryDirectory` 新建后不可读写，应在具备正常临时目录权限的环境复核，并保留错误日志；不要通过删除断言绕过。
 
+### 实时旋转与空间工具共存定向回归
+
+```powershell
+python -m unittest tests.ui.test_rotation_dial tests.ui.test_canvas_overlay tests.integration.test_rotation_preview tests.integration.test_canvas_axis_slices tests.integration.test_multi_region_interaction tests.integration.test_local_enhancement_controls tests.integration.test_path_slice tests.core.test_rotation_crop tests.integration.test_rotated_crop tests.integration.test_rotated_edc tests.integration.test_rotated_derived_pages tests.integration.test_view_recipe_roundtrip -v
+```
+
+合成数据必须分别核对 XY／XZ／YZ 的多个当前角度与独立参考数组，覆盖 `axis_integral_crop`、切页恢复和导出一致性；法向区间和坐标不变，预览实际更新且不污染最终精确结果。交互回归覆盖两种面板打开顺序、普通外部点击不误关、Z／`Esc`／切页关闭和面板避让，并确认 2D 框、3D 盒、局部增强框与路径节点在旋转前后保持原几何和活动状态。二阶导、EDC、路径结果及插件派生页仍冻结来源；已提交裁剪／裁空历史的跨角度重放测试不得改成实时显示语义。当前实施状态与实窗验收清单见 [2D 切片实时旋转与空间交互工具共存](../plans/live-slice-rotation-interactions.md)。
+
 ## 视觉与真实数据验证
 
 这些脚本读取显式输入文件，默认输出至 `.local/outputs/<检查名>/`。真实数据无需加入 Git。默认隔离用户设置和扩展目录；完整窗口验收默认使用本机图形平台，需要桌面环境。Windows 上 VTK 嵌入窗口不能使用 Qt 的 `offscreen` 平台；若此前设置过该变量，运行前设为 `windows`。纯自动化回归仍默认离屏。
@@ -99,13 +107,13 @@ python scripts/validation/verify_frozen_blender_flow.py <BandScope.exe> --blende
 
 EDC 数值验收覆盖 3D 主页、E 轴积分的 kx–ky 页及 XZ／YZ 页：kx–ky 的框选只限定 Kx／Ky，EDC 必须保留完整能量曲线；XZ／YZ 的范围是框选两轴加该页法向双端滑条区间，脚本按完整 X／Y／E 索引区间独立复算曲线。3D 多盒仍核对各自不同的 E 范围与多选区同页比较。切片内强度积分必须通过次级工具按钮创建，范围为**活动框选 + 当前页法向双端滑条区间**，脚本逐扫描帧复算强度。若法向区间初始锁定，先真实点击锁徽章并确认解锁，再分别提交双端，避免锁定状态下的整体平移。视图右键「处理分析」不再含内置 EDC 或切片内强度积分。脚本输出只代表自动操作、数值断言和截图完成；Z 标号可读性、手柄命中、弹窗布局及科研出图质量仍需人工视觉复核。
 
-`verify_rotated_crop_analysis.py` 使用本机窗口、VTK、原生旋钮、范围浮窗、工具按钮和右键菜单，验收 30° 旋转后的裁剪／裁空及冻结来源分析页，覆盖 EDC、切片内强度积分、XY／XZ／YZ、Energy DOS、二阶导、折线路径、回 0° 切帧和 `log10`。默认读取 `.local/data/WSe2_step.npz`，默认输出 `.local/outputs/rotated-crop-analysis/`，包含 `report.json` 和窗口截图；真实文件缺失时直接失败，不用合成数据替代。严格合成数值回归仍由 `tests/integration/test_rotated_*.py` 负责，实窗脚本不能替代这些回归。自动操作、数值断言和截图完成不等于维护者人工视觉复核，也不代表鼠标手感或科研出图质量已获认可。
+`verify_rotated_crop_analysis.py` 使用本机窗口、VTK、原生旋钮、范围浮窗、工具按钮和右键菜单，验收 30° 旋转后的裁剪／裁空及冻结来源分析页，覆盖 EDC、切片内强度积分、XY／XZ／YZ、Energy DOS、二阶导、折线路径、回 0° 切帧和 `log10`。这些派生页继续冻结创建来源；主页与 `axis_integral`／`axis_integral_crop` 直接切片按当前角度实时重建是另一套显示契约，已提交裁剪／裁空记录仍按既有创建角度重放。默认读取 `.local/data/WSe2_step.npz`，默认输出 `.local/outputs/rotated-crop-analysis/`，包含 `report.json` 和窗口截图；真实文件缺失时直接失败，不用合成数据替代。严格合成数值回归仍由 `tests/integration/test_rotated_*.py` 负责，实窗脚本不能替代这些回归。自动操作、数值断言和截图完成不等于维护者人工视觉复核，也不代表鼠标手感或科研出图质量已获认可。
 
-`verify_crop_window.py` 真实点击画布初级「裁剪」「裁空」与框选主按钮，检查初级／次级父控件和布局归属、浮窗位置记忆与重绘恢复；范围标题应以「裁剪范围」或「裁空范围」开头并包含对应 `Z{id}`，不能再与无标号旧标题做全等比较。`verify_time_axis_visibility.py` 在启动、动态 3D、动态含能量轴 2D、静态及重新加载页面均确认右键「处理分析」无内置切片积分，同时检查合法动态 2D 页的 `slice_dos_button` 可用、静态 2D 页禁用。
+`verify_crop_window.py` 真实点击画布初级「裁剪」「裁空」与框选主按钮，检查初级操作不联动勾选框选或展开次级栏、初级／次级父控件和布局归属、浮窗位置记忆与重绘恢复；范围标题应以「裁剪范围」或「裁空范围」开头并包含对应 `Z{id}`，不能再与无标号旧标题做全等比较。`verify_time_axis_visibility.py` 在启动、动态 3D、动态含能量轴 2D、静态及重新加载页面均确认右键「处理分析」无内置切片积分，同时检查合法动态 2D 页的 `slice_dos_button` 可用、静态 2D 页禁用。
 
-`verify_canvas_axis_slices.py` 从 3D 画布新建 XY 切片，核对四分位端点、零长度锁定、开锁动画、重复建页与 3D 返回，截取深浅主题、窄窗口、悬浮坐标框和动画帧，并输出 `report.json`。
+`verify_canvas_axis_slices.py` 从 3D 画布新建 XY／XZ／YZ 切片，核对四分位端点、零长度锁定、开锁动画、重复建页与 3D 返回；在多个当前角度下驱动真实旋钮，核对中间预览和最终精确数组相对独立参考正确、法向区间与坐标不变、`axis_integral_crop` 同样实时重建，以及切页恢复、导出和画面一致。截取深浅主题、窄窗口、悬浮坐标框、动画帧和旋转前后对照，并输出 `report.json`。
 
-`verify_canvas_rotation_dial.py` 在真实窗口中驱动画布图标开关、负小数输入、跨零拖动、单次精确提交和归零，检查宽窗等分、窄窗两行、低高度工具条、系统缩放及路径选段条独立显隐；输出主窗口、原生旋钮弹层和桌面区域截图及 `report.json`。默认数据为 WSe₂，也可用其他含时间轴的 NPZ 做布局与交互验收。
+`verify_canvas_rotation_dial.py` 在真实窗口中驱动画布图标开关、负小数输入、跨零拖动、单次精确提交和归零，检查旋转按钮高亮与弹层显隐同步、宽窗等分、窄窗两行、低高度工具条、系统缩放及路径选段条独立显隐。旋钮按模式less浮窗验收：普通外部点击不关闭，Z、`Esc`、切页／切源和工具条隐藏仍关闭；按两种打开顺序检查它与框选、裁剪／裁空范围浮窗、局部增强和路径选点共存，检查屏幕边界与矩形避让，并核对连续角度序列中 2D 框、3D 裁剪／增强盒和路径节点不动而框内数据变化。输出主窗口、原生旋钮浮窗、空间工具共存截图和桌面区域截图及 `report.json`。默认数据为 WSe₂，也可用其他含时间轴的 NPZ 做布局与交互验收；自动截图和数值断言不记为人工视觉、鼠标流畅度或科研出图质量认可。
 
 `verify_integration_context_menu.py` 使用真实 `QMenu` 验证「视图右键 → 处理分析」，覆盖「能级态密度」「二阶导」两个内置动作与 EDC 插件动作、非法父页和深浅主题，并检查页面树入口与 `Ctrl+2` 已消失。每个菜单都断言不含 `builtin:edc_curve` 和 `builtin:slice_dos`；切片内强度积分另从框选次级工具按钮真实创建，核对活动选区、法向双端区间和逐帧数值，不能再用静态数据检查一个已经移除的菜单项。脚本在右键前激活目标父页，再操作 2D／3D 视图的真实菜单；真实桌面验收必须实际创建结果，核对父页、数值／冻结参数、创建后选中和插件面板，不能用直接调用 `_on_page_create_requested()` 的集成测试代替菜单与视觉验收。
 

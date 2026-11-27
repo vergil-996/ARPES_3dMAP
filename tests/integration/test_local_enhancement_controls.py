@@ -2,6 +2,8 @@ import copy
 import threading
 import time
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -24,6 +26,7 @@ from bandscope.ui import theme
 from bandscope.ui.enhancement_controls import SHOW_ALL_REGIONS_ID
 from bandscope.ui.page_render_control import RenderControlPage
 from tests.support.enhancement import context_2d, context_3d, region, state_2d
+from tests.support.view_recipe import control_window, synthetic_npz
 
 
 UI_POINTS = [[0.0, 0.0], [1.0, 1.0]]
@@ -900,6 +903,67 @@ class RegionControlTests(unittest.TestCase):
         np.testing.assert_array_equal(host.current_render_context["data"], processed[..., 0])
 
 
+class EnhancementRotationCoexistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        path = Path(self.temp.name) / "source.npz"
+        synthetic_npz(path, seed=23, descending=True)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(str(path)))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
+        source = self.window.left_workspace.current_spec()
+        spec = self.window._build_canvas_axis_slice_spec(source, 2)
+        self.assertIsNotNone(spec)
+        self.window.left_workspace.add_page(spec)
+        self.window.show()
+        self.window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        self.window.canvas_2d.draw()
+        self.app.processEvents()
+
+    def test_rotation_preserves_active_enhancement_bounds_and_panel(self):
+        window = self.window
+        overlay = window.canvas_tool_overlay
+        overlay.show_rotation_panel()
+        window._add_enhancement_region()
+        selected = window._enhancement_selected()
+        self.assertIsNotNone(selected)
+        region_id = selected["region_id"]
+        bounds = tuple(selected["bounds"])
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        window.canvas_2d.draw()
+        self.assertIsNotNone(window._enhancement_selector)
+        extents = window._enhancement_selector.extents
+
+        window.on_rotation_angle_preview(-12.0)
+        window._render_active_page(RenderQuality.PREVIEW, RefreshCause.ROTATION)
+
+        self.assertEqual(window._enhancement_state()["selected_id"], region_id)
+        self.assertEqual(tuple(window._enhancement_selected()["bounds"]), bounds)
+        self.assertIsNotNone(window._enhancement_selector)
+        np.testing.assert_allclose(window._enhancement_selector.extents, extents)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+        window.on_rotation_angle_changed(22.0)
+        window._render_active_page(RenderQuality.EXACT, RefreshCause.ROTATION)
+
+        self.assertEqual(window._enhancement_state()["selected_id"], region_id)
+        self.assertEqual(tuple(window._enhancement_selected()["bounds"]), bounds)
+        self.assertIsNotNone(window._enhancement_selector)
+        np.testing.assert_allclose(window._enhancement_selector.extents, extents)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+
 class EnhancementBoxIncrementalTests(unittest.TestCase):
     """3D 辅助对象按签名增量更新：只改色阶时不重建框和标签。"""
 
@@ -951,6 +1015,42 @@ class EnhancementBoxIncrementalTests(unittest.TestCase):
         host._draw_enhancement_boxes(context, self._fields((10, 60, 90)), None)
         self.assertEqual(host.plotter.add_mesh.call_count, 1)
         host.plotter.add_scalar_bar.assert_called_once()
+
+    def test_actor_rotation_preserves_enhancement_box_bounds(self):
+        from bandscope.app.refactored_app import My3DAnalyzer
+
+        host = self._host()
+        context = {"data": np.zeros((4, 4, 4), dtype=np.float32)}
+        fields = self._fields()
+        active = fields["regions"][0]
+        host._draw_enhancement_boxes(context, fields, active)
+        host.plotter.add_box_widget.assert_called_once()
+        call = host.plotter.add_box_widget.call_args
+        bounds_before = call.kwargs["bounds"]
+        widget_before = host._enhancement_box_widget
+        self.assertFalse(call.kwargs["rotation_enabled"])
+        self.assertEqual(host._enhancement_draw_key, ("1", tuple(active["bounds"])))
+        host.volume_session = SimpleNamespace(
+            active=True,
+            volume=Mock(),
+            _set_interactive_quality=lambda _quality: None,
+            render_count=0,
+        )
+        host.left_display_stack = SimpleNamespace(currentWidget=lambda: host.plotter)
+        host._rendered_rotation_angle = 0.0
+        host._actor_preview_rotation_angle = None
+
+        self.assertTrue(My3DAnalyzer._apply_rotation_actor_preview(host, 17.0))
+        host.volume_session.volume.SetOrientation.assert_called_with(0.0, 0.0, 17.0)
+        My3DAnalyzer._reset_volume_actor_transform(host)
+        host._draw_enhancement_boxes(context, fields, active)
+
+        self.assertIs(host._enhancement_box_widget, widget_before)
+        host.plotter.add_box_widget.assert_called_once()
+        self.assertEqual(
+            host.plotter.add_box_widget.call_args.kwargs["bounds"], bounds_before
+        )
+        self.assertEqual(host._enhancement_draw_key, ("1", tuple(active["bounds"])))
 
 
 class EnhancementRoiAsyncTests(unittest.TestCase):

@@ -1,5 +1,6 @@
-"""Canvas-created axis slices, frozen sources, thickening and recipe recovery."""
+"""Canvas-created live axis slices, frozen sources, thickening and recipe recovery."""
 
+import copy
 import os
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PyQt5.QtWidgets import QApplication
+from scipy.ndimage import rotate as scipy_rotate
 
 from bandscope.core.axis_interval import AxisInterval
 from bandscope.core.crop_model import CropSelection, apply_crop_regions
@@ -20,6 +22,13 @@ from tests.support.view_recipe import control_window, synthetic_npz
 
 def assert_close(actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=2e-6, atol=2e-6, equal_nan=True)
+
+
+def rotate_linear(frame, angle):
+    return scipy_rotate(
+        np.asarray(frame, dtype=np.float32), float(angle), axes=(0, 1),
+        reshape=False, order=1, mode="constant", cval=0.0, prefilter=True,
+    )
 
 
 class CanvasAxisSliceTests(unittest.TestCase):
@@ -49,7 +58,23 @@ class CanvasAxisSliceTests(unittest.TestCase):
 
     def _context(self, spec):
         raw, coords = self.window._get_display_state_for_spec(spec)
+        if spec.page_kind == "axis_integral_crop":
+            return self.window._get_axis_integral_crop_context(spec, raw, coords)
         return self.window._get_axis_integral_context(spec, raw, coords)
+
+    def _expected(self, spec, angle):
+        axis = int(spec.params["axis_index"])
+        low, up = int(spec.params["low"]), int(spec.params["up"])
+        rotated = rotate_linear(self.data[..., 0], angle)
+        slices = [slice(None)] * 3
+        slices[axis] = slice(low, up + 1)
+        return np.sum(rotated[tuple(slices)], axis=axis, dtype=np.float64)
+
+    def _export(self, spec):
+        raw, coords = self.window._get_display_state_for_spec(spec)
+        if spec.page_kind == "axis_integral_crop":
+            return self.window._get_axis_integral_crop_export_context(spec, raw, coords)
+        return self.window._get_axis_integral_export_context(spec, raw, coords)
 
     def test_three_directions_start_at_physical_quartiles_and_sum_inclusively(self):
         for axis, plane in ((0, "YZ"), (1, "XZ"), (2, "XY")):
@@ -66,6 +91,97 @@ class CanvasAxisSliceTests(unittest.TestCase):
                 slices[axis] = slice(low, up + 1)
                 expected = np.sum(self.data[..., 0][tuple(slices)], axis=axis)
                 assert_close(self._context(spec)["data"], expected)
+
+    def test_direct_slices_rebuild_at_current_angles_with_fixed_ranges_and_export(self):
+        for axis in (0, 1, 2):
+            with self.subTest(axis=axis):
+                self.window.left_workspace.activate_page(self.source.page_id)
+                self.window.timeline_bar.set_rotation_angle(30.0)
+                self.window.on_rotation_angle_changed()
+                spec = self._build(axis, activate=True)
+                fixed_interval = copy.deepcopy(spec.params["axis_interval"])
+                fixed_domain = copy.deepcopy(spec.params["axis_domain"])
+                fixed_bounds = (spec.params["low"], spec.params["up"], spec.params["mid"])
+                self.assertEqual(spec.params["source_3d"]["rotation_angle"], 30.0)
+                results = []
+                for angle in (-20.0, 0.0, 47.5):
+                    with self.subTest(axis=axis, angle=angle):
+                        self.window.timeline_bar.set_rotation_angle(angle)
+                        self.window.on_rotation_angle_changed()
+                        expected = self._expected(spec, angle)
+                        context = self._context(spec)
+                        assert_close(context["data"], expected)
+                        self.assertEqual(context["rotation_angle"], angle)
+                        self.assertEqual(spec.params["axis_interval"], fixed_interval)
+                        self.assertEqual(spec.params["axis_domain"], fixed_domain)
+                        self.assertEqual(
+                            (spec.params["low"], spec.params["up"], spec.params["mid"]),
+                            fixed_bounds,
+                        )
+                        self.assertEqual(spec.params["source_3d"]["rotation_angle"], 30.0)
+                        for axis_key in context["plot_axes"].values():
+                            if axis_key in self.window.core.coords:
+                                np.testing.assert_array_equal(
+                                    context["coords"][axis_key], self.window.core.coords[axis_key]
+                                )
+                        exported = self._export(spec)["export_data"]
+                        assert_close(exported["sample"], expected)
+                        axis_key = self.window._axis_plot_info(axis)["integrated_axis_key"]
+                        assert_close(
+                            exported["integrated_range"],
+                            [
+                                self.window.core.logical_to_physical(axis_key, fixed_bounds[0]),
+                                self.window.core.logical_to_physical(axis_key, fixed_bounds[1]),
+                            ],
+                        )
+                        results.append(context["data"])
+                self.assertFalse(np.allclose(results[0], results[1]))
+                self.assertFalse(np.allclose(results[1], results[2]))
+
+    def test_axis_integral_crop_reuses_live_angle_without_moving_crop_or_normal_range(self):
+        self.window.timeline_bar.set_rotation_angle(30.0)
+        self.window.on_rotation_angle_changed()
+        base = self._build(2)
+        self.window.left_workspace.add_page_inactive(base)
+        cropped = AnalysisPageSpec(
+            "live-crop", "实时裁剪切片", "axis_integral_crop", "test",
+            source_page_id=base.page_id, params=copy.deepcopy(base.params),
+        )
+        cropped.params.update(
+            crop_k_low=1, crop_k_up=4, crop_e_low=2, crop_e_up=5,
+            crop_base_rect=None, crop_regions=[],
+        )
+        self.window.left_workspace.add_page(cropped)
+        fixed_interval = copy.deepcopy(cropped.params["axis_interval"])
+        fixed_crop = tuple(cropped.params[key] for key in (
+            "crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"
+        ))
+
+        for angle in (-15.0, 0.0, 62.0):
+            with self.subTest(angle=angle):
+                self.window.timeline_bar.set_rotation_angle(angle)
+                self.window.on_rotation_angle_changed()
+                expected = self._expected(cropped, angle)[1:5, 2:6]
+                context = self._context(cropped)
+                assert_close(context["data"], expected)
+                self.assertEqual(context["rotation_angle"], angle)
+                self.assertEqual(cropped.params["axis_interval"], fixed_interval)
+                self.assertEqual(
+                    tuple(cropped.params[key] for key in (
+                        "crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"
+                    )),
+                    fixed_crop,
+                )
+                self.assertEqual(cropped.params["source_3d"]["rotation_angle"], 30.0)
+                exported = self._export(cropped)["export_data"]
+                assert_close(exported["sample"], expected)
+                assert_close(
+                    exported["crop_range"],
+                    [
+                        self.window.core.coords["X"][1], self.window.core.coords["X"][4],
+                        self.window.core.coords["Y"][2], self.window.core.coords["Y"][5],
+                    ],
+                )
 
     def test_single_available_position_opens_as_a_locked_single_layer(self):
         path = Path(self.temp.name) / "single-axis.npz"
@@ -98,6 +214,39 @@ class CanvasAxisSliceTests(unittest.TestCase):
         self.assertEqual(self.window.left_workspace.current_spec().page_id, self.source.page_id)
         self.window.left_workspace.activate_page(second.page_id)
         self.assertEqual(second.params["axis_interval"], original_second)
+
+    def test_page_switch_restores_each_direct_slices_current_angle_and_export(self):
+        window = self.window
+        overlay = window.canvas_tool_overlay
+        window.timeline_bar.set_rotation_angle(30.0)
+        window.on_rotation_angle_changed()
+        first = self._build(2, activate=True)
+        first_interval = copy.deepcopy(first.params["axis_interval"])
+        overlay.set_rotation_angle(-20.0)
+        window.on_rotation_angle_changed()
+
+        window.left_workspace.activate_page(self.source.page_id)
+        self.assertEqual(window.rotation_angle, 30.0)
+        overlay.set_rotation_angle(5.0)
+        window.on_rotation_angle_changed()
+        second = self._build(1, activate=True)
+        second_interval = copy.deepcopy(second.params["axis_interval"])
+        overlay.set_rotation_angle(45.0)
+        window.on_rotation_angle_changed()
+
+        window.left_workspace.activate_page(first.page_id)
+        self.assertEqual(window.rotation_angle, -20.0)
+        self.assertEqual(first.params["axis_interval"], first_interval)
+        self.assertEqual(first.params["source_3d"]["rotation_angle"], 30.0)
+        assert_close(window.current_render_context["data"], self._expected(first, -20.0))
+        assert_close(self._export(first)["export_data"]["sample"], self._expected(first, -20.0))
+
+        window.left_workspace.activate_page(second.page_id)
+        self.assertEqual(window.rotation_angle, 45.0)
+        self.assertEqual(second.params["axis_interval"], second_interval)
+        self.assertEqual(second.params["source_3d"]["rotation_angle"], 5.0)
+        assert_close(window.current_render_context["data"], self._expected(second, 45.0))
+        assert_close(self._export(second)["export_data"]["sample"], self._expected(second, 45.0))
 
     def test_cropped_slice_returns_to_the_original_3d_not_its_2d_parent(self):
         first = self._build(2, activate=True)
@@ -221,9 +370,10 @@ class CanvasAxisSliceTests(unittest.TestCase):
         self.assertFalse(overlay.rotation_panel.isVisible())
         self.assertEqual(window.timeline_bar.get_rotation_angle(), -7.5)
         self.assertFalse(overlay.switch_flip.isChecked())
-        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertFalse(overlay.rotation_button.isChecked())
 
         overlay.show_rotation_panel()
+        self.assertTrue(overlay.rotation_button.isChecked())
         self.assertEqual(overlay.edit_rotation.text(), "-7.5")
         window.left_workspace.activate_page(spec.page_id)
         self.assertEqual(window.timeline_bar.get_rotation_angle(), 12.25)
@@ -231,9 +381,14 @@ class CanvasAxisSliceTests(unittest.TestCase):
         self.assertTrue(overlay.switch_flip.isChecked())
         self.assertIn("12.25°", overlay.rotation_button.toolTip())
 
-    def test_recipe_restores_the_same_frozen_source_and_interval(self):
+    def test_recipe_restores_current_angle_with_frozen_source_and_fixed_interval(self):
+        self.window.timeline_bar.set_rotation_angle(30.0)
+        self.window.on_rotation_angle_changed()
         spec = self._build(1, activate=True)
-        expected = self._context(spec)["data"].copy()
+        self.window.canvas_tool_overlay.set_rotation_angle(-20.0)
+        self.window.on_rotation_angle_changed()
+        expected = self._expected(spec, -20.0)
+        assert_close(self._context(spec)["data"], expected)
         snapshot = capture_snapshot(self.window)
         self.assertIsNotNone(snapshot.view_recipe, snapshot.recipe_error)
         recipe_path = Path(self.temp.name) / "axis.bsview.json"
@@ -243,14 +398,16 @@ class CanvasAxisSliceTests(unittest.TestCase):
             recipe_path, confirm=False, relocate=lambda _: str(self.path),
         ))
         restored = self.window.active_page_spec
+        self.assertEqual(self.window.rotation_angle, -20.0)
         self.assertEqual(restored.params["axis_interval"], spec.params["axis_interval"])
         self.assertEqual(restored.params["source_3d"]["page_kind"], "home")
         self.assertEqual(
             restored.params["source_3d"]["params"]["time_interval"],
             spec.params["source_3d"]["params"]["time_interval"],
         )
-        self.assertEqual(restored.params["source_3d"]["rotation_angle"], 0.0)
+        self.assertEqual(restored.params["source_3d"]["rotation_angle"], 30.0)
         assert_close(self._context(restored)["data"], expected)
+        assert_close(self._export(restored)["export_data"]["sample"], expected)
 
 
 if __name__ == "__main__":

@@ -328,8 +328,3 @@ class OpacityInterpolationSwitch(QAbstractButton):
         self._paint_groove(painter)
         self._paint_thumb(painter)
         self._paint_icons(painter)
-        if self.hasFocus() and self.isEnabled():
-            rect = self._track_rect().adjusted(-0.35, -0.35, 0.35, 0.35)
-            painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(theme.token_color("TEXT_2"), 1.15))
-            painter.drawRoundedRect(rect, rect.height() / 2.0, rect.height() / 2.0)

@@ -2,12 +2,13 @@
 """主框选工具条与裁剪/裁空范围窗口的真实鼠标验收。
 
 验证点：
-1. 真实点击主「框选范围」展开次级工具条，再点击画布初级「裁剪」呼出独立浮窗；
-2. 次级工具条位于主按钮左侧且不超出画布，浮窗落在初级裁剪按钮下方；
-3. 拖动标题行整窗移动，切到初级「裁空」只换模式且保留浮窗位置；
-4. 右击画布仍能把窗口移到光标处；重复点击初级操作按钮只收起浮窗；
-5. 重复点击主按钮收起/再展开工具条时保留选区草稿与 Z 标号标题；
-6. 开关打开期间，页面重新渲染后浮窗仍在，最终可分别关闭初级操作与主模式。
+1. 直接点击初级「裁剪」「裁空」只呼出独立浮窗，不联动框选主按钮与次级工具条；
+2. 真实点击主「框选范围」展开次级工具条，再点击画布初级「裁剪」呼出独立浮窗；
+3. 次级工具条位于主按钮左侧且不超出画布，浮窗落在初级裁剪按钮下方；
+4. 拖动标题行整窗移动，切到初级「裁空」只换模式且保留浮窗位置；
+5. 右击画布仍能把窗口移到光标处；重复点击初级操作按钮只收起浮窗；
+6. 重复点击主按钮收起/再展开工具条时保留选区草稿与 Z 标号标题；
+7. 开关打开期间，页面重新渲染后浮窗仍在，最终可分别关闭初级操作与主模式。
 
 用法: .venv/Scripts/python.exe scripts/validation/verify_crop_window.py <npz路径>
 """
@@ -126,6 +127,16 @@ def main():
         check("数据加载后 3D 视图就绪", (window.current_render_context or {}).get("view") == "3d")
         check("加载后主/次级工具与范围窗口默认收起",
               not selection_button.isChecked() and not selection_panel.isVisible() and not popup.isVisible())
+
+        for label, button in (("裁剪", crop_button), ("裁空", erase_button)):
+            click(button)
+            check(f"直接点击初级「{label}」不联动框选主按钮与次级工具条",
+                  button.isChecked() and popup.isVisible() and window.crop_controller.enabled
+                  and not selection_button.isChecked() and not selection_panel.isVisible())
+            click(button)
+            check(f"框选收起时再次点击初级「{label}」关闭交互与浮窗",
+                  not button.isChecked() and not popup.isVisible()
+                  and not window.crop_controller.enabled)
 
         click(selection_button)
         check("真实点击主框选按钮展开次级工具条",

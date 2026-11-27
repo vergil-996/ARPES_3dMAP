@@ -268,6 +268,15 @@ class OpacityInterpolationSwitchTests(unittest.TestCase):
         }
         self.assertGreater(len(colors), 30)
 
+    def test_focus_does_not_change_rendering(self):
+        self.switch.clearFocus()
+        unfocused = self.render_switch()
+
+        self.switch.setFocus(Qt.OtherFocusReason)
+
+        self.assertTrue(self.switch.hasFocus())
+        self.assertEqual(self.render_switch(), unfocused)
+
     def test_rendering_tracks_theme_at_rest_and_mid_animation(self):
         self.switch.clearFocus()
         light = self.render_switch()

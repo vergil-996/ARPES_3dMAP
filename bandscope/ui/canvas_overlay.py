@@ -1,5 +1,5 @@
 """画布右侧的视角预设与常用操作工具条。"""
-from PyQt5.QtCore import QPoint, QRectF, QSize, Qt, QSignalBlocker, pyqtSignal
+from PyQt5.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, QSignalBlocker, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QPainter, QPainterPath, QPen, QRegion
 from PyQt5.QtWidgets import QApplication, QFrame, QVBoxLayout
 
@@ -171,6 +171,9 @@ class CanvasToolOverlay(QFrame):
         self.focus_button.toggled.connect(self.focus_requested)
         layout.addWidget(self.focus_button, 0, Qt.AlignHCenter)
         self.adjustSize()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
 
     def install_path_button(self, button):
         self.path_button = button
@@ -206,12 +209,85 @@ class CanvasToolOverlay(QFrame):
 
     def _set_selection_panel_visible(self, visible):
         if visible:
-            self.close_rotation_panel(commit=False)
             self._position_selection_panel()
             self.selection_panel.show()
             self.selection_panel.raise_()
         else:
             self.selection_panel.hide()
+
+    @staticmethod
+    def _global_rect(widget):
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    @staticmethod
+    def _screen_bounds(anchor):
+        screen = QApplication.screenAt(anchor.center()) or QApplication.primaryScreen()
+        if screen is None:
+            return QRect()
+        return screen.availableGeometry()
+
+    @staticmethod
+    def _fit_panel_position(size, anchor, bounds, obstacles):
+        def clamped(x, y):
+            return QPoint(
+                max(bounds.left(), min(x, bounds.right() - size.width() + 1)),
+                max(bounds.top(), min(y, bounds.bottom() - size.height() + 1)),
+            )
+
+        preferred = QPoint(
+            anchor.left() - size.width() - 8,
+            anchor.center().y() - size.height() // 2,
+        )
+        centered_x = anchor.center().x() - size.width() // 2
+        candidates = [
+            preferred,
+            QPoint(centered_x, anchor.top() - size.height() - 8),
+            QPoint(centered_x, anchor.bottom() + 9),
+            QPoint(anchor.right() + 9, preferred.y()),
+            bounds.topLeft(),
+            QPoint(bounds.right() - size.width() + 1, bounds.top()),
+            QPoint(bounds.left(), bounds.bottom() - size.height() + 1),
+            QPoint(bounds.right() - size.width() + 1, bounds.bottom() - size.height() + 1),
+        ]
+        for obstacle in obstacles:
+            candidates.extend((
+                QPoint(obstacle.left() - size.width() - 8, preferred.y()),
+                QPoint(obstacle.right() + 9, preferred.y()),
+                QPoint(centered_x, obstacle.top() - size.height() - 8),
+                QPoint(centered_x, obstacle.bottom() + 9),
+            ))
+
+        best = None
+        best_score = None
+        seen = set()
+        for candidate in candidates:
+            position = clamped(candidate.x(), candidate.y())
+            key = (position.x(), position.y())
+            if key in seen:
+                continue
+            seen.add(key)
+            rect = QRect(position, size)
+            overlap = 0
+            for obstacle in obstacles:
+                intersection = rect.intersected(obstacle)
+                overlap += max(0, intersection.width()) * max(0, intersection.height())
+            score = (overlap, (position - preferred).manhattanLength())
+            if best_score is None or score < best_score:
+                best = position
+                best_score = score
+            if overlap == 0 and score[1] == 0:
+                break
+        return best if best is not None else bounds.topLeft()
+
+    def _layout_obstacles(self, exclude):
+        obstacles = []
+        for panel in (self.selection_panel, self.rotation_panel):
+            if panel is not exclude and panel.isVisible():
+                obstacles.append(self._global_rect(panel))
+        for widget in QApplication.topLevelWidgets():
+            if widget.objectName() == "crop_popup" and widget.isVisible():
+                obstacles.append(self._global_rect(widget))
+        return obstacles
 
     def _position_selection_panel(self):
         parent = self.parentWidget()
@@ -223,12 +299,14 @@ class CanvasToolOverlay(QFrame):
         self._selection_layout.setSpacing(0 if compact else 4)
         self._selection_layout.setContentsMargins(4, 2 if compact else 4, 4, 2 if compact else 4)
         panel.adjustSize()
-        anchor = self.selection_button.mapTo(parent, QPoint(0, 0))
-        x = anchor.x() - panel.width() - 8
-        y = anchor.y() + (self.selection_button.height() - panel.height()) // 2
-        x = max(0, min(x, max(0, parent.width() - panel.width())))
-        y = max(0, min(y, max(0, parent.height() - panel.height())))
-        panel.move(x, y)
+        anchor = self._global_rect(self.selection_button)
+        bounds = self._screen_bounds(anchor).intersected(self._global_rect(parent))
+        if bounds.isEmpty():
+            bounds = self._global_rect(parent)
+        position = self._fit_panel_position(
+            panel.size(), anchor, bounds, self._layout_obstacles(panel)
+        )
+        panel.move(parent.mapFromGlobal(position))
 
     def rotation_angle(self):
         return self.rotation_panel.current_angle()
@@ -239,6 +317,7 @@ class CanvasToolOverlay(QFrame):
     def toggle_rotation_panel(self):
         if self._suppress_rotation_click:
             self._suppress_rotation_click = False
+            self._sync_rotation_button()
             return
         if self.rotation_panel.isVisible():
             self.close_rotation_panel()
@@ -247,7 +326,6 @@ class CanvasToolOverlay(QFrame):
 
     def show_rotation_panel(self):
         self._suppress_rotation_click = False
-        self.close_selection_panel()
         self._position_rotation_panel()
         self.rotation_panel.show()
         self.rotation_panel.raise_()
@@ -267,15 +345,19 @@ class CanvasToolOverlay(QFrame):
     def _position_rotation_panel(self):
         panel = self.rotation_panel
         panel.adjustSize()
-        anchor = self.rotation_button.mapToGlobal(QPoint(0, 0))
-        x = anchor.x() - panel.width() - 8
-        y = anchor.y() + (self.rotation_button.height() - panel.height()) // 2
-        screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            x = max(available.left(), min(x, available.right() - panel.width() + 1))
-            y = max(available.top(), min(y, available.bottom() - panel.height() + 1))
-        panel.move(x, y)
+        anchor = self._global_rect(self.rotation_button)
+        bounds = self._screen_bounds(anchor)
+        if bounds.isEmpty():
+            return
+        position = self._fit_panel_position(
+            panel.size(), anchor, bounds, self._layout_obstacles(panel)
+        )
+        panel.move(position)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Show and watched.objectName() == "crop_popup":
+            QTimer.singleShot(0, self.reposition)
+        return super().eventFilter(watched, event)
 
     def _on_rotation_angle_presented(self, angle):
         text = f"{float(angle):.2f}".rstrip("0").rstrip(".")
@@ -285,7 +367,7 @@ class CanvasToolOverlay(QFrame):
 
     def _sync_rotation_button(self):
         blocker = QSignalBlocker(self.rotation_button)
-        self.rotation_button.setChecked(abs(self.rotation_angle()) >= 0.005)
+        self.rotation_button.setChecked(self.rotation_panel.isVisible())
         del blocker
 
     def _on_rotation_panel_closed(self):
@@ -436,6 +518,9 @@ class CanvasToolOverlay(QFrame):
         path_button = getattr(self, "path_button", None)
         if path_button is not None:
             compact_buttons.append(path_button)
+        self.reset_button.setVisible(
+            not (compact and not self._3d_active and not self.reset_button.isEnabled())
+        )
         for button in compact_buttons:
             button.setFixedHeight(22 if compact else 26)
         for separator in self._separators:

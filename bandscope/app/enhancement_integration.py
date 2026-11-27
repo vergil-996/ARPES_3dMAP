@@ -1224,8 +1224,10 @@ class EnhancementInteractionMixin:
     def _draw_enhancement_regions(self, context, fields, *, redraw=True):
         if "_enhancement_artists" not in self.__dict__:
             return
-        if fields is None or self._crop_enabled():
+        if self._crop_enabled():
             self._clear_enhancement_interaction()
+            return
+        if fields is None:
             return
         state = self._enhancement_state()
         active = self._enhancement_selected()

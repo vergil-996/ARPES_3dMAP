@@ -298,7 +298,7 @@ class _WorkspaceFixture(unittest.TestCase):
         self.assertEqual(window.timeline_bar.get_rotation_angle(), -7.5)
         self.assertEqual(overlay.rotation_panel.dial.angle(), -7.5)
         self.assertIn("−7.5°", overlay.rotation_button.toolTip())
-        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertFalse(overlay.rotation_button.isChecked())
         self.assertTrue(overlay.switch_axes.isChecked())
         self.assertTrue(overlay.switch_flip.isChecked())
 

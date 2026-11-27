@@ -187,8 +187,12 @@ class TimeIntervalMixin:
     def _rotation_angle_for_spec(self, spec):
         params = (getattr(spec, "params", None) or {})
         angle = params.get("source_rotation_angle")
+        if angle is not None:
+            return float(angle)
+        if getattr(spec, "page_kind", None) in {"axis_integral", "axis_integral_crop"}:
+            return float(self.rotation_angle)
         source_3d = params.get("source_3d")
-        if angle is None and isinstance(source_3d, dict):
+        if isinstance(source_3d, dict):
             angle = source_3d.get("rotation_angle")
         return float(self.rotation_angle if angle is None else angle)
 

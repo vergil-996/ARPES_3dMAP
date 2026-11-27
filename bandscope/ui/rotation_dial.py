@@ -151,7 +151,7 @@ class RotationDialPanel(QFrame):
     closed = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
         self.setObjectName("rotation_dial_panel")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(

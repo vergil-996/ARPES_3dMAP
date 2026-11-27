@@ -23,6 +23,7 @@ from bandscope.core.path_slice import (
 )
 from bandscope.exporting.publication_export import capture_snapshot
 from bandscope.processing.compute_backends import ArrayLRUCache, BackendManager
+from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from tests.support.view_recipe import control_window, synthetic_npz
 
@@ -305,6 +306,105 @@ class PathSliceHostTests(unittest.TestCase):
         self.assertEqual([segment["colormap_end"] for segment in segments], [0.3, 0.9])
         self.assertEqual([segment["gray"] for segment in segments], [40, 70])
         self.assertEqual([segment["intensity_map"] for segment in segments], ["线性", "对数"])
+
+
+class PathSliceRotationCoexistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        path = Path(self.temp.name) / "source.npz"
+        synthetic_npz(path, seed=29, descending=True)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(str(path)))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
+        home = self.window.left_workspace.current_spec()
+        self.source = self.window._build_canvas_axis_slice_spec(home, 2)
+        self.assertIsNotNone(self.source)
+        self.window.left_workspace.add_page(self.source)
+        self.window.show()
+        self.window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        self.window.canvas_2d.draw()
+        write_draft(self.source.params, [
+            PathNode(1, 1, "Γ"), PathNode(3, 1, "K"), PathNode(3, 3, "M"),
+        ])
+        self.controller = self.window.path_slice_controller
+        self.app.processEvents()
+
+    def draft_geometry(self):
+        artists = self.controller._draft_artists
+        self.assertGreaterEqual(len(artists), 5)
+        return (
+            np.array(artists[0].get_xydata(), copy=True),
+            np.array(artists[1].get_offsets(), copy=True),
+            [artist.get_position() for artist in artists[2:]],
+            [artist.get_text() for artist in artists[2:]],
+        )
+
+    def assert_draft_geometry(self, expected):
+        actual = self.draft_geometry()
+        np.testing.assert_allclose(actual[0], expected[0])
+        np.testing.assert_allclose(actual[1], expected[1])
+        self.assertEqual(actual[2], expected[2])
+        self.assertEqual(actual[3], expected[3])
+        self.assertTrue(all(
+            artist.axes is self.window.ax_2d
+            for artist in self.controller._draft_artists
+        ))
+
+    def test_rotation_preserves_path_nodes_and_crop_conflict_protection(self):
+        window = self.window
+        overlay = window.canvas_tool_overlay
+        overlay.show_rotation_panel()
+        self.controller.button.click()
+        self.controller.redraw_draft()
+        nodes_before = [
+            (node.x, node.y, node.label) for node in draft_nodes(self.source.params)
+        ]
+        geometry_before = self.draft_geometry()
+        self.assertEqual(self.controller.active_source_id, self.source.page_id)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(all(
+            artist in window._active_2d_blit_artists()
+            for artist in self.controller._draft_artists
+        ))
+
+        window.on_rotation_angle_preview(-16.0)
+        window._render_active_page(RenderQuality.PREVIEW, RefreshCause.ROTATION)
+
+        self.assertEqual(self.controller.active_source_id, self.source.page_id)
+        self.assertEqual([
+            (node.x, node.y, node.label) for node in draft_nodes(self.source.params)
+        ], nodes_before)
+        self.assert_draft_geometry(geometry_before)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+        window.on_rotation_angle_changed(24.0)
+        window._render_active_page(RenderQuality.EXACT, RefreshCause.ROTATION)
+
+        self.assertEqual(self.controller.active_source_id, self.source.page_id)
+        self.assertEqual([
+            (node.x, node.y, node.label) for node in draft_nodes(self.source.params)
+        ], nodes_before)
+        self.assert_draft_geometry(geometry_before)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+
+        window.btn_tb_crop.click()
+
+        self.assertIsNone(self.controller.active_source_id)
+        self.assertFalse(self.controller.button.isChecked())
+        self.assertEqual([
+            (node.x, node.y, node.label) for node in draft_nodes(self.source.params)
+        ], nodes_before)
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
 
 
 class PathSliceRecipeTests(unittest.TestCase):

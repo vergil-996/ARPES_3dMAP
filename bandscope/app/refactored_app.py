@@ -1488,6 +1488,10 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         params = spec.params
         t_low, t_up = self._time_indices_for_spec(spec)
         angle = float(request.snapshot.get("rotation_angle", self.rotation_angle))
+        live_axis_source = bool(
+            spec.page_kind in {"axis_integral", "axis_integral_crop"}
+            and params.get("source_rotation_angle") is None
+        )
         key = self._volume_cache_key(raw_data, t_low, t_up, angle)
         needs_compute = t_up > t_low or abs(angle) >= 1e-6
         extra_metadata = {}
@@ -1522,7 +1526,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
                 and frozen_source.get("page_kind") != "home"
             )
             or (
-                frozen_angle is not None
+                not live_axis_source
+                and frozen_angle is not None
                 and abs(float(frozen_angle) - angle) >= 1e-6
             )
         )
@@ -1611,7 +1616,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             if self._apply_rotation_actor_preview(self.rotation_angle):
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
-            if spec.page_kind != "home":
+            if spec.page_kind not in {"home", "axis_integral", "axis_integral_crop"}:
                 self._finish_ui_refresh(request, self._last_compute_backend)
                 return
 
@@ -5100,7 +5105,8 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
 
     def _is_current_page(self, spec):
         current_spec = self.left_workspace.current_spec()
-        return current_spec is not None and current_spec.page_id == spec.page_id
+        current_page_id = getattr(current_spec, "page_id", None)
+        return current_page_id is not None and current_page_id == getattr(spec, "page_id", None)
 
     def _build_axis_request_params(self, axis_index=None):
         current = self.left_workspace.current_spec()
@@ -5131,7 +5137,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             params["axis_interval"] = state
         return params
 
-    def _compute_frozen_axis_source(self, snapshot, *, time_interval=None):
+    def _compute_frozen_axis_source(self, snapshot, *, time_interval=None, rotation_angle=None):
         if not isinstance(snapshot, dict):
             return None
         kind = str(snapshot.get("page_kind") or "")
@@ -5152,8 +5158,12 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             snapshot.get("cache_page_id", source_spec.page_id)
         )
         previous_rotation = self.rotation_angle
+        source_rotation = (
+            snapshot.get("rotation_angle", previous_rotation)
+            if rotation_angle is None else rotation_angle
+        )
         try:
-            self.rotation_angle = float(snapshot.get("rotation_angle", previous_rotation))
+            self.rotation_angle = float(source_rotation)
             context = self._compute_render_context(source_spec)
         finally:
             self.rotation_angle = previous_rotation
@@ -5210,6 +5220,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
             return self._compute_frozen_axis_source(
                 spec.params["source_3d"],
                 time_interval=spec.params.get("time_interval"),
+                rotation_angle=self._rotation_angle_for_spec(spec),
             )
         data_3d = self._get_rotated_time_range_for_spec(raw_data, spec)
         context = {
@@ -5343,7 +5354,7 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         }
         for key in (
             "time_interval", "source_mode", "source_page_kind", "source_t_index",
-            "source_t_low", "source_t_up", "t_low", "t_up",
+            "source_t_low", "source_t_up", "t_low", "t_up", "source_rotation_angle",
         ):
             if key in params:
                 spec_params[key] = copy.deepcopy(params[key])
@@ -8239,6 +8250,9 @@ class My3DAnalyzer(TimeIntervalMixin, SourceWorkspaceMixin, BlenderRecipeMixin, 
         annotation = getattr(self.plot_coordinate_tooltip, "annotation", None)
         if annotation is not None:
             artists.append(annotation)
+        path_controller = self.__dict__.get("path_slice_controller")
+        if path_controller is not None:
+            artists.extend(path_controller.blit_artists())
         return artists
 
     def _sync_active_2d_blit_background(self):

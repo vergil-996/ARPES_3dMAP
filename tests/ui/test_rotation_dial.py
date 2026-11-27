@@ -55,6 +55,11 @@ class RotationDialTests(unittest.TestCase):
     def _release(self, dial, pointer_angle):
         self._send_at_angle(dial, QEvent.MouseButtonRelease, pointer_angle, Qt.LeftButton, Qt.NoButton)
 
+    def test_panel_is_a_modeless_tool_window_instead_of_a_popup(self):
+        panel = self.make_panel()
+
+        self.assertEqual(panel.windowFlags() & Qt.WindowType_Mask, Qt.Tool)
+
     def test_drag_starts_at_current_angle_and_crosses_zero_continuously(self):
         panel = self.make_panel()
         panel.set_angle(-7.5)

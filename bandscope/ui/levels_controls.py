@@ -120,6 +120,7 @@ class _HandleEditor(QWidget):
             getattr(self, self._active_name).sliderReleased.emit()
             event.accept()
             self._update_hover(event.pos())
+            self.clearFocus()
             return
         super().mouseReleaseEvent(event)
 
@@ -158,6 +159,7 @@ class _HandleEditor(QWidget):
         if self._hovered is not None:
             self._hovered = None
             self.update()
+        self.clearFocus()
         super().leaveEvent(event)
 
     def _update_hover(self, position):

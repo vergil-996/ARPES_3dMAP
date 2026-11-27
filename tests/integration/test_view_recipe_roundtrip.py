@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 from PyQt5.QtWidgets import QApplication
+from scipy.ndimage import rotate as scipy_rotate
 
 from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.app.view_recipe_integration import RecipeEvaluator
@@ -26,6 +27,13 @@ from bandscope.ui.axis_title_controller import axis_title_key
 from bandscope.ui.result_workspace import AnalysisPageSpec
 from bandscope.core.crop_model import CropSelection
 from tests.support.view_recipe import control_window, recipe_document, synthetic_npz
+
+
+def rotate_linear(frame, angle):
+    return scipy_rotate(
+        np.asarray(frame, dtype=np.float32), float(angle), axes=(0, 1),
+        reshape=False, order=1, mode="constant", cval=0.0, prefilter=True,
+    )
 
 
 class RecipeRoundtripTests(unittest.TestCase):
@@ -110,7 +118,7 @@ class RecipeRoundtripTests(unittest.TestCase):
         self.assertEqual(other.timeline_bar.slider_time.value(), 2)
         self.assertEqual(other.timeline_bar.get_rotation_angle(), -7.5)
         self.assertEqual(other.canvas_tool_overlay.rotation_panel.dial.angle(), -7.5)
-        self.assertTrue(other.canvas_tool_overlay.rotation_button.isChecked())
+        self.assertFalse(other.canvas_tool_overlay.rotation_button.isChecked())
         self.assertIn("−7.5°", other.canvas_tool_overlay.rotation_button.toolTip())
         self.assertEqual(other._get_display_levels(), w._get_display_levels())
         restored_key = axis_title_key(other.left_workspace.home_page_id, "3d", ("X", "Y", "E"))
@@ -119,6 +127,73 @@ class RecipeRoundtripTests(unittest.TestCase):
         np.testing.assert_allclose(other.plotter.camera.position, snapshot.camera["position"])
         np.testing.assert_allclose(other.plotter.camera.focal_point, snapshot.camera["focal_point"])
         np.testing.assert_array_equal(other.current_render_context["data"], snapshot.payload["volume"])
+
+    def test_axis_crop_roundtrip_restores_live_angle_fixed_ranges_and_export(self):
+        w = self.window
+        w.timeline_bar.set_rotation_angle(25.0)
+        w.on_rotation_angle_changed()
+        home = w.left_workspace.current_spec()
+        spec = w._build_canvas_axis_slice_spec(home, 2)
+        spec.page_kind = "axis_integral_crop"
+        spec.params.update(
+            crop_k_low=1, crop_k_up=4, crop_e_low=2, crop_e_up=5,
+            crop_base_rect=None, crop_regions=[],
+        )
+        w.left_workspace.add_page(spec)
+        w.canvas_tool_overlay.set_rotation_angle(-35.0)
+        w.on_rotation_angle_changed()
+        fixed_interval = copy.deepcopy(spec.params["axis_interval"])
+        fixed_crop = tuple(spec.params[key] for key in (
+            "crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"
+        ))
+        low, up = int(spec.params["low"]), int(spec.params["up"])
+
+        def expected(angle):
+            rotated = rotate_linear(self.raw[..., 0], angle)
+            full = np.sum(rotated[:, :, low:up + 1], axis=2, dtype=np.float64)
+            return full[1:5, 2:6]
+
+        np.testing.assert_allclose(
+            w.current_render_context["data"], expected(-35.0), rtol=2e-6, atol=2e-6
+        )
+        path, _snapshot = self.save()
+        other = control_window()
+        self.addCleanup(other.close)
+        self.assertTrue(other._load_view_recipe(
+            path, confirm=False, relocate=lambda _: str(self.path)
+        ))
+        restored = other.active_page_spec
+        self.assertEqual(restored.page_kind, "axis_integral_crop")
+        self.assertEqual(other.rotation_angle, -35.0)
+        self.assertEqual(restored.params["source_3d"]["rotation_angle"], 25.0)
+        self.assertEqual(restored.params["axis_interval"], fixed_interval)
+        self.assertEqual(
+            tuple(restored.params[key] for key in (
+                "crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"
+            )),
+            fixed_crop,
+        )
+        np.testing.assert_allclose(
+            other.current_render_context["data"], expected(-35.0), rtol=2e-6, atol=2e-6
+        )
+        raw, coords = other._get_display_state_for_spec(restored)
+        exported = other._get_axis_integral_crop_export_context(restored, raw, coords)
+        np.testing.assert_allclose(
+            exported["export_data"]["sample"], expected(-35.0), rtol=2e-6, atol=2e-6
+        )
+
+        other.canvas_tool_overlay.set_rotation_angle(10.0)
+        other.on_rotation_angle_changed()
+        np.testing.assert_allclose(
+            other.current_render_context["data"], expected(10.0), rtol=2e-6, atol=2e-6
+        )
+        self.assertEqual(restored.params["axis_interval"], fixed_interval)
+        self.assertEqual(
+            tuple(restored.params[key] for key in (
+                "crop_k_low", "crop_k_up", "crop_e_low", "crop_e_up"
+            )),
+            fixed_crop,
+        )
 
     def test_old_restricted_lock_is_rebuilt_on_restored_frame_and_survives_scrubbing(self):
         path, snapshot = self.save()

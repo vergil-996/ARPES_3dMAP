@@ -1,6 +1,6 @@
 """Crop interaction wiring for the analyzer's VTK and Matplotlib canvases.
 
-主框选开关控制全部选区，裁剪 / 裁空开关只控制活动选区的数值范围窗口。
+框选与裁剪 / 裁空共用选区交互；初级操作不联动展开框选次级工具栏。
 """
 import copy
 from dataclasses import replace
@@ -232,16 +232,13 @@ class CropInteractionMixin:
         overlay = self.__dict__.get("canvas_tool_overlay")
         selection_button = getattr(overlay, "selection_button", None)
         if checked:
-            if selection_button is not None and not selection_button.isChecked():
-                selection_button.setChecked(True)
-            else:
-                CropInteractionMixin._set_selection_mode(self, True)
+            CropInteractionMixin._set_selection_mode(self, True)
             other = self.btn_tb_crop if operation == "erase" else self.btn_tb_erase
             other.blockSignals(True)
             other.setChecked(False)
             other.blockSignals(False)
             self.crop_controller.set_operation(operation)
-        elif selection_button is None:
+        elif selection_button is None or not selection_button.isChecked():
             CropInteractionMixin._set_selection_mode(self, False)
         self.crop_controller.popup.hide()
         if checked:

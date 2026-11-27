@@ -300,6 +300,9 @@ class PathSliceController:
                 pass
         self._draft_artists = []
 
+    def blit_artists(self):
+        return tuple(self._draft_artists)
+
     def redraw_draft(self) -> None:
         self._clear_draft_artists()
         spec = self.current_spec()

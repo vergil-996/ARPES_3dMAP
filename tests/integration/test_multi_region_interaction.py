@@ -19,8 +19,11 @@ from bandscope.app.refactored_app import My3DAnalyzer
 from bandscope.app.enhancement_integration import EnhancementInteractionMixin
 from bandscope.core.analyzer_core import AnalyzerCore
 from bandscope.core.crop_model import CropSelection
+from bandscope.rendering.refresh_pipeline import RefreshCause, RenderQuality
+from bandscope.ui.canvas_overlay import CanvasToolOverlay
 from bandscope.ui.crop_controls import CropController
 from bandscope.ui.result_workspace import AnalysisPageSpec
+from tests.support.view_recipe import control_window, synthetic_npz
 
 
 def _image_context():
@@ -303,6 +306,115 @@ class MultiRegion2DTests(unittest.TestCase):
         self.assertEqual(self.controller.active_selection_id, second)
 
 
+class RotationSelectionCoexistenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        path = os.path.join(self.temp.name, "source.npz")
+        synthetic_npz(path, seed=19, descending=True)
+        self.window = control_window()
+        self.addCleanup(self.window.close)
+        self.assertTrue(self.window.load_data(path))
+        identity = self.window.core.source_identity
+        if identity is not None and identity.future is not None:
+            identity.future.result(timeout=30)
+        source = self.window.left_workspace.current_spec()
+        self.spec = self.window._build_canvas_axis_slice_spec(source, 2)
+        self.assertIsNotNone(self.spec)
+        self.window.left_workspace.add_page(self.spec)
+        self.window.show()
+        self.window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        self.window.canvas_2d.draw()
+        self.app.processEvents()
+
+    def assert_rotation_panel_visible(self):
+        overlay = self.window.canvas_tool_overlay
+        self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
+
+    def test_rotation_panel_coexists_with_selection_crop_and_erase(self):
+        overlay = self.window.canvas_tool_overlay
+        controller = self.window.crop_controller
+
+        overlay.selection_button.click()
+        self.assertTrue(overlay.selection_panel.isVisible())
+        overlay.show_rotation_panel()
+        self.assertTrue(overlay.selection_panel.isVisible())
+        self.assert_rotation_panel_visible()
+
+        overlay.close_selection_panel()
+        overlay.close_rotation_panel(commit=False)
+        overlay.show_rotation_panel()
+        overlay.selection_button.click()
+        self.assertTrue(overlay.selection_panel.isVisible())
+        self.assertTrue(controller.enabled)
+        self.assert_rotation_panel_visible()
+        overlay.close_selection_panel()
+
+        for operation, button in (
+            ("crop", self.window.btn_tb_crop),
+            ("erase", self.window.btn_tb_erase),
+        ):
+            with self.subTest(operation=operation):
+                overlay.show_rotation_panel()
+                button.click()
+                self.assertTrue(button.isChecked())
+                self.assertTrue(controller.popup.isVisible())
+                self.assertEqual(controller.operation, operation)
+                self.assert_rotation_panel_visible()
+                button.click()
+                self.assert_rotation_panel_visible()
+
+    def test_rotation_preview_and_exact_refresh_preserve_2d_selection_geometry(self):
+        window = self.window
+        overlay = window.canvas_tool_overlay
+        controller = window.crop_controller
+        overlay.set_selection_panel_visible(True)
+        first = controller.active_selection_id
+        second = controller.add_selection()
+        controller.set_selection(
+            CropSelection("2d", ("X", "Y"), (-0.5, 0.5, -1.0, 1.0)),
+            notify=False,
+        )
+        window._render_active_page(RenderQuality.EXACT, RefreshCause.DATA_SOURCE)
+        window.canvas_2d.draw()
+        drafts_before = dict(controller.selections_for_page())
+        extents_before = {
+            selection_id: selector.extents
+            for selection_id, selector in window.axis_crop_selectors.items()
+        }
+        self.assertEqual(set(extents_before), {first, second})
+        overlay.show_rotation_panel()
+
+        window.on_rotation_angle_preview(18.0)
+        window._render_active_page(RenderQuality.PREVIEW, RefreshCause.ROTATION)
+
+        self.assertEqual(controller.active_selection_id, second)
+        self.assertEqual(dict(controller.selections_for_page()), drafts_before)
+        self.assertEqual(set(window.axis_crop_selectors), {first, second})
+        for selection_id, extents in extents_before.items():
+            np.testing.assert_allclose(
+                window.axis_crop_selectors[selection_id].extents, extents
+            )
+        self.assert_rotation_panel_visible()
+
+        window.on_rotation_angle_changed(27.0)
+        window._render_active_page(RenderQuality.EXACT, RefreshCause.ROTATION)
+
+        self.assertEqual(controller.active_selection_id, second)
+        self.assertEqual(dict(controller.selections_for_page()), drafts_before)
+        self.assertEqual(set(window.axis_crop_selectors), {first, second})
+        for selection_id, extents in extents_before.items():
+            np.testing.assert_allclose(
+                window.axis_crop_selectors[selection_id].extents, extents
+            )
+        self.assert_rotation_panel_visible()
+
+
 class SelectionModeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -318,7 +430,7 @@ class SelectionModeTests(unittest.TestCase):
         host.canvas_tool_overlay.close_selection_panel.assert_called_once_with()
         add_region.assert_called_once_with()
 
-    def test_secondary_toggle_does_not_close_master_mode_and_collapse_keeps_drafts(self):
+    def test_primary_modes_do_not_expand_selection_and_master_collapse_keeps_drafts(self):
         parent = QWidget()
         controller = CropController(parent)
         controller.activate("image", _image_context())
@@ -329,8 +441,9 @@ class SelectionModeTests(unittest.TestCase):
         host.btn_tb_erase = QPushButton()
         for button in (host.btn_tb_crop, host.btn_tb_erase):
             button.setCheckable(True)
-        host.canvas_tool_overlay = SimpleNamespace(selection_button=QPushButton())
-        host.canvas_tool_overlay.selection_button.setCheckable(True)
+        host.canvas_tool_overlay = CanvasToolOverlay(
+            parent, host.btn_tb_crop, host.btn_tb_erase, QPushButton()
+        )
         host.path_slice_controller = Mock()
         host._clear_enhancement_interaction = Mock()
         host._can_show_interactive_box = lambda: False
@@ -341,11 +454,23 @@ class SelectionModeTests(unittest.TestCase):
         host.current_render_context = None
         host._update_crop_cursor = Mock()
         host.plotter = SimpleNamespace(render=Mock())
-        host.canvas_tool_overlay.selection_button.toggled.connect(
+        host.canvas_tool_overlay.selection_toggled.connect(
             lambda checked: host.on_selection_toggled(checked)
         )
         host.btn_tb_crop.toggled.connect(lambda checked: host.on_toggle_interactive_box(checked))
         host.btn_tb_erase.toggled.connect(lambda checked: host.on_toggle_erase(checked))
+        parent.show()
+
+        for operation, button in (("crop", host.btn_tb_crop), ("erase", host.btn_tb_erase)):
+            with self.subTest(operation=operation):
+                button.click()
+                self.assertTrue(controller.enabled)
+                self.assertTrue(controller.popup.isVisible())
+                self.assertFalse(host.canvas_tool_overlay.selection_button.isChecked())
+                self.assertFalse(host.canvas_tool_overlay.selection_panel.isVisible())
+                button.click()
+                self.assertFalse(controller.enabled)
+                self.assertFalse(controller.popup.isVisible())
 
         host.canvas_tool_overlay.selection_button.click()
         self.assertTrue(controller.enabled)
@@ -400,8 +525,9 @@ class _FakePlotter:
             widget.Off()
         self.box_widgets.clear()
 
-    def add_box_widget(self, callback, bounds, **_kwargs):
+    def add_box_widget(self, callback, bounds, **kwargs):
         widget = _FakeBoxWidget(callback, bounds)
+        widget.rotation_enabled = kwargs.get("rotation_enabled")
         widget.PlaceWidget(bounds)
         self.box_widgets.append(widget)
         return widget
@@ -502,6 +628,48 @@ class MultiRegion3DTests(unittest.TestCase):
         self.assertTrue(enhancement.enabled)
         self.assertTrue(all(not widget.enabled for widget in self.host.plotter.box_widgets[:-1]))
         self.host.plotter.clear_box_widgets.assert_not_called()
+
+    def test_actor_rotation_preserves_crop_box_bounds_and_active_id(self):
+        controller = self.host.crop_controller
+        first = controller.active_selection_id
+        second = controller.add_selection()
+        self.host._rebuild_interactive_box()
+        active_before = controller.active_selection_id
+        drafts_before = dict(controller.selections_for_page())
+        widgets_before = dict(self.host._crop_box_widgets)
+        bounds_before = {
+            selection_id: widget.bounds
+            for selection_id, widget in widgets_before.items()
+        }
+        self.assertEqual(set(bounds_before), {first, second})
+        self.assertTrue(all(
+            widget.rotation_enabled is False for widget in widgets_before.values()
+        ))
+        self.host.volume_session = SimpleNamespace(
+            active=True,
+            volume=Mock(),
+            _set_interactive_quality=lambda _quality: None,
+            render_count=0,
+        )
+        self.host.left_display_stack = SimpleNamespace(
+            currentWidget=lambda: self.host.plotter
+        )
+        self.host._rendered_rotation_angle = 0.0
+        self.host._actor_preview_rotation_angle = None
+
+        self.assertTrue(self.host._apply_rotation_actor_preview(25.0))
+        self.host.volume_session.volume.SetOrientation.assert_called_with(0.0, 0.0, 25.0)
+        self.host.rotation_angle = 25.0
+        self.host._reset_volume_actor_transform()
+        self.host._rebuild_interactive_box()
+
+        self.assertEqual(controller.active_selection_id, active_before)
+        self.assertEqual(dict(controller.selections_for_page()), drafts_before)
+        self.assertEqual(self.host._crop_box_widgets, widgets_before)
+        self.assertEqual({
+            selection_id: widget.bounds
+            for selection_id, widget in self.host._crop_box_widgets.items()
+        }, bounds_before)
 
 
 class EdcSnapshotAndExportTests(unittest.TestCase):

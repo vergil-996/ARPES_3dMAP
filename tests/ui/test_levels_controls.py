@@ -41,6 +41,34 @@ class LevelsEditorTests(unittest.TestCase):
         self.addCleanup(editor.deleteLater)
         return editor
 
+    def assert_handle_focus_lifecycle(self, editor, handle_name):
+        editor.activateWindow()
+        QApplication.processEvents()
+        position = editor._handle_positions()[handle_name]
+        y = int(round(editor._handle_center_y()))
+        point = QPoint(int(round(position)), y)
+        QTest.mousePress(editor, Qt.LeftButton, pos=point)
+        self.assertTrue(editor.hasFocus())
+        QTest.mouseRelease(editor, Qt.LeftButton, pos=point)
+        self.assertFalse(editor.hasFocus())
+
+        editor.setFocus()
+        self.assertTrue(editor.hasFocus())
+        QApplication.sendEvent(editor, QEvent(QEvent.Leave))
+        self.assertFalse(editor.hasFocus())
+
+    def test_levels_handle_clears_focus_on_release_and_leave(self):
+        editor = self.make_editor()
+        self.assert_handle_focus_lifecycle(editor, "gray")
+
+    def test_colormap_handle_clears_focus_on_release_and_leave(self):
+        editor = ColormapRangeEditor("gray")
+        editor.resize(300, editor.height())
+        editor.show()
+        self.addCleanup(editor.close)
+        self.addCleanup(editor.deleteLater)
+        self.assert_handle_focus_lifecycle(editor, "cmap_low")
+
     def test_black_white_drag_preserves_gamma_and_gray_keyboard_direction(self):
         editor = self.make_editor()
         positions = editor._handle_positions()
@@ -61,6 +89,7 @@ class LevelsEditorTests(unittest.TestCase):
         self.assertLessEqual(positions["gray"], positions["white"])
 
         editor._active_name = "gray"
+        editor.setFocus()
         before = editor._info()["gray_pos"]
         QTest.keyClick(editor, Qt.Key_Left)
         self.assertLess(editor._info()["gray_pos"], before)
@@ -246,6 +275,7 @@ class LevelsEditorTests(unittest.TestCase):
         self.assertLessEqual(editor.cmap_low.value(), editor.cmap_high.value())
         self.assertEqual(editor.cmap_low.value(), 800)
         editor._active_name = "cmap_high"
+        editor.setFocus()
         QTest.keyClick(editor, Qt.Key_Right)
         self.assertEqual(editor.cmap_high.value(), 801)
 

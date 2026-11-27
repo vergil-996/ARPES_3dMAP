@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtCore import QPoint, QRect, Qt
 from PyQt5.QtGui import QColor, QImage, QTransform
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QFrame, QPushButton, QVBoxLayout, QWidget
@@ -140,6 +140,7 @@ class CanvasToolOverlayTests(unittest.TestCase):
 
     def test_overlay_stays_inside_the_right_edge_after_resize(self):
         parent, overlay, _buttons = self.make_overlay()
+        parent.show()
         overlay.set_3d_active(True)
         self.assertEqual(overlay.x() + overlay.width(), parent.width() - 12)
         self.assertEqual(overlay.y(), 12)
@@ -156,6 +157,7 @@ class CanvasToolOverlayTests(unittest.TestCase):
         self.assertTrue(overlay.preset_container.isHidden())
         self.assertEqual(overlay.crop_button.height(), 22)
         self.assertEqual(overlay.erase_button.height(), 22)
+        self.assertFalse(overlay.reset_button.isHidden())
         self.assertLessEqual(overlay.y() + overlay.height(), parent.height() - 12)
         overlay.install_path_button(QPushButton("折线路径切片"))
         overlay.set_path_available(True)
@@ -165,6 +167,33 @@ class CanvasToolOverlayTests(unittest.TestCase):
         overlay.reposition()
         self.assertLessEqual(overlay.y() + overlay.height(), parent.height())
         self.assertFalse(overlay.path_button.isHidden())
+
+        parent.resize(640, 218)
+        overlay.reposition()
+        self.assertTrue(overlay.reset_button.isHidden())
+        self.assertLessEqual(overlay.y() + overlay.height(), parent.height())
+        remaining_buttons = (
+            overlay.switch_axes,
+            overlay.switch_flip,
+            overlay.rotation_button,
+            overlay.path_button,
+            overlay.selection_button,
+            overlay.crop_button,
+            overlay.erase_button,
+            overlay.export_button,
+            overlay.focus_button,
+        )
+        for button in remaining_buttons:
+            self.assertFalse(button.isHidden(), button.accessibleName())
+            top = button.mapTo(parent, QPoint(0, 0)).y()
+            bottom = button.mapTo(parent, QPoint(0, button.height())).y()
+            self.assertGreaterEqual(top, 0, button.accessibleName())
+            self.assertLessEqual(bottom, parent.height(), button.accessibleName())
+
+        parent.resize(640, 600)
+        overlay.reposition()
+        self.assertFalse(overlay.reset_button.isHidden())
+        self.assertEqual(overlay.reset_button.height(), 26)
 
     def test_selection_panel_repositions_left_of_button_and_stays_in_parent(self):
         parent, overlay, _buttons = self.make_overlay()
@@ -297,46 +326,155 @@ class CanvasToolOverlayTests(unittest.TestCase):
         self.assertLess(layout.indexOf(overlay.selection_button), layout.indexOf(overlay.crop_button))
         self.assertLess(layout.indexOf(overlay.erase_button), layout.indexOf(overlay.export_button))
 
-    def test_rotation_popup_closes_with_button_and_escape_and_preserves_highlight(self):
+    def test_rotation_tool_highlight_tracks_visibility_instead_of_angle(self):
         parent, overlay, _buttons = self.make_overlay()
         parent.show()
         overlay.show()
         overlay.reposition()
         overlay.set_rotation_angle(-7.5)
-        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertFalse(overlay.rotation_button.isChecked())
         self.assertIn("−7.5°", overlay.rotation_button.toolTip())
 
         overlay.rotation_button.click()
         self.assertTrue(overlay.rotation_panel.isVisible())
+        self.assertTrue(overlay.rotation_button.isChecked())
         button_left = overlay.rotation_button.mapToGlobal(QPoint(0, 0)).x()
         self.assertLess(overlay.rotation_panel.x() + overlay.rotation_panel.width(), button_left)
         overlay.rotation_button.click()
         self.assertFalse(overlay.rotation_panel.isVisible())
-        self.assertTrue(overlay.rotation_button.isChecked())
+        self.assertFalse(overlay.rotation_button.isChecked())
 
         overlay.rotation_button.click()
         QTest.keyClick(overlay.rotation_panel, Qt.Key_Escape)
         self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
         overlay.rotation_button.click()
         overlay.rotation_panel.zero_button.click()
         self.assertTrue(overlay.rotation_panel.isVisible())
-        self.assertFalse(overlay.rotation_button.isChecked())
+        self.assertTrue(overlay.rotation_button.isChecked())
         overlay.close_rotation_panel(commit=False)
         overlay.set_rotation_angle(0)
         self.assertFalse(overlay.rotation_button.isChecked())
 
-    def test_rotation_and_selection_panels_are_mutually_exclusive(self):
+    def test_suppressed_rotation_click_keeps_hidden_button_unchecked(self):
         parent, overlay, _buttons = self.make_overlay()
         parent.show()
-        overlay.selection_button.click()
-        self.assertTrue(overlay.selection_panel.isVisible())
+        overlay._suppress_rotation_click = True
+
         overlay.rotation_button.click()
+
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
+        self.assertFalse(overlay._suppress_rotation_click)
+
+    @staticmethod
+    def _global_rect(widget):
+        return QRect(widget.mapToGlobal(QPoint(0, 0)), widget.size())
+
+    def _assert_panels_do_not_overlap(self, overlay, crop_popup=None):
+        panels = [overlay.rotation_panel, overlay.selection_panel]
+        if crop_popup is not None:
+            panels.append(crop_popup)
+        rects = [self._global_rect(panel) for panel in panels if panel.isVisible()]
+        for index, rect in enumerate(rects):
+            for other in rects[index + 1:]:
+                self.assertFalse(rect.intersects(other), (rect, other))
+
+    def _assert_panels_stay_on_screen(self, overlay):
+        anchor = overlay.rotation_button.mapToGlobal(QPoint(0, 0))
+        screen = QApplication.screenAt(anchor) or QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        self.assertTrue(available.contains(self._global_rect(overlay.rotation_panel)))
+        self.assertTrue(available.contains(self._global_rect(overlay.selection_panel)))
+        parent = overlay.parentWidget()
+        self.assertTrue(self._global_rect(parent).contains(self._global_rect(overlay.selection_panel)))
+
+    def test_rotation_and_selection_panels_coexist_in_both_open_orders(self):
+        parent, overlay, _buttons = self.make_overlay()
+        parent.show()
+        overlay.show()
+        overlay.reposition()
+
+        for order in (("selection", "rotation"), ("rotation", "selection")):
+            with self.subTest(order=order):
+                overlay.close_rotation_panel(commit=False)
+                overlay.close_selection_panel()
+                for tool in order:
+                    if tool == "selection":
+                        overlay.selection_button.click()
+                    else:
+                        overlay.rotation_button.click()
+                self.assertTrue(overlay.selection_panel.isVisible())
+                self.assertTrue(overlay.selection_button.isChecked())
+                self.assertTrue(overlay.rotation_panel.isVisible())
+                self.assertTrue(overlay.rotation_button.isChecked())
+                self._assert_panels_do_not_overlap(overlay)
+                self._assert_panels_stay_on_screen(overlay)
+
+    def test_external_click_and_selection_tool_do_not_dismiss_rotation(self):
+        parent, overlay, _buttons = self.make_overlay()
+        outside = QPushButton("画布", parent)
+        outside.setGeometry(20, 20, 100, 30)
+        parent.show()
+        overlay.show()
+        overlay.reposition()
+        overlay.rotation_button.click()
+
+        QTest.mouseClick(outside, Qt.LeftButton)
+        QApplication.processEvents()
+
         self.assertTrue(overlay.rotation_panel.isVisible())
-        self.assertFalse(overlay.selection_panel.isVisible())
-        self.assertFalse(overlay.selection_button.isChecked())
+        self.assertTrue(overlay.rotation_button.isChecked())
         overlay.selection_button.click()
         self.assertTrue(overlay.selection_panel.isVisible())
+        self.assertTrue(overlay.rotation_panel.isVisible())
+
+        QTest.keyClick(overlay.rotation_panel, Qt.Key_Escape)
         self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
+        overlay.rotation_button.click()
+        overlay.rotation_button.click()
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
+
+        overlay.rotation_button.click()
+        overlay.hide()
+        self.assertFalse(overlay.rotation_panel.isVisible())
+        self.assertFalse(overlay.selection_panel.isVisible())
+        self.assertFalse(overlay.rotation_button.isChecked())
+
+    def test_visible_panels_avoid_a_crop_popup_opened_later(self):
+        parent, overlay, _buttons = self.make_overlay()
+        available = QApplication.primaryScreen().availableGeometry()
+        parent.resize(min(560, available.width() - 40), min(420, available.height() - 40))
+        parent.move(available.topLeft() + QPoint(10, 10))
+        parent.show()
+        overlay.show()
+        overlay.reposition()
+        overlay.rotation_button.click()
+        crop_popup = QFrame(None, Qt.Tool | Qt.FramelessWindowHint)
+        crop_popup.setObjectName("crop_popup")
+        crop_popup.resize(min(180, available.width() // 5), min(140, available.height() // 4))
+        crop_popup.move(overlay.rotation_panel.pos())
+        self.addCleanup(crop_popup.deleteLater)
+
+        crop_popup.show()
+        QTest.qWait(0)
+        self.assertTrue(crop_popup.isVisible())
+        self._assert_panels_do_not_overlap(overlay, crop_popup)
+
+        overlay.selection_button.click()
+        self._assert_panels_do_not_overlap(overlay, crop_popup)
+        self._assert_panels_stay_on_screen(overlay)
+
+        parent.resize(min(460, available.width()), min(320, available.height()))
+        parent.move(
+            available.right() - parent.width() + 1,
+            available.bottom() - parent.height() + 1,
+        )
+        overlay.reposition()
+        self._assert_panels_do_not_overlap(overlay, crop_popup)
+        self._assert_panels_stay_on_screen(overlay)
 
     def test_timeline_state_round_trip_drives_the_same_overlay_controls(self):
         from bandscope.ui.timeline_bar import TimelineBar
